@@ -1,0 +1,538 @@
+import { describe, expect, it } from 'vitest';
+import { defaultParams } from './params.ts';
+import { loadPreset } from './presets.ts';
+import { queryHit, SLOP } from './collide.ts';
+import { mixScent, Sim } from './sim.ts';
+import { nematicDelta } from './wrap.ts';
+
+function fastParams() {
+  const params = defaultParams();
+  params.wireShrink = 0.08;
+  params.wireMinRest = 40;
+  params.rewriteDuration = 0.12;
+  params.springK = 90;
+  params.gravity = 0;
+  params.spawnInterval = 0;
+  return params;
+}
+
+function step(sim: Sim, params: ReturnType<typeof fastParams>, n: number): void {
+  for (let i = 0; i < n; i++) sim.step(1 / 60, params);
+}
+
+describe('scent steering', () => {
+  it('does not mix an agent’s own principal channel', () => {
+    const params = defaultParams();
+    expect(mixScent('dup', 1, 50, 3, params)).toBe(mixScent('dup', 1, 0, 3, params));
+    expect(mixScent('con', 50, 2, 3, params)).toBe(mixScent('con', 0, 2, 3, params));
+    expect(mixScent('era', 1, 2, 3, params)).toBeGreaterThan(mixScent('era', 0, 0, 3, params));
+  });
+
+  it('goes straight when the two sensors are symmetric', () => {
+    for (const kind of ['era', 'con', 'dup'] as const) {
+      const sim = new Sim(240, 160);
+      const params = defaultParams();
+      params.wander = 0;
+      params.faceAttract = 0;
+      params.snapWell = 0;
+      params.snapRadius = 0;
+      params.gravity = 0;
+      const heading = 0.4;
+      const agent = sim.spawn(kind, 120, 80, heading, params, true)!;
+      step(sim, params, 45);
+      expect(agent.heading).toBeCloseTo(heading, 5);
+      const hx = Math.cos(heading);
+      const hy = Math.sin(heading);
+      const along = agent.vx * hx + agent.vy * hy;
+      expect(agent.vx).toBeCloseTo(along * hx, 5);
+      expect(agent.vy).toBeCloseTo(along * hy, 5);
+    }
+  });
+
+  it('does not self-propel when the principal port is latched', () => {
+    const sim = new Sim(320, 200);
+    const params = defaultParams();
+    params.gravity = 0;
+    params.flockAlign = 0;
+    params.flockSep = 0;
+    params.snapRadius = 0;
+    params.wireShrink = 20;
+    params.rewriteDuration = 20;
+    params.stepSpeed = 50;
+    const a = sim.spawn('era', 80, 100, 0, params, true)!;
+    const b = sim.spawn('era', 200, 100, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    step(sim, params, 30);
+    expect(Math.hypot(a.vx, a.vy)).toBeLessThan(18);
+    expect(Math.hypot(b.vx, b.vy)).toBeLessThan(18);
+  });
+
+  it('pushes overlapping free agents apart', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.faceAttract = 0;
+    params.snapWell = 0;
+    params.wander = 0;
+    params.stepSpeed = 0;
+    const a = sim.spawn('con', 120, 80, 0, params, true)!;
+    const b = sim.spawn('con', 121, 80, Math.PI, params, true)!;
+    step(sim, params, 12);
+    expect(queryHit(a, b, sim.w, sim.h)?.overlap ?? 0).toBeLessThanOrEqual(SLOP + 0.08);
+  });
+
+  it('pushes overlapping wired agents apart', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.faceAttract = 0;
+    params.snapWell = 0;
+    params.wander = 0;
+    params.stepSpeed = 0;
+    params.rewriteDuration = 20;
+    const a = sim.spawn('era', 120, 80, 0, params, true)!;
+    const b = sim.spawn('era', 121, 80, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    step(sim, params, 24);
+    expect(queryHit(a, b, sim.w, sim.h)?.overlap ?? 0).toBeLessThan(2);
+  });
+
+  it('collision changes linear velocity', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.faceAttract = 0;
+    params.snapWell = 0;
+    params.wander = 0;
+    params.stepSpeed = 0;
+    params.gravity = 0;
+    const a = sim.spawn('con', 100, 80, 0, params, true)!;
+    const b = sim.spawn('con', 118, 80, Math.PI, params, true)!;
+    a.vx = 60;
+    sim.step(1 / 60, params);
+    expect(a.vx).toBeLessThan(60);
+    expect(b.vx).toBeGreaterThan(0);
+  });
+
+  it('chain nodes collide with other agents', () => {
+    const sim = new Sim(320, 200);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.stepSpeed = 0;
+    params.gravity = 0;
+    params.rewriteDuration = 20;
+    const a = sim.spawn('era', 60, 100, 0, params, true)!;
+    const b = sim.spawn('era', 260, 100, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    const wire = [...sim.graph.wires.values()][0];
+    expect(wire.nodes.length).toBeGreaterThan(2);
+    const mid = wire.nodes[Math.floor(wire.nodes.length / 2)];
+    const blocker = sim.spawn('con', mid.x, mid.y, 0, params, true)!;
+    step(sim, params, 10);
+    const d = Math.hypot(mid.x - blocker.x, mid.y - blocker.y);
+    expect(d).toBeGreaterThan(10);
+  });
+});
+
+describe('simulation presets', () => {
+  it('steps a soup without throwing', () => {
+    const sim = new Sim(480, 320);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    loadPreset(sim, 'soup', params);
+    expect(sim.agents.size).toBeGreaterThan(0);
+    step(sim, params, 30);
+    expect(sim.agents.size).toBeGreaterThan(0);
+  });
+
+  it('auto-spawns a free agent about every ten seconds', () => {
+    const sim = new Sim(400, 240);
+    const params = defaultParams();
+    params.spawnInterval = 10;
+    params.snapRadius = 0;
+    params.maxAgents = 80;
+    sim.spawn('era', 200, 120, 0, params, true);
+    const n0 = sim.agents.size;
+    step(sim, params, 599);
+    expect(sim.agents.size).toBe(n0);
+    step(sim, params, 2);
+    expect(sim.agents.size).toBe(n0 + 1);
+  });
+
+  it('filled ports do not deposit scent', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.decay = 0;
+    params.diffuse = 0;
+    params.deposit = 4;
+    params.wireShrink = 10;
+    params.rewriteDuration = 10;
+    const a = sim.spawn('era', 80, 80, 0, params, true)!;
+    const b = sim.spawn('era', 160, 80, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    sim.fields.clear();
+    step(sim, params, 8);
+    expect(sim.fields.peak()).toBe(0);
+  });
+
+  it('does not rewrite until every port on both agents is filled', () => {
+    const sim = new Sim(480, 320);
+    const params = fastParams();
+    const c = sim.spawn('con', 200, 160, 0, params, true)!;
+    const d = sim.spawn('dup', 280, 160, Math.PI, params, true)!;
+    sim.wire(c.id, 'p', d.id, 'p', params);
+    step(sim, params, 50);
+    expect(sim.agents.size).toBe(2);
+    expect(sim.rewrites).toHaveLength(0);
+  });
+
+  it('snap joins facing ports and only once', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 28;
+    params.snapArc = 0.45;
+    params.wireShrink = 20;
+    params.rewriteDuration = 20;
+    const a = sim.spawn('era', 90, 80, 0, params, true)!;
+    const b = sim.spawn('era', 130, 80, Math.PI, params, true)!;
+    sim.step(1 / 60, params);
+    const between = [...sim.graph.wires.values()].filter(
+      (w) =>
+        (w.a.id === a.id && w.b.id === b.id) || (w.a.id === b.id && w.b.id === a.id),
+    );
+    expect(between.length).toBe(1);
+  });
+
+  it('does not snap ports that are close but not facing', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 90;
+    params.snapArc = 0.3;
+    params.wireShrink = 20;
+    params.rewriteDuration = 20;
+    sim.spawn('con', 120, 80, 0, params, true);
+    sim.spawn('con', 128, 80, 0, params, true);
+    sim.step(1 / 60, params);
+    expect(sim.graph.wires.size).toBe(0);
+  });
+
+  it('γ–δ commutation copies into two cons and two dups before further reduction', () => {
+    const sim = new Sim(480, 320);
+    const params = fastParams();
+    loadPreset(sim, 'commute', params);
+    expect(sim.agents.size).toBe(6);
+    let sawCopy = false;
+    for (let i = 0; i < 120; i++) {
+      sim.step(1 / 60, params);
+      const kinds = [...sim.agents.values()].map((a) => a.kind);
+      if (
+        kinds.filter((k) => k === 'con').length === 2 &&
+        kinds.filter((k) => k === 'dup').length === 2 &&
+        kinds.filter((k) => k === 'era').length === 4
+      ) {
+        sawCopy = true;
+        break;
+      }
+    }
+    expect(sawCopy).toBe(true);
+  });
+
+  it('γ–γ annihilation consumes both constructors', () => {
+    const sim = new Sim(480, 320);
+    const params = fastParams();
+    loadPreset(sim, 'annihilate-con', params);
+    step(sim, params, 120);
+    expect([...sim.agents.values()].every((a) => a.kind !== 'con')).toBe(true);
+  });
+
+  it('δ–δ annihilation consumes both duplicators', () => {
+    const sim = new Sim(480, 320);
+    const params = fastParams();
+    loadPreset(sim, 'annihilate-dup', params);
+    step(sim, params, 120);
+    const kinds = [...sim.agents.values()].map((a) => a.kind);
+    expect(kinds.every((k) => k === 'era')).toBe(true);
+  });
+
+  it('oscillator keeps a net after the first rewrite', () => {
+    const sim = new Sim(480, 320);
+    const params = fastParams();
+    loadPreset(sim, 'oscillator', params);
+    expect(sim.agents.size).toBe(4);
+    step(sim, params, 90);
+    expect(sim.agents.size).toBeGreaterThan(0);
+  });
+
+  it('tracks the mass-weighted center of all shapes', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    const a = sim.spawn('era', 0, 0, 0, params, true)!;
+    const b = sim.spawn('era', 100, 0, 0, params, true)!;
+    const com = sim.centerOfMass()!;
+    const m = a.mass + b.mass;
+    expect(com.x).toBeCloseTo((a.mass * 0 + b.mass * 100) / m);
+    expect(com.y).toBeCloseTo(0);
+  });
+
+  it('weights flocking by graph hops and ignores disconnected agents', () => {
+    const sim = new Sim(400, 200);
+    const params = defaultParams();
+    params.rewriteDuration = 20;
+    const a = sim.spawn('era', 40, 100, 0, params, true)!;
+    const b = sim.spawn('con', 120, 100, 0, params, true)!;
+    const c = sim.spawn('era', 200, 100, 0, params, true)!;
+    const d = sim.spawn('era', 300, 100, 0, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    sim.wire(b.id, 'l', c.id, 'p', params);
+    const hops = sim.graph.hopDistances(sim.agents);
+    expect(hops.get(a.id)?.get(b.id)).toBe(1);
+    expect(hops.get(a.id)?.get(c.id)).toBe(2);
+    expect(hops.get(a.id)?.has(d.id)).toBe(false);
+    expect(hops.get(d.id)?.get(d.id)).toBe(0);
+  });
+});
+
+describe('conservative mechanics', () => {
+  function passiveParams() {
+    const params = defaultParams();
+    params.gravity = 0;
+    params.stepSpeed = 0;
+    params.turnRate = 0;
+    params.snapRadius = 0;
+    params.snapWell = 0;
+    params.faceAttract = 0;
+    params.wander = 0;
+    params.drag = 0;
+    params.angDrag = 0;
+    params.deposit = 0;
+    params.rewriteDuration = 20;
+    params.flockAlign = 0;
+    params.flockSep = 0;
+    return params;
+  }
+
+  it('conserves linear and angular momentum in a collision', () => {
+    const sim = new Sim(400, 200);
+    const params = passiveParams();
+    const a = sim.spawn('era', 80, 100, 0, params, true)!;
+    const b = sim.spawn('era', 140, 104, Math.PI, params, true)!;
+    a.vx = 50;
+    a.omega = 2;
+    const before = sim.momentum();
+    const e0 = sim.kineticEnergy();
+    step(sim, params, 40);
+    const after = sim.momentum();
+    expect(after.px).toBeCloseTo(before.px, 2);
+    expect(after.py).toBeCloseTo(before.py, 2);
+    expect(after.L).toBeCloseTo(before.L, 1);
+    expect(sim.kineticEnergy()).toBeLessThan(e0 * 1.35);
+    expect(sim.kineticEnergy()).toBeGreaterThan(e0 * 0.45);
+  });
+
+  it('gravity does not move the center of mass', () => {
+    const sim = new Sim(240, 160);
+    const params = passiveParams();
+    params.gravity = 0.4;
+    sim.spawn('era', 40, 40, 0, params, true);
+    sim.spawn('con', 180, 120, 1, params, true);
+    const com0 = sim.centerOfMass()!;
+    step(sim, params, 30);
+    const com1 = sim.centerOfMass()!;
+    expect(com1.x).toBeCloseTo(com0.x, 3);
+    expect(com1.y).toBeCloseTo(com0.y, 3);
+  });
+
+  it('does not latch through an intervening wire', () => {
+    const sim = new Sim(400, 240);
+    const params = passiveParams();
+    params.snapRadius = 90;
+    params.snapArc = 0.6;
+    const wallA = sim.spawn('era', 200, 40, Math.PI / 2, params, true)!;
+    const wallB = sim.spawn('era', 200, 200, -Math.PI / 2, params, true)!;
+    sim.wire(wallA.id, 'p', wallB.id, 'p', params);
+    const left = sim.spawn('era', 140, 120, 0, params, true)!;
+    const right = sim.spawn('era', 260, 120, Math.PI, params, true)!;
+    sim.step(1 / 60, params);
+    const between = [...sim.graph.wires.values()].filter(
+      (w) =>
+        (w.a.id === left.id && w.b.id === right.id) ||
+        (w.a.id === right.id && w.b.id === left.id),
+    );
+    expect(between).toHaveLength(0);
+    expect(sim.graph.wires.size).toBe(1);
+  });
+
+  it('pushes crossing wires apart', () => {
+    const sim = new Sim(400, 240);
+    const params = passiveParams();
+    params.springK = 40;
+    const h1 = sim.spawn('era', 60, 120, 0, params, true)!;
+    const h2 = sim.spawn('era', 340, 120, Math.PI, params, true)!;
+    const v1 = sim.spawn('era', 200, 20, Math.PI / 2, params, true)!;
+    const v2 = sim.spawn('era', 200, 220, -Math.PI / 2, params, true)!;
+    sim.wire(h1.id, 'p', h2.id, 'p', params);
+    sim.wire(v1.id, 'p', v2.id, 'p', params);
+    step(sim, params, 20);
+    const wires = [...sim.graph.wires.values()];
+    expect(wires).toHaveLength(2);
+    const mid = (w: (typeof wires)[0]) => {
+      const n = w.nodes[Math.floor(w.nodes.length / 2)];
+      return n;
+    };
+    const m0 = mid(wires[0]);
+    const m1 = mid(wires[1]);
+    expect(Math.hypot(m0.x - m1.x, m0.y - m1.y)).toBeGreaterThan(4);
+  });
+});
+
+function quietParams() {
+  const params = defaultParams();
+  params.gravity = 0;
+  params.flockAlign = 0;
+  params.flockSep = 0;
+  params.snapRadius = 0;
+  params.snapWell = 0;
+  params.faceAttract = 0;
+  params.wander = 0;
+  params.deposit = 0;
+  params.diffuse = 0;
+  params.decay = 0;
+  params.rewriteDuration = 20;
+  params.wireShrink = 20;
+  params.spawnInterval = 0;
+  return params;
+}
+
+describe('isolated motion rules', () => {
+  it('a free principal still cruises along its heading', () => {
+    const sim = new Sim(320, 200);
+    const params = quietParams();
+    params.stepSpeed = 48;
+    params.drag = 0.2;
+    const a = sim.spawn('era', 80, 100, 0, params, true)!;
+    step(sim, params, 40);
+    expect(a.vx).toBeGreaterThan(12);
+    expect(Math.abs(a.vy)).toBeLessThan(0.8);
+  });
+
+  it('a settled latch does not keep injecting kinetic energy', () => {
+    const sim = new Sim(320, 200);
+    const params = quietParams();
+    params.stepSpeed = 0;
+    params.drag = 0.8;
+    const a = sim.spawn('era', 80, 100, 0, params, true)!;
+    const b = sim.spawn('era', 200, 100, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    step(sim, params, 90);
+    const e0 = sim.kineticEnergy();
+    const v0 = Math.hypot(a.vx, a.vy) + Math.hypot(b.vx, b.vy);
+    step(sim, params, 60);
+    expect(sim.kineticEnergy()).toBeLessThan(e0 + 8);
+    expect(Math.hypot(a.vx, a.vy) + Math.hypot(b.vx, b.vy)).toBeLessThan(v0 + 4);
+  });
+
+  it('does not bounce a constructor off its own wires', () => {
+    const sim = new Sim(400, 240);
+    const params = quietParams();
+    params.stepSpeed = 0;
+    params.drag = 0.8;
+    const con = sim.spawn('con', 200, 120, 0, params, true)!;
+    const left = sim.spawn('era', 140, 90, Math.PI, params, true)!;
+    const right = sim.spawn('era', 140, 150, Math.PI, params, true)!;
+    const face = sim.spawn('era', 280, 120, Math.PI, params, true)!;
+    sim.wire(con.id, 'l', left.id, 'p', params);
+    sim.wire(con.id, 'r', right.id, 'p', params);
+    sim.wire(con.id, 'p', face.id, 'p', params);
+    step(sim, params, 90);
+    expect(Math.hypot(con.vx, con.vy)).toBeLessThan(28);
+    expect(Math.abs(con.omega)).toBeLessThan(8);
+  });
+
+  it('wires do not spontaneously spin a settled pair', () => {
+    const sim = new Sim(320, 200);
+    const params = quietParams();
+    params.stepSpeed = 0;
+    params.drag = 1.2;
+    params.angDrag = 4;
+    const a = sim.spawn('era', 100, 100, 0.2, params, true)!;
+    const b = sim.spawn('era', 220, 100, Math.PI - 0.2, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    step(sim, params, 120);
+    const h0 = a.heading;
+    const o0 = Math.abs(a.omega) + Math.abs(b.omega);
+    step(sim, params, 60);
+    expect(Math.abs(a.omega) + Math.abs(b.omega)).toBeLessThan(o0 + 0.4);
+    expect(Math.abs(a.heading - h0)).toBeLessThan(0.35);
+  });
+
+  it('connected agents align headings nematically', () => {
+    const sim = new Sim(400, 240);
+    const params = quietParams();
+    params.stepSpeed = 0;
+    params.flockAlign = 10;
+    params.angDrag = 1.2;
+    const a = sim.spawn('era', 120, 120, 0.9, params, true)!;
+    const b = sim.spawn('era', 240, 120, Math.PI + 0.9, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    step(sim, params, 90);
+    const err = Math.abs(nematicDelta(a.heading, b.heading));
+    expect(err).toBeLessThan(0.35);
+  });
+
+  it('an aux-only wire does not disable constructor locomotion', () => {
+    const sim = new Sim(400, 240);
+    const params = quietParams();
+    params.stepSpeed = 48;
+    params.drag = 0.2;
+    params.springK = 6;
+    const con = sim.spawn('con', 180, 120, 0, params, true)!;
+    const era = sim.spawn('era', 140, 120, Math.PI, params, true)!;
+    sim.wire(con.id, 'l', era.id, 'p', params);
+    expect(sim.graph.isFree({ id: con.id, slot: 'p' })).toBe(true);
+    expect(sim.graph.isFree({ id: era.id, slot: 'p' })).toBe(false);
+    step(sim, params, 35);
+    expect(con.vx).toBeGreaterThan(10);
+  });
+
+  it('does not apply flock separation to disconnected agents', () => {
+    const sim = new Sim(320, 200);
+    const params = quietParams();
+    params.flockSep = 90;
+    params.flockAlign = 8;
+    params.stepSpeed = 0;
+    const a = sim.spawn('era', 100, 100, 0, params, true)!;
+    const b = sim.spawn('era', 145, 100, Math.PI, params, true)!;
+    const d0 = Math.hypot(b.x - a.x, b.y - a.y);
+    step(sim, params, 25);
+    const d1 = Math.hypot(b.x - a.x, b.y - a.y);
+    expect(Math.abs(d1 - d0)).toBeLessThan(3);
+  });
+
+  it('reports a blocking wire on a would-be latch chord', () => {
+    const sim = new Sim(400, 240);
+    const params = quietParams();
+    params.stepSpeed = 0;
+    const wallA = sim.spawn('era', 200, 40, Math.PI / 2, params, true)!;
+    const wallB = sim.spawn('era', 200, 200, -Math.PI / 2, params, true)!;
+    sim.wire(wallA.id, 'p', wallB.id, 'p', params);
+    const left = sim.spawn('era', 140, 120, 0, params, true)!;
+    const right = sim.spawn('era', 260, 120, Math.PI, params, true)!;
+    expect(
+      sim.graph.latchCrosses(sim.agents, { id: left.id, slot: 'p' }, { id: right.id, slot: 'p' }, sim.w, sim.h),
+    ).toBe(true);
+  });
+
+  it('does not treat a clear gap as a crossing latch', () => {
+    const sim = new Sim(400, 240);
+    const params = quietParams();
+    params.stepSpeed = 0;
+    const wallA = sim.spawn('era', 80, 40, Math.PI / 2, params, true)!;
+    const wallB = sim.spawn('era', 80, 200, -Math.PI / 2, params, true)!;
+    sim.wire(wallA.id, 'p', wallB.id, 'p', params);
+    const left = sim.spawn('era', 200, 120, 0, params, true)!;
+    const right = sim.spawn('era', 280, 120, Math.PI, params, true)!;
+    expect(
+      sim.graph.latchCrosses(sim.agents, { id: left.id, slot: 'p' }, { id: right.id, slot: 'p' }, sim.w, sim.h),
+    ).toBe(false);
+  });
+});
