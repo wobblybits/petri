@@ -22,6 +22,7 @@ import { bezierPoint } from './curve.ts';
 import { segmentsInterfere, WIRE_RADIUS } from './geom.ts';
 import type { Params } from './params.ts';
 import { clamp, easeInOut, lerp, wrap, wrapDeltaVec, type Vec2 } from './wrap.ts';
+import type { LatchEvent } from './audio/types.ts';
 
 export interface Wire {
   id: number;
@@ -50,6 +51,7 @@ export class Graph {
   wires = new Map<number, Wire>();
   portWire = new Map<string, number>();
   nextWireId = 1;
+  onLatch: ((ev: LatchEvent) => void) | null = null;
 
   clear(): void {
     this.wires.clear();
@@ -142,7 +144,21 @@ export class Graph {
     const len = Math.max(span, params.wireMinRest * Graph.BIRTH_FLOOR);
     const c = wireCubic(A, a.slot, B, b.slot, w, h, len);
     const wire = this.attach(a, b, len, time);
-    if (wire) wire.nodes = sampleChain(c, desiredLinks(len), w, h);
+    if (wire) {
+      wire.nodes = sampleChain(c, desiredLinks(len), w, h);
+      this.onLatch?.({
+        type: 'latch',
+        wireId: wire.id,
+        agentA: a.id,
+        agentB: b.id,
+        slotA: a.slot,
+        slotB: b.slot,
+        kindA: A.kind,
+        kindB: B.kind,
+        rest: wire.rest,
+        latchLen: len,
+      });
+    }
     return wire;
   }
 
@@ -326,6 +342,32 @@ export class Graph {
 
   shrinkU(wire: Wire, time: number, params: Params): number {
     return this.shrinkProgress(wire, time, params);
+  }
+
+  /** Root id of each agent's connected component. */
+  componentIds(agents: Map<number, Agent>): Map<number, number> {
+    const parent = new Map<number, number>();
+    const find = (x: number): number => {
+      let r = parent.get(x) ?? x;
+      while ((parent.get(r) ?? r) !== r) r = parent.get(r) ?? r;
+      let cur = x;
+      while ((parent.get(cur) ?? cur) !== r) {
+        const p = parent.get(cur) ?? cur;
+        parent.set(cur, r);
+        cur = p;
+      }
+      parent.set(x, r);
+      return r;
+    };
+    for (const id of agents.keys()) parent.set(id, id);
+    for (const wire of this.wires.values()) {
+      const ra = find(wire.a.id);
+      const rb = find(wire.b.id);
+      if (ra !== rb) parent.set(ra, rb);
+    }
+    const out = new Map<number, number>();
+    for (const id of agents.keys()) out.set(id, find(id));
+    return out;
   }
 
   componentMass(agents: Map<number, Agent>): Map<number, number> {

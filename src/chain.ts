@@ -327,6 +327,53 @@ export function solveWire(
 
 }
 
+/**
+ * The mechanics the audio needs from a contact, taken from the same quantities
+ * the solver uses rather than re-guessed from positions.
+ *
+ * `effMass` is the generalized effective mass at the contact point along the
+ * normal — it already includes the lever arm, so an off-centre hit on a
+ * triangle correctly transfers less linear momentum and more spin than a
+ * square one.
+ */
+export interface ContactMechanics {
+  effMass: number;
+  /** Closing speed along the normal. Positive means approaching. */
+  vN: number;
+  /** Signed sliding velocity along the tangent (A relative to B). */
+  vT: number;
+  /** Momentum that has to be turned around: effMass * vN. */
+  impulse: number;
+}
+
+/** Velocity of the material point of `agent` currently at world (px, py). */
+function pointVelocity(agent: Agent, px: number, py: number): Vec2 {
+  const rx = px - agent.x;
+  const ry = py - agent.y;
+  return { x: agent.vx - agent.omega * ry, y: agent.vy + agent.omega * rx };
+}
+
+export function contactMechanics(
+  A: Agent,
+  B: Agent,
+  hit: { nx: number; ny: number; px: number; py: number },
+): ContactMechanics {
+  const rA = { x: hit.px - A.x, y: hit.py - A.y };
+  const rB = { x: hit.px - B.x, y: hit.py - B.y };
+  const wA = genInvMass(A, rA, hit.nx, hit.ny);
+  const wB = genInvMass(B, rB, hit.nx, hit.ny);
+  const effMass = 1 / Math.max(1e-9, wA + wB);
+
+  const pa = pointVelocity(A, hit.px, hit.py);
+  const pb = pointVelocity(B, hit.px, hit.py);
+  const rvx = pa.x - pb.x;
+  const rvy = pa.y - pb.y;
+  // Normal points from A toward B, so approaching means a negative projection.
+  const vN = -(rvx * hit.nx + rvy * hit.ny);
+  const vT = rvx * -hit.ny + rvy * hit.nx;
+  return { effMass, vN, vT, impulse: effMass * Math.abs(vN) };
+}
+
 /** XPBD non-penetration between two bodies, from an existing contact manifold. */
 export function solveContact(
   A: Agent,

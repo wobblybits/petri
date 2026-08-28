@@ -1,4 +1,5 @@
 import {
+  boundRadius,
   createAgent,
   inSnapArc,
   momentOfInertia,
@@ -10,8 +11,9 @@ import {
   type AgentKind,
   type PortSlot,
 } from './agents.ts';
-import { queryHit, SLOP } from './collide.ts';
-import { CHAIN_MASS, portExitAngle, solveContact, unwrapPoints } from './chain.ts';
+import { queryHit, SLOP, type Hit } from './collide.ts';
+import { segmentsIntersect, WIRE_RADIUS } from './geom.ts';
+import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact, unwrapPoints } from './chain.ts';
 import { CH, Fields } from './fields.ts';
 import { Graph, wrapPos } from './graph.ts';
 import type { Params } from './params.ts';
@@ -21,6 +23,8 @@ import {
   commitRewrite,
   type Rewrite,
 } from './rewrite.ts';
+import { audio } from './audio/engine.ts';
+import type { CollisionEvent, LiveContact, RewriteEvent } from './audio/types.ts';
 import { angleDelta, clamp, wrapAngle, wrapDeltaVec } from './wrap.ts';
 
 /** Attraction-only chemotaxis. Own principal trails are a different channel and are ignored. */
@@ -64,6 +68,18 @@ export class Sim {
   /** Distance past which the pull home stops growing. */
   private static readonly HOME_REACH = 320;
 
+  /** Repulsion in px/s² at exactly one wire's length; inverse-square inside that. */
+  static DECLUTTER_FORCE = 200;
+
+  /** Range of the repulsion, in wire lengths. */
+  private static readonly DECLUTTER_CUTOFF = 2;
+
+  /** Closest distance the inverse-square law is evaluated at, in wire lengths. */
+  private static readonly DECLUTTER_FLOOR = 0.4;
+
+  /** Most a rope node may be pushed clear in one substep, in px. */
+  static WIRE_CLEAR_STEP = 0.35;
+
   /** Share of the homing pull that still applies to a wired agent. */
   private static readonly HOME_WIRED = 0.2;
 
@@ -79,6 +95,16 @@ export class Sim {
   fields: Fields;
   rewrites: Rewrite[] = [];
   masses = new Map<number, number>();
+  /** Connected-component root per agent, refreshed once per frame. */
+  private components = new Map<number, number>();
+  /** Pairs in contact last frame — a strike fires on onset, contact continues. */
+  private contactAudioPrev = new Set<string>();
+  private contactAudioNow = new Set<string>();
+  /** Bodies sliding against something this frame, and how fast. */
+  /** Bodies currently overlapping, keyed by canonical `lo:hi` id pair. */
+  contacts = new Map<string, LiveContact>();
+  /** Momentum lost to sound this frame, applied once after the substeps. */
+  private radiated = new Map<number, { x: number; y: number }>();
   /** Eased centre of mass. Rewrites delete agents, which jumps the true COM. */
   private home: { x: number; y: number } | null = null;
 
@@ -88,6 +114,8 @@ export class Sim {
     this.coverW = this.w;
     this.coverH = this.h;
     this.fields = new Fields(this.w, this.h);
+    this.graph.onLatch = (ev) => audio.push(ev, this.graph, this.agents);
+    audio.contacts = this.contacts;
   }
 
   /** Viewport / spawn-box size. World coordinates are not scaled. */
@@ -123,6 +151,10 @@ export class Sim {
     this.nextId = 1;
     this.spawnAcc = 0;
     this.home = null;
+    this.contactAudioPrev.clear();
+    this.contactAudioNow.clear();
+    this.contacts.clear();
+    audio.invalidateTopology();
   }
 
   canSpawn(params: Params, n = 1): boolean {
@@ -173,13 +205,20 @@ export class Sim {
       this.coverH,
     );
     this.masses = this.graph.componentMass(this.agents);
+    this.components = this.graph.componentIds(this.agents);
     this.trackHome(t);
+    this.contactAudioNow.clear();
+    this.contacts.clear();
+    this.radiated.clear();
 
     this.steer(params, t);
     this.portTorques(params, t);
+    this.declutter(params, t);
+    this.uncrossPrincipals(params, t);
     this.flock(params, t);
     this.gravitate(params, t);
     this.solve(params, t);
+    this.applyRadiationLoss();
     this.dampVelocities(params, t);
 
     this.graph.refreshLengths(this.agents, this.w, this.h);
@@ -192,6 +231,10 @@ export class Sim {
     this.fields.diffuse(params.diffuse * 0.65);
     this.fields.decay(params.decay);
     this.autoSpawn(params, t);
+
+    const prev = this.contactAudioPrev;
+    this.contactAudioPrev = this.contactAudioNow;
+    this.contactAudioNow = prev;
   }
 
   /**
@@ -240,6 +283,228 @@ export class Sim {
   }
 
   /**
+   * Ropes push off other ropes, and off bodies they are not attached to.
+   *
+   * Node-only and one-way: a rope never moves an agent. That is what makes it
+   * safe — letting a wire shove its own anchors is exactly the coupling that
+   * made the early drafts of this solver explode. It separates wires that would
+   * otherwise be drawn through each other; it does not forbid a crossing
+   * topologically, since two wires that genuinely cross will bow apart and
+   * still cross.
+   *
+   * Solved inside the substep loop rather than after the frame, so the link,
+   * bend and shape constraints get to re-settle the rope around the push
+   * instead of the rope ending each frame off its own manifold. It is rate
+   * limited for the same reason everything else here is: a displacement
+   * resolved in one substep becomes that displacement times 1/h in velocity.
+   */
+  private clearWires(params: Params): void {
+    const gain = params.wireClear;
+    if (gain <= 0) return;
+    const ropeGap = WIRE_RADIUS * 3;
+    const cap = Sim.WIRE_CLEAR_STEP;
+    const wires = [...this.graph.wires.values()];
+
+    for (let i = 0; i < wires.length; i++) {
+      const P = wires[i];
+      if (P.nodes.length === 0) continue;
+      for (let j = i + 1; j < wires.length; j++) {
+        const Q = wires[j];
+        if (Q.nodes.length === 0) continue;
+        if (
+          P.a.id === Q.a.id ||
+          P.a.id === Q.b.id ||
+          P.b.id === Q.a.id ||
+          P.b.id === Q.b.id
+        ) {
+          continue;
+        }
+        // Broad phase on the ropes' midpoints, so distant wires cost one test.
+        const pm = P.nodes[P.nodes.length >> 1];
+        const qm = Q.nodes[Q.nodes.length >> 1];
+        const span = (P.ropeLen + Q.ropeLen) * 0.5 + ropeGap;
+        if ((qm.x - pm.x) ** 2 + (qm.y - pm.y) ** 2 > span * span) continue;
+        for (const p of P.nodes) {
+          for (const q of Q.nodes) {
+            const dx = q.x - p.x;
+            const dy = q.y - p.y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 >= ropeGap * ropeGap || d2 < 1e-9) continue;
+            const d = Math.sqrt(d2);
+            const step = Math.min((ropeGap - d) * 0.5 * gain, cap);
+            const ux = (dx / d) * step;
+            const uy = (dy / d) * step;
+            p.x -= ux;
+            p.y -= uy;
+            q.x += ux;
+            q.y += uy;
+          }
+        }
+      }
+    }
+
+    for (const wire of wires) {
+      if (wire.nodes.length === 0) continue;
+      for (const agent of this.agents.values()) {
+        if (agent.id === wire.a.id || agent.id === wire.b.id) continue;
+        const keep = boundRadius(agent) + WIRE_RADIUS;
+        for (const node of wire.nodes) {
+          const dx = node.x - agent.x;
+          const dy = node.y - agent.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 >= keep * keep || d2 < 1e-9) continue;
+          const d = Math.sqrt(d2);
+          const step = Math.min((keep - d) * gain, cap);
+          node.x += (dx / d) * step;
+          node.y += (dy / d) * step;
+        }
+      }
+    }
+  }
+
+  /**
+   * Personal space around a fully wired agent: a soft inverse-square push
+   * against agents from *other* nets.
+   *
+   * A saturated agent has nothing left to join, so a stranger drifting close is
+   * pure crowding, and crowding is what tangles nets. Nothing else does this —
+   * flocking separation reads `hopDistances`, which has no entry for an agent
+   * in another component, so those pairs are skipped entirely and separate nets
+   * have never repelled at all. Meanwhile homing actively pulls them together.
+   *
+   * Inverse-square rather than linear, which matters: at a wire's length the
+   * push is gentle enough to be ignored, but it climbs steeply as the gap
+   * closes, so it still wins where it needs to. A linear falloff strong enough
+   * to hold the distance is a wall you can feel; this is a bubble you can lean
+   * into. Equal and opposite, so it never moves the flock's centre of mass.
+   *
+   * Same-net crowding is left to flocking separation, which already handles it
+   * with hop-weighted spacing.
+   */
+  private declutter(params: Params, dt: number): void {
+    const gain = params.declutter;
+    if (gain <= 0 || dt <= 0) return;
+    const reach = params.wireMinRest;
+    const cutoff = reach * Sim.DECLUTTER_CUTOFF;
+    // Force at exactly one wire's length; it grows as (reach / d)^2 inside that.
+    const atReach = gain * Sim.DECLUTTER_FORCE;
+    const floor = reach * Sim.DECLUTTER_FLOOR;
+    const list = [...this.agents.values()];
+    for (let i = 0; i < list.length; i++) {
+      const A = list[i];
+      const satA = this.graph.portsFilled(A);
+      const compA = this.components.get(A.id);
+      for (let j = i + 1; j < list.length; j++) {
+        const B = list[j];
+        if (compA !== undefined && compA === this.components.get(B.id)) continue;
+        if (!satA && !this.graph.portsFilled(B)) continue;
+        const dx = B.x - A.x;
+        const dy = B.y - A.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > cutoff || dist < 1e-6) continue;
+        // Floored so the law cannot run away at touching distance; contacts own
+        // that range anyway.
+        const ratio = reach / Math.max(dist, floor);
+        const force = atReach * ratio * ratio;
+        const nx = dx / dist;
+        const ny = dy / dist;
+        if (!A.locked) {
+          const invM = 1 / Math.max(0.08, A.mass);
+          A.vx -= nx * force * invM * dt;
+          A.vy -= ny * force * invM * dt;
+        }
+        if (!B.locked) {
+          const invM = 1 / Math.max(0.08, B.mass);
+          B.vx += nx * force * invM * dt;
+          B.vy += ny * force * invM * dt;
+        }
+      }
+    }
+  }
+
+  /**
+   * Finds wires whose chords cross a principal connection and eases the pair
+   * apart. A principal wire is the one that matters: it is the redex, and a
+   * wire lying across it keeps the two agents from ever meeting cleanly.
+   *
+   * The response is lateral — each crossed wire's endpoints slide away from the
+   * other wire's line. Pulling the agents along their own wire instead (the
+   * obvious "move forward") mostly just shortens the chord and leaves the
+   * crossing where it was.
+   */
+  private uncrossPrincipals(params: Params, dt: number): void {
+    const gain = params.uncross;
+    if (gain <= 0 || dt <= 0) return;
+    type Chord = {
+      wireA: Agent;
+      wireB: Agent;
+      ax: number;
+      ay: number;
+      bx: number;
+      by: number;
+      principal: boolean;
+    };
+    const chords: Chord[] = [];
+    for (const wire of this.graph.wires.values()) {
+      const A = this.agents.get(wire.a.id);
+      const B = this.agents.get(wire.b.id);
+      if (!A || !B) continue;
+      const sa = stemWorld(A, wire.a.slot, this.w, this.h);
+      const sb = stemWorld(B, wire.b.slot, this.w, this.h);
+      chords.push({
+        wireA: A,
+        wireB: B,
+        ax: sa.x,
+        ay: sa.y,
+        bx: sb.x,
+        by: sb.y,
+        principal: wire.a.slot === 'p' || wire.b.slot === 'p',
+      });
+    }
+    for (let i = 0; i < chords.length; i++) {
+      for (let j = i + 1; j < chords.length; j++) {
+        const S = chords[i];
+        const T = chords[j];
+        if (!S.principal && !T.principal) continue;
+        if (
+          S.wireA === T.wireA ||
+          S.wireA === T.wireB ||
+          S.wireB === T.wireA ||
+          S.wireB === T.wireB
+        ) {
+          continue;
+        }
+        if (!segmentsIntersect(S.ax, S.ay, S.bx, S.by, T.ax, T.ay, T.bx, T.by)) continue;
+        // Draw the crossed principal's ends toward each other. A shorter chord
+        // spans less, so it tends to slip out from under the wire lying over it.
+        if (S.principal) this.reelIn(S, gain * dt);
+        if (T.principal) this.reelIn(T, gain * dt);
+      }
+    }
+  }
+
+  /** Draw a wire's two agents toward each other along its own chord. */
+  private reelIn(
+    chord: { wireA: Agent; wireB: Agent; ax: number; ay: number; bx: number; by: number },
+    k: number,
+  ): void {
+    const dx = chord.bx - chord.ax;
+    const dy = chord.by - chord.ay;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) return;
+    const ux = (dx / len) * k * 26;
+    const uy = (dy / len) * k * 26;
+    if (!chord.wireA.locked) {
+      chord.wireA.vx += ux;
+      chord.wireA.vy += uy;
+    }
+    if (!chord.wireB.locked) {
+      chord.wireB.vx -= ux;
+      chord.wireB.vy -= uy;
+    }
+  }
+
+  /**
    * Constrained integration. Wires, port axes and contacts are all compliant
    * constraints solved inside this one loop; nothing outside it writes a pose,
    * and velocity is derived from the result rather than repaired afterwards.
@@ -278,6 +543,7 @@ export class Sim {
       }
 
       this.graph.solveWires(this.agents, params, h, this.time);
+      this.clearWires(params);
       this.solveContacts(h);
 
       for (const a of list) {
@@ -305,6 +571,76 @@ export class Sim {
     }
   }
 
+  /** Approach speed that retriggers a strike while two bodies already touch. */
+  private static readonly CONTACT_RETRIGGER = 3.2;
+  /** Fraction of contact momentum radiated as sound instead of bounce. */
+  private static readonly RADIATION = 0.035;
+
+  private emitCollision(A: Agent, B: Agent, hit: Hit): void {
+    const key = A.id < B.id ? `${A.id}:${B.id}` : `${B.id}:${A.id}`;
+    const m = contactMechanics(A, B, hit);
+    this.noteContact(A, B, hit.overlap, m.vT);
+
+    if (this.contactAudioNow.has(key)) return;
+    this.contactAudioNow.add(key);
+
+    if (m.vN < 0.8 && hit.overlap < 1.2) return;
+    if (this.contactAudioPrev.has(key) && m.vN < Sim.CONTACT_RETRIGGER) return;
+
+    const ev: CollisionEvent = {
+      type: 'collision',
+      agentA: A.id,
+      agentB: B.id,
+      kindA: A.kind,
+      kindB: B.kind,
+      impact: Math.max(m.vN, hit.overlap * 4),
+      overlap: hit.overlap,
+      effMass: m.effMass,
+      vN: m.vN,
+      vT: m.vT,
+      nx: hit.nx,
+      ny: hit.ny,
+      headingA: A.heading,
+      headingB: B.heading,
+      spin: Math.abs(A.omega) + Math.abs(B.omega),
+    };
+    audio.push(ev, this.graph, this.agents);
+    this.noteRadiation(A, B, hit, m.effMass, m.vN);
+  }
+
+  /**
+   * Keep the deepest overlap of the frame, with vT signed in canonical id order
+   * so the worklet applies +F on A and −F on B consistently across substeps.
+   */
+  private noteContact(A: Agent, B: Agent, overlap: number, vT: number): void {
+    const lo = A.id < B.id ? A.id : B.id;
+    const hi = A.id < B.id ? B.id : A.id;
+    const signed = A.id < B.id ? vT : -vT;
+    const key = `${lo}:${hi}`;
+    const prev = this.contacts.get(key);
+    if (prev && prev.overlap >= overlap) return;
+    this.contacts.set(key, { agentA: lo, agentB: hi, overlap, vT: signed });
+  }
+
+  /**
+   * Energy that leaves as sound has to leave the bodies too. Without this the
+   * audio is a passive read-out; with it, a collision that rings loudly is
+   * measurably less bouncy than one that does not.
+   */
+  private noteRadiation(A: Agent, B: Agent, hit: Hit, effMass: number, vN: number): void {
+    const j = effMass * Math.abs(vN) * Sim.RADIATION;
+    if (j <= 0) return;
+    const add = (agent: Agent, sx: number, sy: number) => {
+      if (agent.locked) return;
+      const cur = this.radiated.get(agent.id) ?? { x: 0, y: 0 };
+      cur.x += sx;
+      cur.y += sy;
+      this.radiated.set(agent.id, cur);
+    };
+    add(A, hit.nx * j, hit.ny * j);
+    add(B, -hit.nx * j, -hit.ny * j);
+  }
+
   private solveContacts(h: number): void {
     const list = [...this.agents.values()];
     for (let i = 0; i < list.length; i++) {
@@ -313,8 +649,31 @@ export class Sim {
         const B = list[j];
         if (A.locked && B.locked) continue;
         const hit = queryHit(A, B, this.w, this.h);
-        if (hit) solveContact(A, B, hit, SLOP, h);
+        if (hit) {
+          this.emitCollision(A, B, hit);
+          solveContact(A, B, hit, SLOP, h);
+        }
       }
+    }
+  }
+
+  /**
+   * Applied once, after the substeps, so it never fights the position solver.
+   * Capped at a fraction of the body's own speed: sound can slow a collision,
+   * never reverse it.
+   */
+  private applyRadiationLoss(): void {
+    for (const [id, imp] of this.radiated) {
+      const agent = this.agents.get(id);
+      if (!agent || agent.locked) continue;
+      const im = 1 / Math.max(0.08, agent.mass);
+      const dvx = imp.x * im;
+      const dvy = imp.y * im;
+      const speed = Math.hypot(agent.vx, agent.vy);
+      const mag = Math.hypot(dvx, dvy);
+      const scale = mag > speed * 0.25 ? (speed * 0.25) / Math.max(1e-9, mag) : 1;
+      agent.vx += dvx * scale;
+      agent.vy += dvy * scale;
     }
   }
 
@@ -717,9 +1076,9 @@ export class Sim {
       B.vx = 0;
       B.vy = 0;
       B.omega = 0;
-      this.rewrites.push(
-        beginRewrite(A, B, this.graph, this.agents, this.w, this.h, params.rewriteDuration),
-      );
+      const rw = beginRewrite(A, B, this.graph, this.agents, this.w, this.h, params.rewriteDuration);
+      this.rewrites.push(rw);
+      audio.push(rewriteAudio(rw, 'begin', wire.id, []), this.graph, this.agents);
       busy.add(A.id);
       busy.add(B.id);
     }
@@ -731,6 +1090,7 @@ export class Sim {
       if (advanceRewrite(rw, this.agents, this.w, this.h, dt)) done.push(rw);
     }
     for (const rw of done) {
+      audio.push(rewriteAudio(rw, 'commit', 0, leftoverAgentIds(rw)), this.graph, this.agents);
       this.nextId = commitRewrite(
         rw,
         this.agents,
@@ -744,4 +1104,37 @@ export class Sim {
     }
     if (done.length) this.rewrites = this.rewrites.filter((rw) => !done.includes(rw));
   }
+}
+
+function leftoverAgentIds(rw: Rewrite): number[] {
+  const ids: number[] = [];
+  const ports = [rw.leftoverAL, rw.leftoverAR, rw.leftoverBL, rw.leftoverBR];
+  for (const p of ports) {
+    if (!p || p.id === rw.a || p.id === rw.b) continue;
+    if (!ids.includes(p.id)) ids.push(p.id);
+  }
+  return ids;
+}
+
+function rewriteAudio(
+  rw: Rewrite,
+  phase: 'begin' | 'commit',
+  wireId: number,
+  leftovers: number[],
+): RewriteEvent {
+  const kindA: AgentKind =
+    rw.a === rw.eraId ? 'era' : rw.a === rw.conId ? 'con' : rw.a === rw.dupId ? 'dup' : 'era';
+  const kindB: AgentKind =
+    rw.b === rw.eraId ? 'era' : rw.b === rw.conId ? 'con' : rw.b === rw.dupId ? 'dup' : 'era';
+  return {
+    type: 'rewrite',
+    phase,
+    rule: rw.rule,
+    agentA: rw.a,
+    agentB: rw.b,
+    kindA,
+    kindB,
+    wireId,
+    leftovers,
+  };
 }

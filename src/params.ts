@@ -15,6 +15,26 @@ export interface Params {
   springDamp: number;
   /** How far an aux port aims off its neighbour, toward its own side. 1 = 20 degrees. */
   auxSpread: number;
+  /**
+   * Strength of the soft inverse-square push a fully wired agent exerts on
+   * agents from *other* nets. Flocking separation only ever applied within a
+   * net, so before this nothing pushed separate nets apart at all.
+   */
+  declutter: number;
+  /**
+   * How hard a wire crossing a principal connection reels its own ends
+   * together. Off by default: measured over three minutes of soup it made
+   * crossings, clumping and rewrite throughput all slightly worse once
+   * `declutter` was in, which already removes the crossings a local force
+   * can plausibly undo. Kept as a knob because the detection is the cheap part.
+   */
+  uncross: number;
+  /**
+   * How hard a rope pushes off other ropes and off bodies it is not attached
+   * to. Node-only and one-way — a rope never moves an agent — so this cannot
+   * feed back into the joint solver.
+   */
+  wireClear: number;
   /** Port-axis stiffness multiplier. Higher = wires hug their port axis harder. */
   portStiff: number;
   /** Rest-length breathing amplitude, as a fraction. 0 = a settled net freezes. */
@@ -64,6 +84,9 @@ export function defaultParams(): Params {
     springK: 12,
     springDamp: 45,
     auxSpread: 1.7,
+    declutter: 1,
+    uncross: 0,
+    wireClear: 1,
     portStiff: 2,
     wireBreathe: 0.04,
     wireMinRest: 40,
@@ -81,7 +104,7 @@ export function defaultParams(): Params {
     angDrag: 2.4,
     maxSpeed: 70,
     wander: 0.12,
-    gravity: 0.12,
+    gravity: 0,
     homing: 0.9,
     flockAlign: 5.5,
     flockSep: 36,
@@ -124,6 +147,9 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'springDamp', label: 'Rope damp', min: 0, max: 120, step: 1 },
   { key: 'portStiff', label: 'Port stiffness', min: 0.1, max: 4, step: 0.05 },
   { key: 'auxSpread', label: 'Aux spread', min: 0, max: 3, step: 0.05 },
+  { key: 'declutter', label: 'Personal space', min: 0, max: 4, step: 0.05 },
+  { key: 'uncross', label: 'Uncross', min: 0, max: 4, step: 0.05 },
+  { key: 'wireClear', label: 'Wire clearance', min: 0, max: 4, step: 0.05 },
   { key: 'wireBreathe', label: 'Wire breathe', min: 0, max: 0.15, step: 0.005 },
   { key: 'eraMass', label: 'Era mass', min: 0.15, max: 2, step: 0.05 },
   { key: 'nodeMass', label: 'Con/Dup mass', min: 0.3, max: 4, step: 0.05 },

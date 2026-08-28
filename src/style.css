@@ -58,6 +58,10 @@ h1 {
   font-size: 12px;
 }
 
+.sound-hint {
+  color: #6b8cff;
+}
+
 .row,
 .presets,
 .spawn {

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { portAxis, stemRoot, stemWorld, type Agent } from './agents.ts';
+import { boundRadius, portAxis, stemRoot, stemWorld, type Agent } from './agents.ts';
 import { queryHit } from './collide.ts';
+import { segmentsIntersect } from './geom.ts';
 import type { Wire } from './graph.ts';
 import { defaultParams, type Params } from './params.ts';
 import { loadPreset } from './presets.ts';
@@ -32,6 +33,7 @@ function liveParams(): Params {
   p.snapWell = 0;
   p.rewriteDuration = 0;
   p.spawnInterval = 0;
+  p.gravity = 0.12;
   return p;
 }
 
@@ -286,8 +288,9 @@ describe('aux wires keep to their own side', () => {
 
   it('keeps most aux wires uncrossed across a minute of soup', () => {
     // Parallel aux axes mean nothing geometrically forbids a crossing, so this
-    // is a rate, not an invariant. Aiming each aux port slightly to its own
-    // side takes it from ~29% of wire-ends crossed to ~12%.
+    // is a rate, not an invariant. Aiming each aux port slightly to its own side
+    // roughly halves it; holding personal space between nets costs a little of
+    // that back (18.4% to 21.7%) in exchange for nets not resting on each other.
     let obs = 0;
     let crossed = 0;
     for (const sd of [999, 12345, 5150]) {
@@ -315,8 +318,129 @@ describe('aux wires keep to their own side', () => {
     }
     const rate = crossed / Math.max(1, obs);
     expect(rate, `${(rate * 100).toFixed(1)}% of aux ends crossed (${crossed}/${obs})`).toBeLessThan(
-      0.22,
+      0.26,
     );
+  });
+});
+
+describe('crowding and tangling', () => {
+  it('pushes a stranger out of a saturated agent\'s space', () => {
+    const sim = new Sim(480, 280);
+    const params = passiveParams();
+    const con = sim.spawn('con', 240, 140, 0, params, true)!;
+    const p1 = sim.spawn('era', 290, 140, Math.PI, params, true)!;
+    const l1 = sim.spawn('era', 200, 120, 0, params, true)!;
+    const r1 = sim.spawn('era', 200, 160, 0, params, true)!;
+    sim.wire(con.id, 'p', p1.id, 'p', params);
+    sim.wire(con.id, 'l', l1.id, 'p', params);
+    sim.wire(con.id, 'r', r1.id, 'p', params);
+    expect(sim.graph.portsFilled(con)).toBe(true);
+    // A loose agent parked right on top of it.
+    const stranger = sim.spawn('era', 252, 146, 0, params, true)!;
+    run(sim, params, 600);
+    const gap = Math.hypot(stranger.x - con.x, stranger.y - con.y);
+    // Contact alone would settle around the two bound radii, ~27 px.
+    expect(gap, `stranger sits ${gap.toFixed(1)} px away`).toBeGreaterThan(34);
+  });
+
+  it('keeps other nets out of a saturated agent\'s space', () => {
+    // Flocking separation is scoped to one net, so nothing but this constraint
+    // pushes separate nets apart — while homing pulls them together.
+    let saturated = 0;
+    let invaded = 0;
+    for (const sd of [999, 12345, 5150]) {
+      seed(sd);
+      const sim = new Sim(900, 600);
+      const params = defaultParams();
+      loadPreset(sim, 'soup', params);
+      for (let f = 1; f <= 3600; f++) {
+        sim.step(1 / 60, params);
+        if (f % 60) continue;
+        const comp = sim.graph.componentIds(sim.agents);
+        const list = [...sim.agents.values()];
+        for (const a of list) {
+          if (!sim.graph.portsFilled(a)) continue;
+          saturated++;
+          for (const b of list) {
+            if (b.id === a.id || comp.get(a.id) === comp.get(b.id)) continue;
+            if (Math.hypot(b.x - a.x, b.y - a.y) < params.wireMinRest - 0.5) {
+              invaded++;
+              break;
+            }
+          }
+        }
+      }
+    }
+    const rate = invaded / Math.max(1, saturated);
+    // 36.6% before this existed; nothing had ever separated two different nets.
+    expect(rate, `${(rate * 100).toFixed(1)}% of saturated agents crowded by another net`)
+      .toBeLessThan(0.06);
+  });
+
+  it('keeps ropes out of bodies they are not attached to', () => {
+    let samples = 0;
+    let inside = 0;
+    for (const sd of [999, 12345, 5150]) {
+      seed(sd);
+      const sim = new Sim(900, 600);
+      const params = defaultParams();
+      loadPreset(sim, 'soup', params);
+      for (let f = 1; f <= 3600; f++) {
+        sim.step(1 / 60, params);
+        if (f % 60) continue;
+        for (const wire of sim.graph.wires.values()) {
+          for (const agent of sim.agents.values()) {
+            if (agent.id === wire.a.id || agent.id === wire.b.id) continue;
+            const r = boundRadius(agent);
+            for (const node of wire.nodes) {
+              samples++;
+              if (Math.hypot(node.x - agent.x, node.y - agent.y) < r) inside++;
+            }
+          }
+        }
+      }
+    }
+    const rate = inside / Math.max(1, samples);
+    // 0.32% of rope-node/body pairs overlapped before wire clearance existed.
+    expect(rate, `${(rate * 100).toFixed(2)}% of rope nodes inside a foreign body`)
+      .toBeLessThan(0.003);
+  });
+
+  it('leaves few wire crossings in a minute of soup', () => {
+    let crossings = 0;
+    let samples = 0;
+    for (const sd of [999, 12345, 5150]) {
+      seed(sd);
+      const sim = new Sim(900, 600);
+      const params = defaultParams();
+      loadPreset(sim, 'soup', params);
+      for (let f = 1; f <= 3600; f++) {
+        sim.step(1 / 60, params);
+        if (f % 30) continue;
+        samples++;
+        const chords = [...sim.graph.wires.values()].flatMap((w) => {
+          const A = sim.agents.get(w.a.id);
+          const B = sim.agents.get(w.b.id);
+          if (!A || !B) return [];
+          const sa = stemWorld(A, w.a.slot, sim.w, sim.h);
+          const sb = stemWorld(B, w.b.slot, sim.w, sim.h);
+          return [{ a: w.a.id, b: w.b.id, sa, sb }];
+        });
+        for (let i = 0; i < chords.length; i++) {
+          for (let j = i + 1; j < chords.length; j++) {
+            const S = chords[i];
+            const T = chords[j];
+            if (S.a === T.a || S.a === T.b || S.b === T.a || S.b === T.b) continue;
+            if (segmentsIntersect(S.sa.x, S.sa.y, S.sb.x, S.sb.y, T.sa.x, T.sa.y, T.sb.x, T.sb.y)) {
+              crossings++;
+            }
+          }
+        }
+      }
+    }
+    const rate = crossings / Math.max(1, samples);
+    // 2.33 per frame before saturated agents started holding their space.
+    expect(rate, `${rate.toFixed(2)} wire crossings per frame`).toBeLessThan(2.1);
   });
 });
 

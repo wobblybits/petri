@@ -1,0 +1,1352 @@
+import type { AgentTopo, NetTopology } from './types.ts';
+
+/**
+ * The worklet is inlined as one import-free file, so it cannot read the shared
+ * sample-rate helper. AudioWorkletGlobalScope defines `sampleRate`; in tests it
+ * does not exist, so fall back to the rate the engine asks for.
+ */
+declare const sampleRate: number | undefined;
+const SAMPLE_RATE = typeof sampleRate === 'number' ? sampleRate : 48000;
+
+type AgentTopoLike = AgentTopo;
+
+export const MAX_WIRES = 64;
+export const MAX_DELAY = 4096;
+export const MAX_AGENTS = 256;
+export const MAX_PORTS = 4;
+export const MAX_CONTACTS = 48;
+export const MAX_AIR = 48;
+export const MAX_AIR_DELAY = 512;
+export const IMPULSE_TAPS = 12;
+
+/** Spatial bins in a traveling-wave snapshot. t=0 is end A, t=1 is end B. */
+export const WAVE_BINS = 32;
+/** Packed record: id, env, fwd[WAVE_BINS], back[WAVE_BINS]. */
+export const WAVE_STRIDE = 2 + WAVE_BINS * 2;
+
+/** Delay length glides toward its target instead of stepping (~5 ms). */
+const LENGTH_GLIDE = 0.004;
+/** Below this pickup envelope a wire is zeroed so silence is really silent. */
+const QUIET_FLOOR = 3e-6;
+/** Junction incoming bled into body modes. Mix-only — never written back. */
+const BODY_FROM_STRING = 0.1;
+/** Active wires quieter than this can be stolen for a new latch. */
+const STEAL_ENV = 0.002;
+/** Fraction of traveling-wave energy dumped into the two agents on retire. */
+const RETIRE_DUMP = 0.012;
+/** Friction / Hertzian force into the junction — a bow, not a scrape-pluck. */
+const RUB_TO_JUNCTION = 0.22;
+/** How hard a contact force drives the plate modes. They are quiet at contact-scale gain. */
+const BOW_TO_MODE = 6;
+/** Incoming waveguide velocity, scaled into the same units as modal velocity. */
+const JUNCTION_VEL = 0.012;
+/** Hertzian stiffness: vibrational displacement difference → restoring force. */
+const CONTACT_K = 2.2;
+/** Hertzian dashpot: keeps the contact spring from howling. */
+const CONTACT_C = 0.28;
+/** Air pressure into plate modes. Weaker than a bow so the gap is a halo, not a second instrument. */
+const AIR_TO_BODY = 2.2;
+/** Air pressure into the junction. */
+const AIR_TO_JUNCTION = 0.08;
+const MU_STATIC = 0.82;
+const MU_KINETIC = 0.34;
+const V_STRIBECK = 0.01;
+const V_STICK = 0.0012;
+
+export interface WireState {
+  active: boolean;
+  /** Zeroed and skipped once the pickup envelope falls under QUIET_FLOOR. */
+  quiet: boolean;
+  wireId: number;
+  length: number;
+  lengthTarget: number;
+  loss: number;
+  bend: number;
+  /** One-pole damping coefficient, 1 = bright, toward 0 = dark. */
+  damp: number;
+  /** First-order allpass coefficient. Nonzero stretches partials (bar/bell). */
+  disp: number;
+  /** -1 hard left .. +1 hard right. */
+  pan: number;
+  exAt: number;
+  exWidth: number;
+  zA: number;
+  zB: number;
+  agentA: number;
+  agentB: number;
+  pos: number;
+  burstPos: number;
+  env: number;
+  lpFwd: number;
+  lpBack: number;
+  dcXFwd: number;
+  dcYFwd: number;
+  dcXBack: number;
+  dcYBack: number;
+  apXFwd: number;
+  apYFwd: number;
+  apXBack: number;
+  apYBack: number;
+  bufFwd: Float32Array;
+  bufBack: Float32Array;
+  burstFwd: Float32Array;
+  burstBack: Float32Array;
+  exciteA: number;
+  exciteB: number;
+  inA: number;
+  inB: number;
+  outA: number;
+  outB: number;
+}
+
+export const BODY_MODES = 3;
+
+export interface AgentState {
+  active: boolean;
+  id: number;
+  openPorts: number;
+  portCount: number;
+  loadY: number;
+  excite: number;
+  pan: number;
+  coupling: number;
+  wireIdx: Int16Array;
+  wireEnd: Int8Array;
+  admittance: Float32Array;
+
+  /** Hertzian contact in progress: a force pulse, not an instantaneous spike. */
+  strikePeak: number;
+  strikePos: number;
+  strikeDur: number;
+  strikeSharp: number;
+
+  /** True while this body is in at least one contact pair. */
+  touching: boolean;
+  /** Scratch: junction admittance sum, incoming, this-sample strike and contact force. */
+  sumY: number;
+  sumYIn: number;
+  strikeNow: number;
+  contactF: number;
+  /** Delayed air arriving this sample. */
+  airIn: number;
+  /** What this body radiated last sample — the air source. */
+  radiate: number;
+
+  /** Body modes — a knocked body rings whether or not a wire is tied to it. */
+  modeA1: Float32Array;
+  modeA2: Float32Array;
+  modeGain: Float32Array;
+  modeY1: Float32Array;
+  modeY2: Float32Array;
+  bodyEnv: number;
+  /** Differentiated contact force — the transient that radiates directly. */
+  prevForce: number;
+  dForce: number;
+}
+
+export type WorkletMessage =
+  | { type: 'topology'; topo: NetTopology }
+  | { type: 'impulse'; wireId: number; end: 0 | 1; gain: number }
+  | { type: 'junction'; agentId: number; gain: number }
+  | { type: 'strike'; agentId: number; peak: number; dur: number; sharp: number }
+  | { type: 'contact'; items: { agentA: number; agentB: number; load: number; slide: number }[] }
+  | { type: 'air'; items: { agentA: number; agentB: number; length: number; gain: number; damp: number }[] }
+  | { type: 'latch'; topo: NetTopology; wireId: number; gain: number }
+  | { type: 'rewrite'; phase: 0 | 1; wireId: number; agentA: number; agentB: number; leftovers: number[]; gain: number }
+  | { type: 'gain'; master: number };
+
+function makeWire(): WireState {
+  return {
+    active: false,
+    quiet: true,
+    wireId: -1,
+    length: 64,
+    lengthTarget: 64,
+    loss: 0.999,
+    bend: 0.05,
+    damp: 0.5,
+    disp: 0,
+    pan: 0,
+    exAt: 0.16,
+    exWidth: 1,
+    zA: 1,
+    zB: 1,
+    agentA: -1,
+    agentB: -1,
+    pos: 0,
+    burstPos: 0,
+    env: 0,
+    lpFwd: 0,
+    lpBack: 0,
+    dcXFwd: 0,
+    dcYFwd: 0,
+    dcXBack: 0,
+    dcYBack: 0,
+    apXFwd: 0,
+    apYFwd: 0,
+    apXBack: 0,
+    apYBack: 0,
+    bufFwd: new Float32Array(MAX_DELAY),
+    bufBack: new Float32Array(MAX_DELAY),
+    burstFwd: new Float32Array(IMPULSE_TAPS),
+    burstBack: new Float32Array(IMPULSE_TAPS),
+    exciteA: 0,
+    exciteB: 0,
+    inA: 0,
+    inB: 0,
+    outA: 0,
+    outB: 0,
+  };
+}
+
+function makeAgent(): AgentState {
+  return {
+    active: false,
+    id: -1,
+    openPorts: 0,
+    portCount: 0,
+    loadY: 0,
+    excite: 0,
+    pan: 0,
+    coupling: 1,
+    wireIdx: new Int16Array(MAX_PORTS),
+    wireEnd: new Int8Array(MAX_PORTS),
+    admittance: new Float32Array(MAX_PORTS),
+    strikePeak: 0,
+    strikePos: 0,
+    strikeDur: 0,
+    strikeSharp: 0.5,
+    touching: false,
+    sumY: 0,
+    sumYIn: 0,
+    strikeNow: 0,
+    contactF: 0,
+    airIn: 0,
+    radiate: 0,
+    modeA1: new Float32Array(BODY_MODES),
+    modeA2: new Float32Array(BODY_MODES),
+    modeGain: new Float32Array(BODY_MODES),
+    modeY1: new Float32Array(BODY_MODES),
+    modeY2: new Float32Array(BODY_MODES),
+    bodyEnv: 0,
+    prevForce: 0,
+    dForce: 0,
+  };
+}
+
+interface ContactState {
+  active: boolean;
+  idxA: number;
+  idxB: number;
+  idA: number;
+  idB: number;
+  load: number;
+  slide: number;
+  noise: number;
+}
+
+function makeContact(): ContactState {
+  return {
+    active: false,
+    idxA: 0,
+    idxB: 0,
+    idA: -1,
+    idB: -1,
+    load: 0,
+    slide: 0,
+    noise: 1,
+  };
+}
+
+interface AirState {
+  active: boolean;
+  keep: boolean;
+  idxA: number;
+  idxB: number;
+  idA: number;
+  idB: number;
+  length: number;
+  lengthTarget: number;
+  gain: number;
+  damp: number;
+  pos: number;
+  lpFwd: number;
+  lpBack: number;
+  bufFwd: Float32Array;
+  bufBack: Float32Array;
+}
+
+function makeAir(): AirState {
+  return {
+    active: false,
+    keep: false,
+    idxA: 0,
+    idxB: 0,
+    idA: -1,
+    idB: -1,
+    length: 16,
+    lengthTarget: 16,
+    gain: 0,
+    damp: 0.5,
+    pos: 0,
+    lpFwd: 0,
+    lpBack: 0,
+    bufFwd: new Float32Array(MAX_AIR_DELAY),
+    bufBack: new Float32Array(MAX_AIR_DELAY),
+  };
+}
+
+function clampDelay(length: number): number {
+  if (!Number.isFinite(length)) return 64;
+  return Math.max(8, Math.min(MAX_DELAY - 1, length));
+}
+
+function clampAirDelay(length: number): number {
+  if (!Number.isFinite(length)) return 16;
+  return Math.max(4, Math.min(MAX_AIR_DELAY - 1, length));
+}
+
+function wrapDelayIndex(pos: number, delay: number): number {
+  if (!Number.isFinite(pos) || !Number.isFinite(delay)) return 0;
+  let r = pos - delay;
+  r %= MAX_DELAY;
+  if (r < 0) r += MAX_DELAY;
+  if (!Number.isFinite(r)) return 0;
+  return r;
+}
+
+function wrapAirIndex(pos: number, delay: number): number {
+  if (!Number.isFinite(pos) || !Number.isFinite(delay)) return 0;
+  let r = pos - delay;
+  r %= MAX_AIR_DELAY;
+  if (r < 0) r += MAX_AIR_DELAY;
+  if (!Number.isFinite(r)) return 0;
+  return r;
+}
+
+function sameAirPair(s: AirState, a: number, b: number): boolean {
+  return (s.idA === a && s.idB === b) || (s.idA === b && s.idB === a);
+}
+
+function softClip(x: number): number {
+  if (x > -1 && x < 1) return x;
+  return Math.tanh(x);
+}
+
+/** Kill denormals and non-finite values so a NaN cannot poison the net. */
+function flush(x: number): number {
+  if (!Number.isFinite(x)) return 0;
+  return x > -1e-25 && x < 1e-25 ? 0 : x;
+}
+
+/**
+ * Resistive load at a junction. Open ports radiate and eat the reflection —
+ * a loose agent thuds, a closed one sings. Closed is not sealed: a little
+ * body leak is what keeps a cycle from circulating until it sits on the clip
+ * rail. 0.05 used to be this term and pinned every wire to ~40 ms regardless
+ * of T60; 0.0004 let cages ring as if lossless. 0.012 is in between.
+ */
+export function junctionLoadY(openPorts: number): number {
+  const body = 0.012;
+  if (openPorts <= 0) return body;
+  return body + 0.05 + openPorts * 0.22;
+}
+
+/**
+ * Bidirectional waveguide net. Runtime-import-free so the AudioWorklet
+ * plugin can inline this file.
+ */
+export class WaveguideNet {
+  wires: WireState[] = [];
+  wireById = new Map<number, number>();
+  agents: AgentState[] = [];
+  agentById = new Map<number, number>();
+  contacts: ContactState[] = [];
+  airs: AirState[] = [];
+  master = 1;
+  bodyL = 0;
+  bodyR = 0;
+  snap = 0;
+  snapLp = 0;
+  outL = 0;
+  outR = 0;
+  env = 0;
+  dcX = 0;
+  dcY = 0;
+  dcX2 = 0;
+  dcY2 = 0;
+
+  /** Scratch reused by applyTopology so the audio thread never allocates. */
+  private seen = new Set<number>();
+  private keep = new Set<number>();
+  private portHead = new Map<number, number>();
+  private portWire = new Int16Array(MAX_WIRES * 2);
+  private portEnd = new Int8Array(MAX_WIRES * 2);
+  private portNext = new Int16Array(MAX_WIRES * 2);
+  private savedExcite = new Map<number, number>();
+  /** Preallocated traveling-wave snapshot. [n, bins, ...records of WAVE_STRIDE]. */
+  private waveSnap = new Float32Array(2 + MAX_WIRES * WAVE_STRIDE);
+
+  constructor() {
+    for (let i = 0; i < MAX_WIRES; i++) this.wires.push(makeWire());
+    for (let i = 0; i < MAX_AGENTS; i++) this.agents.push(makeAgent());
+    for (let i = 0; i < MAX_CONTACTS; i++) this.contacts.push(makeContact());
+    for (let i = 0; i < MAX_AIR; i++) this.airs.push(makeAir());
+  }
+
+  handle(msg: WorkletMessage): void {
+    try {
+      if (msg.type === 'gain') {
+        this.master = msg.master;
+        return;
+      }
+      if (msg.type === 'topology') {
+        this.applyTopology(msg.topo);
+        return;
+      }
+      if (msg.type === 'latch') {
+        this.applyTopology(msg.topo);
+        // The pluck is the whole excitation: the voice's `width` already sets
+        // how sharp the attack is, and an extra burst on top just adds a click.
+        this.injectPluck(msg.wireId, msg.gain);
+        return;
+      }
+      if (msg.type === 'impulse') {
+        this.injectImpulse(msg.wireId, msg.end, msg.gain);
+        return;
+      }
+      if (msg.type === 'junction') {
+        this.addJunction(msg.agentId, msg.gain);
+        return;
+      }
+      if (msg.type === 'strike') {
+        this.addStrike(msg.agentId, msg.peak, msg.dur, msg.sharp);
+        return;
+      }
+      if (msg.type === 'contact') {
+        this.setContacts(msg.items);
+        return;
+      }
+      if (msg.type === 'air') {
+        this.setAir(msg.items);
+        return;
+      }
+      if (msg.type === 'rewrite') {
+        this.handleRewrite(msg);
+      }
+    } catch {
+      // Keep processor alive on bad input.
+    }
+  }
+
+  read(buf: Float32Array, pos: number, delay: number): number {
+    const r = wrapDelayIndex(pos, delay);
+    const i0 = r | 0;
+    const frac = r - i0;
+    const i1 = i0 + 1 === MAX_DELAY ? 0 : i0 + 1;
+    return buf[i0] + frac * (buf[i1] - buf[i0]);
+  }
+
+  readAir(buf: Float32Array, pos: number, delay: number): number {
+    const r = wrapAirIndex(pos, delay);
+    const i0 = r | 0;
+    const frac = r - i0;
+    const i1 = i0 + 1 === MAX_AIR_DELAY ? 0 : i0 + 1;
+    return buf[i0] + frac * (buf[i1] - buf[i0]);
+  }
+
+  /** Raised-cosine burst at one end. Never a bare single-sample spike. */
+  injectImpulse(wireId: number, end: 0 | 1, gain: number): boolean {
+    const idx = this.wireById.get(wireId);
+    if (idx === undefined) return false;
+    const w = this.wires[idx];
+    w.quiet = false;
+    // Seed the envelope with what we are about to inject, otherwise the quiet
+    // gate fires on tick 1 — the excitation has not reached the pickup yet.
+    w.env = Math.max(w.env, Math.abs(gain));
+    const burst = end === 1 ? w.burstBack : w.burstFwd;
+    for (let k = 0; k < IMPULSE_TAPS; k++) {
+      const phase = k / (IMPULSE_TAPS - 1);
+      const shape = 0.5 - 0.5 * Math.cos(2 * Math.PI * phase);
+      burst[(w.burstPos + k) % IMPULSE_TAPS] += gain * shape * 0.5;
+    }
+    return true;
+  }
+
+  /**
+   * Excitation shape along the wire, x in [0,1].
+   * width >= 1 gives the classic plucked triangle peaked at `pos`;
+   * width < 1 gives a narrow raised-cosine strike (mallet).
+   */
+  private shapeAt(x: number, pos: number, width: number): number {
+    if (width >= 1) {
+      if (x < pos) return pos > 0 ? x / pos : 0;
+      return pos < 1 ? (1 - x) / (1 - pos) : 0;
+    }
+    const half = Math.max(1e-4, width * 0.5);
+    const d = (x - pos) / half;
+    if (d <= -1 || d >= 1) return 0;
+    return 0.5 + 0.5 * Math.cos(Math.PI * d);
+  }
+
+  /**
+   * Set the string's initial displacement. Each delay line carries half of it,
+   * and because the lines run in opposite directions, sample k of the forward
+   * line and sample L-k of the backward line are the same point on the wire.
+   * The shape is made zero-mean first: with near-unity reflections at both
+   * terminations, any DC in the initial condition is the longest-lived thing
+   * in the loop and would sit under everything as a slow pedestal.
+   */
+  injectPluck(wireId: number, gain: number, at?: number, width?: number): boolean {
+    // `at` near an end drives the fundamental; `at` at 0.5 cancels it. See the
+    // note on Voice in presets.ts — the terminations do not invert, so the mode
+    // shapes are cosines rather than a fixed-fixed string's sines.
+    const idx = this.wireById.get(wireId);
+    if (idx === undefined) return false;
+    const w = this.wires[idx];
+    if (at === undefined) at = w.exAt;
+    if (width === undefined) width = w.exWidth;
+    const L = Math.max(8, w.length | 0);
+
+    let mean = 0;
+    for (let k = 0; k < L; k++) mean += this.shapeAt(k / L, at, width);
+    mean /= L;
+
+    const amp = gain * 0.5;
+    for (let k = 1; k < L; k++) {
+      const s = (this.shapeAt(k / L, at, width) - mean) * amp;
+      w.bufFwd[wrapDelayIndex(w.pos, k) | 0] += s;
+      w.bufBack[wrapDelayIndex(w.pos, L - k) | 0] += s;
+    }
+    w.quiet = false;
+    w.env = Math.max(w.env, Math.abs(gain));
+    return true;
+  }
+
+  addJunction(agentId: number, gain: number): void {
+    const aIdx = this.agentById.get(agentId);
+    if (aIdx === undefined) return;
+    const a = this.agents[aIdx];
+    a.excite += gain;
+    for (let p = 0; p < a.portCount; p++) {
+      const w = this.wires[a.wireIdx[p]];
+      w.quiet = false;
+      w.env = Math.max(w.env, Math.abs(gain));
+    }
+  }
+
+  /**
+   * Start a Hertzian contact. `dur` is the contact duration in samples, which
+   * the sim derives from the effective mass and the closing speed — a harder
+   * hit is a *shorter* contact and therefore a brighter one, which is the whole
+   * reason a strike carries a duration instead of just a gain.
+   */
+  addStrike(agentId: number, peak: number, dur: number, sharp: number): void {
+    const aIdx = this.agentById.get(agentId);
+    if (aIdx === undefined) return;
+    const a = this.agents[aIdx];
+    // Overlapping contacts merge into the louder, shorter one.
+    if (a.strikePos < a.strikeDur && a.strikePeak > peak) return;
+    a.strikePeak = peak;
+    a.strikeDur = Math.max(2, Math.min(2048, dur));
+    a.strikePos = 0;
+    a.strikeSharp = Math.max(0, Math.min(1, sharp));
+    a.bodyEnv = Math.max(a.bodyEnv, peak);
+    for (let p = 0; p < a.portCount; p++) {
+      const w = this.wires[a.wireIdx[p]];
+      w.quiet = false;
+      w.env = Math.max(w.env, peak);
+    }
+  }
+
+  /** Replace the set of touching pairs. Anything not listed has separated. */
+  setContacts(items: { agentA: number; agentB: number; load: number; slide: number }[]): void {
+    for (const a of this.agents) {
+      if (a.active) a.touching = false;
+    }
+    let n = 0;
+    for (const it of items) {
+      if (n >= MAX_CONTACTS) break;
+      const ia = this.agentById.get(it.agentA);
+      const ib = this.agentById.get(it.agentB);
+      if (ia === undefined || ib === undefined || ia === ib) continue;
+      const c = this.contacts[n];
+      c.active = true;
+      c.idxA = ia;
+      c.idxB = ib;
+      c.idA = it.agentA;
+      c.idB = it.agentB;
+      c.load = Math.max(0, Math.min(1, it.load));
+      c.slide = Math.max(-0.08, Math.min(0.08, it.slide));
+      n++;
+      const A = this.agents[ia];
+      const B = this.agents[ib];
+      A.touching = true;
+      B.touching = true;
+      if (c.load > 0) {
+        A.bodyEnv = Math.max(A.bodyEnv, c.load * 0.5);
+        B.bodyEnv = Math.max(B.bodyEnv, c.load * 0.5);
+        this.wakeWires(A, c.load);
+        this.wakeWires(B, c.load);
+      }
+    }
+    for (; n < MAX_CONTACTS; n++) {
+      const c = this.contacts[n];
+      c.active = false;
+      c.idA = -1;
+      c.idB = -1;
+    }
+  }
+
+  /** Replace the set of line-of-sight air paths. Matching pairs keep their delay lines. */
+  setAir(
+    items: { agentA: number; agentB: number; length: number; gain: number; damp: number }[],
+  ): void {
+    for (const a of this.airs) a.keep = false;
+
+    // Match existing pairs first so a new neighbour cannot steal a live buffer.
+    for (const it of items) {
+      const ia = this.agentById.get(it.agentA);
+      const ib = this.agentById.get(it.agentB);
+      if (ia === undefined || ib === undefined || ia === ib) continue;
+      for (let i = 0; i < MAX_AIR; i++) {
+        const a = this.airs[i];
+        if (!a.active || a.keep || !sameAirPair(a, it.agentA, it.agentB)) continue;
+        this.bindAir(a, ia, ib, it, false);
+        a.keep = true;
+        break;
+      }
+    }
+
+    for (const it of items) {
+      const ia = this.agentById.get(it.agentA);
+      const ib = this.agentById.get(it.agentB);
+      if (ia === undefined || ib === undefined || ia === ib) continue;
+      let taken = false;
+      for (let i = 0; i < MAX_AIR; i++) {
+        if (this.airs[i].keep && sameAirPair(this.airs[i], it.agentA, it.agentB)) {
+          taken = true;
+          break;
+        }
+      }
+      if (taken) continue;
+      let slot = -1;
+      for (let i = 0; i < MAX_AIR; i++) {
+        if (!this.airs[i].active) {
+          slot = i;
+          break;
+        }
+      }
+      if (slot < 0) {
+        for (let i = 0; i < MAX_AIR; i++) {
+          if (!this.airs[i].keep) {
+            slot = i;
+            break;
+          }
+        }
+      }
+      if (slot < 0) continue;
+      this.bindAir(this.airs[slot], ia, ib, it, true);
+      this.airs[slot].keep = true;
+    }
+
+    for (const a of this.airs) {
+      if (!a.keep) this.retireAir(a);
+    }
+  }
+
+  private bindAir(
+    a: AirState,
+    ia: number,
+    ib: number,
+    it: { agentA: number; agentB: number; length: number; gain: number; damp: number },
+    fresh: boolean,
+  ): void {
+    if (fresh) this.retireAir(a);
+    a.active = true;
+    a.idxA = ia;
+    a.idxB = ib;
+    a.idA = it.agentA;
+    a.idB = it.agentB;
+    a.lengthTarget = clampAirDelay(it.length);
+    a.gain = Number.isFinite(it.gain) ? Math.max(0, Math.min(1, it.gain)) : 0;
+    a.damp = Number.isFinite(it.damp) ? Math.max(0.02, Math.min(0.95, it.damp)) : 0.5;
+    if (fresh) a.length = a.lengthTarget;
+  }
+
+  private retireAir(a: AirState): void {
+    a.active = false;
+    a.keep = false;
+    a.idA = -1;
+    a.idB = -1;
+    a.gain = 0;
+    a.lpFwd = 0;
+    a.lpBack = 0;
+    a.pos = 0;
+    a.bufFwd.fill(0);
+    a.bufBack.fill(0);
+  }
+
+  /**
+   * Read delayed air into both bodies. Length glides like a wire so a walk
+   * does not zipper the delay.
+   */
+  private applyAirReads(): void {
+    for (let i = 0; i < MAX_AIR; i++) {
+      const a = this.airs[i];
+      if (!a.active) continue;
+      const ia = this.agentById.get(a.idA);
+      const ib = this.agentById.get(a.idB);
+      if (ia === undefined || ib === undefined) continue;
+      a.idxA = ia;
+      a.idxB = ib;
+      const A = this.agents[ia];
+      const B = this.agents[ib];
+      if (!A.active || !B.active) continue;
+      const d = a.lengthTarget - a.length;
+      if (d !== 0) a.length += d * LENGTH_GLIDE;
+      if (!Number.isFinite(a.length)) a.length = a.lengthTarget;
+      const yFwd = flush(this.readAir(a.bufFwd, a.pos, a.length));
+      const yBack = flush(this.readAir(a.bufBack, a.pos, a.length));
+      A.airIn += yBack;
+      B.airIn += yFwd;
+    }
+  }
+
+  /** Body radiation this sample goes into the air lines for the other end. */
+  private applyAirWrites(): void {
+    for (let i = 0; i < MAX_AIR; i++) {
+      const a = this.airs[i];
+      if (!a.active) continue;
+      const A = this.agents[a.idxA];
+      const B = this.agents[a.idxB];
+      const xA = A && A.active && A.id === a.idA ? A.radiate * a.gain : 0;
+      const xB = B && B.active && B.id === a.idB ? B.radiate * a.gain : 0;
+      a.lpFwd += a.damp * (xA - a.lpFwd);
+      a.lpBack += a.damp * (xB - a.lpBack);
+      a.bufFwd[a.pos] = flush(a.lpFwd);
+      a.bufBack[a.pos] = flush(a.lpBack);
+      a.pos++;
+      if (a.pos >= MAX_AIR_DELAY) a.pos = 0;
+    }
+  }
+
+  private wakeWires(a: AgentState, load: number): void {
+    for (let p = 0; p < a.portCount; p++) {
+      const w = this.wires[a.wireIdx[p]];
+      w.quiet = false;
+      w.env = Math.max(w.env, load * 0.3);
+    }
+  }
+
+  /**
+   * Hertzian strike force for this sample. Rubbing is a separate friction loop
+   * on the resonator — not this pulse, and not dForce.
+   */
+  private strikeForce(a: AgentState): number {
+    if (a.strikePos >= a.strikeDur) return 0;
+    const u = a.strikePos / a.strikeDur;
+    const s = Math.sin(Math.PI * u);
+    a.strikePos++;
+    return a.strikePeak * s * Math.sqrt(s);
+  }
+
+  /** Modal + junction velocity at the contact, in per-sample units. */
+  private surfaceVel(a: AgentState, sumYIn: number): number {
+    let v = 0;
+    for (let m = 0; m < BODY_MODES; m++) v += a.modeY1[m] - a.modeY2[m];
+    return v + sumYIn * JUNCTION_VEL;
+  }
+
+  /** Modal displacement at the contact. Junction waves are velocity-like; omit them. */
+  private surfaceDisp(a: AgentState): number {
+    let u = 0;
+    for (let m = 0; m < BODY_MODES; m++) u += a.modeY1[m];
+    return u;
+  }
+
+  /**
+   * Stribeck friction. Sign convention: F is the force on A, so F_B = −F.
+   * vSlip is A's material velocity minus B's, rigid slide included.
+   * F_A = −μN tanh(vSlip) drags A toward stick (vSlip → 0).
+   */
+  private friction(vSlip: number, N: number, c: ContactState): number {
+    if (N <= 1e-6) return 0;
+    let v = vSlip;
+    c.noise = (Math.imul(c.noise, 1664525) + 1013904223) >>> 0;
+    v += ((c.noise / 4294967296) * 2 - 1) * N * 0.012;
+    const ax = v < 0 ? -v : v;
+    const mu = MU_KINETIC + (MU_STATIC - MU_KINETIC) * Math.exp(-ax / V_STRIBECK);
+    let F = -mu * N * Math.tanh(v / V_STICK);
+    const max = MU_STATIC * N;
+    if (F > max) F = max;
+    else if (F < -max) F = -max;
+    return F;
+  }
+
+  /**
+   * Shared contact force: Hertzian spring always, friction while sliding.
+   * Equal and opposite, from the previous sample's surface state.
+   */
+  private applyContacts(): void {
+    for (let i = 0; i < MAX_CONTACTS; i++) {
+      const c = this.contacts[i];
+      if (!c.active || c.load <= 1e-6) continue;
+      const A = this.agents[c.idxA];
+      const B = this.agents[c.idxB];
+      if (!A.active || !B.active) continue;
+      const vA = this.surfaceVel(A, A.sumYIn);
+      const vB = this.surfaceVel(B, B.sumYIn);
+      const du = this.surfaceDisp(A) - this.surfaceDisp(B);
+      const dv = vA - vB;
+      const Fn = -CONTACT_K * c.load * du - CONTACT_C * c.load * dv;
+      const slide = c.slide;
+      const Ft =
+        slide > 1e-6 || slide < -1e-6 ? this.friction(slide + dv, c.load, c) : 0;
+      const F = Fn + Ft;
+      A.contactF += F;
+      B.contactF -= F;
+    }
+  }
+
+  /**
+   * One sample of the agent's own body ringing.
+   *
+   * Strike goes through the differentiator (contact duration → brightness) and
+   * the modes. Contact force (Hertzian spring + friction) drives the modes
+   * only — never dForce — so a pair can couple and a slide can lock instead of
+   * becoming a click train. String bleed is mix-only and never written back
+   * into the junction. Air is a delayed pressure into the same modes.
+   */
+  private bodyVoice(a: AgentState, contact: number, stringIn: number, force = 0, air = 0): number {
+    const bleed = stringIn * BODY_FROM_STRING;
+    const drive = contact + bleed + force * BOW_TO_MODE + air * AIR_TO_BODY;
+    if (drive === 0 && a.bodyEnv < QUIET_FLOOR && a.dForce === 0) return 0;
+    const d = contact - a.prevForce;
+    a.prevForce = contact;
+    a.dForce = flush(a.dForce * 0.72 + d);
+    let sum = a.dForce * 0.5 * (0.6 + a.strikeSharp * 0.8) + bleed;
+    for (let m = 0; m < BODY_MODES; m++) {
+      const y =
+        a.modeA1[m] * a.modeY1[m] - a.modeA2[m] * a.modeY2[m] + a.modeGain[m] * drive;
+      a.modeY2[m] = a.modeY1[m];
+      a.modeY1[m] = flush(y);
+      sum += y;
+    }
+    const abs = sum < 0 ? -sum : sum;
+    a.bodyEnv += (abs > a.bodyEnv ? 0.01 : 0.0002) * (abs - a.bodyEnv);
+    // While a contact is down or air is arriving, do not wipe the modes.
+    const airLive = air > QUIET_FLOOR || air < -QUIET_FLOOR;
+    if (!Number.isFinite(a.bodyEnv) || (a.bodyEnv < QUIET_FLOOR && !a.touching && !airLive)) {
+      a.bodyEnv = 0;
+      a.dForce = 0;
+      a.prevForce = 0;
+      for (let m = 0; m < BODY_MODES; m++) {
+        a.modeY1[m] = 0;
+        a.modeY2[m] = 0;
+      }
+      return 0;
+    }
+    return sum;
+  }
+
+  handleRewrite(msg: Extract<WorkletMessage, { type: 'rewrite' }>): void {
+    if (msg.phase === 0) {
+      // Begin: a soft, wide excitation low on the wire — more breath than click.
+      this.injectPluck(msg.wireId, msg.gain * 0.7, 0.2, 0.8);
+      this.addJunction(msg.agentA, msg.gain * 0.3);
+      this.addJunction(msg.agentB, msg.gain * 0.3);
+      return;
+    }
+    this.snap += msg.gain * 0.5;
+    this.addJunction(msg.agentA, msg.gain * 0.25);
+    this.addJunction(msg.agentB, msg.gain * 0.25);
+    for (let i = 0; i < msg.leftovers.length; i++) {
+      this.addJunction(msg.leftovers[i], msg.gain * 0.5);
+    }
+  }
+
+  private retireWire(w: WireState): void {
+    w.active = false;
+    w.quiet = true;
+    w.exciteA = 0;
+    w.exciteB = 0;
+    w.env = 0;
+    w.bufFwd.fill(0);
+    w.bufBack.fill(0);
+    w.burstFwd.fill(0);
+    w.burstBack.fill(0);
+    if (w.wireId >= 0) this.wireById.delete(w.wireId);
+    w.wireId = -1;
+  }
+
+  /** Fold leftover traveling-wave energy into the two agents, then free the slot. */
+  private dumpAndRetire(w: WireState): void {
+    const e = w.wireId >= 0 ? this.wireEnergy(w.wireId) : 0;
+    if (e > 0) {
+      const g = Math.min(0.85, e * RETIRE_DUMP);
+      if (w.agentA >= 0) {
+        this.savedExcite.set(w.agentA, (this.savedExcite.get(w.agentA) ?? 0) + g);
+      }
+      if (w.agentB >= 0 && w.agentB !== w.agentA) {
+        this.savedExcite.set(w.agentB, (this.savedExcite.get(w.agentB) ?? 0) + g);
+      }
+    }
+    this.retireWire(w);
+  }
+
+  private isStealable(w: WireState): boolean {
+    return w.quiet || w.env < STEAL_ENV;
+  }
+
+  /**
+   * Which of this update's wires get a slot. Loud existing wires keep theirs;
+   * new latches take quiet slots; leftover quiet wires fill whatever remains.
+   */
+  private chooseKeep(topo: NetTopology): void {
+    this.keep.clear();
+    for (const w of this.wires) {
+      if (!w.active || this.isStealable(w)) continue;
+      if (this.keep.size >= MAX_WIRES) break;
+      this.keep.add(w.wireId);
+    }
+    for (const spec of topo.wires) {
+      if (this.keep.size >= MAX_WIRES) break;
+      const idx = this.wireById.get(spec.id);
+      if (idx !== undefined && this.wires[idx].active) continue;
+      this.keep.add(spec.id);
+    }
+    for (const spec of topo.wires) {
+      if (this.keep.size >= MAX_WIRES) break;
+      this.keep.add(spec.id);
+    }
+  }
+
+  applyTopology(topo: NetTopology): void {
+    this.savedExcite.clear();
+    for (const [id, idx] of this.agentById) {
+      this.savedExcite.set(id, this.agents[idx].excite);
+    }
+
+    this.seen.clear();
+    for (let i = 0; i < topo.wires.length; i++) this.seen.add(topo.wires[i].id);
+    for (const w of this.wires) {
+      if (w.active && !this.seen.has(w.wireId)) this.dumpAndRetire(w);
+    }
+
+    this.chooseKeep(topo);
+    for (const w of this.wires) {
+      if (w.active && !this.keep.has(w.wireId)) this.dumpAndRetire(w);
+    }
+
+    for (const a of this.agents) {
+      a.active = false;
+      a.portCount = 0;
+      a.id = -1;
+    }
+    this.agentById.clear();
+
+    let placed = 0;
+    for (const spec of topo.wires) {
+      if (placed >= MAX_WIRES) break;
+      if (!this.keep.has(spec.id)) continue;
+      let slot = this.wireById.get(spec.id);
+      if (slot === undefined) {
+        slot = this.wires.findIndex((w) => !w.active);
+        if (slot < 0) continue;
+      }
+      placed++;
+
+      const w = this.wires[slot];
+      const fresh = !w.active || w.wireId !== spec.id;
+      w.active = true;
+      w.wireId = spec.id;
+      w.lengthTarget = clampDelay(spec.length);
+      w.loss = Number.isFinite(spec.loss) ? spec.loss : 0.99;
+      w.bend = Number.isFinite(spec.bend) ? spec.bend : 0.05;
+      w.damp = spec.damp !== undefined && Number.isFinite(spec.damp) ? spec.damp : Math.max(0.05, 1 - spec.bend * 2.4);
+      w.disp = spec.disp !== undefined && Number.isFinite(spec.disp) ? spec.disp : 0;
+      w.pan = spec.pan !== undefined && Number.isFinite(spec.pan) ? spec.pan : 0;
+      w.exAt = spec.exAt !== undefined ? spec.exAt : 0.16;
+      w.exWidth = spec.exWidth !== undefined ? spec.exWidth : 1;
+      w.zA = spec.zA && spec.zA > 0 ? spec.zA : 1;
+      w.zB = spec.zB && spec.zB > 0 ? spec.zB : 1;
+      w.agentA = spec.agentA;
+      w.agentB = spec.agentB;
+      if (fresh) {
+        w.length = w.lengthTarget;
+        w.quiet = true;
+        w.pos = 0;
+        w.burstPos = 0;
+        w.env = 0;
+        w.lpFwd = 0;
+        w.lpBack = 0;
+        w.dcXFwd = 0;
+        w.dcYFwd = 0;
+        w.dcXBack = 0;
+        w.dcYBack = 0;
+        w.apXFwd = 0;
+        w.apYFwd = 0;
+        w.apXBack = 0;
+        w.apYBack = 0;
+        w.exciteA = 0;
+        w.exciteB = 0;
+        w.inA = 0;
+        w.inB = 0;
+        w.outA = 0;
+        w.outB = 0;
+        w.bufFwd.fill(0);
+        w.bufBack.fill(0);
+        w.burstFwd.fill(0);
+        w.burstBack.fill(0);
+      }
+      this.wireById.set(spec.id, slot);
+    }
+
+    // Intrusive linked lists over preallocated arrays: no per-agent garbage.
+    this.portHead.clear();
+    let n = 0;
+    for (const w of this.wires) {
+      if (!w.active) continue;
+      const idx = this.wireById.get(w.wireId)!;
+      for (let e = 0 as 0 | 1; e <= 1; e = (e + 1) as 0 | 1) {
+        const agentId = e === 0 ? w.agentA : w.agentB;
+        this.portWire[n] = idx;
+        this.portEnd[n] = e;
+        const head = this.portHead.get(agentId);
+        this.portNext[n] = head === undefined ? -1 : head;
+        this.portHead.set(agentId, n);
+        n++;
+      }
+    }
+
+    let ai = 0;
+    for (const spec of topo.agents) {
+      if (ai >= MAX_AGENTS) break;
+      // Every agent gets a slot, wired or not. Skipping the unwired ones meant
+      // a knock on a loose body was silent, which made collisions audible only
+      // by accident of the net's shape.
+      let node = this.portHead.get(spec.id);
+      if (node === undefined) node = -1;
+      const a = this.agents[ai];
+      const same = a.id === spec.id;
+      a.active = true;
+      a.id = spec.id;
+      a.openPorts = spec.openPorts;
+      a.pan = spec.pan !== undefined ? spec.pan : 0;
+      a.coupling = spec.coupling !== undefined ? spec.coupling : 1;
+      this.setBodyModes(a, spec, same);
+      // Scale the resistive load by the agent's own admittance, so a heavy Con
+      // and a light Dup do not leak identically. Without this, `impedance` was
+      // computed by the topology builder every frame and then dropped.
+      a.loadY = junctionLoadY(spec.openPorts) / Math.max(0.05, spec.impedance || 1);
+      a.excite = this.savedExcite.get(spec.id) ?? 0;
+      let p = 0;
+      while (node >= 0 && p < MAX_PORTS) {
+        const wi = this.portWire[node];
+        const end = this.portEnd[node] as 0 | 1;
+        const w = this.wires[wi];
+        a.wireIdx[p] = wi;
+        a.wireEnd[p] = end;
+        a.admittance[p] = 1 / Math.max(0.05, end === 0 ? w.zA : w.zB);
+        p++;
+        node = this.portNext[node];
+      }
+      a.portCount = p;
+      this.agentById.set(spec.id, ai);
+      ai++;
+    }
+  }
+
+  /**
+   * Resonator coefficients for the body's modes. `keep` preserves the ringing
+   * state when an agent keeps its slot across a topology update.
+   */
+  private setBodyModes(a: AgentState, spec: AgentTopoLike, keep: boolean): void {
+    const hz = spec.modeHz;
+    const t60 = spec.modeT60;
+    const gain = spec.modeGain;
+    if (!hz || !t60 || !gain) return;
+    for (let m = 0; m < BODY_MODES; m++) {
+      const f = hz[m] !== undefined ? hz[m] : 200;
+      const d = t60[m] !== undefined ? t60[m] : 0.2;
+      const w = (2 * Math.PI * f) / SAMPLE_RATE;
+      // Pole radius for a given T60: r^(T60*fs) = 1e-3.
+      const r = Math.exp(-6.9078 / Math.max(1, d * SAMPLE_RATE));
+      a.modeA1[m] = 2 * r * Math.cos(w);
+      a.modeA2[m] = r * r;
+      // Normalize so peak response is independent of Q.
+      a.modeGain[m] = (gain[m] !== undefined ? gain[m] : 0.5) * (1 - r) * Math.sin(w) * 4;
+      if (!keep) {
+        a.modeY1[m] = 0;
+        a.modeY2[m] = 0;
+      }
+    }
+    if (!keep) a.bodyEnv = 0;
+  }
+
+  /**
+   * Everything that happens once per one-way trip, lumped at the delay output:
+   * frequency-dependent damping, DC rejection, optional dispersion, loss.
+   * Losses are LTI so they commute with the delay and belong at a single point
+   * rather than being spread over every sample of the line.
+   */
+  private travel(w: WireState, x: number, dir: 0 | 1): number {
+    let lp = dir === 0 ? w.lpFwd : w.lpBack;
+    lp += w.damp * (x - lp);
+    lp = flush(lp);
+
+    let dcX = dir === 0 ? w.dcXFwd : w.dcXBack;
+    let dcY = dir === 0 ? w.dcYFwd : w.dcYBack;
+    const blocked = flush(lp - dcX + 0.999 * dcY);
+    dcX = lp;
+    dcY = blocked;
+
+    let y = blocked;
+    if (w.disp !== 0) {
+      const apX = dir === 0 ? w.apXFwd : w.apXBack;
+      const apY = dir === 0 ? w.apYFwd : w.apYBack;
+      y = flush(w.disp * (y - apY) + apX);
+      if (dir === 0) {
+        w.apXFwd = blocked;
+        w.apYFwd = y;
+      } else {
+        w.apXBack = blocked;
+        w.apYBack = y;
+      }
+    }
+
+    if (dir === 0) {
+      w.lpFwd = lp;
+      w.dcXFwd = dcX;
+      w.dcYFwd = dcY;
+    } else {
+      w.lpBack = lp;
+      w.dcXBack = dcX;
+      w.dcYBack = dcY;
+    }
+    return w.loss * y;
+  }
+
+  /** Advance one sample. Fills outL/outR; returns the mono sum. */
+  tick(): number {
+    for (const w of this.wires) {
+      if (!w.active || w.quiet) continue;
+      const d = w.lengthTarget - w.length;
+      if (d !== 0) w.length += d * LENGTH_GLIDE;
+      if (!Number.isFinite(w.length)) w.length = w.lengthTarget;
+      w.inB = this.travel(w, this.read(w.bufFwd, w.pos, w.length), 0);
+      w.inA = this.travel(w, this.read(w.bufBack, w.pos, w.length), 1);
+      w.outA = w.inA;
+      w.outB = w.inB;
+    }
+
+    this.bodyL = 0;
+    this.bodyR = 0;
+    for (const agent of this.agents) {
+      if (!agent.active) continue;
+      agent.strikeNow = this.strikeForce(agent);
+      let sumY = agent.loadY;
+      let sumYIn = 0;
+      for (let p = 0; p < agent.portCount; p++) {
+        const w = this.wires[agent.wireIdx[p]];
+        const y = agent.admittance[p];
+        sumY += y;
+        sumYIn += y * (agent.wireEnd[p] === 0 ? w.inA : w.inB);
+      }
+      agent.sumY = sumY;
+      agent.sumYIn = sumYIn;
+      agent.contactF = 0;
+      agent.airIn = 0;
+      agent.radiate = 0;
+    }
+
+    this.applyAirReads();
+    this.applyContacts();
+
+    for (const agent of this.agents) {
+      if (!agent.active) continue;
+      const strike = agent.strikeNow;
+      const force = agent.contactF;
+      const air = agent.airIn;
+      if (air > QUIET_FLOOR || air < -QUIET_FLOOR) {
+        agent.bodyEnv = Math.max(agent.bodyEnv, air < 0 ? -air : air);
+        this.wakeWires(agent, Math.min(1, air < 0 ? -air : air));
+      }
+      const body = this.bodyVoice(
+        agent,
+        strike,
+        agent.sumYIn + (agent.portCount === 0 ? agent.excite : 0),
+        force,
+        air,
+      );
+      agent.radiate = body;
+      if (body !== 0) {
+        const gl = Math.sqrt(0.5 * (1 - agent.pan));
+        const gr = Math.sqrt(0.5 * (1 + agent.pan));
+        this.bodyL += body * gl;
+        this.bodyR += body * gr;
+      }
+
+      const drive =
+        agent.excite + strike * agent.coupling + force * RUB_TO_JUNCTION + air * AIR_TO_JUNCTION;
+      const pJ = (2 * agent.sumYIn + drive) / Math.max(1e-6, agent.sumY);
+      agent.excite = 0;
+      if (agent.portCount === 0) continue;
+      for (let p = 0; p < agent.portCount; p++) {
+        const w = this.wires[agent.wireIdx[p]];
+        const incoming = agent.wireEnd[p] === 0 ? w.inA : w.inB;
+        const outgoing = pJ - incoming;
+        if (agent.wireEnd[p] === 0) w.outA = outgoing;
+        else w.outB = outgoing;
+        // A gated wire has to wake up when a neighbour scatters into it,
+        // otherwise energy cannot cross a junction onto a silent wire.
+        if (w.quiet) {
+          const m = outgoing < 0 ? -outgoing : outgoing;
+          if (m > QUIET_FLOOR) {
+            w.quiet = false;
+            w.env = Math.max(w.env, m);
+          }
+        }
+      }
+    }
+
+    this.applyAirWrites();
+
+    let sumL = this.bodyL * 1.5;
+    let sumR = this.bodyR * 1.5;
+    for (const w of this.wires) {
+      if (!w.active || w.quiet) continue;
+      const extraA = w.burstFwd[w.burstPos] + w.exciteA;
+      const extraB = w.burstBack[w.burstPos] + w.exciteB;
+      w.burstFwd[w.burstPos] = 0;
+      w.burstBack[w.burstPos] = 0;
+      w.burstPos = w.burstPos + 1 === IMPULSE_TAPS ? 0 : w.burstPos + 1;
+      const yA = softClip(w.outA + extraA);
+      const yB = softClip(w.outB + extraB);
+      w.bufFwd[w.pos] = yA;
+      w.bufBack[w.pos] = yB;
+      w.exciteA = 0;
+      w.exciteB = 0;
+      w.pos = w.pos + 1 === MAX_DELAY ? 0 : w.pos + 1;
+
+      // One pickup, at end A. The two terminations are L apart, so for mode n
+      // they differ in phase by n*pi: summing both ends cancels every odd
+      // harmonic and doubles every even one, which sounds an octave high and
+      // hollow. Pan the single pickup instead of mixing in the far end.
+      const p = yA + w.inA;
+      const a = p < 0 ? -p : p;
+      w.env += (a > w.env ? 0.01 : 0.0002) * (a - w.env);
+      if (!Number.isFinite(w.env) || w.env < QUIET_FLOOR) {
+        w.quiet = true;
+        w.bufFwd.fill(0);
+        w.bufBack.fill(0);
+        w.inA = 0;
+        w.inB = 0;
+        w.outA = 0;
+        w.outB = 0;
+        continue;
+      }
+      const gL = Math.sqrt(0.5 * (1 - w.pan));
+      const gR = Math.sqrt(0.5 * (1 + w.pan));
+      sumL += p * gL;
+      sumR += p * gR;
+    }
+
+    // Rewrite-commit "snap": a short bandlimited puff, not a DC thump.
+    if (this.snap !== 0 || this.snapLp !== 0) {
+      const noise = (Math.random() * 2 - 1) * this.snap;
+      this.snapLp = flush(this.snapLp + 0.35 * (noise - this.snapLp));
+      sumL += this.snapLp;
+      sumR += this.snapLp;
+      this.snap = flush(this.snap * 0.9992);
+    }
+
+    let l = sumL - this.dcX + 0.9995 * this.dcY;
+    this.dcX = sumL;
+    this.dcY = flush(l);
+    l = this.dcY;
+    let r = sumR - this.dcX2 + 0.9995 * this.dcY2;
+    this.dcX2 = sumR;
+    this.dcY2 = flush(r);
+    r = this.dcY2;
+
+    l *= 0.5;
+    r *= 0.5;
+
+    // Compressor on a smoothed envelope: 5 ms attack, 300 ms release. The old
+    // stage tracked |sample| with a 0.4 ms time constant, which is shorter than
+    // one period of any note in range, so it modulated gain at twice the signal
+    // frequency and expanded transients instead of taming them.
+    const peak = Math.max(l < 0 ? -l : l, r < 0 ? -r : r);
+    this.env += (peak > this.env ? 0.00417 : 0.00007) * (peak - this.env);
+    this.env = flush(this.env);
+    const thresh = 0.45;
+    const g = this.env > thresh ? Math.pow(this.env / thresh, -0.65) : 1;
+    const k = g * this.master;
+    this.outL = flush(Math.tanh(l * k));
+    this.outR = flush(Math.tanh(r * k));
+    return (this.outL + this.outR) * 0.5;
+  }
+
+  /**
+   * Downsample each live delay line onto WAVE_BINS along A→B.
+   * Forward is the wave leaving A; backward is the wave leaving B.
+   * Writes into a reused buffer so the audio thread does not allocate.
+   *
+   * Layout: packed[0] = nWires, packed[1] = bins;
+   * then nWires records of (2 + bins*2): id, env, fwd[bins], back[bins].
+   */
+  fillWaveSnapshot(): Float32Array {
+    let n = 0;
+    let o = 2;
+    for (const w of this.wires) {
+      if (!w.active || w.quiet) continue;
+      const L = Math.max(1, w.length);
+      const span = Math.max(1, L - 1);
+      this.waveSnap[o] = w.wireId;
+      this.waveSnap[o + 1] = w.env;
+      const fwdBase = o + 2;
+      const backBase = fwdBase + WAVE_BINS;
+      for (let i = 0; i < WAVE_BINS; i++) {
+        const t = i / (WAVE_BINS - 1);
+        // Delay 1 is the newest sample at the write end; delay L is the far end.
+        this.waveSnap[fwdBase + i] = this.read(w.bufFwd, w.pos, 1 + t * span);
+        this.waveSnap[backBase + i] = this.read(w.bufBack, w.pos, 1 + (1 - t) * span);
+      }
+      o += WAVE_STRIDE;
+      n++;
+    }
+    this.waveSnap[0] = n;
+    this.waveSnap[1] = WAVE_BINS;
+    return this.waveSnap;
+  }
+
+  /** Traveling-wave energy in the live delay window of one wire. */
+  wireEnergy(wireId: number): number {
+    const idx = this.wireById.get(wireId);
+    if (idx === undefined) return 0;
+    const w = this.wires[idx];
+    let e = 0;
+    const steps = Math.max(1, w.length | 0);
+    for (let d = 0; d < steps; d++) {
+      e += Math.abs(this.read(w.bufFwd, w.pos, d));
+      e += Math.abs(this.read(w.bufBack, w.pos, d));
+    }
+    return e;
+  }
+
+  energy(): number {
+    let e = 0;
+    for (const w of this.wires) {
+      if (w.active) e += this.wireEnergy(w.wireId);
+    }
+    return e;
+  }
+
+  activeWireCount(): number {
+    let n = 0;
+    for (const w of this.wires) if (w.active) n++;
+    return n;
+  }
+}

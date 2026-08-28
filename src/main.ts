@@ -5,6 +5,8 @@ import { loadPreset, type PresetName } from './presets.ts';
 import { render } from './render.ts';
 import { Sim } from './sim.ts';
 import type { AgentKind } from './agents.ts';
+import { audio } from './audio/engine.ts';
+import { getWaveSpeed, setWaveSpeed } from './audio/presets.ts';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('missing #app');
@@ -20,6 +22,13 @@ app.innerHTML = `
       <button type="button" id="reset">Reset</button>
     </div>
     <label class="check"><input type="checkbox" id="overlay" /> Field overlay</label>
+    <label class="check"><input type="checkbox" id="sound" checked /> Sound</label>
+    <p class="hint sound-hint" id="sound-hint">Click anywhere to enable sound.</p>
+    <label class="slider">
+      <span>Wave speed</span>
+      <input type="range" id="wave-speed" min="0.35" max="2.8" step="0.05" value="1" />
+      <span class="val" id="wave-speed-val">1</span>
+    </label>
     <div class="spawn">
       <span>Spawn</span>
       <button type="button" data-kind="era" class="on">Era</button>
@@ -56,6 +65,20 @@ let snapCamera = true;
 const pauseBtn = document.querySelector<HTMLButtonElement>('#pause')!;
 const statsEl = document.querySelector<HTMLParagraphElement>('#stats')!;
 const sliderRoot = document.querySelector<HTMLDivElement>('#sliders')!;
+const soundHint = document.querySelector<HTMLParagraphElement>('#sound-hint')!;
+const soundCheck = document.querySelector<HTMLInputElement>('#sound')!;
+const waveSpeedInput = document.querySelector<HTMLInputElement>('#wave-speed')!;
+const waveSpeedVal = document.querySelector<HTMLSpanElement>('#wave-speed-val')!;
+let audioReady = false;
+
+waveSpeedInput.value = String(getWaveSpeed());
+waveSpeedVal.textContent = format(getWaveSpeed());
+waveSpeedInput.addEventListener('input', () => {
+  const n = Number(waveSpeedInput.value);
+  setWaveSpeed(n);
+  waveSpeedVal.textContent = format(n);
+  audio.invalidateTopology();
+});
 
 for (const spec of SLIDERS) {
   const row = document.createElement('label');
@@ -143,6 +166,27 @@ document.querySelector('#reset')!.addEventListener('click', () => applyPreset(cu
 document.querySelector('#overlay')!.addEventListener('change', (ev) => {
   view.overlay = (ev.target as HTMLInputElement).checked;
 });
+soundCheck.addEventListener('change', () => {
+  audio.setMuted(!soundCheck.checked);
+});
+
+async function bootAudio(): Promise<void> {
+  if (audioReady) return;
+  const ok = await audio.boot();
+  audioReady = ok;
+  soundHint.hidden = ok;
+  soundHint.textContent = ok
+    ? ''
+    : 'Audio failed to start — check the browser console.';
+  if (ok) audio.setMuted(!soundCheck.checked);
+}
+
+function armAudio(): void {
+  void bootAudio();
+}
+
+document.querySelector('#app')!.addEventListener('pointerdown', armAudio, { once: true });
+document.querySelector('#app')!.addEventListener('keydown', armAudio, { once: true });
 
 for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-kind]')) {
   btn.addEventListener('click', () => setSpawn(btn.dataset.kind as AgentKind));
@@ -152,6 +196,7 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-preset]'))
 }
 
 canvas.addEventListener('click', (ev) => {
+  armAudio();
   const rect = canvas.getBoundingClientRect();
   const world = camera.worldFromScreen(ev.clientX - rect.left, ev.clientY - rect.top);
   sim.spawn(spawnKind, world.x, world.y, Math.random() * Math.PI * 2, params);
@@ -181,7 +226,7 @@ window.addEventListener('keydown', (ev) => {
 new ResizeObserver(() => sizeCanvas()).observe(canvas);
 
 function paint(): void {
-  render(ctx, sim, camera, view);
+  render(ctx, sim, camera, view, audio.waves);
   statsEl.textContent = `${sim.agents.size} agents · ${sim.graph.wires.size} wires · ${sim.rewrites.length} rewrites`;
 }
 
@@ -189,9 +234,14 @@ let last = performance.now();
 function frame(now: number): void {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
-  if (!paused) sim.step(dt, params);
-  syncCamera(dt);
-  paint();
+  try {
+    if (!paused) sim.step(dt, params);
+    audio.frame(sim.graph, sim.agents, dt, camera);
+    syncCamera(dt);
+    paint();
+  } catch (err) {
+    console.error(err);
+  }
   requestAnimationFrame(frame);
 }
 
