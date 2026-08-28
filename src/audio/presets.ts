@@ -239,6 +239,50 @@ export function stubDelaySamples(distPx: number): number {
   return Math.max(4, Math.min(MAX_STUB_DELAY - 1, raw));
 }
 
+/**
+ * Distance cues. `d` is 3D distance from the listener (0 on top of them).
+ *
+ * Two different motions share this number, and they are not the same physically:
+ * a source sliding across the pond, vs the camera dollying up and out. Direct
+ * sound and air absorption follow true distance either way. The send does not:
+ * the reverberant field is roughly uniform *in the plane*, but it dies as the
+ * listener leaves the room — which is what zoom does.
+ */
+
+/** Direct sound falls off with distance, like any radiating source. */
+export function distanceDry(d: number): number {
+  return 1 / (1 + 1.15 * Math.max(0, d));
+}
+
+/**
+ * Send vs planar distance. A source twice as far away still excites the room
+ * just as hard; only the direct path weakens. So this stays almost flat, and
+ * in-plane D/R falls out of the physics instead of being dialled in by hand.
+ */
+export function distanceWet(r: number): number {
+  return 0.85 / (1 + 0.12 * Math.max(0, r));
+}
+
+/**
+ * How much of the room the listener still sits in. Zooming out is leaving,
+ * not rearranging sources, so the hall has to fall or overall loudness will
+ * not.
+ */
+export function distanceRoom(h: number): number {
+  return 1 / (1 + 0.9 * Math.max(0, h));
+}
+
+/**
+ * Air absorbs high frequencies over distance. This is the other half of why a
+ * far sound is recognisably far, and why a bright broadband source (a scrape)
+ * reads as being right at your ear no matter how quiet it is.
+ * Returns a one-pole coefficient: 1 is unfiltered, toward 0 is progressively
+ * darker.
+ */
+export function distanceDamp(d: number): number {
+  return Math.max(0.06, 1 / (1 + 1.9 * Math.max(0, d) * Math.max(0, d)));
+}
+
 export function rewriteBeginGain(rule: string): number {
   if (rule === 'commute') return 0.72;
   if (rule === 'erase') return 0.64;

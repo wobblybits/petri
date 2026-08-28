@@ -332,6 +332,17 @@ describe('WaveguideNet', () => {
     expect(net.energy()).toBeLessThan(e0 * 1.5);
   });
 
+  it('a tune message changes delay without rebuilding the net', () => {
+    const net = new WaveguideNet();
+    const topo = sampleTopo(1, 1, 2, 80);
+    net.handle({ type: 'latch', topo, wireId: 1, gain: 0.8 });
+    collect(net, 400);
+    const e0 = net.energy();
+    net.handle({ type: 'tune', wires: [{ id: 1, length: 120, damp: 0.4, loss: 0.998 }] });
+    expect(net.energy()).toBeGreaterThan(e0 * 0.5);
+    expect(peak(collect(net, 200))).toBeGreaterThan(0.001);
+  });
+
   it('rewrite commit still clicks after the wire is gone', () => {
     const net = new WaveguideNet();
     net.handle({ type: 'latch', topo: sampleTopo(1, 1, 2, 80), wireId: 1, gain: 0.5 });
@@ -805,5 +816,63 @@ describe('open stems', () => {
     const x = collect(net, 512);
     expect(x.every(Number.isFinite)).toBe(true);
     expect(peak(x)).toBeGreaterThan(0);
+  });
+});
+
+describe('listener distance mix', () => {
+  function knock(dist: number, height = 0): { dry: number; wet: number } {
+    const net = new WaveguideNet();
+    const a = plate(1, [180, 380, 620]);
+    a.dist = dist;
+    net.handle({ type: 'topology', topo: { wires: [], agents: [a], height } });
+    net.handle({ type: 'strike', agentId: 1, peak: 1.5, dur: 40, sharp: 0.5 });
+    let dry = 0;
+    let wet = 0;
+    for (let i = 0; i < 512; i++) {
+      net.tick();
+      dry = Math.max(dry, Math.abs(net.outDryL) + Math.abs(net.outDryR));
+      wet = Math.max(wet, Math.abs(net.outWetL) + Math.abs(net.outWetR));
+    }
+    return { dry, wet };
+  }
+
+  it('a far body is quieter on the dry bus, and wetter relative to dry', () => {
+    const near = knock(0);
+    const far = knock(2);
+    expect(near.dry).toBeGreaterThan(0.01);
+    expect(far.dry).toBeLessThan(near.dry * 0.7);
+    expect(far.wet / Math.max(1e-9, far.dry)).toBeGreaterThan(near.wet / Math.max(1e-9, near.dry));
+  });
+
+  it('pulling the listener up quiets dry and wet together', () => {
+    const low = knock(0.2, 0.2);
+    const high = knock(5, 5);
+    expect(high.dry).toBeLessThan(low.dry * 0.55);
+    expect(high.wet).toBeLessThan(low.wet * 0.55);
+    expect(high.dry + high.wet).toBeLessThan((low.dry + low.wet) * 0.5);
+  });
+
+  it('a listen message changes distance without rebuilding the net', () => {
+    const near = knock(0.2, 0.2);
+    const net = new WaveguideNet();
+    const a = plate(1, [180, 380, 620]);
+    a.dist = 0.2;
+    net.handle({ type: 'topology', topo: { wires: [], agents: [a], height: 0.2 } });
+    net.handle({
+      type: 'listen',
+      height: 5,
+      wires: [],
+      agents: [{ id: 1, pan: 0, dist: 5 }],
+    });
+    net.handle({ type: 'strike', agentId: 1, peak: 1.5, dur: 40, sharp: 0.5 });
+    let dry = 0;
+    let wet = 0;
+    for (let i = 0; i < 512; i++) {
+      net.tick();
+      dry = Math.max(dry, Math.abs(net.outDryL) + Math.abs(net.outDryR));
+      wet = Math.max(wet, Math.abs(net.outWetL) + Math.abs(net.outWetR));
+    }
+    expect(dry).toBeLessThan(near.dry * 0.55);
+    expect(wet).toBeLessThan(near.wet * 0.55);
   });
 });

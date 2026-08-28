@@ -40,6 +40,9 @@ export class AudioEngine {
   private lastAgent = new Map<number, number>();
   private lastWire = new Map<number, number>();
   private topoKey = '';
+  private poseKey = '';
+  private tuneKey = '';
+  private contactKey = '';
   onPost: ((msg: WorkletInMessage) => void) | null = null;
   /** Latest traveling-wave snapshot from the worklet. Null until the first one. */
   private wavePacked: Float32Array | null = null;
@@ -122,8 +125,8 @@ export class AudioEngine {
       await ctx.audioWorklet.addModule(workletUrl);
       const node = new AudioWorkletNode(ctx, 'net-processor', {
         numberOfInputs: 0,
-        numberOfOutputs: 1,
-        outputChannelCount: [2],
+        numberOfOutputs: 2,
+        outputChannelCount: [2, 2],
       });
       node.onprocessorerror = (ev) => {
         console.error('audio worklet error', ev);
@@ -138,23 +141,16 @@ export class AudioEngine {
         }
       };
 
-      // Tone shaping, then a dry/wet split into a convolution tail. The dry
-      // waveguide stays short; the reverb carries the sustain, and a reverb
-      // tail is guaranteed to decay to silence in a way a feedback loop is not.
+      // Two buses from the worklet: dry (falls with distance) and a wet send
+      // (almost flat). The hall is roughly uniform, so D/R is the distance cue.
       const hp = ctx.createBiquadFilter();
       hp.type = 'highpass';
       hp.frequency.value = 110;
-      const lp = ctx.createBiquadFilter();
-      lp.type = 'lowpass';
-      lp.frequency.value = 6500;
-      lp.Q.value = 0.5;
 
       const dry = ctx.createGain();
-      dry.gain.value = 0.68;
-      const send = ctx.createGain();
-      send.gain.value = 0.55;
+      dry.gain.value = 0.85;
       const wet = ctx.createGain();
-      wet.gain.value = 0.75;
+      wet.gain.value = 0.7;
 
       const verb = ctx.createConvolver();
       verb.normalize = true;
@@ -163,13 +159,11 @@ export class AudioEngine {
       const master = ctx.createGain();
       master.gain.value = this.muted ? 0 : 1;
 
-      node.connect(hp);
-      hp.connect(lp);
-      lp.connect(dry);
-      lp.connect(send);
-      send.connect(verb);
-      verb.connect(wet);
+      node.connect(hp, 0);
+      hp.connect(dry);
       dry.connect(master);
+      node.connect(verb, 1);
+      verb.connect(wet);
       wet.connect(master);
       master.connect(ctx.destination);
 
@@ -228,24 +222,41 @@ export class AudioEngine {
   }
 
   /**
-   * Everything the worklet would actually act on: which wires exist, delay
-   * length to a sample, pan to a tenth, and each agent's open-port count.
-   * Rope length drifts every frame but the delay only posts when it crosses
-   * a sample, so this is not 60 topology messages a second.
+   * Graph shape: who is wired to whom, and which stems are open. Delay and
+   * damping are not here — a stretching rope must not rebuild the net.
    */
   private static topologyKey(topo: NetTopology): string {
     const parts: string[] = [];
     for (const w of topo.wires) {
-      parts.push(
-        `${w.id}:${w.agentA}>${w.agentB}:${Math.round(w.length)}:${Math.round((w.pan ?? 0) * 10)}:${Math.round((w.damp ?? 0) * 20)}`,
-      );
+      parts.push(`${w.id}:${w.agentA}>${w.agentB}`);
     }
     for (const a of topo.agents) {
       let s = `a${a.id}:${a.openPorts}`;
       if (a.stubs) {
-        for (const st of a.stubs) s += `:${st.slot}:${Math.round(st.length)}`;
+        for (const st of a.stubs) s += `:${st.slot}`;
       }
       parts.push(s);
+    }
+    return parts.join('|');
+  }
+
+  /** Rope delay and damping, quantized to a sample / a twentieth. */
+  private static tuneKey(topo: NetTopology): string {
+    const parts: string[] = [];
+    for (const w of topo.wires) {
+      parts.push(`${w.id}:${Math.round(w.length)}:${Math.round((w.damp ?? 0) * 20)}`);
+    }
+    return parts.join('|');
+  }
+
+  /** Listener pose: height, pan, distance. Cheap to send, changes as you look. */
+  private static poseKey(topo: NetTopology): string {
+    const parts: string[] = [`h${Math.round((topo.height ?? 0) * 20)}`];
+    for (const w of topo.wires) {
+      parts.push(`w${w.id}:${Math.round((w.pan ?? 0) * 10)}:${Math.round((w.dist ?? 0) * 20)}`);
+    }
+    for (const a of topo.agents) {
+      parts.push(`a${a.id}:${Math.round((a.pan ?? 0) * 10)}:${Math.round((a.dist ?? 0) * 20)}`);
     }
     return parts.join('|');
   }
@@ -273,16 +284,48 @@ export class AudioEngine {
 
     const topo = buildTopology(graph, agents, view);
     const key = AudioEngine.topologyKey(topo);
+    const pose = AudioEngine.poseKey(topo);
+    const tune = AudioEngine.tuneKey(topo);
     if (key !== this.topoKey) {
       this.topoKey = key;
+      this.poseKey = pose;
+      this.tuneKey = tune;
       this.post({ type: 'topology', topo });
+    } else {
+      if (tune !== this.tuneKey) {
+        this.tuneKey = tune;
+        this.post({
+          type: 'tune',
+          wires: topo.wires.map((w) => ({
+            id: w.id,
+            length: w.length,
+            damp: w.damp,
+            loss: w.loss,
+            bend: w.bend,
+          })),
+        });
+      }
+      if (pose !== this.poseKey) {
+        this.poseKey = pose;
+        this.post({
+          type: 'listen',
+          height: topo.height ?? 0,
+          wires: topo.wires.map((w) => ({ id: w.id, pan: w.pan ?? 0, dist: w.dist ?? 0 })),
+          agents: topo.agents.map((a) => ({ id: a.id, pan: a.pan ?? 0, dist: a.dist ?? 0 })),
+        });
+      }
     }
     this.drainEvents(topo);
 
     // Contact is continuous, so it bypasses the event budget: it is one message
     // describing every touching pair, and an empty list is how they separate.
     if (this.contacts && (this.contacts.size > 0 || this.contactedLast)) {
-      this.post(planContactMessage(this.contacts));
+      const msg = planContactMessage(this.contacts);
+      const cKey = contactKeyOf(msg.items);
+      if (cKey !== this.contactKey) {
+        this.contactKey = cKey;
+        this.post(msg);
+      }
       this.contactedLast = this.contacts.size > 0;
     }
 
@@ -303,6 +346,9 @@ export class AudioEngine {
 
   invalidateTopology(): void {
     this.topoKey = '';
+    this.poseKey = '';
+    this.tuneKey = '';
+    this.contactKey = '';
     this.airKey = '';
     this.airedLast = false;
     this.events.length = 0;
@@ -341,6 +387,15 @@ function airKeyOf(items: { agentA: number; agentB: number; length: number; gain:
   const parts: string[] = [];
   for (const it of items) {
     parts.push(`${it.agentA}:${it.agentB}:${it.length | 0}:${(it.gain * 200) | 0}`);
+  }
+  return parts.join('|');
+}
+
+function contactKeyOf(items: { agentA: number; agentB: number; load: number; slide: number }[]): string {
+  if (items.length === 0) return '';
+  const parts: string[] = [];
+  for (const it of items) {
+    parts.push(`${it.agentA}:${it.agentB}:${(it.load * 20) | 0}:${(it.slide * 40) | 0}`);
   }
   return parts.join('|');
 }

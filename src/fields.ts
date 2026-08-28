@@ -158,35 +158,57 @@ export class Fields {
     return idx < 0 ? 0 : this.data[idx];
   }
 
+  /**
+   * One diffusion pass. Walls hold their value and are treated as reflecting
+   * for their neighbours, so scent cannot cross a wire.
+   *
+   * Written the long way on purpose: the readable version called a closure four
+   * times per channel per cell, which on a 160x107x4 grid is half a million
+   * calls with bounds checks, and it dominated the frame at low agent counts.
+   * Neighbour offsets are resolved once per cell, and the buffers ping-pong
+   * rather than copying a quarter-megabyte each pass.
+   */
   diffuse(mix: number): void {
+    if (mix <= 0) return;
     const m = mix;
     const keep = 1 - m;
-    const { cols, rows, data, tmp, walls } = this;
-    tmp.set(data);
-    const sample = (i: number, j: number, ch: number, fallback: number): number => {
-      if (i < 0 || j < 0 || i >= cols || j >= rows) return fallback;
-      if (walls[j * cols + i]) return fallback;
-      return tmp[(j * cols + i) * CHANNELS + ch];
-    };
+    const { cols, rows, walls } = this;
+    const src = this.data;
+    const dst = this.tmp;
+    const rowStride = cols * CHANNELS;
+
     for (let j = 0; j < rows; j++) {
-      for (let i = 0; i < cols; i++) {
-        const base = (j * cols + i) * CHANNELS;
-        if (walls[j * cols + i]) {
-          for (let ch = 0; ch < CHANNELS; ch++) data[base + ch] = tmp[base + ch];
+      const hasUp = j > 0;
+      const hasDown = j < rows - 1;
+      let cell = j * cols;
+      let base = cell * CHANNELS;
+      for (let i = 0; i < cols; i++, cell++, base += CHANNELS) {
+        if (walls[cell]) {
+          dst[base] = src[base];
+          dst[base + 1] = src[base + 1];
+          dst[base + 2] = src[base + 2];
+          dst[base + 3] = src[base + 3];
           continue;
         }
+        // -1 means "reflect": fall back to this cell's own value.
+        const left = i > 0 && !walls[cell - 1] ? base - CHANNELS : -1;
+        const right = i < cols - 1 && !walls[cell + 1] ? base + CHANNELS : -1;
+        const up = hasUp && !walls[cell - cols] ? base - rowStride : -1;
+        const down = hasDown && !walls[cell + cols] ? base + rowStride : -1;
         for (let ch = 0; ch < CHANNELS; ch++) {
-          const self = tmp[base + ch];
-          const avg =
-            (sample(i, j - 1, ch, self) +
-              sample(i, j + 1, ch, self) +
-              sample(i - 1, j, ch, self) +
-              sample(i + 1, j, ch, self)) *
-            0.25;
-          data[base + ch] = keep * self + m * avg;
+          const k = base + ch;
+          const self = src[k];
+          const a = left >= 0 ? src[left + ch] : self;
+          const b = right >= 0 ? src[right + ch] : self;
+          const c = up >= 0 ? src[up + ch] : self;
+          const e = down >= 0 ? src[down + ch] : self;
+          dst[k] = keep * self + m * (a + b + c + e) * 0.25;
         }
       }
     }
+
+    this.data = dst;
+    this.tmp = src;
   }
 
   decay(rate: number): void {

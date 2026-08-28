@@ -18,6 +18,49 @@ import { kindCode } from './types.ts';
 /** Half-width of the stereo field in world pixels, when no camera is given. */
 const PAN_SPREAD = 260;
 
+/** World pixels that read as one unit of distance from the listener. */
+const DIST_REF_PX = 320;
+/**
+ * Fallback height when there is no camera, in dist units. Keeps a body at the
+ * origin from sitting on the listener.
+ */
+const LISTENER_HEIGHT = 0.45;
+
+/**
+ * How far the listener floats above the pond. An ortho camera has no real
+ * frustum, so this is the dolly: half the world-space view, in dist units.
+ * Zooming in lowers you onto the surface; zooming out is flying up, which is
+ * the gesture that has to change loudness.
+ */
+function listenerHeight(view: PanView | null | undefined): number {
+  if (view && view.zoom > 0 && view.viewW > 0 && view.viewH > 0) {
+    const half = 0.5 * Math.min(view.viewW, view.viewH) / view.zoom;
+    return Math.max(0.12, Math.min(8, half / DIST_REF_PX));
+  }
+  return LISTENER_HEIGHT;
+}
+
+/**
+ * Distance from the listener: 0 is on top of them, 1 is a comfortable way off.
+ *
+ * Planar offset is world pixels, not screen pixels — a body at the edge of a
+ * zoomed-out view really is further away. Height is the camera dolly, so the
+ * cluster you are looking at also recedes when you scroll out.
+ */
+function listenerDistance(
+  wx: number,
+  wy: number,
+  view: PanView | null | undefined,
+  centreX: number,
+  centreY: number,
+  height: number,
+): number {
+  const ox = view ? view.x : centreX;
+  const oy = view ? view.y : centreY;
+  const r = Math.hypot(wx - ox, wy - oy) / DIST_REF_PX;
+  return Math.hypot(r, height);
+}
+
 function stereoPan(wx: number, view: PanView | null | undefined, centreX: number): number {
   if (view && view.viewW > 0 && view.zoom > 0) {
     const sx = (wx - view.x) * view.zoom;
@@ -30,8 +73,10 @@ function wireTopo(
   wire: Wire,
   agents: Map<number, Agent>,
   centreX: number,
+  centreY: number,
   brightness: number,
   view: PanView | null | undefined,
+  height: number,
 ): WireTopo | null {
   const A = agents.get(wire.a.id);
   const B = agents.get(wire.b.id);
@@ -61,6 +106,7 @@ function wireTopo(
     damp,
     disp: voice.disp,
     pan: stereoPan((A.x + B.x) * 0.5, view, centreX),
+    dist: listenerDistance((A.x + B.x) * 0.5, (A.y + B.y) * 0.5, view, centreX, centreY, height),
     exAt: voice.at,
     exWidth: voice.width,
   };
@@ -86,7 +132,9 @@ function agentTopo(
   agent: Agent,
   graph: Graph,
   centreX: number,
+  centreY: number,
   view: PanView | null | undefined,
+  height: number,
 ): AgentTopo {
   const slots = slotsFor(agent.kind);
   const open = slots.filter((slot) => graph.isFree({ id: agent.id, slot }));
@@ -101,6 +149,7 @@ function agentTopo(
     stubs,
     impedance: z,
     pan: stereoPan(agent.x, view, centreX),
+    dist: listenerDistance(agent.x, agent.y, view, centreX, centreY, height),
     modeHz: tone.freq,
     modeT60: tone.decay,
     modeGain: tone.gain,
@@ -114,27 +163,33 @@ export function buildTopology(
   view?: PanView | null,
 ): NetTopology {
   let centreX = 0;
+  let centreY = 0;
   let n = 0;
   for (const agent of agents.values()) {
     centreX += agent.x;
+    centreY += agent.y;
     n++;
   }
-  if (n > 0) centreX /= n;
+  if (n > 0) {
+    centreX /= n;
+    centreY /= n;
+  }
 
   // Thin the top end as the net gets busy: 30 wires ringing at full brightness
   // is a wash, and pulling the highs is what keeps a dense net ambient.
   const brightness = 1 / (1 + graph.wires.size * 0.012);
+  const height = listenerHeight(view);
 
   const wires: WireTopo[] = [];
   for (const wire of graph.wires.values()) {
-    const t = wireTopo(wire, agents, centreX, brightness, view);
+    const t = wireTopo(wire, agents, centreX, centreY, brightness, view, height);
     if (t) wires.push(t);
   }
   const agentList: AgentTopo[] = [];
   for (const agent of agents.values()) {
-    agentList.push(agentTopo(agent, graph, centreX, view));
+    agentList.push(agentTopo(agent, graph, centreX, centreY, view, height));
   }
-  return { wires, agents: agentList };
+  return { wires, agents: agentList, height };
 }
 
 export function kindBrightness(kind: AgentKind): number {

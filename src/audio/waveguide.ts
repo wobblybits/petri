@@ -34,8 +34,6 @@ const QUIET_FLOOR = 3e-6;
 const BODY_FROM_STRING = 0.1;
 /** Active wires quieter than this can be stolen for a new latch. */
 const STEAL_ENV = 0.002;
-/** Fraction of traveling-wave energy dumped into the two agents on retire. */
-const RETIRE_DUMP = 0.012;
 /** Friction / Hertzian force into the junction — a bow, not a scrape-pluck. */
 const RUB_TO_JUNCTION = 0.22;
 /** How hard a contact force drives the plate modes. They are quiet at contact-scale gain. */
@@ -87,6 +85,13 @@ export interface WireState {
   disp: number;
   /** -1 hard left .. +1 hard right. */
   pan: number;
+  /** Listener distance, 0 = on top of you. */
+  dist: number;
+  dry: number;
+  wet: number;
+  /** One-pole air absorption on the pickup. */
+  airDamp: number;
+  airLp: number;
   exAt: number;
   exWidth: number;
   zA: number;
@@ -128,6 +133,11 @@ export interface AgentState {
   loadY: number;
   excite: number;
   pan: number;
+  dist: number;
+  dry: number;
+  wet: number;
+  airDamp: number;
+  airLp: number;
   coupling: number;
   wireIdx: Int16Array;
   wireEnd: Int8Array;
@@ -176,7 +186,17 @@ export type WorkletMessage =
   | { type: 'air'; items: { agentA: number; agentB: number; length: number; gain: number; damp: number }[] }
   | { type: 'latch'; topo: NetTopology; wireId: number; gain: number }
   | { type: 'rewrite'; phase: 0 | 1; wireId: number; agentA: number; agentB: number; leftovers: number[]; gain: number }
-  | { type: 'gain'; master: number };
+  | { type: 'gain'; master: number }
+  | {
+      type: 'listen';
+      height?: number;
+      wires: { id: number; pan?: number; dist?: number }[];
+      agents: { id: number; pan?: number; dist?: number }[];
+    }
+  | {
+      type: 'tune';
+      wires: { id: number; length: number; damp?: number; loss?: number; bend?: number }[];
+    };
 
 function makeWire(): WireState {
   return {
@@ -190,6 +210,11 @@ function makeWire(): WireState {
     damp: 0.5,
     disp: 0,
     pan: 0,
+    dist: 0,
+    dry: 1,
+    wet: 0.85,
+    airDamp: 1,
+    airLp: 0,
     exAt: 0.16,
     exWidth: 1,
     zA: 1,
@@ -231,6 +256,11 @@ function makeAgent(): AgentState {
     loadY: 0,
     excite: 0,
     pan: 0,
+    dist: 0,
+    dry: 1,
+    wet: 0.85,
+    airDamp: 1,
+    airLp: 0,
     coupling: 1,
     wireIdx: new Int16Array(MAX_PORTS),
     wireEnd: new Int8Array(MAX_PORTS),
@@ -406,6 +436,34 @@ function sameAirPair(s: AirState, a: number, b: number): boolean {
   return (s.idA === a && s.idB === b) || (s.idA === b && s.idB === a);
 }
 
+/** Keep in step with presets.ts distanceDry / distanceWet / distanceRoom / distanceDamp. */
+export function distDry(d: number): number {
+  return 1 / (1 + 1.15 * Math.max(0, d));
+}
+export function distWet(r: number): number {
+  return 0.85 / (1 + 0.12 * Math.max(0, r));
+}
+export function distRoom(h: number): number {
+  return 1 / (1 + 0.9 * Math.max(0, h));
+}
+export function distDamp(d: number): number {
+  return Math.max(0.06, 1 / (1 + 1.9 * Math.max(0, d) * Math.max(0, d)));
+}
+
+function listen(
+  s: { dist: number; dry: number; wet: number; airDamp: number },
+  d: number | undefined,
+  height: number,
+): void {
+  const h = Number.isFinite(height) ? Math.max(0, height) : 0;
+  const x = d !== undefined && Number.isFinite(d) ? Math.max(0, d) : h;
+  s.dist = x;
+  s.dry = distDry(x);
+  const r = Math.sqrt(Math.max(0, x * x - h * h));
+  s.wet = distWet(r) * distRoom(h);
+  s.airDamp = distDamp(x);
+}
+
 function softClip(x: number): number {
   if (x > -1 && x < 1) return x;
   return Math.tanh(x);
@@ -439,17 +497,29 @@ export class WaveguideNet {
   airs: AirState[] = [];
   stubs: StubState[] = [];
   master = 1;
-  bodyL = 0;
-  bodyR = 0;
+  dryL = 0;
+  dryR = 0;
+  wetL = 0;
+  wetR = 0;
   snap = 0;
   snapLp = 0;
   outL = 0;
   outR = 0;
+  outDryL = 0;
+  outDryR = 0;
+  outWetL = 0;
+  outWetR = 0;
   env = 0;
-  dcX = 0;
-  dcY = 0;
-  dcX2 = 0;
-  dcY2 = 0;
+  dcDryX = 0;
+  dcDryY = 0;
+  dcDryX2 = 0;
+  dcDryY2 = 0;
+  dcWetX = 0;
+  dcWetY = 0;
+  dcWetX2 = 0;
+  dcWetY2 = 0;
+  /** Listener height for this topology; wet falls as this rises. */
+  listenH = 0;
 
   /**
    * Dense indices of the objects that actually exist, so the per-sample loops
@@ -527,6 +597,14 @@ export class WaveguideNet {
       }
       if (msg.type === 'air') {
         this.setAir(msg.items);
+        return;
+      }
+      if (msg.type === 'listen') {
+        this.applyListen(msg);
+        return;
+      }
+      if (msg.type === 'tune') {
+        this.applyTune(msg.wires);
         return;
       }
       if (msg.type === 'rewrite') {
@@ -1051,6 +1129,21 @@ export class WaveguideNet {
 
   /**
    * Stribeck friction. Sign convention: F is the force on A, so F_B = −F.
+   *
+   * On why rubbing sounds like scraping rather than bowing, which is deliberate
+   * and has been checked: a body offers up to six resonators at once, and none
+   * of them agree. Con carries three plate modes at 145/248/380 Hz — ratios
+   * 1 : 1.71 : 2.62, inharmonic by construction — plus one quarter-wave stub
+   * per open port, at 563/669/669 Hz, which sound odd harmonics only. Friction
+   * excites all of them together, and several mutually inharmonic resonators
+   * driven at once is what a struck metal plate is. A bowed instrument has one
+   * resonator and one harmonic series.
+   *
+   * Give the pair a wire and the friction has something to lock to; with a
+   * single dominant resonator it entrains to the round trip and produces real
+   * Helmholtz motion (see the entrainment test in audio.test.ts). So an
+   * untethered pair scrapes and a wired one sings, which is both the honest
+   * physics and a reason to want the net to wire itself up.
    * vSlip is A's material velocity minus B's, rigid slide included.
    * F_A = −μN tanh(vSlip) drags A toward stick (vSlip → 0).
    */
@@ -1179,11 +1272,12 @@ export class WaveguideNet {
     w.wireId = -1;
   }
 
-  /** Fold leftover traveling-wave energy into the two agents, then free the slot. */
+  /** Fold leftover ringing into the two agents, then free the slot. */
   private dumpAndRetire(w: WireState): void {
-    const e = w.wireId >= 0 ? this.wireEnergy(w.wireId) : 0;
-    if (e > 0) {
-      const g = Math.min(0.85, e * RETIRE_DUMP);
+    // Do not scan the delay line here: wireEnergy walks every sample, and a
+    // rewrite that retires several wires would blow the audio callback.
+    if (w.env > 0) {
+      const g = Math.min(0.85, w.env * 0.25);
       if (w.agentA >= 0) {
         this.savedExcite.set(w.agentA, (this.savedExcite.get(w.agentA) ?? 0) + g);
       }
@@ -1245,6 +1339,8 @@ export class WaveguideNet {
       a.id = -1;
     }
     this.agentById.clear();
+    this.listenH =
+      topo.height !== undefined && Number.isFinite(topo.height) ? Math.max(0, topo.height) : 0;
 
     let placed = 0;
     for (const spec of topo.wires) {
@@ -1267,6 +1363,7 @@ export class WaveguideNet {
       w.damp = spec.damp !== undefined && Number.isFinite(spec.damp) ? spec.damp : Math.max(0.05, 1 - spec.bend * 2.4);
       w.disp = spec.disp !== undefined && Number.isFinite(spec.disp) ? spec.disp : 0;
       w.pan = spec.pan !== undefined && Number.isFinite(spec.pan) ? spec.pan : 0;
+      listen(w, spec.dist, this.listenH);
       w.exAt = spec.exAt !== undefined ? spec.exAt : 0.16;
       w.exWidth = spec.exWidth !== undefined ? spec.exWidth : 1;
       w.zA = spec.zA && spec.zA > 0 ? spec.zA : 1;
@@ -1295,6 +1392,7 @@ export class WaveguideNet {
         w.inB = 0;
         w.outA = 0;
         w.outB = 0;
+        w.airLp = 0;
         w.bufFwd.fill(0);
         w.bufBack.fill(0);
         w.burstFwd.fill(0);
@@ -1334,6 +1432,8 @@ export class WaveguideNet {
       a.id = spec.id;
       a.openPorts = spec.openPorts;
       a.pan = spec.pan !== undefined ? spec.pan : 0;
+      listen(a, spec.dist, this.listenH);
+      if (!same) a.airLp = 0;
       a.coupling = spec.coupling !== undefined ? spec.coupling : 1;
       this.setBodyModes(a, spec, same);
       // Scale the resistive load by the agent's own admittance, so a heavy Con
@@ -1362,6 +1462,55 @@ export class WaveguideNet {
   }
 
   /**
+   * Pan, distance, and listener height. Camera motion used to send a full
+   * topology for this, which rebuilt every delay line on the audio thread and
+   * blew the callback budget — that is the dropout.
+   */
+  applyListen(msg: {
+    height?: number;
+    wires: { id: number; pan?: number; dist?: number }[];
+    agents: { id: number; pan?: number; dist?: number }[];
+  }): void {
+    this.listenH =
+      msg.height !== undefined && Number.isFinite(msg.height) ? Math.max(0, msg.height) : this.listenH;
+    for (let i = 0; i < msg.wires.length; i++) {
+      const spec = msg.wires[i];
+      const idx = this.wireById.get(spec.id);
+      if (idx === undefined) continue;
+      const w = this.wires[idx];
+      if (!w.active) continue;
+      if (spec.pan !== undefined && Number.isFinite(spec.pan)) w.pan = spec.pan;
+      listen(w, spec.dist, this.listenH);
+    }
+    for (let i = 0; i < msg.agents.length; i++) {
+      const spec = msg.agents[i];
+      const idx = this.agentById.get(spec.id);
+      if (idx === undefined) continue;
+      const a = this.agents[idx];
+      if (!a.active) continue;
+      if (spec.pan !== undefined && Number.isFinite(spec.pan)) a.pan = spec.pan;
+      listen(a, spec.dist, this.listenH);
+    }
+  }
+
+  /** Delay and damping only. Must not touch buffers or port lists. */
+  applyTune(
+    wires: { id: number; length: number; damp?: number; loss?: number; bend?: number }[],
+  ): void {
+    for (let i = 0; i < wires.length; i++) {
+      const spec = wires[i];
+      const idx = this.wireById.get(spec.id);
+      if (idx === undefined) continue;
+      const w = this.wires[idx];
+      if (!w.active) continue;
+      w.lengthTarget = clampDelay(spec.length);
+      if (spec.damp !== undefined && Number.isFinite(spec.damp)) w.damp = spec.damp;
+      if (spec.loss !== undefined && Number.isFinite(spec.loss)) w.loss = spec.loss;
+      if (spec.bend !== undefined && Number.isFinite(spec.bend)) w.bend = spec.bend;
+    }
+  }
+
+  /**
    * Resonator coefficients for the body's modes. `keep` preserves the ringing
    * state when an agent keeps its slot across a topology update.
    */
@@ -1386,6 +1535,27 @@ export class WaveguideNet {
       }
     }
     if (!keep) a.bodyEnv = 0;
+  }
+
+  /**
+   * Listen to one source: air-absorption lowpass, then split into a dry bus
+   * (falls with distance) and a wet send (almost flat). D/R is the distance
+   * cue; the two gains are what produce it.
+   */
+  private place(
+    x: number,
+    pan: number,
+    src: { dry: number; wet: number; airDamp: number; airLp: number },
+  ): void {
+    src.airLp += src.airDamp * (x - src.airLp);
+    const y = flush(src.airLp);
+    const p = pan > 1 ? 1 : pan < -1 ? -1 : pan;
+    const gl = Math.sqrt(0.5 * (1 - p));
+    const gr = Math.sqrt(0.5 * (1 + p));
+    this.dryL += y * gl * src.dry;
+    this.dryR += y * gr * src.dry;
+    this.wetL += y * gl * src.wet;
+    this.wetR += y * gr * src.wet;
   }
 
   /**
@@ -1447,8 +1617,10 @@ export class WaveguideNet {
 
     this.applyStubReads();
 
-    this.bodyL = 0;
-    this.bodyR = 0;
+    this.dryL = 0;
+    this.dryR = 0;
+    this.wetL = 0;
+    this.wetR = 0;
     for (let k = 0; k < this.liveAgentN; k++) {
       const agent = this.agents[this.liveAgents[k]];
       agent.strikeNow = this.strikeForce(agent);
@@ -1494,13 +1666,7 @@ export class WaveguideNet {
         air,
       );
       agent.radiate = body;
-      if (body !== 0) {
-        const pan = agent.pan > 1 ? 1 : agent.pan < -1 ? -1 : agent.pan;
-        const gl = Math.sqrt(0.5 * (1 - pan));
-        const gr = Math.sqrt(0.5 * (1 + pan));
-        this.bodyL += body * gl;
-        this.bodyR += body * gr;
-      }
+      if (body !== 0) this.place(body * 1.5, agent.pan, agent);
 
       const drive =
         agent.excite + strike * agent.coupling + force * RUB_TO_JUNCTION + air * AIR_TO_JUNCTION;
@@ -1533,8 +1699,6 @@ export class WaveguideNet {
     this.applyStubWrites();
     this.applyAirWrites();
 
-    let sumL = this.bodyL * 1.5;
-    let sumR = this.bodyR * 1.5;
     for (let k = 0; k < this.liveWireN; k++) {
       const w = this.wires[this.liveWires[k]];
       if (w.quiet) continue;
@@ -1568,46 +1732,54 @@ export class WaveguideNet {
         w.outB = 0;
         continue;
       }
-      const pan = w.pan > 1 ? 1 : w.pan < -1 ? -1 : w.pan;
-      const gL = Math.sqrt(0.5 * (1 - pan));
-      const gR = Math.sqrt(0.5 * (1 + pan));
-      sumL += p * gL;
-      sumR += p * gR;
+      this.place(p, w.pan, w);
     }
 
     // Rewrite-commit "snap": a short bandlimited puff, not a DC thump.
     if (this.snap !== 0 || this.snapLp !== 0) {
       const noise = (Math.random() * 2 - 1) * this.snap;
       this.snapLp = flush(this.snapLp + 0.35 * (noise - this.snapLp));
-      sumL += this.snapLp;
-      sumR += this.snapLp;
+      this.dryL += this.snapLp;
+      this.dryR += this.snapLp;
       this.snap = flush(this.snap * 0.9992);
     }
 
-    let l = sumL - this.dcX + 0.9995 * this.dcY;
-    this.dcX = sumL;
-    this.dcY = flush(l);
-    l = this.dcY;
-    let r = sumR - this.dcX2 + 0.9995 * this.dcY2;
-    this.dcX2 = sumR;
-    this.dcY2 = flush(r);
-    r = this.dcY2;
+    let dL = this.dryL - this.dcDryX + 0.9995 * this.dcDryY;
+    this.dcDryX = this.dryL;
+    this.dcDryY = flush(dL);
+    dL = this.dcDryY * 0.5;
+    let dR = this.dryR - this.dcDryX2 + 0.9995 * this.dcDryY2;
+    this.dcDryX2 = this.dryR;
+    this.dcDryY2 = flush(dR);
+    dR = this.dcDryY2 * 0.5;
+    let wL = this.wetL - this.dcWetX + 0.9995 * this.dcWetY;
+    this.dcWetX = this.wetL;
+    this.dcWetY = flush(wL);
+    wL = this.dcWetY * 0.5;
+    let wR = this.wetR - this.dcWetX2 + 0.9995 * this.dcWetY2;
+    this.dcWetX2 = this.wetR;
+    this.dcWetY2 = flush(wR);
+    wR = this.dcWetY2 * 0.5;
 
-    l *= 0.5;
-    r *= 0.5;
-
-    // Compressor on a smoothed envelope: 5 ms attack, 300 ms release. The old
-    // stage tracked |sample| with a 0.4 ms time constant, which is shorter than
-    // one period of any note in range, so it modulated gain at twice the signal
-    // frequency and expanded transients instead of taming them.
-    const peak = Math.max(l < 0 ? -l : l, r < 0 ? -r : r);
+    const peak = Math.max(
+      dL < 0 ? -dL : dL,
+      dR < 0 ? -dR : dR,
+      wL < 0 ? -wL : wL,
+      wR < 0 ? -wR : wR,
+    );
     this.env += (peak > this.env ? 0.00417 : 0.00007) * (peak - this.env);
     this.env = flush(this.env);
-    const thresh = 0.45;
-    const g = this.env > thresh ? Math.pow(this.env / thresh, -0.65) : 1;
+    // Ceiling only: a compressor with makeup was pulling quiet (far) mixes
+    // back up to the same loudness as near ones.
+    const ceil = 0.95;
+    const g = this.env > ceil ? ceil / this.env : 1;
     const k = g * this.master;
-    this.outL = flush(Math.tanh(l * k));
-    this.outR = flush(Math.tanh(r * k));
+    this.outDryL = flush(dL * k);
+    this.outDryR = flush(dR * k);
+    this.outWetL = flush(wL * k);
+    this.outWetR = flush(wR * k);
+    this.outL = flush(Math.tanh(this.outDryL + this.outWetL));
+    this.outR = flush(Math.tanh(this.outDryR + this.outWetR));
     return (this.outL + this.outR) * 0.5;
   }
 
@@ -1622,7 +1794,8 @@ export class WaveguideNet {
   fillWaveSnapshot(): Float32Array {
     let n = 0;
     let o = 2;
-    for (const w of this.wires) {
+    for (let k = 0; k < this.liveWireN; k++) {
+      const w = this.wires[this.liveWires[k]];
       if (!w.active || w.quiet) continue;
       const L = Math.max(1, w.length);
       const span = Math.max(1, L - 1);
@@ -1638,6 +1811,7 @@ export class WaveguideNet {
       }
       o += WAVE_STRIDE;
       n++;
+      if (n >= 8) break;
     }
     this.waveSnap[0] = n;
     this.waveSnap[1] = WAVE_BINS;
@@ -1661,9 +1835,14 @@ export class WaveguideNet {
   energy(): number {
     let e = 0;
     for (const w of this.wires) {
-      if (w.active) e += this.wireEnergy(w.wireId);
+      if (w.active && !w.quiet) e += this.wireEnergy(w.wireId);
     }
     return e;
+  }
+
+  /** Active delay lines, including ones currently gated silent. */
+  get liveCount(): number {
+    return this.liveWireN;
   }
 
   activeWireCount(): number {

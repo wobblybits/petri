@@ -51,11 +51,8 @@ export interface Params {
   swimTau: number;
   /** Self-propulsion noise, as a fraction of cruise speed. 0 = a flat setpoint. */
   swimNoise: number;
-  thrust: number;
   drag: number;
   angDrag: number;
-  maxSpeed: number;
-  wander: number;
   gravity: number;
   /** Extra pull home for an agent that has lost the scent entirely. */
   homing: number;
@@ -99,11 +96,8 @@ export function defaultParams(): Params {
     stepSpeed: 38,
     swimTau: 1.1,
     swimNoise: 0.35,
-    thrust: 95,
     drag: 0.55,
     angDrag: 2.4,
-    maxSpeed: 70,
-    wander: 0.12,
     gravity: 0,
     homing: 0.9,
     flockAlign: 5.5,

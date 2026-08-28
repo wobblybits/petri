@@ -1,5 +1,6 @@
 declare abstract class AudioWorkletProcessor {
   readonly port: MessagePort;
+  readonly currentTime: number;
   constructor(options?: AudioWorkletNodeOptions);
   abstract process(
     inputs: Float32Array[][],

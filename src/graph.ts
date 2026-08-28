@@ -370,39 +370,6 @@ export class Graph {
     return out;
   }
 
-  componentMass(agents: Map<number, Agent>): Map<number, number> {
-    const parent = new Map<number, number>();
-    const find = (x: number): number => {
-      let r = parent.get(x) ?? x;
-      while ((parent.get(r) ?? r) !== r) r = parent.get(r) ?? r;
-      let cur = x;
-      while ((parent.get(cur) ?? cur) !== r) {
-        const p = parent.get(cur) ?? cur;
-        parent.set(cur, r);
-        cur = p;
-      }
-      parent.set(x, r);
-      return r;
-    };
-    const union = (a: number, b: number) => {
-      const ra = find(a);
-      const rb = find(b);
-      if (ra !== rb) parent.set(ra, rb);
-    };
-    for (const id of agents.keys()) parent.set(id, id);
-    for (const wire of this.wires.values()) union(wire.a.id, wire.b.id);
-    const totals = new Map<number, number>();
-    for (const agent of agents.values()) {
-      const r = find(agent.id);
-      totals.set(r, (totals.get(r) ?? 0) + agent.mass);
-    }
-    const out = new Map<number, number>();
-    for (const agent of agents.values()) {
-      out.set(agent.id, totals.get(find(agent.id)) ?? agent.mass);
-    }
-    return out;
-  }
-
   /**
    * Rest length for a wire this frame: the shrink curve toward `wireMinRest`,
    * plus a slow per-wire breath so a settled net keeps moving like tissue

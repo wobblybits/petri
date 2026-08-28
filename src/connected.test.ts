@@ -18,8 +18,6 @@ function frozenLive(): Params {
 function frozenPassive(): Params {
   const params = frozenLive();
   params.stepSpeed = 0;
-  params.thrust = 0;
-  params.wander = 0;
   params.faceAttract = 0;
   params.gravity = 0;
   params.homing = 0;

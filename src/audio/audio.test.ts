@@ -27,6 +27,10 @@ import {
   MAX_AIR_DELAY,
   MAX_STUBS,
   MAX_STUB_DELAY,
+  distanceDry,
+  distanceWet,
+  distanceDamp,
+  distanceRoom,
 } from './presets.ts';
 import { planCollisionMessages, planLatchMessages, planRewriteMessages, planAirMessage } from './dispatch.ts';
 import { bodyTone } from './body.ts';
@@ -39,9 +43,13 @@ import {
   MAX_AIR_DELAY as WG_MAX_AIR_DELAY,
   MAX_STUBS as WG_MAX_STUBS,
   MAX_STUB_DELAY as WG_MAX_STUB_DELAY,
+  distDry as WG_distDry,
+  distWet as WG_distWet,
+  distDamp as WG_distDamp,
+  distRoom as WG_distRoom,
   WaveguideNet,
 } from './waveguide.ts';
-import type { LatchEvent } from './types.ts';
+import type { LatchEvent, WorkletInMessage } from './types.ts';
 import { albedo, blendVoices, sharpness, strikeSharpness, voiceFromAgent } from './voice.ts';
 
 /** Two unwired bodies that can touch each other. */
@@ -181,12 +189,24 @@ describe('audio dispatch', () => {
     const a = sim.spawn('era', 30, 30, 0, params, true)!;
     const b = sim.spawn('dup', 90, 30, Math.PI, params, true)!;
     sim.wire(a.id, 'p', b.id, 'p', params);
-    const view = { x: 60, y: 30, zoom: 1, viewW: 400 };
+    const view = { x: 60, y: 30, zoom: 1, viewW: 400, viewH: 300 };
     const wide = buildTopology(sim.graph, sim.agents, view);
     const close = buildTopology(sim.graph, sim.agents, { ...view, zoom: 4 });
-    const agentA = (topo: { agents: { id: number; pan?: number }[] }) =>
+    const agentA = (topo: { agents: { id: number; pan?: number; dist?: number }[] }) =>
       topo.agents.find((ag) => ag.id === a.id)!;
     expect(Math.abs(agentA(close).pan ?? 0)).toBeGreaterThan(Math.abs(agentA(wide).pan ?? 0));
+    expect(agentA(close).dist ?? 1).toBeLessThan(agentA(wide).dist ?? 0);
+  });
+
+  it('zooming out at the centre is a real dolly, not a tiny height nudge', () => {
+    const sim = new Sim(200, 160);
+    const params = defaultParams();
+    sim.spawn('era', 100, 80, 0, params, true);
+    const view = { x: 100, y: 80, zoom: 1, viewW: 800, viewH: 600 };
+    const close = buildTopology(sim.graph, sim.agents, { ...view, zoom: 6 });
+    const wide = buildTopology(sim.graph, sim.agents, { ...view, zoom: 0.18 });
+    expect(wide.height ?? 0).toBeGreaterThan((close.height ?? 1) * 8);
+    expect(wide.agents[0].dist ?? 0).toBeGreaterThan((close.agents[0].dist ?? 1) * 8);
   });
 
   it('rewrite begin and commit each emit a rewrite worklet message', () => {
@@ -248,7 +268,7 @@ describe('AudioEngine event flow', () => {
     expect(posted.some((m) => (m as { type: string }).type === 'latch')).toBe(true);
   });
 
-  it('posts topology when the pitch actually changes, not every frame', async () => {
+  it('posts a tune when the pitch actually changes, not a topology rebuild', async () => {
     const engine = new AudioEngine();
     engine.armWithoutAudio();
     const sim = new Sim(200, 160);
@@ -256,7 +276,7 @@ describe('AudioEngine event flow', () => {
     const a = sim.spawn('era', 30, 30, 0, params, true)!;
     const b = sim.spawn('dup', 90, 30, Math.PI, params, true)!;
     sim.wire(a.id, 'p', b.id, 'p', params);
-    const posted: { type: string; topo?: { wires: { length: number }[] } }[] = [];
+    const posted: WorkletInMessage[] = [];
     engine.onPost = (m) => posted.push(m);
 
     await engine.frame(sim.graph, sim.agents);
@@ -269,18 +289,41 @@ describe('AudioEngine event flow', () => {
     wire.lastLen = 24;
     posted.length = 0;
     await engine.frame(sim.graph, sim.agents);
-    const second = posted.filter((m) => m.type === 'topology');
-    expect(second).toHaveLength(1);
+    expect(posted.filter((m) => m.type === 'topology')).toHaveLength(0);
+    const tuned = posted.filter((m) => m.type === 'tune');
+    expect(tuned).toHaveLength(1);
     const voice = blendVoices(voiceFromAgent(a, 'p'), voiceFromAgent(b, 'p'));
-    expect(second[0].topo!.wires[0].length).toBeCloseTo(
-      delaySamplesForPath(24, 0, voice.disp),
-      5,
-    );
+    expect(tuned[0].type).toBe('tune');
+    if (tuned[0].type === 'tune') {
+      expect(tuned[0].wires[0].length).toBeCloseTo(
+        delaySamplesForPath(24, 0, voice.disp),
+        5,
+      );
+    }
 
     // Nothing changed: no redundant post, no structured clone across the thread.
     posted.length = 0;
     await engine.frame(sim.graph, sim.agents);
     expect(posted.filter((m) => m.type === 'topology')).toHaveLength(0);
+    expect(posted.filter((m) => m.type === 'tune')).toHaveLength(0);
+  });
+
+  it('posts a listen update when the camera pans, not a topology rebuild', () => {
+    const engine = new AudioEngine();
+    engine.armWithoutAudio();
+    const sim = new Sim(200, 160);
+    const params = defaultParams();
+    sim.spawn('era', 100, 80, 0, params, true);
+    const posted: { type: string }[] = [];
+    engine.onPost = (m) => posted.push(m);
+    const view = { x: 100, y: 80, zoom: 1, viewW: 400, viewH: 300 };
+    engine.frame(sim.graph, sim.agents, 1 / 60, view);
+    expect(posted.filter((m) => m.type === 'topology')).toHaveLength(1);
+    posted.length = 0;
+    // 40 px is enough to move stereo pan across a key step, but not dist.
+    engine.frame(sim.graph, sim.agents, 1 / 60, { ...view, x: 140 });
+    expect(posted.filter((m) => m.type === 'topology')).toHaveLength(0);
+    expect(posted.filter((m) => m.type === 'listen')).toHaveLength(1);
   });
 
   it('ten sequential latches each produce audible output', () => {
@@ -381,7 +424,6 @@ describe('sim latch integration', () => {
     params.snapRadius = 0;
     params.faceAttract = 0;
     params.snapWell = 0;
-    params.wander = 0;
     params.stepSpeed = 0;
     params.gravity = 0;
     params.homing = 0;
@@ -432,6 +474,10 @@ describe('worklet constants', () => {
     expect(WG_MAX_AIR_DELAY).toBe(MAX_AIR_DELAY);
     expect(WG_MAX_STUBS).toBe(MAX_STUBS);
     expect(WG_MAX_STUB_DELAY).toBe(MAX_STUB_DELAY);
+    expect(WG_distDry(1)).toBe(distanceDry(1));
+    expect(WG_distWet(2)).toBe(distanceWet(2));
+    expect(WG_distDamp(1.5)).toBe(distanceDamp(1.5));
+    expect(WG_distRoom(3)).toBe(distanceRoom(3));
   });
 });
 
@@ -457,6 +503,20 @@ describe('air paths', () => {
     expect(pairs).not.toContain(key(nearA.id, tooClose.id));
     expect(pairs).not.toContain(key(nearA.id, far.id));
     expect(AIR_MIN_PX).toBeGreaterThan(0);
+  });
+});
+
+describe('listener distance', () => {
+  it('direct sound falls faster than the reverb send, so D/R drops', () => {
+    expect(distanceDry(0)).toBeGreaterThan(distanceDry(1));
+    expect(distanceDry(1)).toBeGreaterThan(distanceDry(2));
+    expect(distanceWet(0) / distanceDry(0)).toBeLessThan(distanceWet(2) / distanceDry(2));
+    expect(distanceDamp(0)).toBeGreaterThan(distanceDamp(2));
+  });
+
+  it('the hall falls as the listener leaves the room', () => {
+    expect(distanceRoom(0)).toBeGreaterThan(distanceRoom(2));
+    expect(distanceRoom(2)).toBeGreaterThan(distanceRoom(5));
   });
 });
 
@@ -606,5 +666,74 @@ describe('contact radiation', () => {
     let pk = 0;
     for (let i = 0; i < 12000; i++) pk = Math.max(pk, Math.abs(net.tick()));
     expect(pk).toBeGreaterThan(0.01);
+  });
+});
+
+describe('friction entrainment', () => {
+  it('with one dominant resonator, rubbing locks to it', () => {
+    // Guard on the friction model itself, in a deliberately controlled setup:
+    // one long wire, no stubs, nothing else to compete. Under those conditions
+    // stick-slip must entrain to the wire's round trip — that is Helmholtz
+    // motion, and it is what separates bowing from scraping.
+    //
+    // This exists because it has already been broken once: raising the contact
+    // roughness far enough drags the limit cycle off the string and onto the
+    // body modes, and the whole thing turns to metallic hash. Nothing caught
+    // that but a listener.
+    const net = new WaveguideNet();
+    const L = 150;
+    const agent = (id: number) => ({
+      id,
+      kind: 0 as const,
+      openPorts: 0,
+      impedance: 1,
+      pan: 0,
+      modeHz: [283, 591, 972],
+      modeT60: [0.25, 0.12, 0.08],
+      modeGain: [1, 0.42, 0.26],
+      coupling: 1,
+    });
+    net.handle({
+      type: 'topology',
+      topo: {
+        wires: [
+          {
+            id: 1, length: L, loss: 0.9992, bend: 0.04, agentA: 1, agentB: 2,
+            zA: 1, zB: 1, damp: 0.6, disp: 0, pan: 0, exAt: 0.16, exWidth: 1,
+          },
+        ],
+        agents: [agent(1), agent(2)],
+      },
+    });
+    net.handle({
+      type: 'contact',
+      items: [{ agentA: 1, agentB: 2, load: 1, slide: bowSpeed(120) }],
+    });
+    for (let i = 0; i < 20000; i++) net.tick();
+
+    const x: number[] = [];
+    for (let i = 0; i < 8192; i++) x.push(net.tick());
+    let mean = 0;
+    for (const v of x) mean += v;
+    mean /= x.length;
+    let energy = 0;
+    for (const v of x) energy += (v - mean) * (v - mean);
+    let best = 0;
+    let bestLag = 0;
+    // Floor well above zero: normalized autocorrelation is trivially ~1 at tiny
+    // lags for any smooth signal, which is its own way to fool yourself.
+    for (let lag = 30; lag < 900; lag++) {
+      let s = 0;
+      for (let i = 0; i + lag < x.length; i++) s += (x[i] - mean) * (x[i + lag] - mean);
+      if (s / energy > best) {
+        best = s / energy;
+        bestLag = lag;
+      }
+    }
+    expect(best).toBeGreaterThan(0.4);
+    // The wire's round trip is 2L. Body modes sit near lag 160; landing there
+    // instead is the failure this test is looking for.
+    expect(bestLag).toBeGreaterThan(2 * L * 0.9);
+    expect(bestLag).toBeLessThan(2 * L * 1.1);
   });
 });

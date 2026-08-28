@@ -14,6 +14,7 @@ export interface PanView {
   y: number;
   zoom: number;
   viewW: number;
+  viewH: number;
 }
 
 export interface WireTopo {
@@ -36,6 +37,8 @@ export interface WireTopo {
   disp?: number;
   /** Stereo position of this wire's pickup, -1 left .. +1 right. */
   pan?: number;
+  /** Distance from the listener: 0 on top of them, 1 a comfortable way off. */
+  dist?: number;
   /** Where along the wire excitation lands, 0..1. */
   exAt?: number;
   /** Excitation footprint: <1 is a mallet strike, 1 is a full pluck. */
@@ -61,6 +64,8 @@ export interface AgentTopo {
   impedance: number;
   /** Stereo position of this body, -1 left .. +1 right. */
   pan?: number;
+  /** Distance from the listener: 0 on top of them, 1 a comfortable way off. */
+  dist?: number;
   /** Body mode frequencies in Hz. */
   modeHz?: number[];
   /** Per-mode T60 in seconds. */
@@ -74,6 +79,8 @@ export interface AgentTopo {
 export interface NetTopology {
   wires: WireTopo[];
   agents: AgentTopo[];
+  /** Listener height above the pond, in the same units as `dist`. */
+  height?: number;
 }
 
 export interface LatchEvent {
@@ -188,7 +195,19 @@ export type WorkletInMessage =
       leftovers: number[];
       gain: number;
     }
-  | { type: 'gain'; master: number };
+  | { type: 'gain'; master: number }
+  | {
+      /** Camera pose only. Must not rebuild delay lines. */
+      type: 'listen';
+      height?: number;
+      wires: { id: number; pan?: number; dist?: number }[];
+      agents: { id: number; pan?: number; dist?: number }[];
+    }
+  | {
+      /** Rope delay and damping. The graph shape is unchanged. */
+      type: 'tune';
+      wires: { id: number; length: number; damp?: number; loss?: number; bend?: number }[];
+    };
 
 export type WorkletOutMessage =
   | { type: 'waves'; packed: Float32Array }

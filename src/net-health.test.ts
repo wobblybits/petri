@@ -41,8 +41,6 @@ function liveParams(): Params {
 function passiveParams(): Params {
   const p = liveParams();
   p.stepSpeed = 0;
-  p.thrust = 0;
-  p.wander = 0;
   p.faceAttract = 0;
   p.gravity = 0;
   p.homing = 0;

@@ -13,9 +13,10 @@ import {
 } from './agents.ts';
 import { queryHit, SLOP, type Hit } from './collide.ts';
 import { segmentsIntersect, WIRE_RADIUS } from './geom.ts';
+import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact, unwrapPoints } from './chain.ts';
 import { CH, Fields } from './fields.ts';
-import { Graph, wrapPos } from './graph.ts';
+import { Graph, wrapPos, type Wire } from './graph.ts';
 import type { Params } from './params.ts';
 import {
   advanceRewrite,
@@ -94,9 +95,19 @@ export class Sim {
   graph = new Graph();
   fields: Fields;
   rewrites: Rewrite[] = [];
-  masses = new Map<number, number>();
   /** Connected-component root per agent, refreshed once per frame. */
   private components = new Map<number, number>();
+  /** Broad-phase results for wire clearance, flattened pairs, rebuilt per frame. */
+  private clearWirePairs: unknown[] = [];
+  private clearBodyPairs: unknown[] = [];
+  /** Broad-phase grids and their scratch coordinate arrays. */
+  private bodyGrid = new PairGrid();
+  private wireGrid = new PairGrid();
+  private gx: number[] = [];
+  private gy: number[] = [];
+  private wx: number[] = [];
+  private wy: number[] = [];
+  private agentList: Agent[] = [];
   /** Pairs in contact last frame — a strike fires on onset, contact continues. */
   private contactAudioPrev = new Set<string>();
   private contactAudioNow = new Set<string>();
@@ -204,7 +215,6 @@ export class Sim {
       this.coverW,
       this.coverH,
     );
-    this.masses = this.graph.componentMass(this.agents);
     this.components = this.graph.componentIds(this.agents);
     this.trackHome(t);
     this.contactAudioNow.clear();
@@ -298,32 +308,92 @@ export class Sim {
    * limited for the same reason everything else here is: a displacement
    * resolved in one substep becomes that displacement times 1/h in velocity.
    */
+  /**
+   * Wire pairs and wire/body pairs close enough to be worth testing, rebuilt
+   * once per frame. The broad phase is O(wires²) and the narrow phase runs every
+   * substep, so pairing them up each substep costs eight times what it needs to;
+   * the margins here are generous enough that a frame of drift cannot smuggle a
+   * pair past it.
+   */
+  private buildClearPairs(params: Params): void {
+    this.clearWirePairs.length = 0;
+    this.clearBodyPairs.length = 0;
+    if (params.wireClear <= 0) return;
+    const ropeGap = WIRE_RADIUS * 3;
+    const slack = params.wireMinRest;
+
+    const wires: Wire[] = [];
+    let maxRope = 0;
+    for (const wire of this.graph.wires.values()) {
+      if (wire.nodes.length === 0) continue;
+      wires.push(wire);
+      if (wire.ropeLen > maxRope) maxRope = wire.ropeLen;
+    }
+    const m = wires.length;
+    if (m === 0) return;
+
+    if (this.wx.length < m) {
+      this.wx = new Array(m * 2);
+      this.wy = new Array(m * 2);
+    }
+    for (let i = 0; i < m; i++) {
+      const mid = wires[i].nodes[wires[i].nodes.length >> 1];
+      this.wx[i] = mid.x;
+      this.wy[i] = mid.y;
+    }
+    // A cell this wide guarantees any pair whose reach could overlap lands in
+    // the same cell or an adjacent one.
+    this.wireGrid.build(this.wx, this.wy, m, maxRope + ropeGap + slack);
+
+    this.wireGrid.forEachPair((i, j) => {
+      const P = wires[i];
+      const Q = wires[j];
+      if (
+        P.a.id === Q.a.id ||
+        P.a.id === Q.b.id ||
+        P.b.id === Q.a.id ||
+        P.b.id === Q.b.id
+      ) {
+        return;
+      }
+      const span = (P.ropeLen + Q.ropeLen) * 0.5 + ropeGap + slack;
+      const dx = this.wx[j] - this.wx[i];
+      const dy = this.wy[j] - this.wy[i];
+      if (dx * dx + dy * dy > span * span) return;
+      this.clearWirePairs.push(P, Q);
+    });
+
+    let maxBody = 0;
+    for (const agent of this.agents.values()) maxBody = Math.max(maxBody, boundRadius(agent));
+    const list = this.rebuildBodyGrid(maxRope * 0.5 + maxBody + WIRE_RADIUS + slack);
+    for (let i = 0; i < m; i++) {
+      const P = wires[i];
+      const px = this.wx[i];
+      const py = this.wy[i];
+      const reach = P.ropeLen * 0.5 + maxBody + WIRE_RADIUS + slack;
+      this.bodyGrid.forEachNear(px, py, reach, (k) => {
+        const agent = list[k];
+        if (agent.id === P.a.id || agent.id === P.b.id) return;
+        const span = P.ropeLen * 0.5 + boundRadius(agent) + WIRE_RADIUS + slack;
+        const dx = agent.x - px;
+        const dy = agent.y - py;
+        if (dx * dx + dy * dy > span * span) return;
+        this.clearBodyPairs.push(P, agent);
+      });
+    }
+  }
+
+
   private clearWires(params: Params): void {
     const gain = params.wireClear;
     if (gain <= 0) return;
     const ropeGap = WIRE_RADIUS * 3;
     const cap = Sim.WIRE_CLEAR_STEP;
-    const wires = [...this.graph.wires.values()];
 
-    for (let i = 0; i < wires.length; i++) {
-      const P = wires[i];
-      if (P.nodes.length === 0) continue;
-      for (let j = i + 1; j < wires.length; j++) {
-        const Q = wires[j];
-        if (Q.nodes.length === 0) continue;
-        if (
-          P.a.id === Q.a.id ||
-          P.a.id === Q.b.id ||
-          P.b.id === Q.a.id ||
-          P.b.id === Q.b.id
-        ) {
-          continue;
-        }
-        // Broad phase on the ropes' midpoints, so distant wires cost one test.
-        const pm = P.nodes[P.nodes.length >> 1];
-        const qm = Q.nodes[Q.nodes.length >> 1];
-        const span = (P.ropeLen + Q.ropeLen) * 0.5 + ropeGap;
-        if ((qm.x - pm.x) ** 2 + (qm.y - pm.y) ** 2 > span * span) continue;
+    for (let k = 0; k < this.clearWirePairs.length; k += 2) {
+      const P = this.clearWirePairs[k] as Wire;
+      const Q = this.clearWirePairs[k + 1] as Wire;
+      {
         for (const p of P.nodes) {
           for (const q of Q.nodes) {
             const dx = q.x - p.x;
@@ -343,21 +413,19 @@ export class Sim {
       }
     }
 
-    for (const wire of wires) {
-      if (wire.nodes.length === 0) continue;
-      for (const agent of this.agents.values()) {
-        if (agent.id === wire.a.id || agent.id === wire.b.id) continue;
-        const keep = boundRadius(agent) + WIRE_RADIUS;
-        for (const node of wire.nodes) {
-          const dx = node.x - agent.x;
-          const dy = node.y - agent.y;
-          const d2 = dx * dx + dy * dy;
-          if (d2 >= keep * keep || d2 < 1e-9) continue;
-          const d = Math.sqrt(d2);
-          const step = Math.min((keep - d) * gain, cap);
-          node.x += (dx / d) * step;
-          node.y += (dy / d) * step;
-        }
+    for (let k = 0; k < this.clearBodyPairs.length; k += 2) {
+      const wire = this.clearBodyPairs[k] as Wire;
+      const agent = this.clearBodyPairs[k + 1] as Agent;
+      const keep = boundRadius(agent) + WIRE_RADIUS;
+      for (const node of wire.nodes) {
+        const dx = node.x - agent.x;
+        const dy = node.y - agent.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 >= keep * keep || d2 < 1e-9) continue;
+        const d = Math.sqrt(d2);
+        const step = Math.min((keep - d) * gain, cap);
+        node.x += (dx / d) * step;
+        node.y += (dy / d) * step;
       }
     }
   }
@@ -389,19 +457,25 @@ export class Sim {
     // Force at exactly one wire's length; it grows as (reach / d)^2 inside that.
     const atReach = gain * Sim.DECLUTTER_FORCE;
     const floor = reach * Sim.DECLUTTER_FLOOR;
-    const list = [...this.agents.values()];
-    for (let i = 0; i < list.length; i++) {
-      const A = list[i];
-      const satA = this.graph.portsFilled(A);
-      const compA = this.components.get(A.id);
-      for (let j = i + 1; j < list.length; j++) {
+    const list = this.rebuildBodyGrid(cutoff);
+    const n = list.length;
+    // Hoisted out of the inner loop: both were map lookups per pair.
+    const sat = new Uint8Array(n);
+    const comp = new Int32Array(n);
+    for (let i = 0; i < n; i++) {
+      sat[i] = this.graph.portsFilled(list[i]) ? 1 : 0;
+      comp[i] = this.components.get(list[i].id) ?? -1 - i;
+    }
+    this.bodyGrid.forEachPair((i, j) => {
+      {
+        if (!sat[i] && !sat[j]) return;
+        if (comp[i] === comp[j]) return;
+        const A = list[i];
         const B = list[j];
-        if (compA !== undefined && compA === this.components.get(B.id)) continue;
-        if (!satA && !this.graph.portsFilled(B)) continue;
         const dx = B.x - A.x;
         const dy = B.y - A.y;
         const dist = Math.hypot(dx, dy);
-        if (dist > cutoff || dist < 1e-6) continue;
+        if (dist > cutoff || dist < 1e-6) return;
         // Floored so the law cannot run away at touching distance; contacts own
         // that range anyway.
         const ratio = reach / Math.max(dist, floor);
@@ -419,7 +493,7 @@ export class Sim {
           B.vy += ny * force * invM * dt;
         }
       }
-    }
+    });
   }
 
   /**
@@ -516,6 +590,7 @@ export class Sim {
     if (dt <= 0) return;
     this.graph.syncRest(this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h);
+    this.buildClearPairs(params);
     const h = dt / Sim.SUBSTEPS;
     const invH = 1 / h;
     // Rope velocity is re-derived every substep, so a nudge of e px becomes
@@ -641,20 +716,41 @@ export class Sim {
     add(B, -hit.nx * j, -hit.ny * j);
   }
 
-  private solveContacts(h: number): void {
-    const list = [...this.agents.values()];
-    for (let i = 0; i < list.length; i++) {
-      const A = list[i];
-      for (let j = i + 1; j < list.length; j++) {
-        const B = list[j];
-        if (A.locked && B.locked) continue;
-        const hit = queryHit(A, B, this.w, this.h);
-        if (hit) {
-          this.emitCollision(A, B, hit);
-          solveContact(A, B, hit, SLOP, h);
-        }
-      }
+  /**
+   * Rebuild the body broad-phase from current positions. Cheap enough to redo
+   * every substep, which keeps it exact rather than relying on a motion margin.
+   */
+  private rebuildBodyGrid(cellSize: number): Agent[] {
+    const list = this.agentList;
+    list.length = 0;
+    for (const a of this.agents.values()) list.push(a);
+    const n = list.length;
+    if (this.gx.length < n) {
+      this.gx = new Array(n * 2);
+      this.gy = new Array(n * 2);
     }
+    for (let i = 0; i < n; i++) {
+      this.gx[i] = list[i].x;
+      this.gy[i] = list[i].y;
+    }
+    this.bodyGrid.build(this.gx, this.gy, n, cellSize);
+    return list;
+  }
+
+  private solveContacts(h: number): void {
+    let reach = 0;
+    for (const a of this.agents.values()) reach = Math.max(reach, boundRadius(a));
+    const list = this.rebuildBodyGrid(reach * 2 + SLOP + 4);
+    this.bodyGrid.forEachPair((i, j) => {
+      const A = list[i];
+      const B = list[j];
+      if (A.locked && B.locked) return;
+      const hit = queryHit(A, B, this.w, this.h);
+      if (hit) {
+        this.emitCollision(A, B, hit);
+        solveContact(A, B, hit, SLOP, h);
+      }
+    });
   }
 
   /**
@@ -763,7 +859,10 @@ export class Sim {
 
   private steer(params: Params, dt: number): void {
     const { w, h } = this;
-    const list = [...this.agents.values()];
+    // Face-attraction and the snap well both cut off at faceRadius, so this only
+    // ever needed nearby agents; it used to walk the whole population per agent.
+    const near = Math.max(params.faceRadius, params.snapRadius);
+    const list = this.rebuildBodyGrid(Math.max(1, near));
 
     for (const agent of list) {
       if (agent.locked) continue;
@@ -784,12 +883,13 @@ export class Sim {
       }
 
       if (agent.stun <= 0 && this.graph.isFree({ id: agent.id, slot: 'p' })) {
-        for (const other of list) {
-          if (other.id === agent.id || other.locked || other.stun > 0) continue;
-          if (!this.graph.isFree({ id: other.id, slot: 'p' })) continue;
+        this.bodyGrid.forEachNear(agent.x, agent.y, near, (idx) => {
+          const other = list[idx];
+          if (other.id === agent.id || other.locked || other.stun > 0) return;
+          if (!this.graph.isFree({ id: other.id, slot: 'p' })) return;
           const d = wrapDeltaVec(agent.x, agent.y, other.x, other.y, w, h);
           const dist = Math.hypot(d.x, d.y);
-          if (dist < 1e-4 || dist > params.faceRadius) continue;
+          if (dist < 1e-4 || dist > params.faceRadius) return;
           const nx = d.x / dist;
           const ny = d.y / dist;
           const aFace = Math.cos(agent.heading) * nx + Math.sin(agent.heading) * ny;
@@ -806,7 +906,7 @@ export class Sim {
             biasX += (pd.x / pdist) * well;
             biasY += (pd.y / pdist) * well;
           }
-        }
+        });
       }
 
       const arc = params.sensorAngle;

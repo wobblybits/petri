@@ -14,7 +14,6 @@ function quietOrganizeParams() {
   params.snapRadius = 0;
   params.stepSpeed = 0;
   params.faceAttract = 0;
-  params.wander = 0;
   params.deposit = 0;
   params.diffuse = 0;
   params.decay = 0;
