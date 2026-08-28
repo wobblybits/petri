@@ -133,6 +133,9 @@ export class AudioEngine {
         if (msg && msg.type === 'waves' && msg.packed instanceof Float32Array) {
           this.acceptWaves(msg.packed);
         }
+        if (msg && msg.type === 'error') {
+          console.error('audio worklet', msg.message);
+        }
       };
 
       // Tone shaping, then a dry/wet split into a convolution tail. The dry
@@ -237,7 +240,13 @@ export class AudioEngine {
         `${w.id}:${w.agentA}>${w.agentB}:${Math.round(w.length)}:${Math.round((w.pan ?? 0) * 10)}:${Math.round((w.damp ?? 0) * 20)}`,
       );
     }
-    for (const a of topo.agents) parts.push(`a${a.id}:${a.openPorts}`);
+    for (const a of topo.agents) {
+      let s = `a${a.id}:${a.openPorts}`;
+      if (a.stubs) {
+        for (const st of a.stubs) s += `:${st.slot}:${Math.round(st.length)}`;
+      }
+      parts.push(s);
+    }
     return parts.join('|');
   }
 
@@ -278,17 +287,24 @@ export class AudioEngine {
     }
 
     const air = planAirMessage(agents);
-    if (air.items.length > 0 || this.airedLast) {
-      this.post(air);
-      this.airedLast = air.items.length > 0;
+    const airKey = airKeyOf(air.items);
+    if (airKey !== this.airKey) {
+      this.airKey = airKey;
+      if (air.items.length > 0 || this.airedLast) {
+        this.post(air);
+        this.airedLast = air.items.length > 0;
+      }
     }
   }
 
   private contactedLast = false;
   private airedLast = false;
+  private airKey = '';
 
   invalidateTopology(): void {
     this.topoKey = '';
+    this.airKey = '';
+    this.airedLast = false;
     this.events.length = 0;
     this.lastAgent.clear();
     this.lastWire.clear();
@@ -318,6 +334,15 @@ export class AudioEngine {
     }
     for (const msg of planCollisionMessages(ev)) this.post(msg);
   }
+}
+
+function airKeyOf(items: { agentA: number; agentB: number; length: number; gain: number }[]): string {
+  if (items.length === 0) return '';
+  const parts: string[] = [];
+  for (const it of items) {
+    parts.push(`${it.agentA}:${it.agentB}:${it.length | 0}:${(it.gain * 200) | 0}`);
+  }
+  return parts.join('|');
 }
 
 export const audio = new AudioEngine();

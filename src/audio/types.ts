@@ -42,11 +42,22 @@ export interface WireTopo {
   exWidth?: number;
 }
 
+/** One unused stem, a short open pipe from the body junction to the lip. */
+export interface StubTopo {
+  /** 0 = p, 1 = l, 2 = r */
+  slot: 0 | 1 | 2;
+  /** One-way delay in samples. */
+  length: number;
+  z: number;
+}
+
 export interface AgentTopo {
   id: number;
   kind: KindCode;
-  /** Count of free (open) ports — radiates energy. */
+  /** Count of free (open) ports — each is a stub, not a shunt. */
   openPorts: number;
+  /** Open-ended bore for every unattached stem. */
+  stubs?: StubTopo[];
   impedance: number;
   /** Stereo position of this body, -1 left .. +1 right. */
   pan?: number;
@@ -179,7 +190,9 @@ export type WorkletInMessage =
     }
   | { type: 'gain'; master: number };
 
-export type WorkletOutMessage = { type: 'waves'; packed: Float32Array };
+export type WorkletOutMessage =
+  | { type: 'waves'; packed: Float32Array }
+  | { type: 'error'; message: string };
 
 /** Latest traveling-wave snapshot from the worklet. `index` maps wireId → record offset. */
 export interface WaveSnapshot {

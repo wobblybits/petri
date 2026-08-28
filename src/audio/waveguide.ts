@@ -17,6 +17,8 @@ export const MAX_PORTS = 4;
 export const MAX_CONTACTS = 48;
 export const MAX_AIR = 48;
 export const MAX_AIR_DELAY = 512;
+export const MAX_STUBS = 96;
+export const MAX_STUB_DELAY = 64;
 export const IMPULSE_TAPS = 12;
 
 /** Spatial bins in a traveling-wave snapshot. t=0 is end A, t=1 is end B. */
@@ -44,10 +46,27 @@ const JUNCTION_VEL = 0.012;
 const CONTACT_K = 2.2;
 /** Hertzian dashpot: keeps the contact spring from howling. */
 const CONTACT_C = 0.28;
+/**
+ * How loudly surface asperities radiate, per unit load and slip speed.
+ *
+ * Kept deliberately low. Roughness exists to break the exact antisymmetry of
+ * the contact force so a same-kind pair does not cancel to silence — nothing
+ * more. Turned up, it swamps the friction's own limit cycle: a bowed wire stops
+ * entraining to its round trip and locks onto the body mode instead, and the
+ * whole thing reads as metallic scraping rather than bowing. At this level a
+ * wired pair holds the string's period and stays tonal.
+ */
+const ROUGHNESS = 4.2;
+
 /** Air pressure into plate modes. Weaker than a bow so the gap is a halo, not a second instrument. */
 const AIR_TO_BODY = 2.2;
 /** Air pressure into the junction. */
 const AIR_TO_JUNCTION = 0.08;
+/** Open-lip volume flow mixed into the body's air radiation. */
+const STUB_TO_AIR = 0.1;
+/** One-pole at the lip: 1 is a perfect inversion, lower leaks highs into air. */
+const OPEN_END_DAMP = 0.62;
+const OPEN_END_LOSS = 0.97;
 const MU_STATIC = 0.82;
 const MU_KINETIC = 0.34;
 const V_STRIBECK = 0.01;
@@ -113,6 +132,8 @@ export interface AgentState {
   wireIdx: Int16Array;
   wireEnd: Int8Array;
   admittance: Float32Array;
+  stubCount: number;
+  stubIdx: Int16Array;
 
   /** Hertzian contact in progress: a force pulse, not an instantaneous spike. */
   strikePeak: number;
@@ -142,6 +163,8 @@ export interface AgentState {
   /** Differentiated contact force — the transient that radiates directly. */
   prevForce: number;
   dForce: number;
+  /** This body's own surface-roughness stream, independent of any partner's. */
+  noise: number;
 }
 
 export type WorkletMessage =
@@ -212,6 +235,8 @@ function makeAgent(): AgentState {
     wireIdx: new Int16Array(MAX_PORTS),
     wireEnd: new Int8Array(MAX_PORTS),
     admittance: new Float32Array(MAX_PORTS),
+    stubCount: 0,
+    stubIdx: new Int16Array(MAX_PORTS),
     strikePeak: 0,
     strikePos: 0,
     strikeDur: 0,
@@ -231,6 +256,7 @@ function makeAgent(): AgentState {
     bodyEnv: 0,
     prevForce: 0,
     dForce: 0,
+    noise: 1,
   };
 }
 
@@ -296,6 +322,44 @@ function makeAir(): AirState {
   };
 }
 
+interface StubState {
+  active: boolean;
+  keep: boolean;
+  agentId: number;
+  agentIdx: number;
+  slot: number;
+  length: number;
+  lengthTarget: number;
+  z: number;
+  y: number;
+  pos: number;
+  lp: number;
+  inJ: number;
+  outJ: number;
+  bufFwd: Float32Array;
+  bufBack: Float32Array;
+}
+
+function makeStub(): StubState {
+  return {
+    active: false,
+    keep: false,
+    agentId: -1,
+    agentIdx: 0,
+    slot: 0,
+    length: 8,
+    lengthTarget: 8,
+    z: 1,
+    y: 1,
+    pos: 0,
+    lp: 0,
+    inJ: 0,
+    outJ: 0,
+    bufFwd: new Float32Array(MAX_STUB_DELAY),
+    bufBack: new Float32Array(MAX_STUB_DELAY),
+  };
+}
+
 function clampDelay(length: number): number {
   if (!Number.isFinite(length)) return 64;
   return Math.max(8, Math.min(MAX_DELAY - 1, length));
@@ -304,6 +368,11 @@ function clampDelay(length: number): number {
 function clampAirDelay(length: number): number {
   if (!Number.isFinite(length)) return 16;
   return Math.max(4, Math.min(MAX_AIR_DELAY - 1, length));
+}
+
+function clampStubDelay(length: number): number {
+  if (!Number.isFinite(length)) return 8;
+  return Math.max(4, Math.min(MAX_STUB_DELAY - 1, length));
 }
 
 function wrapDelayIndex(pos: number, delay: number): number {
@@ -324,6 +393,15 @@ function wrapAirIndex(pos: number, delay: number): number {
   return r;
 }
 
+function wrapStubIndex(pos: number, delay: number): number {
+  if (!Number.isFinite(pos) || !Number.isFinite(delay)) return 0;
+  let r = pos - delay;
+  r %= MAX_STUB_DELAY;
+  if (r < 0) r += MAX_STUB_DELAY;
+  if (!Number.isFinite(r)) return 0;
+  return r;
+}
+
 function sameAirPair(s: AirState, a: number, b: number): boolean {
   return (s.idA === a && s.idB === b) || (s.idA === b && s.idB === a);
 }
@@ -340,16 +418,12 @@ function flush(x: number): number {
 }
 
 /**
- * Resistive load at a junction. Open ports radiate and eat the reflection —
- * a loose agent thuds, a closed one sings. Closed is not sealed: a little
- * body leak is what keeps a cycle from circulating until it sits on the clip
- * rail. 0.05 used to be this term and pinned every wire to ~40 ms regardless
- * of T60; 0.0004 let cages ring as if lossless. 0.012 is in between.
+ * Resistive load at a junction. The body always leaks a little so a cycle
+ * cannot sit on the clip rail. Open stems are stubs with an inverting lip,
+ * not extra shunt here.
  */
-export function junctionLoadY(openPorts: number): number {
-  const body = 0.012;
-  if (openPorts <= 0) return body;
-  return body + 0.05 + openPorts * 0.22;
+export function junctionLoadY(_openPorts = 0): number {
+  return 0.012;
 }
 
 /**
@@ -363,6 +437,7 @@ export class WaveguideNet {
   agentById = new Map<number, number>();
   contacts: ContactState[] = [];
   airs: AirState[] = [];
+  stubs: StubState[] = [];
   master = 1;
   bodyL = 0;
   bodyR = 0;
@@ -375,6 +450,28 @@ export class WaveguideNet {
   dcY = 0;
   dcX2 = 0;
   dcY2 = 0;
+
+  /**
+   * Dense indices of the objects that actually exist, so the per-sample loops
+   * never walk the fixed tables.
+   *
+   * The tables are sized for the worst case (256 agents, 96 stubs, ...), and
+   * scanning them cost ~154 us per 128-sample quantum — about 6% of the whole
+   * audio budget — even with the net completely silent, because the cost is set
+   * by table size rather than by load. These lists are rebuilt only when the
+   * set of objects changes, never per sample. `quiet` still gates work inside
+   * the loops; this only removes the walk over slots that hold nothing.
+   */
+  private liveWires = new Int32Array(MAX_WIRES);
+  private liveWireN = 0;
+  private liveAgents = new Int32Array(MAX_AGENTS);
+  private liveAgentN = 0;
+  private liveStubs = new Int32Array(MAX_STUBS);
+  private liveStubN = 0;
+  private liveAirs = new Int32Array(MAX_AIR);
+  private liveAirN = 0;
+  private liveContacts = new Int32Array(MAX_CONTACTS);
+  private liveContactN = 0;
 
   /** Scratch reused by applyTopology so the audio thread never allocates. */
   private seen = new Set<number>();
@@ -392,6 +489,7 @@ export class WaveguideNet {
     for (let i = 0; i < MAX_AGENTS; i++) this.agents.push(makeAgent());
     for (let i = 0; i < MAX_CONTACTS; i++) this.contacts.push(makeContact());
     for (let i = 0; i < MAX_AIR; i++) this.airs.push(makeAir());
+    for (let i = 0; i < MAX_STUBS; i++) this.stubs.push(makeStub());
   }
 
   handle(msg: WorkletMessage): void {
@@ -439,6 +537,39 @@ export class WaveguideNet {
     }
   }
 
+  /** Called whenever the set of live objects changes — never per sample. */
+  private refreshLiveWires(): void {
+    let n = 0;
+    for (let i = 0; i < MAX_WIRES; i++) if (this.wires[i].active) this.liveWires[n++] = i;
+    this.liveWireN = n;
+  }
+
+  private refreshLiveAgents(): void {
+    let n = 0;
+    for (let i = 0; i < MAX_AGENTS; i++) if (this.agents[i].active) this.liveAgents[n++] = i;
+    this.liveAgentN = n;
+  }
+
+  private refreshLiveStubs(): void {
+    let n = 0;
+    for (let i = 0; i < MAX_STUBS; i++) if (this.stubs[i].active) this.liveStubs[n++] = i;
+    this.liveStubN = n;
+  }
+
+  private refreshLiveAirs(): void {
+    let n = 0;
+    for (let i = 0; i < MAX_AIR; i++) if (this.airs[i].active) this.liveAirs[n++] = i;
+    this.liveAirN = n;
+  }
+
+  private refreshLiveContacts(): void {
+    let n = 0;
+    for (let i = 0; i < MAX_CONTACTS; i++) {
+      if (this.contacts[i].active) this.liveContacts[n++] = i;
+    }
+    this.liveContactN = n;
+  }
+
   read(buf: Float32Array, pos: number, delay: number): number {
     const r = wrapDelayIndex(pos, delay);
     const i0 = r | 0;
@@ -452,6 +583,14 @@ export class WaveguideNet {
     const i0 = r | 0;
     const frac = r - i0;
     const i1 = i0 + 1 === MAX_AIR_DELAY ? 0 : i0 + 1;
+    return buf[i0] + frac * (buf[i1] - buf[i0]);
+  }
+
+  readStub(buf: Float32Array, pos: number, delay: number): number {
+    const r = wrapStubIndex(pos, delay);
+    const i0 = r | 0;
+    const frac = r - i0;
+    const i1 = i0 + 1 === MAX_STUB_DELAY ? 0 : i0 + 1;
     return buf[i0] + frac * (buf[i1] - buf[i0]);
   }
 
@@ -596,6 +735,7 @@ export class WaveguideNet {
       c.idA = -1;
       c.idB = -1;
     }
+    this.refreshLiveContacts();
   }
 
   /** Replace the set of line-of-sight air paths. Matching pairs keep their delay lines. */
@@ -653,6 +793,7 @@ export class WaveguideNet {
     for (const a of this.airs) {
       if (!a.keep) this.retireAir(a);
     }
+    this.refreshLiveAirs();
   }
 
   private bindAir(
@@ -692,9 +833,8 @@ export class WaveguideNet {
    * does not zipper the delay.
    */
   private applyAirReads(): void {
-    for (let i = 0; i < MAX_AIR; i++) {
-      const a = this.airs[i];
-      if (!a.active) continue;
+    for (let k = 0; k < this.liveAirN; k++) {
+      const a = this.airs[this.liveAirs[k]];
       const ia = this.agentById.get(a.idA);
       const ib = this.agentById.get(a.idB);
       if (ia === undefined || ib === undefined) continue;
@@ -715,9 +855,8 @@ export class WaveguideNet {
 
   /** Body radiation this sample goes into the air lines for the other end. */
   private applyAirWrites(): void {
-    for (let i = 0; i < MAX_AIR; i++) {
-      const a = this.airs[i];
-      if (!a.active) continue;
+    for (let k = 0; k < this.liveAirN; k++) {
+      const a = this.airs[this.liveAirs[k]];
       const A = this.agents[a.idxA];
       const B = this.agents[a.idxB];
       const xA = A && A.active && A.id === a.idA ? A.radiate * a.gain : 0;
@@ -731,9 +870,148 @@ export class WaveguideNet {
     }
   }
 
+  /**
+   * One open pipe per free stem. Matching (agent, slot) keeps the buffer so a
+   * heading change does not click; a latch retires that slot's stub.
+   */
+  private bindStubs(topo: NetTopology): void {
+    for (const s of this.stubs) s.keep = false;
+
+    for (const spec of topo.agents) {
+      const ia = this.agentById.get(spec.id);
+      if (ia === undefined) continue;
+      const list = spec.stubs;
+      if (!list) continue;
+      for (let k = 0; k < list.length; k++) {
+        const it = list[k];
+        for (let i = 0; i < MAX_STUBS; i++) {
+          const s = this.stubs[i];
+          if (!s.active || s.keep || s.agentId !== spec.id || s.slot !== it.slot) continue;
+          this.bindStub(s, ia, spec.id, it, false);
+          s.keep = true;
+          break;
+        }
+      }
+    }
+
+    for (const spec of topo.agents) {
+      const ia = this.agentById.get(spec.id);
+      if (ia === undefined) continue;
+      const list = spec.stubs;
+      if (!list) continue;
+      for (let k = 0; k < list.length; k++) {
+        const it = list[k];
+        let taken = false;
+        for (let i = 0; i < MAX_STUBS; i++) {
+          if (this.stubs[i].keep && this.stubs[i].agentId === spec.id && this.stubs[i].slot === it.slot) {
+            taken = true;
+            break;
+          }
+        }
+        if (taken) continue;
+        let slot = -1;
+        for (let i = 0; i < MAX_STUBS; i++) {
+          if (!this.stubs[i].active) {
+            slot = i;
+            break;
+          }
+        }
+        if (slot < 0) {
+          for (let i = 0; i < MAX_STUBS; i++) {
+            if (!this.stubs[i].keep) {
+              slot = i;
+              break;
+            }
+          }
+        }
+        if (slot < 0) continue;
+        this.bindStub(this.stubs[slot], ia, spec.id, it, true);
+        this.stubs[slot].keep = true;
+      }
+    }
+
+    for (const s of this.stubs) {
+      if (!s.keep) this.retireStub(s);
+    }
+
+    for (const a of this.agents) a.stubCount = 0;
+    for (let i = 0; i < MAX_STUBS; i++) {
+      const s = this.stubs[i];
+      if (!s.active) continue;
+      const a = this.agents[s.agentIdx];
+      if (!a || !a.active || a.stubCount >= MAX_PORTS) continue;
+      a.stubIdx[a.stubCount] = i;
+      a.stubCount++;
+    }
+    this.refreshLiveStubs();
+  }
+
+  private bindStub(
+    s: StubState,
+    ia: number,
+    agentId: number,
+    it: { slot: number; length: number; z: number },
+    fresh: boolean,
+  ): void {
+    if (fresh) this.retireStub(s);
+    s.active = true;
+    s.agentId = agentId;
+    s.agentIdx = ia;
+    s.slot = it.slot;
+    s.lengthTarget = clampStubDelay(it.length);
+    s.z = it.z > 0 && Number.isFinite(it.z) ? it.z : 1;
+    s.y = 1 / Math.max(0.05, s.z);
+    if (fresh) s.length = s.lengthTarget;
+  }
+
+  private retireStub(s: StubState): void {
+    s.active = false;
+    s.keep = false;
+    s.agentId = -1;
+    s.lp = 0;
+    s.pos = 0;
+    s.inJ = 0;
+    s.outJ = 0;
+    s.bufFwd.fill(0);
+    s.bufBack.fill(0);
+  }
+
+  private applyStubReads(): void {
+    for (let k = 0; k < this.liveStubN; k++) {
+      const s = this.stubs[this.liveStubs[k]];
+      const d = s.lengthTarget - s.length;
+      if (d !== 0) s.length += d * LENGTH_GLIDE;
+      if (!Number.isFinite(s.length)) s.length = s.lengthTarget;
+      s.inJ = flush(this.readStub(s.bufBack, s.pos, s.length));
+    }
+  }
+
+  /** Invert at the lip (pressure release) and write both directions. */
+  private applyStubWrites(): void {
+    for (let k = 0; k < this.liveStubN; k++) {
+      const s = this.stubs[this.liveStubs[k]];
+      const yJ = flush(s.outJ);
+      s.bufFwd[s.pos] = yJ;
+      const lipIn = flush(this.readStub(s.bufFwd, s.pos, s.length));
+      const inv = -lipIn;
+      s.lp += OPEN_END_DAMP * (inv - s.lp);
+      s.lp = flush(s.lp);
+      const lipOut = OPEN_END_LOSS * s.lp;
+      s.bufBack[s.pos] = lipOut;
+      const flow = lipIn - lipOut;
+      const a = this.agents[s.agentIdx];
+      if (a && a.active && a.id === s.agentId) {
+        a.radiate += flow * STUB_TO_AIR;
+      }
+      s.pos++;
+      if (s.pos >= MAX_STUB_DELAY) s.pos = 0;
+    }
+  }
+
   private wakeWires(a: AgentState, load: number): void {
     for (let p = 0; p < a.portCount; p++) {
       const w = this.wires[a.wireIdx[p]];
+      if (!w) continue;
       w.quiet = false;
       w.env = Math.max(w.env, load * 0.3);
     }
@@ -765,6 +1043,12 @@ export class WaveguideNet {
     return u;
   }
 
+  /** Per-body surface roughness. Each body carries its own asperity stream. */
+  private surfaceNoise(a: AgentState): number {
+    a.noise = (Math.imul(a.noise, 1664525) + 1013904223) >>> 0;
+    return (a.noise / 4294967296) * 2 - 1;
+  }
+
   /**
    * Stribeck friction. Sign convention: F is the force on A, so F_B = −F.
    * vSlip is A's material velocity minus B's, rigid slide included.
@@ -789,23 +1073,38 @@ export class WaveguideNet {
    * Equal and opposite, from the previous sample's surface state.
    */
   private applyContacts(): void {
-    for (let i = 0; i < MAX_CONTACTS; i++) {
-      const c = this.contacts[i];
-      if (!c.active || c.load <= 1e-6) continue;
+    for (let k = 0; k < this.liveContactN; k++) {
+      const c = this.contacts[this.liveContacts[k]];
+      if (c.load <= 1e-6) continue;
       const A = this.agents[c.idxA];
       const B = this.agents[c.idxB];
-      if (!A.active || !B.active) continue;
+      if (!A || !B || !A.active || !B.active) continue;
       const vA = this.surfaceVel(A, A.sumYIn);
       const vB = this.surfaceVel(B, B.sumYIn);
       const du = this.surfaceDisp(A) - this.surfaceDisp(B);
       const dv = vA - vB;
       const Fn = -CONTACT_K * c.load * du - CONTACT_C * c.load * dv;
       const slide = c.slide;
-      const Ft =
-        slide > 1e-6 || slide < -1e-6 ? this.friction(slide + dv, c.load, c) : 0;
+      const sliding = slide > 1e-6 || slide < -1e-6;
+      const Ft = sliding ? this.friction(slide + dv, c.load, c) : 0;
       const F = Fn + Ft;
       A.contactF += F;
       B.contactF -= F;
+
+      // Newton's third law makes the force above exactly antisymmetric, which
+      // is right for the dynamics and wrong for what radiates: two identical
+      // bodies rubbing would cancel to literal silence at the pickup. What you
+      // actually hear from a slide is each surface's own asperities exciting
+      // its own body — correlated between the two, never identical. So the
+      // roughness is drawn per body and added with the *same* sign, leaving the
+      // coupled dynamics untouched.
+      if (sliding) {
+        const rough = c.load * (slide < 0 ? -slide : slide) * ROUGHNESS;
+        if (rough > 0) {
+          A.contactF += this.surfaceNoise(A) * rough;
+          B.contactF += this.surfaceNoise(B) * rough;
+        }
+      }
     }
   }
 
@@ -942,6 +1241,7 @@ export class WaveguideNet {
     for (const a of this.agents) {
       a.active = false;
       a.portCount = 0;
+      a.stubCount = 0;
       a.id = -1;
     }
     this.agentById.clear();
@@ -1039,7 +1339,7 @@ export class WaveguideNet {
       // Scale the resistive load by the agent's own admittance, so a heavy Con
       // and a light Dup do not leak identically. Without this, `impedance` was
       // computed by the topology builder every frame and then dropped.
-      a.loadY = junctionLoadY(spec.openPorts) / Math.max(0.05, spec.impedance || 1);
+      a.loadY = junctionLoadY() / Math.max(0.05, spec.impedance || 1);
       a.excite = this.savedExcite.get(spec.id) ?? 0;
       let p = 0;
       while (node >= 0 && p < MAX_PORTS) {
@@ -1056,6 +1356,9 @@ export class WaveguideNet {
       this.agentById.set(spec.id, ai);
       ai++;
     }
+    this.bindStubs(topo);
+    this.refreshLiveWires();
+    this.refreshLiveAgents();
   }
 
   /**
@@ -1130,8 +1433,9 @@ export class WaveguideNet {
 
   /** Advance one sample. Fills outL/outR; returns the mono sum. */
   tick(): number {
-    for (const w of this.wires) {
-      if (!w.active || w.quiet) continue;
+    for (let k = 0; k < this.liveWireN; k++) {
+      const w = this.wires[this.liveWires[k]];
+      if (w.quiet) continue;
       const d = w.lengthTarget - w.length;
       if (d !== 0) w.length += d * LENGTH_GLIDE;
       if (!Number.isFinite(w.length)) w.length = w.lengthTarget;
@@ -1141,18 +1445,27 @@ export class WaveguideNet {
       w.outB = w.inB;
     }
 
+    this.applyStubReads();
+
     this.bodyL = 0;
     this.bodyR = 0;
-    for (const agent of this.agents) {
-      if (!agent.active) continue;
+    for (let k = 0; k < this.liveAgentN; k++) {
+      const agent = this.agents[this.liveAgents[k]];
       agent.strikeNow = this.strikeForce(agent);
       let sumY = agent.loadY;
       let sumYIn = 0;
       for (let p = 0; p < agent.portCount; p++) {
         const w = this.wires[agent.wireIdx[p]];
+        if (!w) continue;
         const y = agent.admittance[p];
         sumY += y;
         sumYIn += y * (agent.wireEnd[p] === 0 ? w.inA : w.inB);
+      }
+      for (let s = 0; s < agent.stubCount; s++) {
+        const st = this.stubs[agent.stubIdx[s]];
+        if (!st) continue;
+        sumY += st.y;
+        sumYIn += st.y * st.inJ;
       }
       agent.sumY = sumY;
       agent.sumYIn = sumYIn;
@@ -1164,8 +1477,8 @@ export class WaveguideNet {
     this.applyAirReads();
     this.applyContacts();
 
-    for (const agent of this.agents) {
-      if (!agent.active) continue;
+    for (let k = 0; k < this.liveAgentN; k++) {
+      const agent = this.agents[this.liveAgents[k]];
       const strike = agent.strikeNow;
       const force = agent.contactF;
       const air = agent.airIn;
@@ -1176,14 +1489,15 @@ export class WaveguideNet {
       const body = this.bodyVoice(
         agent,
         strike,
-        agent.sumYIn + (agent.portCount === 0 ? agent.excite : 0),
+        agent.sumYIn + (agent.portCount === 0 && agent.stubCount === 0 ? agent.excite : 0),
         force,
         air,
       );
       agent.radiate = body;
       if (body !== 0) {
-        const gl = Math.sqrt(0.5 * (1 - agent.pan));
-        const gr = Math.sqrt(0.5 * (1 + agent.pan));
+        const pan = agent.pan > 1 ? 1 : agent.pan < -1 ? -1 : agent.pan;
+        const gl = Math.sqrt(0.5 * (1 - pan));
+        const gr = Math.sqrt(0.5 * (1 + pan));
         this.bodyL += body * gl;
         this.bodyR += body * gr;
       }
@@ -1192,9 +1506,9 @@ export class WaveguideNet {
         agent.excite + strike * agent.coupling + force * RUB_TO_JUNCTION + air * AIR_TO_JUNCTION;
       const pJ = (2 * agent.sumYIn + drive) / Math.max(1e-6, agent.sumY);
       agent.excite = 0;
-      if (agent.portCount === 0) continue;
       for (let p = 0; p < agent.portCount; p++) {
         const w = this.wires[agent.wireIdx[p]];
+        if (!w) continue;
         const incoming = agent.wireEnd[p] === 0 ? w.inA : w.inB;
         const outgoing = pJ - incoming;
         if (agent.wireEnd[p] === 0) w.outA = outgoing;
@@ -1209,14 +1523,21 @@ export class WaveguideNet {
           }
         }
       }
+      for (let s = 0; s < agent.stubCount; s++) {
+        const st = this.stubs[agent.stubIdx[s]];
+        if (!st) continue;
+        st.outJ = pJ - st.inJ;
+      }
     }
 
+    this.applyStubWrites();
     this.applyAirWrites();
 
     let sumL = this.bodyL * 1.5;
     let sumR = this.bodyR * 1.5;
-    for (const w of this.wires) {
-      if (!w.active || w.quiet) continue;
+    for (let k = 0; k < this.liveWireN; k++) {
+      const w = this.wires[this.liveWires[k]];
+      if (w.quiet) continue;
       const extraA = w.burstFwd[w.burstPos] + w.exciteA;
       const extraB = w.burstBack[w.burstPos] + w.exciteB;
       w.burstFwd[w.burstPos] = 0;
@@ -1247,8 +1568,9 @@ export class WaveguideNet {
         w.outB = 0;
         continue;
       }
-      const gL = Math.sqrt(0.5 * (1 - w.pan));
-      const gR = Math.sqrt(0.5 * (1 + w.pan));
+      const pan = w.pan > 1 ? 1 : w.pan < -1 ? -1 : w.pan;
+      const gL = Math.sqrt(0.5 * (1 - pan));
+      const gR = Math.sqrt(0.5 * (1 + pan));
       sumL += p * gL;
       sumR += p * gR;
     }

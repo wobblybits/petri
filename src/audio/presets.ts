@@ -211,6 +211,8 @@ export const AIR_CUTOFF_PX = 240;
 export const AIR_MIN_PX = 16;
 export const MAX_AIR_PATHS = 48;
 export const MAX_AIR_DELAY = 512;
+export const MAX_STUBS = 96;
+export const MAX_STUB_DELAY = 64;
 
 export function airDelaySamples(distPx: number): number {
   const raw = (distPx * getSampleRate()) / AIR_SPEED;
@@ -230,6 +232,13 @@ export function airDamp(distPx: number): number {
   return Math.max(0.08, Math.min(0.85, 0.88 - d / 420));
 }
 
+/** Travel time along a free stem. Same medium as pond air, plus end correction. */
+export function stubDelaySamples(distPx: number): number {
+  const raw = (distPx * getSampleRate()) / AIR_SPEED;
+  if (!Number.isFinite(raw)) return 8;
+  return Math.max(4, Math.min(MAX_STUB_DELAY - 1, raw));
+}
+
 export function rewriteBeginGain(rule: string): number {
   if (rule === 'commute') return 0.72;
   if (rule === 'erase') return 0.64;
@@ -240,8 +249,4 @@ export function rewriteCommitGain(rule: string): number {
   if (rule === 'commute') return 1.15;
   if (rule === 'erase') return 0.95;
   return 0.82;
-}
-
-export function openPortRadiation(openPorts: number): number {
-  return 0.12 + openPorts * 0.09;
 }

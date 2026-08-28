@@ -93,34 +93,81 @@ export function planContactMessage(
 }
 
 /**
+ * Scratch for planAirMessage, kept at module scope so a per-frame call does not
+ * allocate. Main thread only, and the whole selection finishes inside one call.
+ */
+const airBestA = new Int32Array(MAX_AIR_PATHS);
+const airBestB = new Int32Array(MAX_AIR_PATHS);
+const airBestD2 = new Float64Array(MAX_AIR_PATHS);
+const airXs: number[] = [];
+const airYs: number[] = [];
+const airIds: number[] = [];
+
+const AIR_MIN_SQ = AIR_MIN_PX * AIR_MIN_PX;
+const AIR_CUTOFF_SQ = AIR_CUTOFF_PX * AIR_CUTOFF_PX;
+
+/**
  * Direct line-of-sight between nearby bodies. Closest pairs first, capped so a
  * soup does not become N² delay lines. Empty list is how air coupling stops.
+ *
+ * Still O(n²) in pair tests — a real fix needs a broadphase the sim does not
+ * have yet — but the two things that actually dominated are gone. Distances are
+ * compared squared, so the sqrt is paid only for the handful of pairs kept
+ * rather than all of them. And the nearest pairs are selected by insertion into
+ * a fixed 48-slot array instead of sorting every candidate: at 120 agents that
+ * sort ranked 4084 entries to use 49 of them, so 98.8% of it was wasted.
  */
 export function planAirMessage(
   agents: Map<number, Agent>,
 ): Extract<WorkletInMessage, { type: 'air' }> {
-  const list: Agent[] = [];
-  for (const a of agents.values()) list.push(a);
-  const cand: { a: number; b: number; d: number }[] = [];
-  for (let i = 0; i < list.length; i++) {
-    const A = list[i];
-    for (let j = i + 1; j < list.length; j++) {
-      const B = list[j];
-      const d = Math.hypot(B.x - A.x, B.y - A.y);
-      if (d >= AIR_MIN_PX && d <= AIR_CUTOFF_PX) cand.push({ a: A.id, b: B.id, d });
+  airXs.length = 0;
+  airYs.length = 0;
+  airIds.length = 0;
+  for (const a of agents.values()) {
+    airXs.push(a.x);
+    airYs.push(a.y);
+    airIds.push(a.id);
+  }
+
+  const n = airIds.length;
+  let kept = 0;
+  // Once the table is full this is the distance a pair has to beat to matter,
+  // which rejects the overwhelming majority on one compare.
+  let worst = Infinity;
+
+  for (let i = 0; i < n; i++) {
+    const ax = airXs[i];
+    const ay = airYs[i];
+    for (let j = i + 1; j < n; j++) {
+      const dx = airXs[j] - ax;
+      const dy = airYs[j] - ay;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < AIR_MIN_SQ || d2 > AIR_CUTOFF_SQ) continue;
+      if (kept === MAX_AIR_PATHS && d2 >= worst) continue;
+
+      let at = kept < MAX_AIR_PATHS ? kept++ : MAX_AIR_PATHS - 1;
+      while (at > 0 && airBestD2[at - 1] > d2) {
+        airBestD2[at] = airBestD2[at - 1];
+        airBestA[at] = airBestA[at - 1];
+        airBestB[at] = airBestB[at - 1];
+        at--;
+      }
+      airBestD2[at] = d2;
+      airBestA[at] = airIds[i];
+      airBestB[at] = airIds[j];
+      if (kept === MAX_AIR_PATHS) worst = airBestD2[MAX_AIR_PATHS - 1];
     }
   }
-  cand.sort((x, y) => x.d - y.d);
-  const n = Math.min(MAX_AIR_PATHS, cand.length);
+
   const items: Extract<WorkletInMessage, { type: 'air' }>['items'] = [];
-  for (let i = 0; i < n; i++) {
-    const c = cand[i];
+  for (let i = 0; i < kept; i++) {
+    const d = Math.sqrt(airBestD2[i]);
     items.push({
-      agentA: c.a,
-      agentB: c.b,
-      length: airDelaySamples(c.d),
-      gain: airGain(c.d),
-      damp: airDamp(c.d),
+      agentA: airBestA[i],
+      agentB: airBestB[i],
+      length: airDelaySamples(d),
+      gain: airGain(d),
+      damp: airDamp(d),
     });
   }
   return { type: 'air', items };

@@ -8,6 +8,8 @@ import {
   delaySamplesForPath,
   delaySamplesForHz,
   latchGain,
+  contactPeak,
+  contactSeconds,
   MAX_DELAY,
   MAX_WIRES,
   portImpedance,
@@ -23,8 +25,11 @@ import {
   AIR_CUTOFF_PX,
   MAX_AIR_PATHS,
   MAX_AIR_DELAY,
+  MAX_STUBS,
+  MAX_STUB_DELAY,
 } from './presets.ts';
 import { planCollisionMessages, planLatchMessages, planRewriteMessages, planAirMessage } from './dispatch.ts';
+import { bodyTone } from './body.ts';
 import { buildTopology } from './topology.ts';
 import { AudioEngine, audio } from './engine.ts';
 import {
@@ -32,10 +37,39 @@ import {
   MAX_WIRES as WG_MAX_WIRES,
   MAX_AIR as WG_MAX_AIR,
   MAX_AIR_DELAY as WG_MAX_AIR_DELAY,
+  MAX_STUBS as WG_MAX_STUBS,
+  MAX_STUB_DELAY as WG_MAX_STUB_DELAY,
   WaveguideNet,
 } from './waveguide.ts';
 import type { LatchEvent } from './types.ts';
 import { albedo, blendVoices, sharpness, strikeSharpness, voiceFromAgent } from './voice.ts';
+
+/** Two unwired bodies that can touch each other. */
+function sampleContactTopo() {
+  const one = sampleAgentTopo(1);
+  const two = sampleAgentTopo(2);
+  return { wires: [], agents: [one.agents[0], two.agents[0]] };
+}
+
+/** One agent, no wires: the case that used to be silent. */
+function sampleAgentTopo(id: number) {
+  return {
+    wires: [],
+    agents: [
+      {
+        id,
+        kind: 0 as const,
+        openPorts: 3,
+        impedance: 1,
+        pan: 0,
+        modeHz: [283, 591, 972],
+        modeT60: [0.25, 0.12, 0.08],
+        modeGain: [1, 0.42, 0.26],
+        coupling: 1,
+      },
+    ],
+  };
+}
 
 function latchEv(wire: { id: number; rest: number; latchLen: number }, a: number, b: number): LatchEvent {
   return {
@@ -118,6 +152,10 @@ describe('audio dispatch', () => {
     expect(topo.wires[0].zB).toBeGreaterThan(0);
     expect(topo.wires[0].pan).toBeGreaterThanOrEqual(-1);
     expect(topo.wires[0].pan).toBeLessThanOrEqual(1);
+    const dup = topo.agents.find((ag) => ag.id === b.id)!;
+    expect(dup.stubs?.length).toBe(2);
+    const era = topo.agents.find((ag) => ag.id === a.id)!;
+    expect(era.stubs?.length ?? 0).toBe(0);
   });
 
   it('a taut rope is sharper and brighter than a slack one', () => {
@@ -392,6 +430,8 @@ describe('worklet constants', () => {
     expect(WG_MAX_DELAY).toBe(MAX_DELAY);
     expect(WG_MAX_AIR).toBe(MAX_AIR_PATHS);
     expect(WG_MAX_AIR_DELAY).toBe(MAX_AIR_DELAY);
+    expect(WG_MAX_STUBS).toBe(MAX_STUBS);
+    expect(WG_MAX_STUB_DELAY).toBe(MAX_STUB_DELAY);
   });
 });
 
@@ -454,5 +494,117 @@ describe('shape drives the impulse', () => {
     const a = strikeSharpness({ kind: 'era', heading: 0 }, 1, 0);
     const b = strikeSharpness({ kind: 'era', heading: 1.1 }, -0.3, 0.95);
     expect(a).toBe(b);
+  });
+});
+
+describe('contact physics', () => {
+  it('a harder impact is a shorter contact, not just a louder one', () => {
+    // Hertzian contact time goes as v^(-1/5). This is the reason a hard knock
+    // sounds brighter rather than merely bigger, so it is worth pinning down.
+    const soft = contactSeconds(1.4, 5);
+    const hard = contactSeconds(1.4, 300);
+    expect(hard).toBeLessThan(soft);
+    expect(contactPeak(1.4, 300, hard)).toBeGreaterThan(contactPeak(1.4, 5, soft));
+  });
+
+  it('a heavier pair stays in contact longer', () => {
+    expect(contactSeconds(4, 80)).toBeGreaterThan(contactSeconds(1.4, 80));
+  });
+
+  it('the contact force reaches the wires as a pulse, not a spike', () => {
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: sampleAgentTopo(1) });
+    net.handle({ type: 'strike', agentId: 1, peak: 1.2, dur: 96, sharp: 0.5 });
+    // A 96-sample contact must still be pushing force well after sample 1.
+    let early = 0;
+    for (let i = 0; i < 8; i++) early = Math.max(early, Math.abs(net.tick()));
+    let mid = 0;
+    for (let i = 0; i < 60; i++) mid = Math.max(mid, Math.abs(net.tick()));
+    expect(mid).toBeGreaterThan(early);
+  });
+
+  it('an unwired body rings when knocked and then goes silent', () => {
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: sampleAgentTopo(1) });
+    expect(net.activeWireCount()).toBe(0);
+    net.handle({ type: 'strike', agentId: 1, peak: 1.5, dur: 60, sharp: 0.8 });
+    let pk = 0;
+    for (let i = 0; i < 24000; i++) pk = Math.max(pk, Math.abs(net.tick()));
+    expect(pk).toBeGreaterThan(0.005);
+    for (let i = 0; i < 48000 * 8; i++) net.tick();
+    let tail = 0;
+    for (let i = 0; i < 4800; i++) tail = Math.max(tail, Math.abs(net.tick()));
+    expect(tail).toBeLessThan(1e-10);
+  });
+
+  it('body pitch tracks visible size', () => {
+    const sim = new Sim(200, 160);
+    const params = defaultParams();
+    const era = sim.spawn('era', 30, 30, 0, params, true)!;
+    const con = sim.spawn('con', 90, 30, 0, params, true)!;
+    // The circle is drawn about half the triangle's size, so it pings higher.
+    expect(bodyTone(era).freq[0]).toBeGreaterThan(bodyTone(con).freq[0] * 1.5);
+    // Higher modes always die before lower ones.
+    const t = bodyTone(con);
+    expect(t.decay[2]).toBeLessThan(t.decay[0]);
+  });
+
+  it('rubbing is louder the harder and faster it slides', () => {
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: sampleContactTopo() });
+    const level = (load: number, vT: number) => {
+      net.handle({
+        type: 'contact',
+        items: [{ agentA: 1, agentB: 2, load, slide: bowSpeed(vT) }],
+      });
+      let pk = 0;
+      for (let i = 0; i < 12000; i++) pk = Math.max(pk, Math.abs(net.tick()));
+      return pk;
+    };
+    const gentle = level(0.1, 4);
+    const hard = level(1, 120);
+    expect(hard).toBeGreaterThan(gentle);
+  });
+
+  it('rubbing stops dead when the sim stops reporting contact', () => {
+    // Friction is the one continuous excitation in the whole system, so this is
+    // the guarantee that keeps it from becoming a drone: an empty list is how
+    // the sim says nothing is touching, and silence has to follow immediately.
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: sampleContactTopo() });
+    net.handle({
+      type: 'contact',
+      items: [{ agentA: 1, agentB: 2, load: 1, slide: bowSpeed(120) }],
+    });
+    let loud = 0;
+    for (let i = 0; i < 24000; i++) loud = Math.max(loud, Math.abs(net.tick()));
+    expect(loud).toBeGreaterThan(1e-4);
+
+    net.handle({ type: 'contact', items: [] });
+    for (let i = 0; i < 48000 * 4; i++) net.tick();
+    let stopped = 0;
+    for (let i = 0; i < 4800; i++) stopped = Math.max(stopped, Math.abs(net.tick()));
+    expect(stopped).toBeLessThan(1e-10);
+  });
+});
+
+describe('contact radiation', () => {
+  it('two identical bodies rubbing do not cancel to silence', () => {
+    // Regression: the contact force is equal and opposite by Newton's third
+    // law, so radiating it directly made a same-kind pair sum to exactly zero
+    // at the pickup — the same failure mode as summing both ends of a wire.
+    // Surface roughness is drawn per body, so the two are correlated but never
+    // identical, and the pair stays audible.
+    const net = new WaveguideNet();
+    const one = sampleAgentTopo(1);
+    const two = sampleAgentTopo(2);
+    net.handle({ type: 'topology', topo: { wires: [], agents: [one.agents[0], two.agents[0]] } });
+    net.handle({
+      type: 'contact',
+      items: [{ agentA: 1, agentB: 2, load: 1, slide: bowSpeed(120) }],
+    });
+    let pk = 0;
+    for (let i = 0; i < 12000; i++) pk = Math.max(pk, Math.abs(net.tick()));
+    expect(pk).toBeGreaterThan(0.01);
   });
 });

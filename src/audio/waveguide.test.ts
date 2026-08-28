@@ -63,10 +63,9 @@ function binMag(x: number[], hz: number, sr = 48000): number {
 }
 
 describe('WaveguideNet', () => {
-  it('a closed junction still leaks, but less than an open port', () => {
+  it('a closed junction still leaks a little', () => {
     expect(junctionLoadY(0)).toBeGreaterThan(0.004);
-    expect(junctionLoadY(0)).toBeLessThan(junctionLoadY(1) * 0.5);
-    expect(junctionLoadY(2)).toBeGreaterThan(junctionLoadY(1));
+    expect(junctionLoadY(0)).toBeLessThan(0.05);
   });
 
   it('a NaN delay does not poison the output', () => {
@@ -708,5 +707,103 @@ describe('air coupling', () => {
     net.handle({ type: 'strike', agentId: 1, peak: 1.2, dur: 24, sharp: 0.5 });
     const x = collect(net, 512);
     expect(x.every(Number.isFinite)).toBe(true);
+  });
+});
+
+function openStub(length = 8): { slot: 0; length: number; z: number } {
+  return { slot: 0, length, z: 1 };
+}
+
+function withOpenEnd(topo: NetTopology, agentId: number, length = 8): NetTopology {
+  return {
+    ...topo,
+    agents: topo.agents.map((a) =>
+      a.id === agentId ? { ...a, openPorts: 1, stubs: [openStub(length)] } : a,
+    ),
+  };
+}
+
+describe('open stems', () => {
+  it('a closed-open rope is an octave below a closed-closed rope', () => {
+    const L = 80;
+    const fHalf = 48000 / (2 * L);
+    const fQuarter = 48000 / (4 * L);
+
+    const closed = new WaveguideNet();
+    closed.handle({ type: 'latch', topo: sampleTopo(1, 10, 20, L), wireId: 1, gain: 1 });
+    collect(closed, 400);
+    const xClosed = collect(closed, 4096);
+
+    const mixed = new WaveguideNet();
+    mixed.handle({
+      type: 'latch',
+      topo: withOpenEnd(sampleTopo(1, 10, 20, L), 20),
+      wireId: 1,
+      gain: 1,
+    });
+    collect(mixed, 400);
+    const xMixed = collect(mixed, 4096);
+
+    expect(binMag(xClosed, fHalf)).toBeGreaterThan(binMag(xClosed, fQuarter));
+    expect(binMag(xMixed, fQuarter)).toBeGreaterThan(binMag(xMixed, fHalf));
+  });
+
+  it('latching a stem retires its stub', () => {
+    const net = new WaveguideNet();
+    const open: NetTopology = {
+      wires: [],
+      agents: [{ id: 1, kind: 1, openPorts: 3, impedance: 1, stubs: [
+        { slot: 0, length: 8, z: 1 },
+        { slot: 1, length: 8, z: 0.62 },
+        { slot: 2, length: 8, z: 0.62 },
+      ] }],
+    };
+    net.handle({ type: 'topology', topo: open });
+    expect(net.stubs.filter((s) => s.active).length).toBe(3);
+    net.handle({
+      type: 'topology',
+      topo: {
+        wires: [sampleTopo(1, 1, 2, 80).wires[0]],
+        agents: [
+          { id: 1, kind: 1, openPorts: 2, impedance: 1, stubs: [
+            { slot: 1, length: 8, z: 0.62 },
+            { slot: 2, length: 8, z: 0.62 },
+          ] },
+          { id: 2, kind: 0, openPorts: 0, impedance: 1 },
+        ],
+      },
+    });
+    const live = net.stubs.filter((s) => s.active);
+    expect(live).toHaveLength(2);
+    expect(live.every((s) => s.slot !== 0)).toBe(true);
+  });
+
+  it('an open lip leaks instead of howling', () => {
+    const net = new WaveguideNet();
+    net.handle({
+      type: 'latch',
+      topo: withOpenEnd(sampleTopo(1, 10, 20, 80), 20),
+      wireId: 1,
+      gain: 1,
+    });
+    collect(net, 400);
+    const early = peak(collect(net, 512));
+    collect(net, 24000);
+    const late = peak(collect(net, 512));
+    expect(early).toBeGreaterThan(0.01);
+    expect(late).toBeLessThan(early * 0.5);
+  });
+
+  it('a NaN stub delay does not poison the output', () => {
+    const net = new WaveguideNet();
+    net.handle({
+      type: 'latch',
+      topo: withOpenEnd(sampleTopo(1, 10, 20, 80), 20, Number.NaN),
+      wireId: 1,
+      gain: 1,
+    });
+    const x = collect(net, 512);
+    expect(x.every(Number.isFinite)).toBe(true);
+    expect(peak(x)).toBeGreaterThan(0);
   });
 });

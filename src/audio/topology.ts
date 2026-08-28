@@ -1,16 +1,16 @@
-import { slotsFor, type Agent, type AgentKind } from '../agents.ts';
+import { boundRadius, portLocal, slotsFor, type Agent, type AgentKind, type PortSlot } from '../agents.ts';
 import type { Graph, Wire } from '../graph.ts';
 import {
   bendLoss,
   delaySamplesForPath,
   feasibleDamp,
   lossForT60,
-  openPortRadiation,
   portImpedance,
+  stubDelaySamples,
   tautBrighten,
   tautness,
 } from './presets.ts';
-import type { AgentTopo, NetTopology, PanView, WireTopo } from './types.ts';
+import type { AgentTopo, NetTopology, PanView, StubTopo, WireTopo } from './types.ts';
 import { bodyCoupling, bodyTone } from './body.ts';
 import { blendVoices, voiceFromAgent } from './voice.ts';
 import { kindCode } from './types.ts';
@@ -66,6 +66,22 @@ function wireTopo(
   };
 }
 
+function slotCode(slot: PortSlot): 0 | 1 | 2 {
+  if (slot === 'p') return 0;
+  if (slot === 'l') return 1;
+  return 2;
+}
+
+function stubFor(agent: Agent, slot: PortSlot): StubTopo {
+  const tip = portLocal(agent.kind, slot);
+  const path = Math.hypot(tip.x, tip.y) + boundRadius(agent) * 0.6;
+  return {
+    slot: slotCode(slot),
+    length: stubDelaySamples(path),
+    z: portImpedance(agent.kind, slot),
+  };
+}
+
 function agentTopo(
   agent: Agent,
   graph: Graph,
@@ -77,11 +93,13 @@ function agentTopo(
   const z =
     slots.reduce((sum, slot) => sum + portImpedance(agent.kind, slot), 0) / Math.max(1, slots.length);
   const tone = bodyTone(agent);
+  const stubs = open.map((slot) => stubFor(agent, slot));
   return {
     id: agent.id,
     kind: kindCode(agent.kind),
     openPorts: open.length,
-    impedance: z * (1 + openPortRadiation(open.length)),
+    stubs,
+    impedance: z,
     pan: stereoPan(agent.x, view, centreX),
     modeHz: tone.freq,
     modeT60: tone.decay,
