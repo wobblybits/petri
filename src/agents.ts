@@ -1,5 +1,5 @@
 import type { Params } from './params.ts';
-import { rotate, wrap, wrapDeltaVec, type Vec2 } from './wrap.ts';
+import { rotate, wrap, wrapAngle, wrapDeltaVec, angleDelta, type Vec2 } from './wrap.ts';
 
 export type AgentKind = 'era' | 'dup' | 'con';
 export type PortSlot = 'p' | 'l' | 'r';
@@ -23,6 +23,10 @@ export interface Agent {
   scale: number;
   locked: boolean;
   stun: number;
+  /** Ornstein-Uhlenbeck self-propulsion magnitude along the heading. */
+  drive: number;
+  /** Local scent sampled once per frame, shared by steering and homing. */
+  trail: number;
   /** Pose at the start of the current integrate step (for XPBD velocity writeback). */
   prevX: number;
   prevY: number;
@@ -70,10 +74,6 @@ export function triangleWorld(agent: Agent, ox: number, oy: number): Vec2[] {
 export function boundRadius(agent: Agent): number {
   if (agent.kind === 'era') return (ERA_RADIUS + 1.2) * agent.scale;
   return agentSize(agent.kind) * 1.12 * agent.scale;
-}
-
-export function collideRadius(agent: Agent): number {
-  return boundRadius(agent);
 }
 
 export function momentOfInertia(agent: Agent): number {
@@ -134,6 +134,8 @@ export function createAgent(
     scale: 1,
     locked: false,
     stun: 0,
+    drive: params.stepSpeed,
+    trail: 0,
     prevX: x,
     prevY: y,
     prevHeading: heading,
@@ -153,6 +155,96 @@ export function portAxis(agent: Agent, slot: PortSlot): Vec2 {
   );
   const len = Math.hypot(r.x, r.y) || 1;
   return { x: r.x / len, y: r.y / len };
+}
+
+/** Body heading that aims `slot` along the world angle `target`. */
+export function headingFacingPort(agent: Agent, slot: PortSlot, target: number): number {
+  const axis = portAxis(agent, slot);
+  const portAng = Math.atan2(axis.y, axis.x);
+  return wrapAngle(agent.heading + angleDelta(portAng, target));
+}
+
+/** Body heading so `slot` on `agent` points from `from` toward `toward`. */
+export function headingAlongWire(
+  agent: Agent,
+  slot: PortSlot,
+  from: Vec2,
+  toward: Vec2,
+  w: number,
+  h: number,
+): number {
+  const d = wrapDeltaVec(from.x, from.y, toward.x, toward.y, w, h);
+  return headingFacingPort(agent, slot, Math.atan2(d.y, d.x));
+}
+
+/**
+ * Like `headingAlongWire`, but when two headings satisfy the port aim,
+ * pick the one closest to `prefer` (keeps tow chains from flipping 180°).
+ */
+export function headingAlongTow(
+  agent: Agent,
+  slot: PortSlot,
+  from: Vec2,
+  toward: Vec2,
+  prefer: number,
+  w: number,
+  h: number,
+): number {
+  const d = wrapDeltaVec(from.x, from.y, toward.x, toward.y, w, h);
+  const axis = Math.atan2(d.y, d.x);
+  const a = headingFacingPort(agent, slot, axis);
+  const b = wrapAngle(a + Math.PI);
+  return Math.abs(angleDelta(prefer, a)) <= Math.abs(angleDelta(prefer, b)) ? a : b;
+}
+
+/**
+ * Center-to-center distance along the meridian when stems are `stemRest` apart
+ * and the aux agent leads the wired principal.
+ */
+export function meridianCenterGap(
+  lead: Agent,
+  leadSlot: PortSlot,
+  follow: Agent,
+  followSlot: PortSlot,
+  stemRest: number,
+  w: number,
+  h: number,
+): number {
+  const heading = lead.heading;
+  const cos = Math.cos(heading);
+  const sin = Math.sin(heading);
+  const snap = {
+    lx: lead.x,
+    ly: lead.y,
+    lh: lead.heading,
+    fx: follow.x,
+    fy: follow.y,
+    fh: follow.heading,
+  };
+  follow.x = 0;
+  follow.y = 0;
+  follow.heading = heading;
+  lead.heading = heading;
+  let lo = 0;
+  let hi = Math.max(48, stemRest + 80);
+  for (let i = 0; i < 28; i++) {
+    const g = (lo + hi) * 0.5;
+    lead.x = cos * g;
+    lead.y = sin * g;
+    const sa = stemWorld(lead, leadSlot, w, h);
+    const sb = stemWorld(follow, followSlot, w, h);
+    const span = Math.hypot(sb.x - sa.x, sb.y - sa.y);
+    if (span > stemRest) hi = g;
+    else lo = g;
+  }
+  const gap = (lo + hi) * 0.5;
+  lead.x = snap.lx;
+  lead.y = snap.ly;
+  lead.heading = snap.lh;
+  follow.x = snap.fx;
+  follow.y = snap.fy;
+  follow.heading = snap.fh;
+  return gap;
 }
 
 export function inSnapArc(
@@ -185,8 +277,13 @@ export function portWorld(agent: Agent, slot: PortSlot, w: number, h: number): V
 }
 
 export function stemOffset(agent: Agent, slot: PortSlot): Vec2 {
+  return stemOffsetAt(agent.heading, agent, slot);
+}
+
+/** Stem root offset from body center at a given heading. */
+export function stemOffsetAt(heading: number, agent: Agent, slot: PortSlot): Vec2 {
   const loc = stemRoot(agent.kind, slot);
-  return rotate(loc.x * agent.scale, loc.y * agent.scale, agent.heading);
+  return rotate(loc.x * agent.scale, loc.y * agent.scale, heading);
 }
 
 export function stemWorld(agent: Agent, slot: PortSlot, w: number, h: number): Vec2 {
@@ -194,13 +291,21 @@ export function stemWorld(agent: Agent, slot: PortSlot, w: number, h: number): V
   return { x: wrap(agent.x + o.x, w), y: wrap(agent.y + o.y, h) };
 }
 
-/** Control point along the port axis, HANDLE_SCALE times the visible stem. */
-export function handleWorld(agent: Agent, slot: PortSlot, w: number, h: number, _restLen?: number): Vec2 {
+/**
+ * Control point along the port axis. Scaled to the wire's length when it is
+ * known: a fixed handle longer than a third of the span makes the two handles
+ * cross, and the cubic then doubles back on itself — which reads as a shorter
+ * wire than the straight line between the ports.
+ */
+export function handleWorld(agent: Agent, slot: PortSlot, w: number, h: number, restLen?: number): Vec2 {
   const root = stemWorld(agent, slot, w, h);
   const tip = portWorld(agent, slot, w, h);
   const d = wrapDeltaVec(root.x, root.y, tip.x, tip.y, w, h);
   const seg = Math.hypot(d.x, d.y) || 1;
-  const handle = HANDLE_SCALE * seg;
+  const handle =
+    restLen === undefined
+      ? HANDLE_SCALE * seg
+      : Math.max(seg * 0.75, Math.min(restLen * 0.32, HANDLE_SCALE * seg));
   return {
     x: wrap(root.x + (d.x / seg) * handle, w),
     y: wrap(root.y + (d.y / seg) * handle, h),

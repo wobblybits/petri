@@ -4,12 +4,14 @@ import {
   momentOfInertia,
   portWorld,
   slotsFor,
+  stemRoot,
+  stemWorld,
   type Agent,
   type AgentKind,
   type PortSlot,
 } from './agents.ts';
-import { collideWireAgents, collideWires, queryHit, resolveHit } from './collide.ts';
-import { CHAIN_MASS } from './chain.ts';
+import { queryHit, SLOP } from './collide.ts';
+import { CHAIN_MASS, portExitAngle, solveContact, unwrapPoints } from './chain.ts';
 import { CH, Fields } from './fields.ts';
 import { Graph, wrapPos } from './graph.ts';
 import type { Params } from './params.ts';
@@ -19,13 +21,7 @@ import {
   commitRewrite,
   type Rewrite,
 } from './rewrite.ts';
-import {
-  angleDelta,
-  clamp,
-  nematicDelta,
-  wrapAngle,
-  wrapDeltaVec,
-} from './wrap.ts';
+import { angleDelta, clamp, wrapAngle, wrapDeltaVec } from './wrap.ts';
 
 /** Attraction-only chemotaxis. Own principal trails are a different channel and are ignored. */
 export function mixScent(
@@ -42,7 +38,35 @@ export function mixScent(
   return M * (dup + aux);
 }
 
+/** Cruise multiplier from local trail strength (1 = clear, →0 in dense scent). */
+export function scentSlowFactor(trail: number): number {
+  return 1 / (1 + trail / 28);
+}
+
+/**
+ * Turn authority rises as cruise falls — roughly constant locomotion budget,
+ * shifting kinetic emphasis from translation to rotation in stronger scent.
+ */
+export function scentTurnBoost(trail: number): number {
+  const slow = scentSlowFactor(trail);
+  const linear = slow * slow;
+  const spin = 1 - linear;
+  return clamp(1 + spin / Math.max(0.1, linear), 1, 8);
+}
+
 export class Sim {
+  /** Substeps per frame. One constraint iteration each. */
+  private static readonly SUBSTEPS = 8;
+
+  /** Local scent below which an agent counts as having lost the trail. */
+  private static readonly HOME_SCENT = 0.35;
+
+  /** Distance past which the pull home stops growing. */
+  private static readonly HOME_REACH = 320;
+
+  /** Share of the homing pull that still applies to a wired agent. */
+  private static readonly HOME_WIRED = 0.2;
+
   w: number;
   h: number;
   coverW: number;
@@ -55,6 +79,8 @@ export class Sim {
   fields: Fields;
   rewrites: Rewrite[] = [];
   masses = new Map<number, number>();
+  /** Eased centre of mass. Rewrites delete agents, which jumps the true COM. */
+  private home: { x: number; y: number } | null = null;
 
   constructor(w: number, h: number) {
     this.w = Math.max(1, w);
@@ -96,6 +122,7 @@ export class Sim {
     this.time = 0;
     this.nextId = 1;
     this.spawnAcc = 0;
+    this.home = null;
   }
 
   canSpawn(params: Params, n = 1): boolean {
@@ -146,22 +173,180 @@ export class Sim {
       this.coverH,
     );
     this.masses = this.graph.componentMass(this.agents);
+    this.trackHome(t);
+
     this.steer(params, t);
+    this.portTorques(params, t);
     this.flock(params, t);
     this.gravitate(params, t);
-    this.integrate(params, t);
-    this.graph.applySprings(this.agents, this.w, this.h, params, t, this.time);
-    this.separate();
-    this.reconstruct(t);
-    this.damp(params, t);
+    this.solve(params, t);
+    this.dampVelocities(params, t);
+
+    this.graph.refreshLengths(this.agents, this.w, this.h);
     this.graph.snap(this.agents, this.w, this.h, params, this.time);
     this.startRewrites(params);
     this.tickRewrites(params, t);
     this.deposit(params);
+    this.paintScentWalls();
     this.fields.diffuse(params.diffuse);
     this.fields.diffuse(params.diffuse * 0.65);
     this.fields.decay(params.decay);
     this.autoSpawn(params, t);
+  }
+
+  /**
+   * Each wired port pulls its body toward pointing along its own wire. This is
+   * an actuator, not a material constraint, so it acts as a torque in the force
+   * phase rather than as a position correction inside the solve — a
+   * position-level version is inertia-dependent (a light Era snaps 60% of the
+   * error per substep where a Con moves 14%) and pumps angular velocity.
+   *
+   * As torques they simply add, so a fully wired agent comes to rest where its
+   * ports' demands cancel. With Lafont's parallel aux axes that equilibrium is
+   * mostly set by the principal, and the aux wires make the body nod and sway
+   * as their neighbours drift.
+   *
+   * The target is the neighbour's stem, never the wire's own first rope node.
+   * The rope is the least constrained thing in the system; aiming at it makes
+   * body and rope chase each other into a runaway.
+   */
+  private portTorques(params: Params, dt: number): void {
+    const gain = params.portStiff * 320;
+    if (gain <= 0 || dt <= 0) return;
+    const splay = params.auxSpread * 0.35;
+    const aim = (agent: Agent, slot: PortSlot, target: { x: number; y: number }): void => {
+      if (agent.locked) return;
+      const I = momentOfInertia(agent);
+      // Critically damped: a bare proportional torque windmills, and a port
+      // that latches half a turn out is exactly the case that sets it going.
+      const damp = 1.8 * Math.sqrt(gain * I);
+      // Aux ports aim slightly off their neighbour, toward their own side of
+      // the body. Aiming straight at it is side-blind: once a left neighbour
+      // drifts across the centreline the torque simply turns the body to follow
+      // it and holds the crossed pose. Offsetting the setpoint makes the
+      // uncrossed pose the stable one, and leaves the drawn axes parallel.
+      const root = stemRoot(agent.kind, slot);
+      const want = slot === 'p' ? 0 : (root.y < 0 ? 1 : -1) * splay;
+      const err = wrapAngle(portExitAngle(agent, slot, target) - want);
+      agent.omega += (gain * err - damp * agent.omega) * dt / I;
+    };
+    for (const wire of this.graph.wires.values()) {
+      const A = this.agents.get(wire.a.id);
+      const B = this.agents.get(wire.b.id);
+      if (!A || !B) continue;
+      aim(A, wire.a.slot, stemWorld(B, wire.b.slot, this.w, this.h));
+      aim(B, wire.b.slot, stemWorld(A, wire.a.slot, this.w, this.h));
+    }
+  }
+
+  /**
+   * Constrained integration. Wires, port axes and contacts are all compliant
+   * constraints solved inside this one loop; nothing outside it writes a pose,
+   * and velocity is derived from the result rather than repaired afterwards.
+   *
+   * Many substeps with a single iteration each converge far better than the
+   * reverse at equal cost — Macklin et al., "Small Steps in Physics Simulation".
+   */
+  private solve(params: Params, dt: number): void {
+    if (dt <= 0) return;
+    this.graph.syncRest(this.time, params);
+    this.graph.syncRopeShape(this.agents, this.w, this.h);
+    const h = dt / Sim.SUBSTEPS;
+    const invH = 1 / h;
+    // Rope velocity is re-derived every substep, so a nudge of e px becomes
+    // e/h — damping it once per frame is far too late to keep a slack rope calm.
+    const ropeKeep = Math.exp(-Math.max(0, params.springDamp) * h);
+    const list = [...this.agents.values()];
+
+    for (let sub = 0; sub < Sim.SUBSTEPS; sub++) {
+      for (const a of list) {
+        a.prevX = a.x;
+        a.prevY = a.y;
+        a.prevHeading = a.heading;
+        if (a.locked) continue;
+        a.x += a.vx * h;
+        a.y += a.vy * h;
+        a.heading = wrapAngle(a.heading + a.omega * h);
+      }
+      for (const wire of this.graph.wires.values()) {
+        for (const node of wire.nodes) {
+          node.prevX = node.x;
+          node.prevY = node.y;
+          node.x += node.vx * h;
+          node.y += node.vy * h;
+        }
+      }
+
+      this.graph.solveWires(this.agents, params, h, this.time);
+      this.solveContacts(h);
+
+      for (const a of list) {
+        if (a.locked) {
+          a.vx = 0;
+          a.vy = 0;
+          a.omega = 0;
+          continue;
+        }
+        a.vx = (a.x - a.prevX) * invH;
+        a.vy = (a.y - a.prevY) * invH;
+        a.omega = wrapAngle(a.heading - a.prevHeading) * invH;
+      }
+      for (const wire of this.graph.wires.values()) {
+        for (const node of wire.nodes) {
+          node.vx = (node.x - node.prevX) * invH * ropeKeep;
+          node.vy = (node.y - node.prevY) * invH * ropeKeep;
+        }
+      }
+    }
+
+    for (const a of list) {
+      a.stun = Math.max(0, a.stun - dt);
+      wrapPos(a, this.w, this.h);
+    }
+  }
+
+  private solveContacts(h: number): void {
+    const list = [...this.agents.values()];
+    for (let i = 0; i < list.length; i++) {
+      const A = list[i];
+      for (let j = i + 1; j < list.length; j++) {
+        const B = list[j];
+        if (A.locked && B.locked) continue;
+        const hit = queryHit(A, B, this.w, this.h);
+        if (hit) solveContact(A, B, hit, SLOP, h);
+      }
+    }
+  }
+
+  /** One drag law for bodies; the rope is damped inside the substep loop. */
+  private dampVelocities(params: Params, dt: number): void {
+    const linKeep = Math.exp(-Math.max(0, params.drag) * dt);
+    const angKeep = Math.exp(-Math.max(0, params.angDrag) * dt);
+    for (const agent of this.agents.values()) {
+      if (agent.locked) continue;
+      agent.vx *= linKeep;
+      agent.vy *= linKeep;
+      agent.omega *= angKeep;
+    }
+  }
+
+  /** Rasterize wire chains so scent diffusion cannot cross them. */
+  private paintScentWalls(): void {
+    this.fields.clearWalls();
+    for (const wire of this.graph.wires.values()) {
+      const A = this.agents.get(wire.a.id);
+      const B = this.agents.get(wire.b.id);
+      if (!A || !B) continue;
+      const raw = [
+        stemWorld(A, wire.a.slot, this.w, this.h),
+        ...wire.nodes,
+        stemWorld(B, wire.b.slot, this.w, this.h),
+      ];
+      const pts = unwrapPoints(raw, this.w, this.h);
+      for (let i = 0; i < pts.length - 1; i++) {
+        this.fields.markSegment(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y);
+      }
+    }
   }
 
   /** Drop a free forager near the flock every spawnInterval seconds. */
@@ -223,7 +408,6 @@ export class Sim {
 
     for (const agent of list) {
       if (agent.locked) continue;
-      const Mcomp = this.masses.get(agent.id) ?? agent.mass;
 
       let biasX = 0;
       let biasY = 0;
@@ -289,33 +473,37 @@ export class Sim {
       else if (right > left + dead) bestHeading = rightA;
 
       const err = angleDelta(agent.heading, bestHeading);
-      const kp = params.turnRate * 6;
-      const kd = params.turnRate * 2;
+      const trail = this.scentAt(agent, agent.x, agent.y, params);
+      agent.trail = trail;
+      const slow = scentSlowFactor(trail);
+      const turnBoost = scentTurnBoost(trail);
+      const kp = params.turnRate * 6 * turnBoost;
+      const kd = (params.turnRate * 2) / Math.sqrt(turnBoost);
       const principalFree = this.graph.isFree({ id: agent.id, slot: 'p' });
       if (principalFree) {
         agent.omega += (kp * err - kd * agent.omega) * dt;
-        if (params.stepSpeed > 0) {
-          const cruise = params.stepSpeed * (agent.mass / Math.max(0.2, Mcomp));
-          const hx = Math.cos(agent.heading);
-          const hy = Math.sin(agent.heading);
-          const along = agent.vx * hx + agent.vy * hy;
-          const blend = 1 - Math.exp(-10 * dt);
-          const dAlong = (cruise - along) * blend;
-          agent.vx += dAlong * hx;
-          agent.vy += dAlong * hy;
-        }
+      }
+      if (principalFree && params.stepSpeed > 0) {
+        // Active Ornstein-Uhlenbeck propulsion: the drive decays toward cruise
+        // with a persistence time while coloured noise kicks it. A swimmer
+        // surges and eases the way a crawling cell does, where the servo this
+        // replaces — drive velocity straight at a setpoint — reads mechanical.
+        const cruise = params.stepSpeed * slow;
+        const tau = Math.max(0.05, params.swimTau);
+        const kick =
+          params.swimNoise * cruise * Math.sqrt(dt / tau) *
+          (Math.random() + Math.random() + Math.random() - 1.5) * 2;
+        agent.drive += ((cruise - agent.drive) / tau) * dt + kick;
+        agent.drive = clamp(agent.drive, -cruise * 0.4, cruise * 2.2);
+        const hx = Math.cos(agent.heading);
+        const hy = Math.sin(agent.heading);
+        const along = agent.vx * hx + agent.vy * hy;
+        const blend = 1 - Math.exp(-6 * dt);
+        const dAlong = (agent.drive - along) * blend;
+        agent.vx += dAlong * hx;
+        agent.vy += dAlong * hy;
       }
     }
-  }
-
-  /**
-   * Nematic turn: parallel is enough, either polarity.
-   * Latched agents still steer this way — it is facing, not swimming.
-   */
-  private alignHeading(agent: Agent, target: number, gain: number, dt: number): void {
-    if (gain <= 0 || agent.locked) return;
-    const I = Math.max(1e-4, momentOfInertia(agent));
-    agent.omega += (gain * nematicDelta(agent.heading, target) * dt) / I;
   }
 
   /**
@@ -337,6 +525,18 @@ export class Sim {
     }
   }
 
+  /** Flock / constraint pulls on wired cargo (no principal swim). */
+  private netPull(agent: Agent, wishX: number, wishY: number, _turnK: number): void {
+    if (agent.locked) return;
+    agent.vx += wishX;
+    agent.vy += wishY;
+  }
+
+  private netForce(agent: Agent, wishX: number, wishY: number, turnK: number): void {
+    if (this.graph.isFree({ id: agent.id, slot: 'p' })) this.locomote(agent, wishX, wishY, turnK);
+    else this.netPull(agent, wishX, wishY, turnK);
+  }
+
   /**
    * Boids on the net. Weight is 1/hops; disconnected pairs are ignored.
    * Meridians align nematically (parallel, either polarity), velocities match,
@@ -351,15 +551,12 @@ export class Sim {
     const byId = this.agents;
     const desired = Math.max(18, params.wireMinRest * 0.9);
     const nbrs = new Map<number, number[]>();
-    const portToward = new Map<string, PortSlot>();
     for (const a of list) nbrs.set(a.id, []);
     for (const wire of this.graph.wires.values()) {
       if (wire.a.id === wire.b.id) continue;
       if (!byId.has(wire.a.id) || !byId.has(wire.b.id)) continue;
       nbrs.get(wire.a.id)!.push(wire.b.id);
       nbrs.get(wire.b.id)!.push(wire.a.id);
-      portToward.set(`${wire.a.id}:${wire.b.id}`, wire.a.slot);
-      portToward.set(`${wire.b.id}:${wire.a.id}`, wire.b.slot);
     }
 
     for (let i = 0; i < list.length; i++) {
@@ -383,205 +580,82 @@ export class Sim {
 
         if (align > 0) {
           const k = align * w * dt;
-          const turn = params.turnRate * w * 0.35;
           const dvx = B.vx - A.vx;
           const dvy = B.vy - A.vy;
-          this.locomote(A, dvx * k * (mB / mSum), dvy * k * (mB / mSum), turn);
-          this.locomote(B, -dvx * k * (mA / mSum), -dvy * k * (mA / mSum), turn);
-
-          const slotA = portToward.get(`${A.id}:${B.id}`);
-          const slotB = portToward.get(`${B.id}:${A.id}`);
-          if (d === 1) {
-            const axis = Math.atan2(ny, nx);
-            const chord = align * 2.6;
-            if (slotA === 'p') this.alignHeading(A, axis, chord, dt);
-            if (slotB === 'p') this.alignHeading(B, axis + Math.PI, chord, dt);
-          }
-          this.alignHeading(A, B.heading, align * w * 2.1, dt);
-          this.alignHeading(B, A.heading, align * w * 2.1, dt);
-
-          const spd = Math.hypot(A.vx + B.vx, A.vy + B.vy);
-          if (spd > 5) {
-            const motion = Math.atan2(A.vy + B.vy, A.vx + B.vx);
-            const face = align * w * 0.85;
-            this.alignHeading(A, motion, face, dt);
-            this.alignHeading(B, motion, face, dt);
-          }
+          this.netForce(A, dvx * k * (mB / mSum), dvy * k * (mB / mSum), 0);
+          this.netForce(B, -dvx * k * (mA / mSum), -dvy * k * (mA / mSum), 0);
         }
 
-        if (sep > 0) {
+        if (sep > 0 && d > 1) {
           const want = 22 + (d - 1) * desired;
           if (dist < want) {
             const mag = sep * w * (want - dist);
             const ax = nx * mag * dt;
             const ay = ny * mag * dt;
             const turn = params.turnRate * w * 0.25;
-            this.locomote(A, -ax * (mB / mSum), -ay * (mB / mSum), turn);
-            this.locomote(B, ax * (mA / mSum), ay * (mA / mSum), turn);
+            const aSwims = this.graph.isFree({ id: A.id, slot: 'p' });
+            const bSwims = this.graph.isFree({ id: B.id, slot: 'p' });
+            this.netForce(A, -ax * (mB / mSum), -ay * (mB / mSum), aSwims ? 0 : turn);
+            this.netForce(B, ax * (mA / mSum), ay * (mA / mSum), bSwims ? 0 : turn);
           }
         }
       }
     }
 
-    if (align <= 0) return;
-    const straight = align * 0.65;
-    for (const agent of list) {
-      if (agent.locked) continue;
-      const ids = nbrs.get(agent.id);
-      if (!ids || ids.length < 2) continue;
-      let cx = 0;
-      let cy = 0;
-      let massN = 0;
-      const others: Agent[] = [];
-      for (const id of ids) {
-        const n = byId.get(id);
-        if (!n || n.locked) continue;
-        others.push(n);
-        cx += n.x;
-        cy += n.y;
-        massN += Math.max(0.08, n.mass);
-      }
-      if (others.length < 2) continue;
-      cx /= others.length;
-      cy /= others.length;
-      const dx = cx - agent.x;
-      const dy = cy - agent.y;
-      const mI = Math.max(0.08, agent.mass);
-      const k = straight * dt;
-      const turn = params.turnRate * 0.2;
-      this.locomote(agent, dx * k, dy * k, turn);
-      const share = (mI * k) / massN;
-      for (const n of others) {
-        this.locomote(n, -dx * share, -dy * share, turn);
-      }
-      if (Math.hypot(dx, dy) > 1e-4) {
-        this.alignHeading(agent, Math.atan2(dy, dx), align * 1.1, dt);
-      }
-      let cxH = 0;
-      let syH = 0;
-      for (const n of others) {
-        const h = agent.heading + nematicDelta(agent.heading, n.heading);
-        cxH += Math.cos(h);
-        syH += Math.sin(h);
-      }
-      this.alignHeading(agent, Math.atan2(syH, cxH), align * 1.4, dt);
-    }
   }
 
-  private gravitate(params: Params, dt: number): void {
-    const g = params.gravity;
-    if (g <= 0) return;
+  /** Ease the home point toward the live centre of mass. */
+  private trackHome(dt: number): void {
     const com = this.centerOfMass();
+    if (!com) return;
+    if (!this.home) {
+      this.home = { x: com.x, y: com.y };
+      return;
+    }
+    // A rewrite can delete two agents at once, which moves the true centre of
+    // mass discontinuously; pulling toward that unsmoothed would kick the
+    // survivors. Half a second of lag makes home a place, not an instant value.
+    const k = 1 - Math.exp(-2 * dt);
+    this.home.x += (com.x - this.home.x) * k;
+    this.home.y += (com.y - this.home.y) * k;
+  }
+
+  /**
+   * Cohesion toward the flock's centre — which is the centre of the map as
+   * seen, since the camera and the scent field are both built around it.
+   *
+   * The homing share is scaled by how little an agent can smell. A swimmer on a
+   * trail is left alone to follow it; one that has lost the scent completely
+   * turns for home instead of wandering off. Measured over a minute of soup,
+   * agents within 200 px of the flock sit around 0.2 scent while everything
+   * past 600 px reads exactly zero, so the two cases separate cleanly.
+   */
+  private gravitate(params: Params, dt: number): void {
+    const base = params.gravity;
+    const home = params.homing;
+    if ((base <= 0 && home <= 0) || dt <= 0) return;
+    const com = this.home ?? this.centerOfMass();
     if (!com) return;
     for (const agent of this.agents.values()) {
       if (agent.locked) continue;
-      agent.vx += -g * (agent.x - com.x) * dt;
-      agent.vy += -g * (agent.y - com.y) * dt;
-    }
-  }
-
-  private integrate(params: Params, dt: number): void {
-    for (const agent of this.agents.values()) {
-      agent.prevX = agent.x;
-      agent.prevY = agent.y;
-      agent.prevHeading = agent.heading;
-      agent.integVx = agent.vx;
-      agent.integVy = agent.vy;
-      agent.integOmega = agent.omega;
-      if (agent.locked) {
-        wrapPos(agent, this.w, this.h);
-        continue;
+      const dx = com.x - agent.x;
+      const dy = com.y - agent.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 1e-6) continue;
+      let k = base;
+      if (home > 0) {
+        // Mostly for loose foragers. A wired agent is already held in place by
+        // its net, and hauling whole nets inward just crowds the flock, which
+        // is what pushes aux wires across each other.
+        const anchored = this.graph.isWired(agent) ? Sim.HOME_WIRED : 1;
+        k += (home * anchored) / (1 + agent.trail / Sim.HOME_SCENT);
       }
-      agent.x += agent.vx * dt;
-      agent.y += agent.vy * dt;
-      agent.heading = wrapAngle(agent.heading + agent.omega * dt);
-      agent.stun = Math.max(0, agent.stun - dt);
-      wrapPos(agent, this.w, this.h);
+      // Saturating: a spring close in, a steady walk home from far out, so a
+      // stray is not slingshot back through the flock.
+      const pull = (k * Math.min(dist, Sim.HOME_REACH)) / dist;
+      agent.vx += dx * pull * dt;
+      agent.vy += dy * pull * dt;
     }
-    for (const wire of this.graph.wires.values()) {
-      for (const node of wire.nodes) {
-        node.prevX = node.x;
-        node.prevY = node.y;
-        node.integVx = node.vx;
-        node.integVy = node.vy;
-      }
-    }
-  }
-
-  private reconstruct(dt: number): void {
-    const invDt = 1 / Math.max(1e-6, dt);
-    const slack = 3;
-    const wSlack = 1.5;
-    for (const agent of this.agents.values()) {
-      if (agent.locked) continue;
-      agent.vx = (agent.x - agent.prevX) * invDt;
-      agent.vy = (agent.y - agent.prevY) * invDt;
-      agent.omega = wrapAngle(agent.heading - agent.prevHeading) * invDt;
-      const cap = Math.hypot(agent.integVx, agent.integVy) + slack;
-      const speed = Math.hypot(agent.vx, agent.vy);
-      if (speed > cap && speed > 1e-8) {
-        const s = cap / speed;
-        agent.vx *= s;
-        agent.vy *= s;
-      }
-      const wCap = Math.abs(agent.integOmega) + wSlack;
-      if (Math.abs(agent.omega) > wCap) {
-        agent.omega = Math.sign(agent.omega) * wCap;
-      }
-    }
-    for (const wire of this.graph.wires.values()) {
-      for (const node of wire.nodes) {
-        node.vx = (node.x - node.prevX) * invDt;
-        node.vy = (node.y - node.prevY) * invDt;
-        const cap = Math.hypot(node.integVx, node.integVy) + slack;
-        const speed = Math.hypot(node.vx, node.vy);
-        if (speed > cap && speed > 1e-8) {
-          const s = cap / speed;
-          node.vx *= s;
-          node.vy *= s;
-        }
-      }
-    }
-  }
-
-  private damp(params: Params, dt: number): void {
-    const nodeKeep = Math.exp(-Math.max(0, params.drag) * dt);
-    for (const agent of this.agents.values()) {
-      if (agent.locked) continue;
-      const cargo = !this.graph.isFree({ id: agent.id, slot: 'p' });
-      const drag = Math.max(0, params.drag) + (cargo ? 3.5 : 0);
-      const linKeep = Math.exp(-drag * dt);
-      const angKeep = Math.exp(-Math.max(0, params.angDrag) * dt * (cargo ? 2.2 : 1));
-      const shape = agent.kind === 'era' ? 0.75 : 1;
-      agent.vx *= Math.pow(linKeep, shape);
-      agent.vy *= Math.pow(linKeep, shape);
-      agent.omega *= Math.pow(angKeep, shape);
-    }
-    for (const wire of this.graph.wires.values()) {
-      for (const node of wire.nodes) {
-        node.vx *= nodeKeep;
-        node.vy *= nodeKeep;
-      }
-    }
-  }
-
-  private separate(): void {
-    const list = [...this.agents.values()];
-    for (let pass = 0; pass < 6; pass++) {
-      for (let i = 0; i < list.length; i++) {
-        const A = list[i];
-        if (A.locked) continue;
-        for (let j = i + 1; j < list.length; j++) {
-          const B = list[j];
-          if (B.locked) continue;
-          const hit = queryHit(A, B, this.w, this.h);
-          if (!hit) continue;
-          resolveHit(A, B, hit, this.w, this.h);
-        }
-      }
-    }
-    collideWireAgents(this.graph, this.agents, this.w, this.h);
-    collideWires(this.graph, this.agents, this.w, this.h);
   }
 
   momentum(): { px: number; py: number; L: number } {
@@ -619,6 +693,7 @@ export class Sim {
   }
 
   private startRewrites(params: Params): void {
+    if (params.rewriteDuration <= 0) return;
     const busy = new Set<number>();
     for (const rw of this.rewrites) {
       busy.add(rw.a);
@@ -631,8 +706,17 @@ export class Sim {
       if (!A || !B || A.locked || B.locked || A.stun > 0 || B.stun > 0) continue;
       if (busy.has(A.id) || busy.has(B.id)) continue;
       if (!this.graph.portsFilled(A) || !this.graph.portsFilled(B)) continue;
+      const shrinkU = this.graph.shrinkU(wire, this.time, params);
+      if (shrinkU < 1) continue;
+      if (this.time - wire.born < params.wireShrink + 0.2) continue;
       const len = this.graph.curveLength(wire, this.agents, this.w, this.h);
       if (len > params.wireMinRest + 3) continue;
+      A.vx = 0;
+      A.vy = 0;
+      A.omega = 0;
+      B.vx = 0;
+      B.vy = 0;
+      B.omega = 0;
       this.rewrites.push(
         beginRewrite(A, B, this.graph, this.agents, this.w, this.h, params.rewriteDuration),
       );

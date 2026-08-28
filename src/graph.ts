@@ -13,14 +13,15 @@ import {
   polylineLength,
   reduceChain,
   sampleChain,
-  solveChain,
+  solveWire,
   unwrapPoints,
   type ChainNode,
+  type WireStiffness,
 } from './chain.ts';
-import { bezierLength } from './curve.ts';
+import { bezierPoint } from './curve.ts';
 import { segmentsInterfere, WIRE_RADIUS } from './geom.ts';
 import type { Params } from './params.ts';
-import { clamp, easeInOut, lerp, wrap, wrapDeltaVec } from './wrap.ts';
+import { clamp, easeInOut, lerp, wrap, wrapDeltaVec, type Vec2 } from './wrap.ts';
 
 export interface Wire {
   id: number;
@@ -29,6 +30,10 @@ export interface Wire {
   latchLen: number;
   lastLen: number;
   rest: number;
+  /** Arc length of the rope. Longer than `rest` when the ports force a detour. */
+  ropeLen: number;
+  /** Rest shape: where each rope node wants to sit on the port-respecting curve. */
+  shape: Vec2[];
   born: number;
   nodes: ChainNode[];
 }
@@ -39,6 +44,9 @@ export function otherEnd(wire: Wire, port: PortRef): PortRef {
 }
 
 export class Graph {
+  /** Birth length floor, as a fraction of wireMinRest. */
+  static BIRTH_FLOOR = 0.2;
+
   wires = new Map<number, Wire>();
   portWire = new Map<string, number>();
   nextWireId = 1;
@@ -64,18 +72,6 @@ export class Graph {
     const o = otherEnd(w, port);
     if (dying.has(o.id)) return null;
     return o;
-  }
-
-  wiredTogether(aId: number, bId: number): boolean {
-    for (const w of this.wires.values()) {
-      if (
-        (w.a.id === aId && w.b.id === bId) ||
-        (w.a.id === bId && w.b.id === aId)
-      ) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /** Shortest hop count along wires. Missing entry ⇒ not in the same component. */
@@ -107,46 +103,12 @@ export class Graph {
     return out;
   }
 
-  /** Shortest hop counts along wires. Missing / unreachable pairs are absent (weight 0). */
-  hopDistance(): Map<number, Map<number, number>> {
-    const adj = new Map<number, Set<number>>();
-    const link = (a: number, b: number): void => {
-      if (a === b) return;
-      let set = adj.get(a);
-      if (!set) {
-        set = new Set();
-        adj.set(a, set);
-      }
-      set.add(b);
-    };
-    for (const wire of this.wires.values()) {
-      link(wire.a.id, wire.b.id);
-      link(wire.b.id, wire.a.id);
-    }
-    const out = new Map<number, Map<number, number>>();
-    for (const start of adj.keys()) {
-      const dist = new Map<number, number>([[start, 0]]);
-      const q = [start];
-      for (let i = 0; i < q.length; i++) {
-        const u = q[i];
-        const du = dist.get(u)!;
-        for (const v of adj.get(u) ?? []) {
-          if (dist.has(v)) continue;
-          dist.set(v, du + 1);
-          q.push(v);
-        }
-      }
-      out.set(start, dist);
-    }
-    return out;
-  }
-
   attach(a: PortRef, b: PortRef, latchLen: number, time: number): Wire | null {
     if (a.id === b.id && a.slot === b.slot) return null;
     if (!this.isFree(a) || !this.isFree(b)) return null;
     const id = this.nextWireId++;
     const len = Math.max(1, latchLen);
-    const wire: Wire = { id, a, b, latchLen: len, lastLen: len, rest: len, born: time, nodes: [] };
+    const wire: Wire = { id, a, b, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [] };
     this.wires.set(id, wire);
     this.portWire.set(portKey(a), id);
     this.portWire.set(portKey(b), id);
@@ -165,11 +127,31 @@ export class Graph {
     const A = agents.get(a.id);
     const B = agents.get(b.id);
     if (!A || !B) return null;
-    const c = wireCubic(A, a.slot, B, b.slot, w, h);
-    const len = Math.max(bezierLength(c.p0, c.p1, c.p2, c.p3), params.wireMinRest);
+    // No heading assignment here. Snapping used to rotate both bodies into
+    // alignment on the spot, which moves their stems, which hands the solver a
+    // fresh violation and a body overlap to resolve in one substep. The port
+    // torques turn them instead, and the wire is born slack enough to allow it.
+    const sa = stemWorld(A, a.slot, w, h);
+    const sb = stemWorld(B, b.slot, w, h);
+    const stemDelta = wrapDeltaVec(sa.x, sa.y, sb.x, sb.y, w, h);
+    // Born at the length it actually latched at, so the wire starts satisfied
+    // and `restLength` ramps it to wireMinRest over `wireShrink`. Clamping this
+    // up to wireMinRest skips the ramp and hands the solver a 30 px violation
+    // to resolve in one substep, which reads as a kick.
+    const span = Math.hypot(stemDelta.x, stemDelta.y);
+    const len = Math.max(span, params.wireMinRest * Graph.BIRTH_FLOOR);
+    const c = wireCubic(A, a.slot, B, b.slot, w, h, len);
     const wire = this.attach(a, b, len, time);
     if (wire) wire.nodes = sampleChain(c, desiredLinks(len), w, h);
     return wire;
+  }
+
+  /** Cheap degree test: a few port lookups rather than a scan of every wire. */
+  isWired(agent: Agent): boolean {
+    for (const slot of slotsFor(agent.kind)) {
+      if (!this.isFree({ id: agent.id, slot })) return true;
+    }
+    return false;
   }
 
   portsFilled(agent: Agent): boolean {
@@ -187,9 +169,35 @@ export class Graph {
     return polylineLength(pts, w, h);
   }
 
+  stemSpan(wire: Wire, agents: Map<number, Agent>, w: number, h: number): number {
+    const A = agents.get(wire.a.id);
+    const B = agents.get(wire.b.id);
+    if (!A || !B) return wire.rest;
+    const pa = stemWorld(A, wire.a.slot, w, h);
+    const pb = stemWorld(B, wire.b.slot, w, h);
+    const d = wrapDeltaVec(pa.x, pa.y, pb.x, pb.y, w, h);
+    return Math.hypot(d.x, d.y);
+  }
+
+  /**
+   * Rest length on the shrink curve. The duration stretches with how much wire
+   * there is to reel in, so a long latch closes at roughly the same speed as a
+   * short one instead of yanking its agents together.
+   */
   restLength(wire: Wire, time: number, params: Params): number {
-    const u = clamp((time - wire.born) / Math.max(0.05, params.wireShrink), 0, 1);
+    const travel = Math.abs(wire.latchLen - params.wireMinRest);
+    const span = Math.max(1, params.wireMinRest);
+    const dur = Math.max(0.05, params.wireShrink) * Math.max(1, travel / span);
+    const u = clamp((time - wire.born) / dur, 0, 1);
     return lerp(wire.latchLen, params.wireMinRest, easeInOut(u));
+  }
+
+  /** 0 → 1 over the (distance-scaled) shrink window. */
+  shrinkProgress(wire: Wire, time: number, params: Params): number {
+    const travel = Math.abs(wire.latchLen - params.wireMinRest);
+    const span = Math.max(1, params.wireMinRest);
+    const dur = Math.max(0.05, params.wireShrink) * Math.max(1, travel / span);
+    return clamp((time - wire.born) / dur, 0, 1);
   }
 
   detach(id: number): void {
@@ -228,6 +236,8 @@ export class Graph {
     const cands: Cand[] = [];
     const r = params.snapRadius;
     const r2 = r * r;
+    const touchR = 5.5;
+    const touchR2 = touchR * touchR;
     for (let i = 0; i < ports.length; i++) {
       for (let j = i + 1; j < ports.length; j++) {
         const A = ports[i];
@@ -239,11 +249,14 @@ export class Graph {
         const agentA = agents.get(A.ref.id);
         const agentB = agents.get(B.ref.id);
         if (!agentA || !agentB) continue;
-        if (!inSnapArc(agentA, A.ref.slot, B.x, B.y, w, h, r, params.snapArc)) continue;
-        if (!inSnapArc(agentB, B.ref.slot, A.x, A.y, w, h, r, params.snapArc)) continue;
+        const touching = dist2 <= touchR2;
+        if (!touching) {
+          if (!inSnapArc(agentA, A.ref.slot, B.x, B.y, w, h, r, params.snapArc)) continue;
+          if (!inSnapArc(agentB, B.ref.slot, A.x, A.y, w, h, r, params.snapArc)) continue;
+        }
         const rank =
           A.principal && B.principal ? 0 : A.principal || B.principal ? 1 : 2;
-        cands.push({ pa: A.ref, pb: B.ref, dist: dist2, rank });
+        cands.push({ pa: A.ref, pb: B.ref, dist: dist2, rank: touching ? rank - 1 : rank });
       }
     }
     cands.sort((a, b) => a.rank - b.rank || a.dist - b.dist);
@@ -253,7 +266,6 @@ export class Graph {
       const kb = portKey(c.pb);
       if (taken.has(ka) || taken.has(kb)) continue;
       if (!this.isFree(c.pa) || !this.isFree(c.pb)) continue;
-      if (this.wiredTogether(c.pa.id, c.pb.id)) continue;
       if (this.latchCrosses(agents, c.pa, c.pb, w, h)) continue;
       if (this.connect(agents, c.pa, c.pb, w, h, params, time)) {
         taken.add(ka);
@@ -304,6 +316,18 @@ export class Graph {
     return false;
   }
 
+  wireCount(agentId: number): number {
+    let n = 0;
+    for (const wire of this.wires.values()) {
+      if (wire.a.id === agentId || wire.b.id === agentId) n++;
+    }
+    return n;
+  }
+
+  shrinkU(wire: Wire, time: number, params: Params): number {
+    return this.shrinkProgress(wire, time, params);
+  }
+
   componentMass(agents: Map<number, Agent>): Map<number, number> {
     const parent = new Map<number, number>();
     const find = (x: number): number => {
@@ -337,73 +361,93 @@ export class Graph {
     return out;
   }
 
-  applySprings(
+  /**
+   * Rest length for a wire this frame: the shrink curve toward `wireMinRest`,
+   * plus a slow per-wire breath so a settled net keeps moving like tissue
+   * instead of freezing solid.
+   */
+  syncRest(time: number, params: Params): void {
+    for (const wire of this.wires.values()) {
+      const base = this.restLength(wire, time, params);
+      const phase = wire.id * 2.399963;
+      const rate = 0.55 + (wire.id % 7) * 0.11;
+      const breathe = 1 + params.wireBreathe * Math.sin(time * rate + phase);
+      wire.rest = Math.max(4, base * breathe);
+      reduceChain(wire.nodes, wire.rest);
+    }
+  }
+
+  /**
+   * The wire's rest shape: the cubic that leaves both ports along their axes —
+   * the same curve the renderer draws. Sampling it gives every rope node a
+   * target, which is what makes a slack rope well-posed, and its arc length is
+   * the rope's length, so links, bending and shape all agree.
+   */
+  syncRopeShape(agents: Map<number, Agent>, w: number, h: number): void {
+    for (const wire of this.wires.values()) {
+      const A = agents.get(wire.a.id);
+      const B = agents.get(wire.b.id);
+      if (!A || !B) continue;
+      const n = wire.nodes.length;
+      if (n === 0) {
+        wire.shape = [];
+        wire.ropeLen = wire.rest;
+        continue;
+      }
+      const c = wireCubic(A, wire.a.slot, B, wire.b.slot, w, h, wire.rest);
+      const pts: Vec2[] = [];
+      for (let i = 1; i <= n; i++) {
+        pts.push(bezierPoint(c.p0, c.p1, c.p2, c.p3, i / (n + 1)));
+      }
+      wire.shape = pts;
+      wire.ropeLen = polylineLength([c.p0, ...pts, c.p3], w, h);
+    }
+  }
+
+  /**
+   * Compliance for one wire. A fresh latch is slack — it reaches and settles;
+   * an aged latch is firm. This replaces the old shrink/align/organize phase
+   * machine with a single continuous parameter.
+   */
+  private stiffness(wire: Wire, time: number, params: Params): WireStiffness {
+    const age = Math.max(0, time - wire.born);
+    return {
+      scale: 12 / Math.max(1, params.springK),
+      slack: 1 + 6 * Math.exp(-age / 0.8),
+    };
+  }
+
+  /** One XPBD iteration over every wire. Called once per substep. */
+  solveWires(
     agents: Map<number, Agent>,
-    w: number,
-    h: number,
     params: Params,
-    dt: number,
+    h: number,
     time: number,
   ): void {
-    const snap = new Map<number, { x: number; y: number; heading: number }>();
-    for (const agent of agents.values()) {
-      snap.set(agent.id, { x: agent.x, y: agent.y, heading: agent.heading });
-    }
-    const acc = new Map<number, { x: number; y: number; n: number }>();
-    const add = (agent: Agent) => {
-      if (agent.locked) return;
-      let s = acc.get(agent.id);
-      if (!s) {
-        s = { x: 0, y: 0, n: 0 };
-        acc.set(agent.id, s);
-      }
-      s.x += agent.x;
-      s.y += agent.y;
-      s.n += 1;
-    };
-    const restore = (agent: Agent) => {
-      const s = snap.get(agent.id);
-      if (!s) return;
-      agent.x = s.x;
-      agent.y = s.y;
-      agent.heading = s.heading;
-    };
-
     for (const wire of this.wires.values()) {
       const A = agents.get(wire.a.id);
       const B = agents.get(wire.b.id);
       if (!A || !B) continue;
       if (A.locked && B.locked) continue;
-      const rest = this.restLength(wire, time, params);
-      wire.rest = rest;
-      reduceChain(wire.nodes, rest);
-      restore(A);
-      restore(B);
-      wire.lastLen = solveChain(
+      solveWire(
         A,
         wire.a.slot,
         B,
         wire.b.slot,
         wire.nodes,
-        rest,
-        params,
-        dt,
-        w,
+        wire.rest,
+        wire.ropeLen,
+        wire.shape,
+        this.stiffness(wire, time, params),
         h,
-        0,
-        0,
       );
-      add(A);
-      add(B);
     }
+  }
 
-    for (const [id, s] of acc) {
-      const agent = agents.get(id);
-      if (!agent || s.n < 1) continue;
-      agent.x = s.x / s.n;
-      agent.y = s.y / s.n;
-      const orig = snap.get(id);
-      if (orig) agent.heading = orig.heading;
+  /** Bookkeeping the renderer and rewrite gate read. */
+  refreshLengths(agents: Map<number, Agent>, w: number, h: number): void {
+    for (const wire of this.wires.values()) {
+      wire.lastLen = this.curveLength(wire, agents, w, h);
     }
   }
 }

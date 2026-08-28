@@ -13,6 +13,12 @@ export interface Params {
   rewriteDuration: number;
   springK: number;
   springDamp: number;
+  /** How far an aux port aims off its neighbour, toward its own side. 1 = 20 degrees. */
+  auxSpread: number;
+  /** Port-axis stiffness multiplier. Higher = wires hug their port axis harder. */
+  portStiff: number;
+  /** Rest-length breathing amplitude, as a fraction. 0 = a settled net freezes. */
+  wireBreathe: number;
   wireMinRest: number;
   wireShrink: number;
   eraMass: number;
@@ -21,12 +27,18 @@ export interface Params {
   sensorAngle: number;
   sensorDist: number;
   stepSpeed: number;
+  /** Persistence time of self-propulsion, in seconds. Longer = smoother runs. */
+  swimTau: number;
+  /** Self-propulsion noise, as a fraction of cruise speed. 0 = a flat setpoint. */
+  swimNoise: number;
   thrust: number;
   drag: number;
   angDrag: number;
   maxSpeed: number;
   wander: number;
   gravity: number;
+  /** Extra pull home for an agent that has lost the scent entirely. */
+  homing: number;
   flockAlign: number;
   flockSep: number;
   maxAgents: number;
@@ -50,7 +62,10 @@ export function defaultParams(): Params {
     faceAttract: 32,
     rewriteDuration: 0.7,
     springK: 12,
-    springDamp: 18,
+    springDamp: 45,
+    auxSpread: 1.7,
+    portStiff: 2,
+    wireBreathe: 0.04,
     wireMinRest: 40,
     wireShrink: 0.9,
     eraMass: 0.45,
@@ -59,12 +74,15 @@ export function defaultParams(): Params {
     sensorAngle: 0.48,
     sensorDist: 24,
     stepSpeed: 38,
+    swimTau: 1.1,
+    swimNoise: 0.35,
     thrust: 95,
     drag: 0.55,
     angDrag: 2.4,
     maxSpeed: 70,
     wander: 0.12,
     gravity: 0.12,
+    homing: 0.9,
     flockAlign: 5.5,
     flockSep: 36,
     maxAgents: 80,
@@ -90,7 +108,10 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'attractMedium', label: 'Medium attract', min: 0, max: 2, step: 0.05 },
   { key: 'sensorAngle', label: 'Sensor arc', min: 0.1, max: 1.2, step: 0.02 },
   { key: 'stepSpeed', label: 'Step speed', min: 10, max: 180, step: 1 },
+  { key: 'swimTau', label: 'Swim persistence', min: 0.1, max: 4, step: 0.05 },
+  { key: 'swimNoise', label: 'Swim noise', min: 0, max: 2, step: 0.05 },
   { key: 'gravity', label: 'Gravity', min: 0, max: 0.8, step: 0.01 },
+  { key: 'homing', label: 'Homing (no scent)', min: 0, max: 4, step: 0.05 },
   { key: 'drag', label: 'Fluid drag', min: 0, max: 4, step: 0.05 },
   { key: 'angDrag', label: 'Spin damp', min: 0, max: 8, step: 0.05 },
   { key: 'flockAlign', label: 'Flock align', min: 0, max: 16, step: 0.1 },
@@ -100,7 +121,10 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'wireShrink', label: 'Wire shrink', min: 0.1, max: 3, step: 0.05 },
   { key: 'wireMinRest', label: 'Wire min length', min: 8, max: 48, step: 1 },
   { key: 'springK', label: 'Spring stiffness', min: 0, max: 80, step: 0.5 },
-  { key: 'springDamp', label: 'Spring damp', min: 0, max: 40, step: 0.5 },
+  { key: 'springDamp', label: 'Rope damp', min: 0, max: 120, step: 1 },
+  { key: 'portStiff', label: 'Port stiffness', min: 0.1, max: 4, step: 0.05 },
+  { key: 'auxSpread', label: 'Aux spread', min: 0, max: 3, step: 0.05 },
+  { key: 'wireBreathe', label: 'Wire breathe', min: 0, max: 0.15, step: 0.005 },
   { key: 'eraMass', label: 'Era mass', min: 0.15, max: 2, step: 0.05 },
   { key: 'nodeMass', label: 'Con/Dup mass', min: 0.3, max: 4, step: 0.05 },
   { key: 'maxAgents', label: 'Max agents', min: 8, max: 200, step: 1 },

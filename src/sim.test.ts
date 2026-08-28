@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { defaultParams } from './params.ts';
 import { loadPreset } from './presets.ts';
 import { queryHit, SLOP } from './collide.ts';
-import { mixScent, Sim } from './sim.ts';
-import { nematicDelta } from './wrap.ts';
+import { mixScent, scentSlowFactor, scentTurnBoost, Sim } from './sim.ts';
+import { CH } from './fields.ts';
+import { angleDelta } from './wrap.ts';
 
 function fastParams() {
   const params = defaultParams();
@@ -12,6 +13,7 @@ function fastParams() {
   params.rewriteDuration = 0.12;
   params.springK = 90;
   params.gravity = 0;
+  params.homing = 0;
   params.spawnInterval = 0;
   return params;
 }
@@ -21,6 +23,14 @@ function step(sim: Sim, params: ReturnType<typeof fastParams>, n: number): void 
 }
 
 describe('scent steering', () => {
+  it('scentSlowFactor and scentTurnBoost trade linear speed for rotation', () => {
+    expect(scentSlowFactor(0)).toBe(1);
+    expect(scentTurnBoost(0)).toBe(1);
+    const trail = 56;
+    expect(scentSlowFactor(trail)).toBeLessThan(0.4);
+    expect(scentTurnBoost(trail)).toBeGreaterThan(3);
+  });
+
   it('does not mix an agent’s own principal channel', () => {
     const params = defaultParams();
     expect(mixScent('dup', 1, 50, 3, params)).toBe(mixScent('dup', 1, 0, 3, params));
@@ -37,6 +47,7 @@ describe('scent steering', () => {
       params.snapWell = 0;
       params.snapRadius = 0;
       params.gravity = 0;
+      params.homing = 0;
       const heading = 0.4;
       const agent = sim.spawn(kind, 120, 80, heading, params, true)!;
       step(sim, params, 45);
@@ -53,6 +64,7 @@ describe('scent steering', () => {
     const sim = new Sim(320, 200);
     const params = defaultParams();
     params.gravity = 0;
+    params.homing = 0;
     params.flockAlign = 0;
     params.flockSep = 0;
     params.snapRadius = 0;
@@ -106,6 +118,7 @@ describe('scent steering', () => {
     params.wander = 0;
     params.stepSpeed = 0;
     params.gravity = 0;
+    params.homing = 0;
     const a = sim.spawn('con', 100, 80, 0, params, true)!;
     const b = sim.spawn('con', 118, 80, Math.PI, params, true)!;
     a.vx = 60;
@@ -114,23 +127,24 @@ describe('scent steering', () => {
     expect(b.vx).toBeGreaterThan(0);
   });
 
-  it('chain nodes collide with other agents', () => {
+  it('agents can occupy the same space as a wire chain', () => {
     const sim = new Sim(320, 200);
     const params = defaultParams();
     params.snapRadius = 0;
     params.stepSpeed = 0;
     params.gravity = 0;
+    params.homing = 0;
     params.rewriteDuration = 20;
+    params.spawnInterval = 0;
     const a = sim.spawn('era', 60, 100, 0, params, true)!;
     const b = sim.spawn('era', 260, 100, Math.PI, params, true)!;
     sim.wire(a.id, 'p', b.id, 'p', params);
     const wire = [...sim.graph.wires.values()][0];
     expect(wire.nodes.length).toBeGreaterThan(2);
     const mid = wire.nodes[Math.floor(wire.nodes.length / 2)];
-    const blocker = sim.spawn('con', mid.x, mid.y, 0, params, true)!;
+    const visitor = sim.spawn('con', mid.x, mid.y, 0, params, true)!;
     step(sim, params, 10);
-    const d = Math.hypot(mid.x - blocker.x, mid.y - blocker.y);
-    expect(d).toBeGreaterThan(10);
+    expect(Math.hypot(mid.x - visitor.x, mid.y - visitor.y)).toBeLessThan(14);
   });
 });
 
@@ -203,7 +217,7 @@ describe('simulation presets', () => {
     expect(between.length).toBe(1);
   });
 
-  it('does not snap ports that are close but not facing', () => {
+  it('does not snap ports that are close but not facing or touching', () => {
     const sim = new Sim(240, 160);
     const params = defaultParams();
     params.snapRadius = 90;
@@ -214,6 +228,22 @@ describe('simulation presets', () => {
     sim.spawn('con', 128, 80, 0, params, true);
     sim.step(1 / 60, params);
     expect(sim.graph.wires.size).toBe(0);
+  });
+
+  it('latches when free port tips touch even outside the snap arc', () => {
+    const sim = new Sim(320, 200);
+    const params = defaultParams();
+    params.snapRadius = 40;
+    params.snapArc = 0.12;
+    params.wireShrink = 20;
+    params.rewriteDuration = 20;
+    // Same heading: not facing. Tips nearly coincident.
+    const a = sim.spawn('era', 100, 100, 0, params, true)!;
+    const b = sim.spawn('era', 100, 103, 0, params, true)!;
+    sim.graph.snap(sim.agents, sim.w, sim.h, params, sim.time);
+    expect(sim.graph.wires.size).toBe(1);
+    expect(sim.graph.isFree({ id: a.id, slot: 'p' })).toBe(false);
+    expect(sim.graph.isFree({ id: b.id, slot: 'p' })).toBe(false);
   });
 
   it('γ–δ commutation copies into two cons and two dups before further reduction', () => {
@@ -296,6 +326,7 @@ describe('conservative mechanics', () => {
   function passiveParams() {
     const params = defaultParams();
     params.gravity = 0;
+    params.homing = 0;
     params.stepSpeed = 0;
     params.turnRate = 0;
     params.snapRadius = 0;
@@ -308,6 +339,7 @@ describe('conservative mechanics', () => {
     params.rewriteDuration = 20;
     params.flockAlign = 0;
     params.flockSep = 0;
+    params.spawnInterval = 0;
     return params;
   }
 
@@ -327,6 +359,7 @@ describe('conservative mechanics', () => {
     expect(after.L).toBeCloseTo(before.L, 1);
     expect(sim.kineticEnergy()).toBeLessThan(e0 * 1.35);
     expect(sim.kineticEnergy()).toBeGreaterThan(e0 * 0.45);
+    expect(b.id).toBeGreaterThan(0);
   });
 
   it('gravity does not move the center of mass', () => {
@@ -362,7 +395,7 @@ describe('conservative mechanics', () => {
     expect(sim.graph.wires.size).toBe(1);
   });
 
-  it('pushes crossing wires apart', () => {
+  it('allows wire chains to cross without pushing each other', () => {
     const sim = new Sim(400, 240);
     const params = passiveParams();
     params.springK = 40;
@@ -375,19 +408,42 @@ describe('conservative mechanics', () => {
     step(sim, params, 20);
     const wires = [...sim.graph.wires.values()];
     expect(wires).toHaveLength(2);
-    const mid = (w: (typeof wires)[0]) => {
-      const n = w.nodes[Math.floor(w.nodes.length / 2)];
-      return n;
-    };
+    const mid = (w: (typeof wires)[0]) => w.nodes[Math.floor(w.nodes.length / 2)];
     const m0 = mid(wires[0]);
     const m1 = mid(wires[1]);
-    expect(Math.hypot(m0.x - m1.x, m0.y - m1.y)).toBeGreaterThan(4);
+    expect(Math.hypot(m0.x - m1.x, m0.y - m1.y)).toBeLessThan(18);
+  });
+
+  it('keeps scent from diffusing through a wire wall', () => {
+    const sim = new Sim(320, 200);
+    const params = passiveParams();
+    params.diffuse = 0.55;
+    params.decay = 0;
+    params.deposit = 0;
+    params.spawnInterval = 0;
+    params.wireShrink = 30;
+    const top = sim.spawn('era', 160, 30, Math.PI / 2, params, true)!;
+    const bot = sim.spawn('era', 160, 170, -Math.PI / 2, params, true)!;
+    sim.wire(top.id, 'p', bot.id, 'p', params);
+    sim.setFieldCover(320, 200);
+    sim.fields.cover(160, 100, 320, 200);
+    for (let y = 40; y <= 90; y += 2) {
+      for (let x = 20; x <= 100; x += 2) sim.fields.deposit(CH.conP, x, y, 20);
+    }
+    expect(sim.fields.sample(CH.conP, 60, 60)).toBeGreaterThan(5);
+    expect(sim.fields.sample(CH.conP, 260, 60)).toBeLessThan(0.2);
+    for (let i = 0; i < 60; i++) {
+      sim.step(1 / 60, params);
+    }
+    expect(sim.fields.sample(CH.conP, 60, 60)).toBeGreaterThan(0.8);
+    expect(sim.fields.sample(CH.conP, 260, 60)).toBeLessThan(1.5);
   });
 });
 
 function quietParams() {
   const params = defaultParams();
   params.gravity = 0;
+  params.homing = 0;
   params.flockAlign = 0;
   params.flockSep = 0;
   params.snapRadius = 0;
@@ -400,6 +456,12 @@ function quietParams() {
   params.rewriteDuration = 20;
   params.wireShrink = 20;
   params.spawnInterval = 0;
+  // These tests target deterministic mechanics — the scent-to-cruise mapping,
+  // locomotion gating — not self-propulsion dynamics. Noise swamps single-run
+  // comparisons and persistence delays them past their measurement window, so
+  // both are turned off to isolate what is actually under test.
+  params.swimNoise = 0;
+  params.swimTau = 0.05;
   return params;
 }
 
@@ -413,6 +475,22 @@ describe('isolated motion rules', () => {
     step(sim, params, 40);
     expect(a.vx).toBeGreaterThan(12);
     expect(Math.abs(a.vy)).toBeLessThan(0.8);
+  });
+
+  it('wired eras pull together during the shrink phase', () => {
+    const sim = new Sim(400, 240);
+    const params = quietParams();
+    params.stepSpeed = 0;
+    params.flockAlign = 0;
+    params.flockSep = 0;
+    params.wireShrink = 0.45;
+    const a = sim.spawn('era', 120, 120, 0, params, true)!;
+    const b = sim.spawn('era', 260, 120, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    const d0 = Math.hypot(b.x - a.x, b.y - a.y);
+    step(sim, params, 20);
+    const d1 = Math.hypot(b.x - a.x, b.y - a.y);
+    expect(d1).toBeLessThan(d0 - 8);
   });
 
   it('a settled latch does not keep injecting kinetic energy', () => {
@@ -465,18 +543,103 @@ describe('isolated motion rules', () => {
     expect(Math.abs(a.heading - h0)).toBeLessThan(0.35);
   });
 
-  it('connected agents align headings nematically', () => {
+  it('principal–principal wires tend to 180° heading alignment', () => {
     const sim = new Sim(400, 240);
     const params = quietParams();
     params.stepSpeed = 0;
-    params.flockAlign = 10;
-    params.angDrag = 1.2;
-    const a = sim.spawn('era', 120, 120, 0.9, params, true)!;
-    const b = sim.spawn('era', 240, 120, Math.PI + 0.9, params, true)!;
+    params.flockAlign = 14;
+    params.angDrag = 0.6;
+    params.turnRate = 0;
+    const a = sim.spawn('era', 120, 120, 0.35, params, true)!;
+    const b = sim.spawn('era', 240, 120, 0.5, params, true)!;
     sim.wire(a.id, 'p', b.id, 'p', params);
-    step(sim, params, 90);
-    const err = Math.abs(nematicDelta(a.heading, b.heading));
-    expect(err).toBeLessThan(0.35);
+    step(sim, params, 160);
+    expect(Math.abs(Math.abs(angleDelta(a.heading, b.heading)) - Math.PI)).toBeLessThan(0.5);
+  });
+
+  it('principal–aux wires tend to 0° heading alignment', () => {
+    const sim = new Sim(400, 240);
+    const params = quietParams();
+    params.stepSpeed = 0;
+    params.flockAlign = 14;
+    params.angDrag = 0.6;
+    params.turnRate = 0;
+    const con = sim.spawn('con', 200, 120, 0.2, params, true)!;
+    const era = sim.spawn('era', 140, 120, Math.PI * 0.7, params, true)!;
+    sim.wire(con.id, 'l', era.id, 'p', params);
+    step(sim, params, 160);
+    expect(Math.abs(angleDelta(con.heading, era.heading))).toBeLessThan(0.5);
+  });
+
+  it('aux–aux wires tend to 180° heading alignment', () => {
+    const sim = new Sim(400, 240);
+    const params = quietParams();
+    params.stepSpeed = 0;
+    params.flockAlign = 16;
+    params.angDrag = 0.4;
+    params.turnRate = 0;
+    const a = sim.spawn('con', 160, 120, 0.15, params, true)!;
+    const b = sim.spawn('con', 250, 120, Math.PI + 0.45, params, true)!;
+    sim.wire(a.id, 'l', b.id, 'r', params);
+    step(sim, params, 220);
+    // Both aux ports aim off their neighbour by params.auxSpread * 0.35 rad
+    // so wires keep to their own side, which costs exact antiparallelism.
+    const auxSplay = params.auxSpread * 0.35;
+    expect(Math.abs(Math.abs(angleDelta(a.heading, b.heading)) - Math.PI)).toBeLessThan(
+      0.7 + 2 * auxSplay,
+    );
+  });
+
+  it('stronger scent slows free cruise', () => {
+    const sim = new Sim(320, 200);
+    const params = quietParams();
+    params.stepSpeed = 48;
+    params.drag = 0.2;
+    params.deposit = 0;
+    const clear = sim.spawn('era', 80, 60, 0, params, true)!;
+    step(sim, params, 40);
+    const vClear = Math.hypot(clear.vx, clear.vy);
+    sim.clear();
+    const thick = sim.spawn('era', 80, 60, 0, params, true)!;
+    for (let i = 0; i < 40; i++) {
+      for (let dy = -12; dy <= 12; dy += 4) {
+        sim.fields.deposit(CH.conP, 80 + i * 3, 60 + dy, 18);
+      }
+    }
+    step(sim, params, 40);
+    const vThick = Math.hypot(thick.vx, thick.vy);
+    expect(vClear).toBeGreaterThan(12);
+    expect(vThick).toBeLessThan(vClear * 0.75);
+  });
+
+  it('stronger scent increases turn agility while slowing cruise', () => {
+    const sim = new Sim(320, 200);
+    const params = quietParams();
+    params.stepSpeed = 48;
+    params.drag = 0.2;
+    params.deposit = 0;
+    const bias = (s: Sim) => {
+      for (let i = 0; i < 24; i++) {
+        s.fields.deposit(CH.conP, 80 + 22, 60 + 10, 28);
+      }
+    };
+    const clear = sim.spawn('era', 80, 60, 0, params, true)!;
+    bias(sim);
+    step(sim, params, 20);
+    const omegaClear = Math.abs(clear.omega);
+    sim.clear();
+    const thick = sim.spawn('era', 80, 60, 0, params, true)!;
+    for (let i = 0; i < 40; i++) {
+      for (let dy = -12; dy <= 12; dy += 4) {
+        sim.fields.deposit(CH.conP, 80 + i * 3, 60 + dy, 18);
+      }
+    }
+    bias(sim);
+    step(sim, params, 20);
+    const vThick = Math.hypot(thick.vx, thick.vy);
+    const omegaThick = Math.abs(thick.omega);
+    expect(vThick).toBeLessThan(Math.hypot(clear.vx, clear.vy) * 0.85);
+    expect(omegaThick).toBeGreaterThan(omegaClear * 1.15);
   });
 
   it('an aux-only wire does not disable constructor locomotion', () => {
@@ -485,6 +648,7 @@ describe('isolated motion rules', () => {
     params.stepSpeed = 48;
     params.drag = 0.2;
     params.springK = 6;
+    params.flockAlign = 5;
     const con = sim.spawn('con', 180, 120, 0, params, true)!;
     const era = sim.spawn('era', 140, 120, Math.PI, params, true)!;
     sim.wire(con.id, 'l', era.id, 'p', params);
@@ -492,6 +656,25 @@ describe('isolated motion rules', () => {
     expect(sim.graph.isFree({ id: era.id, slot: 'p' })).toBe(false);
     step(sim, params, 35);
     expect(con.vx).toBeGreaterThan(10);
+    expect(Math.abs(con.omega)).toBeLessThan(5);
+  });
+
+  it('towing does not penalize cruise speed with component mass', () => {
+    const sim = new Sim(400, 240);
+    const params = quietParams();
+    params.stepSpeed = 48;
+    params.drag = 0.2;
+    params.flockAlign = 5;
+    const solo = sim.spawn('con', 100, 120, 0, params, true)!;
+    step(sim, params, 40);
+    const vSolo = solo.vx;
+    sim.clear();
+    const con = sim.spawn('con', 180, 120, 0, params, true)!;
+    const era = sim.spawn('era', 140, 120, Math.PI, params, true)!;
+    sim.wire(con.id, 'l', era.id, 'p', params);
+    step(sim, params, 40);
+    expect(con.vx).toBeGreaterThan(vSolo * 0.5);
+    expect(Math.abs(con.omega)).toBeLessThan(5);
   });
 
   it('does not apply flock separation to disconnected agents', () => {

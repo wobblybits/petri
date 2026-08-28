@@ -1,6 +1,5 @@
-import { momentOfInertia, PORT_EXTRUDE, portLocal, stemRoot, type Agent, type PortSlot } from './agents.ts';
+import { momentOfInertia, portLocal, stemRoot, type Agent, type PortSlot } from './agents.ts';
 import { bezierPoint, type Cubic } from './curve.ts';
-import type { Params } from './params.ts';
 import { clamp, rotate, wrap, wrapAngle, wrapDeltaVec, type Vec2 } from './wrap.ts';
 
 export const TARGET_LINK = 6;
@@ -18,6 +17,44 @@ export interface ChainNode {
   prevY: number;
   integVx: number;
   integVy: number;
+}
+
+/**
+ * XPBD compliance, in (length² / force) units. Smaller is stiffer. These are the
+ * only stiffness numbers in the joint solver; everything else follows from them.
+ *
+ *   span — the joint: holds two wired ports at the wire's rest length
+ *   link — near-rigid against stretch, weak against compression: a rope, not a
+ *          rod. Slack has to hang harmlessly, otherwise surplus rope pushes its
+ *          own anchors around and the length feedback loop goes unstable.
+ *   bend — soft, so the rope curves smoothly rather than kinking
+ *   contact — stiff but not rigid. Resolving a deep overlap in a single
+ *          substep turns into an enormous derived angular velocity, because
+ *          velocity here is a position delta divided by h.
+ *   shape — pulls the rope toward the curve that leaves both ports along their
+ *          axes. Without it a slack rope is neutrally stable: nothing decides
+ *          which of its many slack shapes it should take, so it wanders, and
+ *          every wander is amplified into velocity by 1/h.
+ *
+ * Port-axis alignment is deliberately not here — it is an actuator, not a
+ * material property. See Sim.portTorques.
+ */
+export const COMPLIANCE: Record<"span" | "link" | "bend" | "contact" | "shape", number> = {
+  span: 3.0e-6,
+  link: 2.0e-6,
+  bend: 1.5e-4,
+  shape: 3.0e-4,
+  contact: 4.0e-6,
+} as const;
+
+/** Compression is this much softer than stretch on a rope link. */
+const SLACK_RATIO = 2;
+
+export interface WireStiffness {
+  /** Global inverse-stiffness scale, from params.springK. */
+  scale: number;
+  /** Extra compliance while a latch is young — a fresh joint reaches, an old one holds. */
+  slack: number;
 }
 
 export function desiredLinks(rest: number): number {
@@ -40,36 +77,6 @@ export function reduceChain(nodes: ChainNode[], rest: number): void {
   while (nodes.length + 1 > MIN_LINKS && rest / (nodes.length + 1) < MIN_SEG) {
     nodes.splice(Math.floor(nodes.length / 2), 1);
   }
-}
-
-function smoothstep(t: number): number {
-  const x = clamp(t, 0, 1);
-  return x * x * (3 - 2 * x);
-}
-
-/** Stiff at the hull, eases along the original port, then softer on the free wire. */
-export function taperStiffness(s: number, portLen: number, k: number): number {
-  const kBase = k * 2.4;
-  const kPort = k * 0.85;
-  const kWire = k * 0.12;
-  const L = Math.max(1e-6, portLen);
-  if (s <= L) return kBase + (kPort - kBase) * smoothstep(s / L);
-  const t = smoothstep((s - L) / (L * 3.5 + 18));
-  return kPort + (kWire - kPort) * t;
-}
-
-function portLength(agent: Agent): number {
-  return PORT_EXTRUDE * agent.scale;
-}
-
-function portOutward(agent: Agent, slot: PortSlot, heading: number): Vec2 {
-  const tip = portLocal(agent.kind, slot);
-  const root = stemRoot(agent.kind, slot);
-  return rotate(
-    (tip.x - root.x) * agent.scale,
-    (tip.y - root.y) * agent.scale,
-    heading,
-  );
 }
 
 export function unwrapPoints(pts: Vec2[], w: number, h: number): Vec2[] {
@@ -100,284 +107,6 @@ export function catmullSegment(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2): Cubic {
   };
 }
 
-interface Pose {
-  x: number;
-  y: number;
-  heading: number;
-}
-
-function attachOffset(agent: Agent, slot: PortSlot, heading: number): Vec2 {
-  const loc = stemRoot(agent.kind, slot);
-  return rotate(loc.x * agent.scale, loc.y * agent.scale, heading);
-}
-
-function endWeight(agent: Agent, r: Vec2, nx: number, ny: number, rot: number): number {
-  if (agent.locked) return 0;
-  const invM = 1 / Math.max(0.08, agent.mass);
-  const invI = (1 / Math.max(1e-4, momentOfInertia(agent))) * rot;
-  const rxn = r.x * ny - r.y * nx;
-  return invM + invI * rxn * rxn;
-}
-
-function applyEnd(
-  pose: Pose,
-  agent: Agent,
-  slot: PortSlot,
-  nx: number,
-  ny: number,
-  dlambda: number,
-  rot: number,
-): void {
-  if (agent.locked || Math.abs(dlambda) < 1e-12) return;
-  const invM = 1 / Math.max(0.08, agent.mass);
-  const invI = (1 / Math.max(1e-4, momentOfInertia(agent))) * rot;
-  const r = attachOffset(agent, slot, pose.heading);
-  pose.x += invM * dlambda * nx;
-  pose.y += invM * dlambda * ny;
-  pose.heading += invI * (r.x * ny - r.y * nx) * dlambda;
-}
-
-function stemOf(pose: Pose, agent: Agent, slot: PortSlot): Vec2 {
-  const r = attachOffset(agent, slot, pose.heading);
-  return { x: pose.x + r.x, y: pose.y + r.y };
-}
-
-function commitPose(agent: Agent, pose: Pose): void {
-  if (agent.locked) return;
-  agent.x = pose.x;
-  agent.y = pose.y;
-  agent.heading = wrapAngle(pose.heading);
-}
-
-function pinPortRay(
-  pts: Vec2[],
-  n: number,
-  pose: Pose,
-  agent: Agent,
-  slot: PortSlot,
-  portLen: number,
-  linkRest: number,
-  fromA: boolean,
-  k: number,
-  invMNode: number,
-  dt2: number,
-  lambda: Float64Array,
-  lambdaOff: number,
-): void {
-  const origin = fromA ? pts[0] : pts[n + 1];
-  const axis = portOutward(agent, slot, pose.heading);
-  const alen = Math.hypot(axis.x, axis.y) || 1;
-  const ux = axis.x / alen;
-  const uy = axis.y / alen;
-  for (let i = 0; i < n; i++) {
-    const s = fromA ? (i + 1) * linkRest : (n - i) * linkRest;
-    if (s > portLen * 1.08) continue;
-    const p = pts[i + 1];
-    const tx = origin.x + ux * s;
-    const ty = origin.y + uy * s;
-    const kPin = taperStiffness(s, portLen, k);
-    const at = 1 / Math.max(16, kPin * 160) / dt2;
-    const Cx = p.x - tx;
-    const Cy = p.y - ty;
-    const denom = invMNode + at;
-    if (denom < 1e-10) continue;
-    const li = lambdaOff + i;
-    const dlamX = (-Cx - at * lambda[li]) / denom;
-    const dlamY = (-Cy - at * lambda[li]) / denom;
-    lambda[li] += 0.5 * (dlamX + dlamY);
-    p.x += invMNode * dlamX;
-    p.y += invMNode * dlamY;
-  }
-}
-
-function xpbdBend(
-  a: Vec2,
-  b: Vec2,
-  c: Vec2,
-  wA: number,
-  wB: number,
-  wC: number,
-  alphaTilde: number,
-  lambda: number,
-): number {
-  const Cx = a.x - 2 * b.x + c.x;
-  const Cy = a.y - 2 * b.y + c.y;
-  const denom = wA + 4 * wB + wC + alphaTilde;
-  if (denom < 1e-10) return lambda;
-  const dlamX = (-Cx - alphaTilde * lambda) / denom;
-  const dlamY = (-Cy - alphaTilde * lambda) / denom;
-  a.x += wA * dlamX;
-  a.y += wA * dlamY;
-  b.x -= 2 * wB * dlamX;
-  b.y -= 2 * wB * dlamY;
-  c.x += wC * dlamX;
-  c.y += wC * dlamY;
-  return lambda + 0.5 * (dlamX + dlamY);
-}
-
-/**
- * XPBD rubber-band: stiff stretch, soft compression, bending that prefers a
- * straight geodesic, and force+torque at the ports so agents turn to face the band.
- */
-export function solveChain(
-  A: Agent,
-  aSlot: PortSlot,
-  B: Agent,
-  bSlot: PortSlot,
-  nodes: ChainNode[],
-  rest: number,
-  params: Params,
-  dt: number,
-  w: number,
-  h: number,
-  rotA = 1,
-  rotB = 1,
-): number {
-  const n = nodes.length;
-  const nPts = n + 2;
-  const nLinks = n + 1;
-  const linkRest = rest / nLinks;
-  const invMNode = 1 / CHAIN_MASS;
-  const k = Math.max(0.5, params.springK);
-  const portA = portLength(A);
-  const portB = portLength(B);
-  const sub = 2;
-  const sdt = dt / sub;
-  const iters = 10;
-
-  const dCom = wrapDeltaVec(A.x, A.y, B.x, B.y, w, h);
-  const poseA: Pose = { x: A.x, y: A.y, heading: A.heading };
-  const poseB: Pose = { x: A.x + dCom.x, y: A.y + dCom.y, heading: B.heading };
-
-  const pts: Vec2[] = new Array(nPts);
-  const prev: Vec2[] = new Array(nPts);
-
-  for (let s = 0; s < sub; s++) {
-    pts[0] = stemOf(poseA, A, aSlot);
-    const raw: Vec2[] = [pts[0], ...nodes, stemOf(poseB, B, bSlot)];
-    const un = unwrapPoints(raw, w, h);
-    for (let i = 0; i < nPts; i++) {
-      pts[i] = { x: un[i].x, y: un[i].y };
-      prev[i] = { x: un[i].x, y: un[i].y };
-    }
-    for (let i = 0; i < n; i++) {
-      pts[i + 1].x += nodes[i].vx * sdt;
-      pts[i + 1].y += nodes[i].vy * sdt;
-    }
-
-    const lamDist = new Float64Array(nLinks);
-    const lamBend = new Float64Array(Math.max(0, nPts - 2));
-    const lamPin = new Float64Array(n * 2);
-    const dt2 = sdt * sdt;
-
-    for (let it = 0; it < iters; it++) {
-      pts[0] = stemOf(poseA, A, aSlot);
-      pts[nPts - 1] = stemOf(poseB, B, bSlot);
-
-      for (let i = 0; i < nLinks; i++) {
-        const p = pts[i];
-        const q = pts[i + 1];
-        const dx = q.x - p.x;
-        const dy = q.y - p.y;
-        const dist = Math.hypot(dx, dy) || 1e-6;
-        const nx = dx / dist;
-        const ny = dy / dist;
-        const C = dist - linkRest;
-        const sA = (i + 0.5) * linkRest;
-        const sB = rest - sA;
-        const kLink = Math.max(taperStiffness(sA, portA, k), taperStiffness(sB, portB, k));
-        const alphaStretch = 1 / Math.max(6, kLink * 36);
-        const alpha = C >= 0 ? alphaStretch : alphaStretch * 14;
-        const at = alpha / dt2;
-        const rA = attachOffset(A, aSlot, poseA.heading);
-        const rB = attachOffset(B, bSlot, poseB.heading);
-        const wP = i === 0 ? endWeight(A, rA, nx, ny, rotA) : invMNode;
-        const wQ = i === nLinks - 1 ? endWeight(B, rB, nx, ny, rotB) : invMNode;
-        const denom = wP + wQ + at;
-        if (denom < 1e-10) continue;
-        const dlam = (-C - at * lamDist[i]) / denom;
-        lamDist[i] += dlam;
-        if (i === 0) applyEnd(poseA, A, aSlot, -nx, -ny, dlam, rotA);
-        else {
-          p.x -= invMNode * dlam * nx;
-          p.y -= invMNode * dlam * ny;
-        }
-        if (i === nLinks - 1) applyEnd(poseB, B, bSlot, nx, ny, dlam, rotB);
-        else {
-          q.x += invMNode * dlam * nx;
-          q.y += invMNode * dlam * ny;
-        }
-      }
-
-      pinPortRay(
-        pts,
-        n,
-        poseA,
-        A,
-        aSlot,
-        portA,
-        linkRest,
-        true,
-        k,
-        invMNode,
-        dt2,
-        lamPin,
-        0,
-      );
-      pinPortRay(
-        pts,
-        n,
-        poseB,
-        B,
-        bSlot,
-        portB,
-        linkRest,
-        false,
-        k,
-        invMNode,
-        dt2,
-        lamPin,
-        n,
-      );
-
-      for (let i = 1; i < nPts - 1; i++) {
-        const sA = i * linkRest;
-        const sB = rest - sA;
-        const kBend = Math.max(taperStiffness(sA, portA, k), taperStiffness(sB, portB, k));
-        const wA = i - 1 === 0 ? 0 : invMNode;
-        const wC = i + 1 === nPts - 1 ? 0 : invMNode;
-        lamBend[i - 1] = xpbdBend(
-          pts[i - 1],
-          pts[i],
-          pts[i + 1],
-          wA,
-          invMNode,
-          wC,
-          1 / Math.max(4, kBend * 28) / dt2,
-          lamBend[i - 1],
-        );
-      }
-    }
-
-    const keep = Math.exp(-Math.max(0, params.springDamp) * sdt);
-    for (let i = 0; i < n; i++) {
-      const node = nodes[i];
-      const p = pts[i + 1];
-      node.vx = ((p.x - prev[i + 1].x) / sdt) * keep;
-      node.vy = ((p.y - prev[i + 1].y) / sdt) * keep;
-      node.x = wrap(p.x, w);
-      node.y = wrap(p.y, h);
-    }
-  }
-
-  commitPose(A, poseA);
-  commitPose(B, poseB);
-
-  const sA = stemOf(poseA, A, aSlot);
-  const sB = stemOf(poseB, B, bSlot);
-  return polylineLength([sA, ...nodes, sB], w, h);
-}
-
 export function chordDeviation(pts: Vec2[], w: number, h: number): number {
   if (pts.length < 3) return 0;
   const un = unwrapPoints(pts, w, h);
@@ -394,4 +123,237 @@ export function chordDeviation(pts: Vec2[], w: number, h: number): number {
     max = Math.max(max, Math.hypot(un[i].x - px, un[i].y - py));
   }
   return max;
+}
+
+// --------------------------------------------------------------- rigid bodies
+
+const invMass = (agent: Agent): number => (agent.locked ? 0 : 1 / Math.max(0.08, agent.mass));
+const invInertia = (agent: Agent): number =>
+  agent.locked ? 0 : 1 / Math.max(1e-4, momentOfInertia(agent));
+
+/** Offset from body centre to a port's stem root, at the body's current heading. */
+export function attachOffset(agent: Agent, slot: PortSlot): Vec2 {
+  const loc = stemRoot(agent.kind, slot);
+  return rotate(loc.x * agent.scale, loc.y * agent.scale, agent.heading);
+}
+
+export function stemPoint(agent: Agent, slot: PortSlot): Vec2 {
+  const r = attachOffset(agent, slot);
+  return { x: agent.x + r.x, y: agent.y + r.y };
+}
+
+/** Unit vector the port points along, in world space. */
+export function portAxisWorld(agent: Agent, slot: PortSlot): Vec2 {
+  const tip = portLocal(agent.kind, slot);
+  const root = stemRoot(agent.kind, slot);
+  const r = rotate(
+    (tip.x - root.x) * agent.scale,
+    (tip.y - root.y) * agent.scale,
+    agent.heading,
+  );
+  const len = Math.hypot(r.x, r.y) || 1;
+  return { x: r.x / len, y: r.y / len };
+}
+
+/**
+ * Generalized inverse mass of a body at attachment `r` along direction `n`:
+ * `1/m + (r × n)² / I`. This is what makes a rope hanging off an off-centre
+ * port torque the body instead of only dragging it.
+ */
+function genInvMass(agent: Agent, r: Vec2, nx: number, ny: number): number {
+  const rxn = r.x * ny - r.y * nx;
+  return invMass(agent) + invInertia(agent) * rxn * rxn;
+}
+
+/** Apply a positional impulse `lambda` along `n` at attachment `r`. */
+function applyImpulse(agent: Agent, r: Vec2, nx: number, ny: number, lambda: number): void {
+  if (agent.locked || lambda === 0) return;
+  const im = invMass(agent);
+  agent.x += im * lambda * nx;
+  agent.y += im * lambda * ny;
+  agent.heading = wrapAngle(
+    agent.heading + invInertia(agent) * (r.x * ny - r.y * nx) * lambda,
+  );
+}
+
+// --------------------------------------------------------------- constraints
+
+/**
+ * Anchors the end of a rope at a port stem. One-way: the stem moves the node,
+ * never the reverse.
+ *
+ * Bodies drive the rope; the rope never drives the bodies. Spacing belongs to
+ * the span joint and orientation to the port torques, so letting rope tension
+ * also push its own anchors adds nothing but a feedback path — and it is the
+ * path that made every earlier version blow up, because a rope's slack shape is
+ * the least constrained thing in the system.
+ */
+function solveBodyNodeLink(
+  agent: Agent,
+  slot: PortSlot,
+  node: ChainNode,
+  rest: number,
+  alphaTilde: number,
+): void {
+  const r = attachOffset(agent, slot);
+  const dx = node.x - (agent.x + r.x);
+  const dy = node.y - (agent.y + r.y);
+  const dist = Math.hypot(dx, dy);
+  if (dist < 1e-9) return;
+  const C = dist - rest;
+  const wNode = 1 / CHAIN_MASS;
+  const denom = wNode + (C < 0 ? alphaTilde * SLACK_RATIO : alphaTilde);
+  if (denom < 1e-12) return;
+  const lambda = -C / denom;
+  node.x += (wNode * lambda * dx) / dist;
+  node.y += (wNode * lambda * dy) / dist;
+}
+
+/**
+ * The joint proper: holds the two port stems `rest` apart. The rope alone
+ * cannot do this — it only constrains arc length, so slack lets the bodies
+ * drift together and the rope buckle back through its own port.
+ */
+function solveSpan(
+  A: Agent,
+  aSlot: PortSlot,
+  B: Agent,
+  bSlot: PortSlot,
+  rest: number,
+  alphaTilde: number,
+): void {
+  const rA = attachOffset(A, aSlot);
+  const rB = attachOffset(B, bSlot);
+  const dx = B.x + rB.x - (A.x + rA.x);
+  const dy = B.y + rB.y - (A.y + rA.y);
+  const dist = Math.hypot(dx, dy);
+  if (dist < 1e-9) return;
+  const nx = dx / dist;
+  const ny = dy / dist;
+  const C = dist - rest;
+  const denom = genInvMass(A, rA, nx, ny) + genInvMass(B, rB, nx, ny) + alphaTilde;
+  if (denom < 1e-12) return;
+  const lambda = -C / denom;
+  applyImpulse(A, rA, -nx, -ny, lambda);
+  applyImpulse(B, rB, nx, ny, lambda);
+}
+
+/** Soft pull of a rope node toward its place on the wire's rest curve. */
+function solveShape(node: ChainNode, target: Vec2, alphaTilde: number): void {
+  const dx = node.x - target.x;
+  const dy = node.y - target.y;
+  const C = Math.hypot(dx, dy);
+  if (C < 1e-9) return;
+  const w = 1 / CHAIN_MASS;
+  const lambda = -C / (w + alphaTilde);
+  node.x += (w * lambda * dx) / C;
+  node.y += (w * lambda * dy) / C;
+}
+
+/** Distance constraint between two rope nodes. */
+function solveNodeLink(a: ChainNode, b: ChainNode, rest: number, alphaTilde: number): void {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 1e-9) return;
+  const nx = dx / dist;
+  const ny = dy / dist;
+  const C = dist - rest;
+  const w = 1 / CHAIN_MASS;
+  const lambda = -C / (2 * w + (C < 0 ? alphaTilde * SLACK_RATIO : alphaTilde));
+  a.x -= w * lambda * nx;
+  a.y -= w * lambda * ny;
+  b.x += w * lambda * nx;
+  b.y += w * lambda * ny;
+}
+
+/** Straightening (Laplacian) constraint on a rope triple. Soft — this is the rope's give. */
+function solveBend(a: Vec2, b: ChainNode, c: Vec2, wA: number, wC: number, alphaTilde: number): void {
+  const Cx = a.x - 2 * b.x + c.x;
+  const Cy = a.y - 2 * b.y + c.y;
+  const wB = 1 / CHAIN_MASS;
+  const denom = wA + 4 * wB + wC + alphaTilde;
+  if (denom < 1e-12) return;
+  b.x += 2 * wB * (Cx / denom);
+  b.y += 2 * wB * (Cy / denom);
+}
+
+/**
+ * One XPBD iteration over a single wire: rope links, bending, and the port-axis
+ * preference at each end. Mutates agents and nodes in place so that wires
+ * sharing an agent see each other's corrections within the same substep.
+ */
+export function solveWire(
+  A: Agent,
+  aSlot: PortSlot,
+  B: Agent,
+  bSlot: PortSlot,
+  nodes: ChainNode[],
+  rest: number,
+  ropeLen: number,
+  shape: Vec2[],
+  stiff: WireStiffness,
+  h: number,
+): void {
+  const n = nodes.length;
+  if (n === 0) return;
+  const invH2 = 1 / Math.max(1e-12, h * h);
+  const soft = stiff.scale * stiff.slack;
+  const aLink = COMPLIANCE.link * soft * invH2;
+  const aBend = COMPLIANCE.bend * soft * invH2;
+  const aShape = COMPLIANCE.shape * soft * invH2;
+  const aSpan = COMPLIANCE.span * soft * invH2;
+
+  solveSpan(A, aSlot, B, bSlot, rest, aSpan);
+  const linkRest = ropeLen / (n + 1);
+
+  solveBodyNodeLink(A, aSlot, nodes[0], linkRest, aLink);
+  for (let i = 0; i < n - 1; i++) solveNodeLink(nodes[i], nodes[i + 1], linkRest, aLink);
+  solveBodyNodeLink(B, bSlot, nodes[n - 1], linkRest, aLink);
+
+  const sA = stemPoint(A, aSlot);
+  const sB = stemPoint(B, bSlot);
+  for (let i = 0; i < n; i++) {
+    const prev = i === 0 ? sA : nodes[i - 1];
+    const next = i === n - 1 ? sB : nodes[i + 1];
+    const wPrev = i === 0 ? 0 : 1 / CHAIN_MASS;
+    const wNext = i === n - 1 ? 0 : 1 / CHAIN_MASS;
+    solveBend(prev, nodes[i], next, wPrev, wNext, aBend);
+  }
+
+  if (shape.length === n) {
+    for (let i = 0; i < n; i++) solveShape(nodes[i], shape[i], aShape);
+  }
+
+}
+
+/** XPBD non-penetration between two bodies, from an existing contact manifold. */
+export function solveContact(
+  A: Agent,
+  B: Agent,
+  hit: { nx: number; ny: number; overlap: number; px: number; py: number },
+  slop: number,
+  h: number,
+): void {
+  const depth = hit.overlap - slop;
+  if (depth <= 0) return;
+  const rA = { x: hit.px - A.x, y: hit.py - A.y };
+  const rB = { x: hit.px - B.x, y: hit.py - B.y };
+  const wA = genInvMass(A, rA, hit.nx, hit.ny);
+  const wB = genInvMass(B, rB, hit.nx, hit.ny);
+  const denom = wA + wB + COMPLIANCE.contact / Math.max(1e-12, h * h);
+  if (denom < 1e-12) return;
+  const lambda = depth / denom;
+  applyImpulse(A, rA, -hit.nx, -hit.ny, lambda);
+  applyImpulse(B, rB, hit.nx, hit.ny, lambda);
+}
+
+/** Signed angle from a port's axis to the direction its wire actually leaves in. */
+export function portExitAngle(agent: Agent, slot: PortSlot, target: Vec2): number {
+  const u = portAxisWorld(agent, slot);
+  const s = stemPoint(agent, slot);
+  const dx = target.x - s.x;
+  const dy = target.y - s.y;
+  if (Math.hypot(dx, dy) < 1e-6) return 0;
+  return Math.atan2(u.x * dy - u.y * dx, u.x * dx + u.y * dy);
 }

@@ -16,6 +16,8 @@ export class Fields {
   originY = 0;
   data: Float32Array;
   tmp: Float32Array;
+  /** Cells occupied by wires; scent will not diffuse through them. */
+  walls: Uint8Array;
 
   constructor(worldW: number, worldH: number) {
     this.worldW = Math.max(1, worldW);
@@ -24,6 +26,7 @@ export class Fields {
     this.rows = Math.max(8, Math.round((160 * this.worldH) / this.worldW));
     this.data = new Float32Array(this.cols * this.rows * CHANNELS);
     this.tmp = new Float32Array(this.data.length);
+    this.walls = new Uint8Array(this.cols * this.rows);
   }
 
   /** Slide / resize the scent window so it stays centered on (cx, cy). */
@@ -48,9 +51,11 @@ export class Fields {
         this.rows = newRows;
         this.data = new Float32Array(this.cols * this.rows * CHANNELS);
         this.tmp = new Float32Array(this.data.length);
+        this.walls = new Uint8Array(this.cols * this.rows);
       } else {
         this.data.fill(0);
         this.tmp.fill(0);
+        this.walls.fill(0);
       }
       return;
     }
@@ -68,6 +73,38 @@ export class Fields {
 
   clear(): void {
     this.data.fill(0);
+    this.walls.fill(0);
+  }
+
+  clearWalls(): void {
+    this.walls.fill(0);
+  }
+
+  private markCell(i: number, j: number): void {
+    if (i < 0 || j < 0 || i >= this.cols || j >= this.rows) return;
+    this.walls[j * this.cols + i] = 1;
+  }
+
+  /** Stamp a world-space segment onto the scent wall mask. */
+  markSegment(x0: number, y0: number, x1: number, y1: number): void {
+    const cellW = this.worldW / this.cols;
+    const cellH = this.worldH / this.rows;
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const len = Math.hypot(dx, dy);
+    const step = Math.max(0.35 * Math.min(cellW, cellH), 0.5);
+    const n = Math.max(1, Math.ceil(len / step));
+    for (let k = 0; k <= n; k++) {
+      const t = k / n;
+      const { gx, gy } = this.toGrid(x0 + dx * t, y0 + dy * t);
+      const i = Math.floor(gx);
+      const j = Math.floor(gy);
+      this.markCell(i, j);
+      this.markCell(i - 1, j);
+      this.markCell(i + 1, j);
+      this.markCell(i, j - 1);
+      this.markCell(i, j + 1);
+    }
   }
 
   private shiftCells(di: number, dj: number): void {
@@ -124,23 +161,29 @@ export class Fields {
   diffuse(mix: number): void {
     const m = mix;
     const keep = 1 - m;
-    const { cols, rows, data, tmp } = this;
+    const { cols, rows, data, tmp, walls } = this;
     tmp.set(data);
+    const sample = (i: number, j: number, ch: number, fallback: number): number => {
+      if (i < 0 || j < 0 || i >= cols || j >= rows) return fallback;
+      if (walls[j * cols + i]) return fallback;
+      return tmp[(j * cols + i) * CHANNELS + ch];
+    };
     for (let j = 0; j < rows; j++) {
-      const jm = j === 0 ? 0 : j - 1;
-      const jp = j === rows - 1 ? rows - 1 : j + 1;
       for (let i = 0; i < cols; i++) {
-        const im = i === 0 ? 0 : i - 1;
-        const ip = i === cols - 1 ? cols - 1 : i + 1;
         const base = (j * cols + i) * CHANNELS;
+        if (walls[j * cols + i]) {
+          for (let ch = 0; ch < CHANNELS; ch++) data[base + ch] = tmp[base + ch];
+          continue;
+        }
         for (let ch = 0; ch < CHANNELS; ch++) {
+          const self = tmp[base + ch];
           const avg =
-            (tmp[(jm * cols + i) * CHANNELS + ch] +
-              tmp[(jp * cols + i) * CHANNELS + ch] +
-              tmp[(j * cols + im) * CHANNELS + ch] +
-              tmp[(j * cols + ip) * CHANNELS + ch]) *
+            (sample(i, j - 1, ch, self) +
+              sample(i, j + 1, ch, self) +
+              sample(i - 1, j, ch, self) +
+              sample(i + 1, j, ch, self)) *
             0.25;
-          data[base + ch] = keep * tmp[base + ch] + m * avg;
+          data[base + ch] = keep * self + m * avg;
         }
       }
     }

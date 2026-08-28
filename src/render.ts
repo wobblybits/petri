@@ -74,6 +74,8 @@ function ghostAsAgent(g: Ghost): Agent {
     scale: g.scale,
     locked: true,
     stun: 0,
+    drive: 0,
+    trail: 0,
     prevX: g.x,
     prevY: g.y,
     prevHeading: g.heading,
