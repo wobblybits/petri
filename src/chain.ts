@@ -99,10 +99,20 @@ export function polylineLength(pts: Vec2[], w: number, h: number): number {
 }
 
 export function catmullSegment(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2): Cubic {
+  const h1x = (p2.x - p0.x) / 6;
+  const h1y = (p2.y - p0.y) / 6;
+  const h2x = (p3.x - p1.x) / 6;
+  const h2y = (p3.y - p1.y) / 6;
+  const max1 = Math.hypot(p2.x - p1.x, p2.y - p1.y) * 0.45;
+  const max2 = max1;
+  const len1 = Math.hypot(h1x, h1y);
+  const len2 = Math.hypot(h2x, h2y);
+  const s1 = len1 > max1 && len1 > 1e-6 ? max1 / len1 : 1;
+  const s2 = len2 > max2 && len2 > 1e-6 ? max2 / len2 : 1;
   return {
     p0: p1,
-    p1: { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 },
-    p2: { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 },
+    p1: { x: p1.x + h1x * s1, y: p1.y + h1y * s1 },
+    p2: { x: p2.x - h2x * s2, y: p2.y - h2y * s2 },
     p3: p2,
   };
 }

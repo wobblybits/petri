@@ -138,7 +138,15 @@ export interface SpawnEvent {
   kind: AgentKind;
 }
 
-export type AudioEvent = LatchEvent | CollisionEvent | RewriteEvent | SpawnEvent;
+export interface WirePluckEvent {
+  type: 'pluck';
+  wireId: number;
+  gain: number;
+  /** Signed waveguide samples along A→B. Ends are zero. */
+  samples: number[];
+}
+
+export type AudioEvent = LatchEvent | CollisionEvent | RewriteEvent | SpawnEvent | WirePluckEvent;
 
 /** One touching pair, sent every frame while the overlap lasts. */
 export interface ContactItem {
@@ -200,6 +208,13 @@ export type WorkletInMessage =
       agentB: number;
       leftovers: number[];
       gain: number;
+    }
+  | {
+      /** Geometric bow released onto a ringing (or quiet) wire. */
+      type: 'pluck';
+      wireId: number;
+      gain: number;
+      samples: number[];
     }
   | { type: 'gain'; master: number }
   | {

@@ -170,7 +170,7 @@ describe('audio dispatch', () => {
     expect(era.stubs?.length ?? 0).toBe(0);
   });
 
-  it('a taut rope is sharper and brighter than a slack one', () => {
+  it('a taut rope is brighter than a slack one', () => {
     const sim = new Sim(200, 160);
     const params = defaultParams();
     const a = sim.spawn('era', 30, 30, 0, params, true)!;
@@ -183,8 +183,41 @@ describe('audio dispatch', () => {
     const slack = buildTopology(sim.graph, sim.agents);
     wire.lastLen = 52;
     const taut = buildTopology(sim.graph, sim.agents);
-    expect(taut.wires[0].length).toBeLessThan(slack.wires[0].length);
     expect(taut.wires[0].damp ?? 0).toBeGreaterThan(slack.wires[0].damp ?? 0);
+  });
+
+  it('a draped rope retunes from its live path, not the rest cubic', () => {
+    const sim = new Sim(200, 160);
+    const params = defaultParams();
+    const a = sim.spawn('era', 30, 30, 0, params, true)!;
+    const b = sim.spawn('dup', 90, 30, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    const wire = [...sim.graph.wires.values()][0];
+    wire.rest = 40;
+    wire.ropeLen = 40;
+    wire.lastLen = 40;
+    const rest = buildTopology(sim.graph, sim.agents);
+    wire.ropeLen = 52;
+    wire.lastLen = 52;
+    const draped = buildTopology(sim.graph, sim.agents);
+    expect(draped.wires[0].length).toBeGreaterThan(rest.wires[0].length);
+  });
+
+  it('a yank does not fully cancel the pitch drop from extra length', () => {
+    const sim = new Sim(200, 160);
+    const params = defaultParams();
+    const a = sim.spawn('era', 30, 30, 0, params, true)!;
+    const b = sim.spawn('dup', 90, 30, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    const wire = [...sim.graph.wires.values()][0];
+    wire.rest = 40;
+    wire.ropeLen = 40;
+    wire.lastLen = 40;
+    const slack = buildTopology(sim.graph, sim.agents);
+    wire.lastLen = 52;
+    const yank = buildTopology(sim.graph, sim.agents);
+    expect(yank.wires[0].length).toBeGreaterThan(slack.wires[0].length * 0.95);
+    expect(yank.wires[0].damp ?? 0).toBeGreaterThan(slack.wires[0].damp ?? 0);
   });
 
   it('spreads stereo when the camera zooms in', () => {
@@ -446,6 +479,51 @@ describe('sim latch integration', () => {
     audio.onPost = null;
     expect(strikes).toBeGreaterThan(0);
     expect(strikes).toBeLessThan(16);
+  });
+
+  it('plucks a wire when a visitor leaves the bowed rope', () => {
+    audio.armWithoutAudio();
+    const posted: { type: string; samples?: number[] }[] = [];
+    audio.onPost = (m) => posted.push(m);
+
+    const sim = new Sim(320, 200);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.stepSpeed = 0;
+    params.gravity = 0;
+    params.homing = 0;
+    params.flockAlign = 0;
+    params.flockSep = 0;
+    params.declutter = 0;
+    params.rewriteDuration = 20;
+    params.spawnInterval = 0;
+    const a = sim.spawn('era', 60, 100, 0, params, true)!;
+    const b = sim.spawn('era', 260, 100, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    const wire = [...sim.graph.wires.values()][0];
+    const mid = wire.nodes[Math.floor(wire.nodes.length / 2)];
+    const visitor = sim.spawn('con', mid.x, mid.y, 0, params, true)!;
+
+    for (let i = 0; i < 20; i++) {
+      sim.step(1 / 60, params);
+      audio.frame(sim.graph, sim.agents, 1 / 60);
+    }
+    posted.length = 0;
+    visitor.x = 160;
+    visitor.y = 20;
+    visitor.vx = 0;
+    visitor.vy = 0;
+    for (let i = 0; i < 12; i++) {
+      sim.step(1 / 60, params);
+      audio.frame(sim.graph, sim.agents, 1 / 60);
+    }
+
+    audio.onPost = null;
+    const plucks = posted.filter((m) => m.type === 'pluck');
+    expect(plucks.length).toBeGreaterThan(0);
+    expect(plucks[0].samples?.length).toBeGreaterThan(4);
+    const peak = Math.max(...(plucks[0].samples ?? []).map((s) => Math.abs(s)));
+    expect(peak).toBeGreaterThan(0.05);
   });
 
   it('indexes a traveling-wave snapshot by wire id', () => {

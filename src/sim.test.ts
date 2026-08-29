@@ -3,7 +3,7 @@ import { boundRadius, stemWorld } from './agents.ts';
 import { defaultParams } from './params.ts';
 import { loadPreset } from './presets.ts';
 import { queryHit, SLOP } from './collide.ts';
-import { closestPointOnSegment, WIRE_RADIUS } from './geom.ts';
+import { closestPointOnSegment, transverseProfile, WIRE_RADIUS } from './geom.ts';
 import { mixScent, scentSlowFactor, scentTurnBoost, Sim } from './sim.ts';
 import { CH } from './fields.ts';
 import { angleDelta } from './wrap.ts';
@@ -167,6 +167,19 @@ describe('scent steering', () => {
     const keep = boundRadius(visitor) + WIRE_RADIUS;
     expect(dist).toBeGreaterThan(keep - 4);
     expect(Math.hypot(visitor.x - vx0, visitor.y - vy0)).toBeLessThan(3);
+  });
+});
+
+describe('transverse profile', () => {
+  it('pins the ends and reports the bow height', () => {
+    const p = transverseProfile([
+      { x: 0, y: 0 },
+      { x: 50, y: 20 },
+      { x: 100, y: 0 },
+    ]);
+    expect(p.samples[0]).toBe(0);
+    expect(p.samples[p.samples.length - 1]).toBe(0);
+    expect(p.peak).toBeGreaterThan(10);
   });
 });
 

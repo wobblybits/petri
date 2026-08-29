@@ -12,7 +12,7 @@ import {
   type PortSlot,
 } from './agents.ts';
 import { queryHit, SLOP, type Hit } from './collide.ts';
-import { closestOnSegments, closestTOnSegment, segmentsIntersect, WIRE_RADIUS } from './geom.ts';
+import { closestOnSegments, closestTOnSegment, ropeAabb, segmentsIntersect, transverseProfile, WAVE_DISP_PX, WIRE_RADIUS } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact, unwrapPoints } from './chain.ts';
 import { CH, Fields } from './fields.ts';
@@ -124,6 +124,10 @@ export class Sim {
   /** Pairs in contact last frame — a strike fires on onset, contact continues. */
   private contactAudioPrev = new Set<string>();
   private contactAudioNow = new Set<string>();
+  /** Wire/body bows this frame, keyed by `wireId:agentId`. */
+  private wireBowPrev = new Set<string>();
+  private wireBowNow = new Set<string>();
+  private wireBowShape = new Map<string, { samples: number[]; peak: number }>();
   /** Bodies sliding against something this frame, and how fast. */
   /** Bodies currently overlapping, keyed by canonical `lo:hi` id pair. */
   contacts = new Map<string, LiveContact>();
@@ -186,6 +190,9 @@ export class Sim {
     this.home = null;
     this.contactAudioPrev.clear();
     this.contactAudioNow.clear();
+    this.wireBowPrev.clear();
+    this.wireBowNow.clear();
+    this.wireBowShape.clear();
     this.contacts.clear();
     audio.invalidateTopology();
   }
@@ -256,6 +263,8 @@ export class Sim {
     this.dampVelocities(params, t);
 
     this.graph.refreshLengths(this.agents, this.w, this.h);
+    this.noteWireBows();
+    this.emitWirePlucks();
     this.graph.snap(this.agents, this.w, this.h, params, this.time);
     this.startRewrites(params);
     this.tickRewrites(params, t);
@@ -351,6 +360,16 @@ export class Sim {
       const qB = stemWorld(QB, Q.b.slot, this.w, this.h);
       const nP = P.nodes.length;
       const nQ = Q.nodes.length;
+      const pBox = ropeAabb(pA, P.nodes, pB);
+      const qBox = ropeAabb(qA, Q.nodes, qB);
+      if (
+        pBox.maxX + ropeGap < qBox.minX ||
+        qBox.maxX + ropeGap < pBox.minX ||
+        pBox.maxY + ropeGap < qBox.minY ||
+        qBox.maxY + ropeGap < pBox.minY
+      ) {
+        continue;
+      }
       for (let i = 0; i <= nP; i++) {
         const a0 = i === 0 ? pA : P.nodes[i - 1];
         const a1 = i === nP ? pB : P.nodes[i];
@@ -405,6 +424,15 @@ export class Sim {
       const sA = stemWorld(A, wire.a.slot, this.w, this.h);
       const sB = stemWorld(B, wire.b.slot, this.w, this.h);
       const keep = boundRadius(agent) + WIRE_RADIUS;
+      const box = ropeAabb(sA, wire.nodes, sB);
+      if (
+        box.maxX < agent.x - keep ||
+        box.minX > agent.x + keep ||
+        box.maxY < agent.y - keep ||
+        box.minY > agent.y + keep
+      ) {
+        continue;
+      }
       const n = wire.nodes.length;
       for (let i = 0; i <= n; i++) {
         const p0 = i === 0 ? sA : wire.nodes[i - 1];
@@ -440,6 +468,93 @@ export class Sim {
         moveRopeClosest(wire, i, t, dx * step, dy * step);
       }
     }
+
+    this.leashRopes();
+  }
+
+  /**
+   * A stacked clearance step can throw a node far off the chord. Pull it back
+   * before the cubic / Catmull handles turn that into an off-screen loop.
+   */
+  private leashRopes(): void {
+    for (const wire of this.graph.wires.values()) {
+      if (wire.nodes.length === 0) continue;
+      const A = this.agents.get(wire.a.id);
+      const B = this.agents.get(wire.b.id);
+      if (!A || !B) continue;
+      const sA = stemWorld(A, wire.a.slot, this.w, this.h);
+      const sB = stemWorld(B, wire.b.slot, this.w, this.h);
+      const mx = (sA.x + sB.x) * 0.5;
+      const my = (sA.y + sB.y) * 0.5;
+      const span = Math.hypot(sB.x - sA.x, sB.y - sA.y);
+      const limit = span * 1.6 + wire.rest + 48;
+      const lim2 = limit * limit;
+      for (const node of wire.nodes) {
+        const dx = node.x - mx;
+        const dy = node.y - my;
+        const d2 = dx * dx + dy * dy;
+        if (d2 <= lim2) continue;
+        const d = Math.sqrt(d2);
+        const k = limit / d;
+        node.x = mx + dx * k;
+        node.y = my + dy * k;
+      }
+    }
+  }
+
+  /**
+   * Remember the live bow of each wire/body contact so a release can pluck
+   * that shape rather than a canned triangle.
+   */
+  private noteWireBows(): void {
+    this.wireBowNow.clear();
+    for (let k = 0; k < this.clearBodyPairs.length; k += 2) {
+      const wire = this.clearBodyPairs[k] as Wire;
+      const agent = this.clearBodyPairs[k + 1] as Agent;
+      const A = this.agents.get(wire.a.id);
+      const B = this.agents.get(wire.b.id);
+      if (!A || !B) continue;
+      const sA = stemWorld(A, wire.a.slot, this.w, this.h);
+      const sB = stemWorld(B, wire.b.slot, this.w, this.h);
+      const raw = [sA, ...wire.nodes, sB];
+      const keep = boundRadius(agent) + WIRE_RADIUS;
+      let minD = Infinity;
+      for (let i = 0; i < raw.length - 1; i++) {
+        const t = closestTOnSegment(agent.x, agent.y, raw[i].x, raw[i].y, raw[i + 1].x, raw[i + 1].y);
+        const qx = raw[i].x + (raw[i + 1].x - raw[i].x) * t;
+        const qy = raw[i].y + (raw[i + 1].y - raw[i].y) * t;
+        const d = Math.hypot(qx - agent.x, qy - agent.y);
+        if (d < minD) minD = d;
+      }
+      if (minD >= keep) continue;
+      const key = `${wire.id}:${agent.id}`;
+      this.wireBowNow.add(key);
+      const pts = unwrapPoints(raw, this.w, this.h);
+      const prof = transverseProfile(pts);
+      if (prof.peak < 2) continue;
+      const samples = new Array(prof.samples.length);
+      for (let i = 0; i < prof.samples.length; i++) samples[i] = prof.samples[i] / WAVE_DISP_PX;
+      this.wireBowShape.set(key, { samples, peak: prof.peak });
+    }
+  }
+
+  /** Falling edge of a wire/body overlap: inject the last bowed profile. */
+  private emitWirePlucks(): void {
+    for (const key of this.wireBowPrev) {
+      if (this.wireBowNow.has(key)) continue;
+      const bow = this.wireBowShape.get(key);
+      this.wireBowShape.delete(key);
+      if (!bow || bow.peak < 2) continue;
+      const colon = key.indexOf(':');
+      const wireId = Number(key.slice(0, colon));
+      if (!Number.isFinite(wireId)) continue;
+      const gain = Math.min(1.8, 0.35 + bow.peak / WAVE_DISP_PX);
+      audio.push({ type: 'pluck', wireId, gain, samples: bow.samples }, this.graph, this.agents);
+    }
+    const swap = this.wireBowPrev;
+    this.wireBowPrev = this.wireBowNow;
+    this.wireBowNow = swap;
+    this.wireBowNow.clear();
   }
 
   /**

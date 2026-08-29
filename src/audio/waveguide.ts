@@ -243,6 +243,7 @@ export type WorkletMessage =
   | { type: 'air'; items: { agentA: number; agentB: number; length: number; gain: number; damp: number }[] }
   | { type: 'latch'; topo: NetTopology; wireId: number; gain: number }
   | { type: 'rewrite'; phase: 0 | 1; wireId: number; agentA: number; agentB: number; leftovers: number[]; gain: number }
+  | { type: 'pluck'; wireId: number; gain: number; samples: number[] }
   | { type: 'gain'; master: number }
   | {
       type: 'listen';
@@ -704,6 +705,10 @@ export class WaveguideNet {
         this.applyTune(msg.wires);
         return;
       }
+      if (msg.type === 'pluck') {
+        this.injectProfile(msg.wireId, msg.samples, msg.gain);
+        return;
+      }
       if (msg.type === 'rewrite') {
         this.handleRewrite(msg);
       }
@@ -894,6 +899,51 @@ export class WaveguideNet {
     w.env = Math.max(w.env, Math.abs(gain));
     this.wakeAgentId(w.agentA, Math.abs(gain));
     this.wakeAgentId(w.agentB, Math.abs(gain));
+    return true;
+  }
+
+  /**
+   * Write a measured transverse profile onto the delay lines. `samples` are
+   * already in waveguide units (world px / WAVE_DISP_PX). Same layout as a
+   * pluck: half on each travelling wave so the first snapshot looks like the
+   * bow that produced it.
+   */
+  injectProfile(wireId: number, samples: number[], gainRaw?: number): boolean {
+    const idx = this.wireById.get(wireId);
+    if (idx === undefined) return false;
+    const n = samples.length;
+    if (n < 2) return false;
+    const gain = Math.max(-8, Math.min(8, num(gainRaw, 1)));
+    if (gain === 0) return false;
+    const w = this.wires[idx];
+    const L = Math.max(8, w.length | 0);
+    const vals = new Float32Array(L);
+    let mean = 0;
+    let peak = 0;
+    for (let k = 0; k < L; k++) {
+      const t = k / L;
+      const x = t * (n - 1);
+      const i0 = x | 0;
+      const i1 = i0 + 1 < n ? i0 + 1 : n - 1;
+      const frac = x - i0;
+      let v = (samples[i0] + frac * (samples[i1] - samples[i0])) * gain;
+      if (k === 0 || k === L - 1) v = 0;
+      vals[k] = v;
+      mean += v;
+      const a = v < 0 ? -v : v;
+      if (a > peak) peak = a;
+    }
+    mean /= L;
+    const amp = 0.5;
+    for (let k = 1; k < L; k++) {
+      const s = (vals[k] - mean) * amp;
+      w.bufFwd[wrapDelayIndex(w.pos, k) | 0] += s;
+      w.bufBack[wrapDelayIndex(w.pos, L - k) | 0] += s;
+    }
+    w.quiet = false;
+    w.env = Math.max(w.env, peak, 1e-4);
+    this.wakeAgentId(w.agentA, peak);
+    this.wakeAgentId(w.agentB, peak);
     return true;
   }
 

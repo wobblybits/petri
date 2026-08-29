@@ -526,6 +526,19 @@ describe('traveling-wave snapshot', () => {
     expect(absEnergy(waveChannel(packed, 1, 'back'))).toBeGreaterThan(0.1);
   });
 
+  it('injectProfile writes a measured bow onto both delay lines', () => {
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: sampleTopo(1, 10, 20, 80) });
+    const samples = new Array(16).fill(0);
+    for (let i = 1; i < 15; i++) samples[i] = Math.sin((Math.PI * i) / 15);
+    net.handle({ type: 'pluck', wireId: 1, gain: 1, samples });
+    const packed = snapCopy(net);
+    expect(packed[0]).toBe(1);
+    expect(absEnergy(waveChannel(packed, 1, 'fwd'))).toBeGreaterThan(0.05);
+    expect(absEnergy(waveChannel(packed, 1, 'back'))).toBeGreaterThan(0.05);
+    expect(peak(collect(net, 256))).toBeGreaterThan(0.005);
+  });
+
   it('an impulse at A travels toward B on the forward line', () => {
     const net = new WaveguideNet();
     net.handle({ type: 'topology', topo: sampleTopo(1, 10, 20, 64) });

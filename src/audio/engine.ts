@@ -22,6 +22,7 @@ const WIRE_COOLDOWN = 0.05;
 
 function eventGain(ev: AudioEvent): number {
   if (ev.type === 'latch') return 1.5;
+  if (ev.type === 'pluck') return Math.min(1.4, 0.4 + ev.gain);
   if (ev.type === 'rewrite') return ev.phase === 'commit' ? 1.4 : 1;
   // A spawn outranks a light bump but yields to a latch, so a busy frame keeps
   // the structural events and drops the incidental ones.
@@ -202,7 +203,7 @@ export class AudioEngine {
   /** Cooldowns keep one agent or wire from retriggering every frame. */
   private allow(ev: AudioEvent): boolean {
     if (ev.type === 'spawn') return true;
-    if (ev.type === 'latch') {
+    if (ev.type === 'latch' || ev.type === 'pluck') {
       if ((this.lastWire.get(ev.wireId) ?? -1) > this.now - WIRE_COOLDOWN) return false;
       this.lastWire.set(ev.wireId, this.now);
       return true;
@@ -387,6 +388,10 @@ export class AudioEngine {
     }
     if (ev.type === 'rewrite') {
       for (const msg of planRewriteMessages(ev)) this.post(msg);
+      return;
+    }
+    if (ev.type === 'pluck') {
+      this.post({ type: 'pluck', wireId: ev.wireId, gain: ev.gain, samples: ev.samples });
       return;
     }
     for (const msg of planCollisionMessages(ev)) this.post(msg);

@@ -1,4 +1,5 @@
 import { ERA_RADIUS, portLocal, slotsFor, stemRoot, stemWorld, triangleLocal, wireCubic, type Agent, type AgentKind } from './agents.ts';
+import { WAVE_DISP_PX } from './geom.ts';
 import type { WaveSnapshot } from './audio/types.ts';
 import type { Camera } from './camera.ts';
 import { catmullSegment, unwrapPoints } from './chain.ts';
@@ -94,7 +95,7 @@ function ghostAsAgent(g: Ghost): Agent {
 }
 
 /** World-space px of displacement at |sample/env| = 1 after AGC. */
-const WAVE_SCALE = 16;
+const WAVE_SCALE = WAVE_DISP_PX;
 /** Below this envelope the wire is drawn as its rest pose. */
 const ENV_DEAD = 4e-4;
 /** Envelope at which AGC fade reaches 1. */

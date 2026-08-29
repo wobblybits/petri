@@ -4,7 +4,9 @@ import {
   headingAlongWire,
   portAxis,
   stemWorld,
+  wireCubic,
 } from './agents.ts';
+import { bezierLength } from './curve.ts';
 import { defaultParams } from './params.ts';
 import { angleDelta } from './wrap.ts';
 
@@ -46,5 +48,17 @@ describe('port meridian headings', () => {
     const len = Math.hypot(d.x, d.y) || 1;
     expect(axisC.x * (d.x / len) + axisC.y * (d.y / len)).toBeGreaterThan(0.98);
     expect(axisE.x * (-d.x / len) + axisE.y * (-d.y / len)).toBeGreaterThan(0.98);
+  });
+});
+
+describe('wire cubics', () => {
+  it('caps handles so close ports cannot loop off-screen', () => {
+    const params = defaultParams();
+    const a = createAgent(1, 'era', 100, 100, 0, params);
+    const b = createAgent(2, 'era', 108, 100, Math.PI, params);
+    const c = wireCubic(a, 'p', b, 'p', 400, 240, 200);
+    const span = Math.hypot(c.p3.x - c.p0.x, c.p3.y - c.p0.y);
+    const len = bezierLength(c.p0, c.p1, c.p2, c.p3);
+    expect(len).toBeLessThan(span * 3.5);
   });
 });

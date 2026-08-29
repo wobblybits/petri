@@ -297,15 +297,23 @@ export function stemWorld(agent: Agent, slot: PortSlot, w: number, h: number): V
  * cross, and the cubic then doubles back on itself — which reads as a shorter
  * wire than the straight line between the ports.
  */
-export function handleWorld(agent: Agent, slot: PortSlot, w: number, h: number, restLen?: number): Vec2 {
+export function handleWorld(
+  agent: Agent,
+  slot: PortSlot,
+  w: number,
+  h: number,
+  restLen?: number,
+  maxHandle?: number,
+): Vec2 {
   const root = stemWorld(agent, slot, w, h);
   const tip = portWorld(agent, slot, w, h);
   const d = wrapDeltaVec(root.x, root.y, tip.x, tip.y, w, h);
   const seg = Math.hypot(d.x, d.y) || 1;
-  const handle =
+  let handle =
     restLen === undefined
       ? HANDLE_SCALE * seg
       : Math.max(seg * 0.75, Math.min(restLen * 0.32, HANDLE_SCALE * seg));
+  if (maxHandle !== undefined) handle = Math.min(handle, Math.max(1, maxHandle));
   return {
     x: wrap(root.x + (d.x / seg) * handle, w),
     y: wrap(root.y + (d.y / seg) * handle, h),
@@ -322,9 +330,15 @@ export function wireCubic(
   restLen?: number,
 ): { p0: Vec2; p1: Vec2; p2: Vec2; p3: Vec2 } {
   const p0 = stemWorld(A, aSlot, w, h);
-  const hA = handleWorld(A, aSlot, w, h, restLen);
-  const hB = handleWorld(B, bSlot, w, h, restLen);
   const rootB = stemWorld(B, bSlot, w, h);
+  const spanVec = wrapDeltaVec(p0.x, p0.y, rootB.x, rootB.y, w, h);
+  const span = Math.hypot(spanVec.x, spanVec.y);
+  // A handle longer than a third of the span crosses its partner and the cubic
+  // loops off-screen — which is exactly what a collision that shoves two ports
+  // together used to draw.
+  const cap = Math.max(4, span * 0.33);
+  const hA = handleWorld(A, aSlot, w, h, restLen, cap);
+  const hB = handleWorld(B, bSlot, w, h, restLen, cap);
   const d1 = wrapDeltaVec(p0.x, p0.y, hA.x, hA.y, w, h);
   const d2 = wrapDeltaVec(p0.x, p0.y, hB.x, hB.y, w, h);
   const d3 = wrapDeltaVec(p0.x, p0.y, rootB.x, rootB.y, w, h);

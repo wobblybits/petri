@@ -1,6 +1,10 @@
 import type { Vec2 } from './wrap.ts';
 
 export const WIRE_RADIUS = 2.5;
+/** World px of string displacement at waveguide |sample| = 1 after AGC. */
+export const WAVE_DISP_PX = 16;
+/** Spatial samples in a wire-pluck profile. */
+export const PLUCK_BINS = 16;
 
 export function orient(
   ax: number,
@@ -164,4 +168,80 @@ export function polylineInterfere(
     }
   }
   return false;
+}
+
+/**
+ * Signed perpendicular offsets of `n` arc-length samples from the chord
+ * through the polyline's ends. Ends are pinned to 0 — a string.
+ */
+export function transverseProfile(
+  pts: Vec2[],
+  n = PLUCK_BINS,
+): { samples: number[]; peak: number; at: number } {
+  const samples = new Array<number>(Math.max(2, n)).fill(0);
+  const bins = samples.length;
+  if (pts.length < 2) return { samples, peak: 0, at: 0.5 };
+  const a = pts[0];
+  const b = pts[pts.length - 1];
+  const cx = b.x - a.x;
+  const cy = b.y - a.y;
+  const cLen = Math.hypot(cx, cy);
+  const nx = cLen > 1e-6 ? -cy / cLen : 0;
+  const ny = cLen > 1e-6 ? cx / cLen : -1;
+
+  const seg: number[] = [];
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const d = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    seg.push(d);
+    total += d;
+  }
+  if (total < 1e-6) return { samples, peak: 0, at: 0.5 };
+
+  let peak = 0;
+  let at = 0.5;
+  for (let i = 0; i < bins; i++) {
+    if (i === 0 || i === bins - 1) {
+      samples[i] = 0;
+      continue;
+    }
+    const target = (i / (bins - 1)) * total;
+    let acc = 0;
+    let s = 0;
+    while (s < seg.length - 1 && acc + seg[s] < target) {
+      acc += seg[s];
+      s++;
+    }
+    const span = seg[s];
+    const u = span < 1e-9 ? 0 : (target - acc) / span;
+    const px = pts[s].x + (pts[s + 1].x - pts[s].x) * u;
+    const py = pts[s].y + (pts[s + 1].y - pts[s].y) * u;
+    const off = (px - a.x) * nx + (py - a.y) * ny;
+    samples[i] = off;
+    if (Math.abs(off) > peak) {
+      peak = Math.abs(off);
+      at = i / (bins - 1);
+    }
+  }
+  return { samples, peak, at };
+}
+
+/** Axis-aligned bounds of a rope polyline, stems included. */
+export function ropeAabb(
+  a: Vec2,
+  nodes: Vec2[],
+  b: Vec2,
+): { minX: number; minY: number; maxX: number; maxY: number } {
+  let minX = a.x < b.x ? a.x : b.x;
+  let maxX = a.x > b.x ? a.x : b.x;
+  let minY = a.y < b.y ? a.y : b.y;
+  let maxY = a.y > b.y ? a.y : b.y;
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    if (n.x < minX) minX = n.x;
+    else if (n.x > maxX) maxX = n.x;
+    if (n.y < minY) minY = n.y;
+    else if (n.y > maxY) maxY = n.y;
+  }
+  return { minX, minY, maxX, maxY };
 }

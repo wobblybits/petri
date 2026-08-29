@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createAgent, stemWorld } from './agents.ts';
 import {
   chordDeviation,
+  catmullSegment,
   desiredLinks,
   portExitAngle,
   solveWire,
@@ -86,5 +87,18 @@ describe('wire constraints', () => {
     relax((h) => solveWire(a, "p", b, "p", nodes, 120, 120, [], firm, h), 240);
     const seg = Math.hypot(nodes[1].x - nodes[0].x, nodes[1].y - nodes[0].y);
     expect(Math.abs(seg - 30), `link length ${seg.toFixed(1)} vs 30`).toBeLessThan(6);
+  });
+});
+
+describe('catmull handles', () => {
+  it('clamps handles to the local span so a far neighbour cannot loop a segment', () => {
+    const c = catmullSegment(
+      { x: -200, y: 0 },
+      { x: 0, y: 0 },
+      { x: 10, y: 0 },
+      { x: 400, y: 0 },
+    );
+    const h1 = Math.hypot(c.p1.x - c.p0.x, c.p1.y - c.p0.y);
+    expect(h1).toBeLessThanOrEqual(10 * 0.45 + 1e-6);
   });
 });
