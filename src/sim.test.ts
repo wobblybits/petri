@@ -183,6 +183,25 @@ describe('transverse profile', () => {
   });
 });
 
+describe('hop distances', () => {
+  it('reuses the hop table while the graph is unchanged', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    const a = sim.spawn('era', 40, 80, 0, params, true)!;
+    const b = sim.spawn('dup', 120, 80, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    const first = sim.graph.hopDistances(sim.agents);
+    expect(sim.graph.hopDistances(sim.agents)).toBe(first);
+    const c = sim.spawn('era', 200, 80, Math.PI, params, true)!;
+    expect(sim.graph.hopDistances(sim.agents)).not.toBe(first);
+    sim.wire(b.id, 'l', c.id, 'p', params);
+    const after = sim.graph.hopDistances(sim.agents);
+    expect(after).not.toBe(first);
+    expect(after.get(a.id)?.get(c.id)).toBe(2);
+  });
+});
+
 describe('simulation presets', () => {
   it('steps a soup without throwing', () => {
     const sim = new Sim(480, 320);

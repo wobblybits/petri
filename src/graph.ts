@@ -11,7 +11,6 @@ import {
 } from './agents.ts';
 import {
   desiredLinks,
-  polylineLength,
   reduceChain,
   sampleChain,
   solveWire,
@@ -19,7 +18,7 @@ import {
   type ChainNode,
   type WireStiffness,
 } from './chain.ts';
-import { bezierPoint } from './curve.ts';
+import { bezierPointInto } from './curve.ts';
 import { segmentsInterfere, WIRE_RADIUS } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import type { Params } from './params.ts';
@@ -64,10 +63,16 @@ export class Graph {
   portWire = new Map<string, number>();
   nextWireId = 1;
   onLatch: ((ev: LatchEvent) => void) | null = null;
+  /** Bumps whenever a wire is added or removed. Hop caches key off this. */
+  version = 0;
+  private hops: Map<number, Map<number, number>> | null = null;
+  private hopsVersion = -1;
+  private hopsAgents = -1;
 
   clear(): void {
     this.wires.clear();
     this.portWire.clear();
+    this.bump();
   }
 
   wireAt(port: PortRef): Wire | undefined {
@@ -88,8 +93,16 @@ export class Graph {
     return o;
   }
 
+  private bump(): void {
+    this.version++;
+    this.hops = null;
+  }
+
   /** Shortest hop count along wires. Missing entry ⇒ not in the same component. */
   hopDistances(agents: Map<number, Agent>): Map<number, Map<number, number>> {
+    if (this.hops && this.hopsVersion === this.version && this.hopsAgents === agents.size) {
+      return this.hops;
+    }
     const adj = new Map<number, number[]>();
     for (const id of agents.keys()) adj.set(id, []);
     for (const wire of this.wires.values()) {
@@ -114,6 +127,9 @@ export class Graph {
       }
       out.set(start, dist);
     }
+    this.hops = out;
+    this.hopsVersion = this.version;
+    this.hopsAgents = agents.size;
     return out;
   }
 
@@ -126,6 +142,7 @@ export class Graph {
     this.wires.set(id, wire);
     this.portWire.set(portKey(a), id);
     this.portWire.set(portKey(b), id);
+    this.bump();
     return wire;
   }
 
@@ -193,8 +210,20 @@ export class Graph {
     const A = agents.get(wire.a.id);
     const B = agents.get(wire.b.id);
     if (!A || !B) return wire.lastLen;
-    const pts = chainPoints(A, B, wire, w, h);
-    return polylineLength(pts, w, h);
+    const sa = stemWorld(A, wire.a.slot, w, h);
+    const sb = stemWorld(B, wire.b.slot, w, h);
+    let px = sa.x;
+    let py = sa.y;
+    let len = 0;
+    for (let i = 0; i < wire.nodes.length; i++) {
+      const n = wire.nodes[i];
+      const d = wrapDeltaVec(px, py, n.x, n.y, w, h);
+      len += Math.hypot(d.x, d.y);
+      px = n.x;
+      py = n.y;
+    }
+    const d = wrapDeltaVec(px, py, sb.x, sb.y, w, h);
+    return len + Math.hypot(d.x, d.y);
   }
 
   stemSpan(wire: Wire, agents: Map<number, Agent>, w: number, h: number): number {
@@ -234,6 +263,7 @@ export class Graph {
     this.portWire.delete(portKey(w.a));
     this.portWire.delete(portKey(w.b));
     this.wires.delete(id);
+    this.bump();
   }
 
   detachAgent(agentId: number): void {
@@ -442,12 +472,23 @@ export class Graph {
         continue;
       }
       const c = wireCubic(A, wire.a.slot, B, wire.b.slot, w, h, wire.rest);
-      const pts: Vec2[] = [];
-      for (let i = 1; i <= n; i++) {
-        pts.push(bezierPoint(c.p0, c.p1, c.p2, c.p3, i / (n + 1)));
+      const shape = wire.shape;
+      if (shape.length !== n) {
+        wire.shape = new Array(n);
+        for (let i = 0; i < n; i++) wire.shape[i] = { x: 0, y: 0 };
       }
-      wire.shape = pts;
-      wire.ropeLen = polylineLength([c.p0, ...pts, c.p3], w, h);
+      const pts = wire.shape;
+      let rope = 0;
+      let px = c.p0.x;
+      let py = c.p0.y;
+      for (let i = 0; i < n; i++) {
+        const p = bezierPointInto(c.p0, c.p1, c.p2, c.p3, (i + 1) / (n + 1), pts[i]);
+        rope += Math.hypot(p.x - px, p.y - py);
+        px = p.x;
+        py = p.y;
+      }
+      rope += Math.hypot(c.p3.x - px, c.p3.y - py);
+      wire.ropeLen = rope;
     }
   }
 

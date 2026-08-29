@@ -121,6 +121,10 @@ export class Sim {
   private wx: number[] = [];
   private wy: number[] = [];
   private agentList: Agent[] = [];
+  private clearWireList: Wire[] = [];
+  private wallPts: { x: number; y: number }[] = [];
+  private satBuf = new Uint8Array(0);
+  private compBuf = new Int32Array(0);
   /** Pairs in contact last frame — a strike fires on onset, contact continues. */
   private contactAudioPrev = new Set<string>();
   private contactAudioNow = new Set<string>();
@@ -571,7 +575,8 @@ export class Sim {
     const ropeGap = WIRE_RADIUS * 3;
     const slack = params.wireMinRest;
 
-    const wires: Wire[] = [];
+    const wires = this.clearWireList;
+    wires.length = 0;
     let maxRope = 0;
     for (const wire of this.graph.wires.values()) {
       if (wire.nodes.length === 0) continue;
@@ -710,8 +715,12 @@ export class Sim {
     const list = this.rebuildBodyGrid(cutoff);
     const n = list.length;
     // Hoisted out of the inner loop: both were map lookups per pair.
-    const sat = new Uint8Array(n);
-    const comp = new Int32Array(n);
+    if (this.satBuf.length < n) {
+      this.satBuf = new Uint8Array(n * 2);
+      this.compBuf = new Int32Array(n * 2);
+    }
+    const sat = this.satBuf;
+    const comp = this.compBuf;
     for (let i = 0; i < n; i++) {
       sat[i] = this.graph.portsFilled(list[i]) ? 1 : 0;
       comp[i] = this.components.get(list[i].id) ?? -1 - i;
@@ -798,6 +807,14 @@ export class Sim {
         ) {
           continue;
         }
+        if (
+          Math.max(S.ax, S.bx) < Math.min(T.ax, T.bx) ||
+          Math.max(T.ax, T.bx) < Math.min(S.ax, S.bx) ||
+          Math.max(S.ay, S.by) < Math.min(T.ay, T.by) ||
+          Math.max(T.ay, T.by) < Math.min(S.ay, S.by)
+        ) {
+          continue;
+        }
         if (!segmentsIntersect(S.ax, S.ay, S.bx, S.by, T.ax, T.ay, T.bx, T.by)) continue;
         // Draw the crossed principal's ends toward each other. A shorter chord
         // spans less, so it tends to slip out from under the wire lying over it.
@@ -847,7 +864,9 @@ export class Sim {
     // Rope velocity is re-derived every substep, so a nudge of e px becomes
     // e/h — damping it once per frame is far too late to keep a slack rope calm.
     const ropeKeep = Math.exp(-Math.max(0, params.springDamp) * h);
-    const list = [...this.agents.values()];
+    const list = this.agentList;
+    list.length = 0;
+    for (const a of this.agents.values()) list.push(a);
 
     for (let sub = 0; sub < Sim.SUBSTEPS; sub++) {
       for (const a of list) {
@@ -1048,17 +1067,30 @@ export class Sim {
   /** Rasterize wire chains so scent diffusion cannot cross them. */
   private paintScentWalls(): void {
     this.fields.clearWalls();
+    const pts = this.wallPts;
     for (const wire of this.graph.wires.values()) {
       const A = this.agents.get(wire.a.id);
       const B = this.agents.get(wire.b.id);
       if (!A || !B) continue;
-      const raw = [
-        stemWorld(A, wire.a.slot, this.w, this.h),
-        ...wire.nodes,
-        stemWorld(B, wire.b.slot, this.w, this.h),
-      ];
-      const pts = unwrapPoints(raw, this.w, this.h);
-      for (let i = 0; i < pts.length - 1; i++) {
+      const n = wire.nodes.length;
+      const need = n + 2;
+      while (pts.length < need) pts.push({ x: 0, y: 0 });
+      const sA = stemWorld(A, wire.a.slot, this.w, this.h);
+      const sB = stemWorld(B, wire.b.slot, this.w, this.h);
+      pts[0].x = sA.x;
+      pts[0].y = sA.y;
+      for (let i = 0; i < n; i++) {
+        pts[i + 1].x = wire.nodes[i].x;
+        pts[i + 1].y = wire.nodes[i].y;
+      }
+      pts[n + 1].x = sB.x;
+      pts[n + 1].y = sB.y;
+      for (let i = 1; i < need; i++) {
+        const d = wrapDeltaVec(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y, this.w, this.h);
+        pts[i].x = pts[i - 1].x + d.x;
+        pts[i].y = pts[i - 1].y + d.y;
+      }
+      for (let i = 0; i < need - 1; i++) {
         this.fields.markSegment(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y);
       }
     }
@@ -1266,18 +1298,11 @@ export class Sim {
     const sep = params.flockSep;
     if ((align <= 0 && sep <= 0) || dt <= 0) return;
     const hops = this.graph.hopDistances(this.agents);
-    const list = [...this.agents.values()];
+    const list = this.agentList;
+    list.length = 0;
+    for (const a of this.agents.values()) list.push(a);
     const byId = this.agents;
     const desired = Math.max(18, params.wireMinRest * 0.9);
-    const nbrs = new Map<number, number[]>();
-    for (const a of list) nbrs.set(a.id, []);
-    for (const wire of this.graph.wires.values()) {
-      if (wire.a.id === wire.b.id) continue;
-      if (!byId.has(wire.a.id) || !byId.has(wire.b.id)) continue;
-      nbrs.get(wire.a.id)!.push(wire.b.id);
-      nbrs.get(wire.b.id)!.push(wire.a.id);
-    }
-
     for (let i = 0; i < list.length; i++) {
       const A = list[i];
       if (A.locked) continue;
