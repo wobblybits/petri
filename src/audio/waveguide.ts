@@ -30,6 +30,27 @@ export const WAVE_STRIDE = 2 + WAVE_BINS * 2;
 const LENGTH_GLIDE = 0.004;
 /** Below this pickup envelope a wire is zeroed so silence is really silent. */
 const QUIET_FLOOR = 3e-6;
+/**
+ * Most bodies allowed to ring at once.
+ *
+ * Nothing else bounds concurrent voices: the net stays inside its budget only
+ * because gating happens to keep counts low, so a cascade — a rewrite chain, a
+ * flurry of clicks — can wake far more than the callback can afford. Stubs and
+ * air are both gated by their agents, so one ceiling on awake bodies bounds all
+ * three costs at once.
+ */
+const MAX_AWAKE = 44;
+/**
+ * Steals allowed per quantum. A large cascade converges over a few callbacks
+ * instead of paying O(excess * agents) inside one of them.
+ */
+const MAX_STEALS = 8;
+/**
+ * Air quieter than this is not worth waking a silent body for. One strike used
+ * to light up every neighbour along the air graph, and 48 plates then rang for
+ * a full T60 — that is the load that blew the callback.
+ */
+const AIR_WAKE = 2.5e-4;
 /** Junction incoming bled into body modes. Mix-only — never written back. */
 const BODY_FROM_STRING = 0.1;
 /** Active wires quieter than this can be stolen for a new latch. */
@@ -45,16 +66,22 @@ const CONTACT_K = 2.2;
 /** Hertzian dashpot: keeps the contact spring from howling. */
 const CONTACT_C = 0.28;
 /**
+ * How much of the contact force shows up as compression of each body rather
+ * than as shoving it. This is the in-phase, monopole half of a contact, and it
+ * is what lets two identical bodies be heard at all.
+ */
+const CONTACT_SQUEEZE = 0.12;
+/**
  * How loudly surface asperities radiate, per unit load and slip speed.
  *
- * Kept deliberately low. Roughness exists to break the exact antisymmetry of
- * the contact force so a same-kind pair does not cancel to silence — nothing
- * more. Turned up, it swamps the friction's own limit cycle: a bowed wire stops
- * entraining to its round trip and locks onto the body mode instead, and the
- * whole thing reads as metallic scraping rather than bowing. At this level a
- * wired pair holds the string's period and stays tonal.
+ * Texture only. Breaking the contact's antisymmetry is CONTACT_SQUEEZE's job
+ * now, and it does it coherently; roughness is incoherent, so turning it up
+ * swamps the friction's own limit cycle — a bowed wire stops entraining to its
+ * round trip and drops to the sub-octave or locks onto the body mode, and the
+ * whole thing reads as metallic scraping. At 4.2 it did exactly that; halving
+ * it puts the string back in charge.
  */
-const ROUGHNESS = 4.2;
+const ROUGHNESS = 0.5;
 
 /** Air pressure into plate modes. Weaker than a bow so the gap is a halo, not a second instrument. */
 const AIR_TO_BODY = 2.2;
@@ -65,6 +92,27 @@ const STUB_TO_AIR = 0.1;
 /** One-pole at the lip: 1 is a perfect inversion, lower leaks highs into air. */
 const OPEN_END_DAMP = 0.62;
 const OPEN_END_LOSS = 0.97;
+/**
+ * Ridges crossed per unit of slip. A scraped surface is not a smooth hiss — a
+ * güiro is a row of ridges and you hear each one, at a rate that rises with how
+ * fast you drag across it. Broadband noise is what makes a scrape read as nails
+ * on a chalkboard; a countable train of taps is what makes it an instrument.
+ *
+ * Spaced so the rasp lands above the body's own pitch (~127 Hz at a slow drag,
+ * ~285 Hz at a fast one). Coarser ridges put the train's harmonics underneath
+ * the plate mode, where they drown it and the scrape loses its pitch entirely.
+ */
+const RIDGE_DENSITY = 0.3;
+/**
+ * How hard one ridge crossing strikes. Balanced so the rasp rate stays the
+ * strongest component — that is the güiro — while the body's own resonance
+ * still dominates the bins around it, so the scrape keeps a pitch instead of
+ * turning into a rate-following buzz.
+ */
+const RIDGE_GAIN = 0.8;
+/** Per-sample decay of a ridge tap: short enough to stay a tap. */
+const RIDGE_DECAY = 0.86;
+
 const MU_STATIC = 0.82;
 const MU_KINETIC = 0.34;
 const V_STRIBECK = 0.01;
@@ -153,11 +201,20 @@ export interface AgentState {
 
   /** True while this body is in at least one contact pair. */
   touching: boolean;
+  /**
+   * Below the pickup floor with nothing driving it. The per-sample loops skip
+   * these so a silent soup does not cost like a ringing one.
+   */
+  quiet: boolean;
   /** Scratch: junction admittance sum, incoming, this-sample strike and contact force. */
   sumY: number;
   sumYIn: number;
   strikeNow: number;
   contactF: number;
+  /** In-phase compression drive: the monopole half of a contact. */
+  contactC: number;
+  /** Incoming wave from the single resonator friction is allowed to hear. */
+  domIn: number;
   /** Delayed air arriving this sample. */
   airIn: number;
   /** What this body radiated last sample — the air source. */
@@ -272,10 +329,13 @@ function makeAgent(): AgentState {
     strikeDur: 0,
     strikeSharp: 0.5,
     touching: false,
+    quiet: true,
     sumY: 0,
     sumYIn: 0,
     strikeNow: 0,
     contactF: 0,
+    contactC: 0,
+    domIn: 0,
     airIn: 0,
     radiate: 0,
     modeA1: new Float32Array(BODY_MODES),
@@ -298,6 +358,9 @@ interface ContactState {
   idB: number;
   load: number;
   slide: number;
+  /** Ridge train: phase across the surface, and the tap it last let go. */
+  ridgePhase: number;
+  ridgeEnv: number;
   noise: number;
 }
 
@@ -310,6 +373,8 @@ function makeContact(): ContactState {
     idB: -1,
     load: 0,
     slide: 0,
+    ridgePhase: 0,
+    ridgeEnv: 0,
     noise: 1,
   };
 }
@@ -317,6 +382,7 @@ function makeContact(): ContactState {
 interface AirState {
   active: boolean;
   keep: boolean;
+  quiet: boolean;
   idxA: number;
   idxB: number;
   idA: number;
@@ -336,6 +402,7 @@ function makeAir(): AirState {
   return {
     active: false,
     keep: false,
+    quiet: true,
     idxA: 0,
     idxB: 0,
     idA: -1,
@@ -469,6 +536,15 @@ function softClip(x: number): number {
   return Math.tanh(x);
 }
 
+/**
+ * Message inputs are external data. Math.max/Math.min propagate NaN rather than
+ * clamping it, and comparisons against NaN are false, so an unchecked value
+ * walks straight past every guard and into a filter state — where it stays.
+ */
+function num(x: number | undefined, fallback = 0): number {
+  return typeof x === 'number' && Number.isFinite(x) ? x : fallback;
+}
+
 /** Kill denormals and non-finite values so a NaN cannot poison the net. */
 function flush(x: number): number {
   if (!Number.isFinite(x)) return 0;
@@ -543,6 +619,8 @@ export class WaveguideNet {
   private liveContacts = new Int32Array(MAX_CONTACTS);
   private liveContactN = 0;
 
+  private quantumPos = 0;
+
   /** Scratch reused by applyTopology so the audio thread never allocates. */
   private seen = new Set<number>();
   private keep = new Set<number>();
@@ -565,7 +643,7 @@ export class WaveguideNet {
   handle(msg: WorkletMessage): void {
     try {
       if (msg.type === 'gain') {
-        this.master = msg.master;
+        this.master = Math.max(0, Math.min(4, num(msg.master, 1)));
         return;
       }
       if (msg.type === 'topology') {
@@ -573,7 +651,26 @@ export class WaveguideNet {
         return;
       }
       if (msg.type === 'latch') {
-        this.applyTopology(msg.topo);
+        // The engine posts topology before the latch in the same frame. Rebuilding
+        // here doubled applyTopology inside one quantum — enough to drop a callback
+        // once the pond is busy.
+        const idx = this.wireById.get(msg.wireId);
+        const w = idx !== undefined ? this.wires[idx] : undefined;
+        let spec: NetTopology['wires'][number] | undefined;
+        const wires = msg.topo.wires;
+        for (let i = 0; i < wires.length; i++) {
+          if (wires[i].id === msg.wireId) {
+            spec = wires[i];
+            break;
+          }
+        }
+        const same =
+          w !== undefined &&
+          w.active &&
+          spec !== undefined &&
+          w.agentA === spec.agentA &&
+          w.agentB === spec.agentB;
+        if (!same) this.applyTopology(msg.topo);
         // The pluck is the whole excitation: the voice's `width` already sets
         // how sharp the attack is, and an extra burst on top just adds a click.
         this.injectPluck(msg.wireId, msg.gain);
@@ -648,6 +745,57 @@ export class WaveguideNet {
     this.liveContactN = n;
   }
 
+  private wakeAgent(a: AgentState, amt = 0): void {
+    a.quiet = false;
+    if (amt > 0) a.bodyEnv = Math.max(a.bodyEnv, amt);
+  }
+
+  private wakeAgentId(id: number, amt = 0): void {
+    const idx = this.agentById.get(id);
+    if (idx === undefined) return;
+    this.wakeAgent(this.agents[idx], amt);
+  }
+
+  /** Junction admittance and incoming waves for this sample. */
+  private prepAgent(agent: AgentState): void {
+    agent.strikeNow = this.strikeForce(agent);
+    let sumY = agent.loadY;
+    let sumYIn = 0;
+    for (let p = 0; p < agent.portCount; p++) {
+      const w = this.wires[agent.wireIdx[p]];
+      if (!w) continue;
+      const y = agent.admittance[p];
+      sumY += y;
+      sumYIn += y * (agent.wireEnd[p] === 0 ? w.inA : w.inB);
+    }
+    for (let s = 0; s < agent.stubCount; s++) {
+      const st = this.stubs[agent.stubIdx[s]];
+      if (!st) continue;
+      sumY += st.y;
+      sumYIn += st.y * st.inJ;
+    }
+    agent.sumY = sumY;
+    agent.sumYIn = sumYIn;
+
+    // The one resonator friction is allowed to hear.
+    //
+    // A body offers up to six — three inharmonic plate modes plus a quarter-wave
+    // stub per open port — and stick-slip cannot entrain to six things that
+    // disagree, so it free-runs and the result is a scrape. Given a single
+    // harmonic series it locks to that period instead, which is what bowing is.
+    // A wire wins over a stub: it is longer, more harmonic, and it is the thing
+    // the net actually built.
+    let dom = 0;
+    if (agent.portCount > 0) {
+      const w = this.wires[agent.wireIdx[0]];
+      if (w) dom = agent.wireEnd[0] === 0 ? w.inA : w.inB;
+    } else if (agent.stubCount > 0) {
+      const st = this.stubs[agent.stubIdx[0]];
+      if (st) dom = st.inJ;
+    }
+    agent.domIn = dom;
+  }
+
   read(buf: Float32Array, pos: number, delay: number): number {
     const r = wrapDelayIndex(pos, delay);
     const i0 = r | 0;
@@ -673,14 +821,19 @@ export class WaveguideNet {
   }
 
   /** Raised-cosine burst at one end. Never a bare single-sample spike. */
-  injectImpulse(wireId: number, end: 0 | 1, gain: number): boolean {
+  injectImpulse(wireId: number, endRaw: 0 | 1, gainRaw: number): boolean {
     const idx = this.wireById.get(wireId);
     if (idx === undefined) return false;
+    const end = endRaw === 1 ? 1 : 0;
+    const gain = Math.max(-8, Math.min(8, num(gainRaw)));
+    if (gain === 0) return false;
     const w = this.wires[idx];
     w.quiet = false;
     // Seed the envelope with what we are about to inject, otherwise the quiet
     // gate fires on tick 1 — the excitation has not reached the pickup yet.
     w.env = Math.max(w.env, Math.abs(gain));
+    this.wakeAgentId(w.agentA, Math.abs(gain));
+    this.wakeAgentId(w.agentB, Math.abs(gain));
     const burst = end === 1 ? w.burstBack : w.burstFwd;
     for (let k = 0; k < IMPULSE_TAPS; k++) {
       const phase = k / (IMPULSE_TAPS - 1);
@@ -714,12 +867,14 @@ export class WaveguideNet {
    * terminations, any DC in the initial condition is the longest-lived thing
    * in the loop and would sit under everything as a slow pedestal.
    */
-  injectPluck(wireId: number, gain: number, at?: number, width?: number): boolean {
+  injectPluck(wireId: number, gainRaw: number, at?: number, width?: number): boolean {
     // `at` near an end drives the fundamental; `at` at 0.5 cancels it. See the
     // note on Voice in presets.ts — the terminations do not invert, so the mode
     // shapes are cosines rather than a fixed-fixed string's sines.
     const idx = this.wireById.get(wireId);
     if (idx === undefined) return false;
+    const gain = Math.max(-8, Math.min(8, num(gainRaw)));
+    if (gain === 0) return false;
     const w = this.wires[idx];
     if (at === undefined) at = w.exAt;
     if (width === undefined) width = w.exWidth;
@@ -737,16 +892,22 @@ export class WaveguideNet {
     }
     w.quiet = false;
     w.env = Math.max(w.env, Math.abs(gain));
+    this.wakeAgentId(w.agentA, Math.abs(gain));
+    this.wakeAgentId(w.agentB, Math.abs(gain));
     return true;
   }
 
-  addJunction(agentId: number, gain: number): void {
+  addJunction(agentId: number, gainRaw: number): void {
     const aIdx = this.agentById.get(agentId);
     if (aIdx === undefined) return;
+    const gain = Math.max(-8, Math.min(8, num(gainRaw)));
+    if (gain === 0) return;
     const a = this.agents[aIdx];
     a.excite += gain;
+    this.wakeAgent(a, Math.abs(gain));
     for (let p = 0; p < a.portCount; p++) {
       const w = this.wires[a.wireIdx[p]];
+      if (!w) continue;
       w.quiet = false;
       w.env = Math.max(w.env, Math.abs(gain));
     }
@@ -762,24 +923,30 @@ export class WaveguideNet {
     const aIdx = this.agentById.get(agentId);
     if (aIdx === undefined) return;
     const a = this.agents[aIdx];
+    const pk = Math.max(0, Math.min(8, num(peak)));
+    if (pk === 0) return;
     // Overlapping contacts merge into the louder, shorter one.
-    if (a.strikePos < a.strikeDur && a.strikePeak > peak) return;
-    a.strikePeak = peak;
-    a.strikeDur = Math.max(2, Math.min(2048, dur));
+    if (a.strikePos < a.strikeDur && a.strikePeak > pk) return;
+    a.strikePeak = pk;
+    a.strikeDur = Math.max(2, Math.min(2048, num(dur, 2)));
     a.strikePos = 0;
-    a.strikeSharp = Math.max(0, Math.min(1, sharp));
-    a.bodyEnv = Math.max(a.bodyEnv, peak);
+    a.strikeSharp = Math.max(0, Math.min(1, num(sharp, 0.5)));
+    a.bodyEnv = Math.max(a.bodyEnv, pk);
+    this.wakeAgent(a, pk);
     for (let p = 0; p < a.portCount; p++) {
       const w = this.wires[a.wireIdx[p]];
+      // Same guard the tick loops use: a stale index must skip a wire, not
+      // throw out of the message handler and swallow the whole strike.
+      if (!w) continue;
       w.quiet = false;
-      w.env = Math.max(w.env, peak);
+      w.env = Math.max(w.env, pk);
     }
   }
 
   /** Replace the set of touching pairs. Anything not listed has separated. */
   setContacts(items: { agentA: number; agentB: number; load: number; slide: number }[]): void {
-    for (const a of this.agents) {
-      if (a.active) a.touching = false;
+    for (let k = 0; k < this.liveAgentN; k++) {
+      this.agents[this.liveAgents[k]].touching = false;
     }
     let n = 0;
     for (const it of items) {
@@ -793,16 +960,16 @@ export class WaveguideNet {
       c.idxB = ib;
       c.idA = it.agentA;
       c.idB = it.agentB;
-      c.load = Math.max(0, Math.min(1, it.load));
-      c.slide = Math.max(-0.08, Math.min(0.08, it.slide));
+      c.load = Math.max(0, Math.min(1, num(it.load)));
+      c.slide = Math.max(-0.08, Math.min(0.08, num(it.slide)));
       n++;
       const A = this.agents[ia];
       const B = this.agents[ib];
       A.touching = true;
       B.touching = true;
       if (c.load > 0) {
-        A.bodyEnv = Math.max(A.bodyEnv, c.load * 0.5);
-        B.bodyEnv = Math.max(B.bodyEnv, c.load * 0.5);
+        this.wakeAgent(A, c.load * 0.5);
+        this.wakeAgent(B, c.load * 0.5);
         this.wakeWires(A, c.load);
         this.wakeWires(B, c.load);
       }
@@ -896,6 +1063,7 @@ export class WaveguideNet {
   private retireAir(a: AirState): void {
     a.active = false;
     a.keep = false;
+    a.quiet = true;
     a.idA = -1;
     a.idB = -1;
     a.gain = 0;
@@ -913,21 +1081,41 @@ export class WaveguideNet {
   private applyAirReads(): void {
     for (let k = 0; k < this.liveAirN; k++) {
       const a = this.airs[this.liveAirs[k]];
-      const ia = this.agentById.get(a.idA);
-      const ib = this.agentById.get(a.idB);
-      if (ia === undefined || ib === undefined) continue;
-      a.idxA = ia;
-      a.idxB = ib;
-      const A = this.agents[ia];
-      const B = this.agents[ib];
+      let A = this.agents[a.idxA];
+      let B = this.agents[a.idxB];
+      if (!A || A.id !== a.idA || !A.active) {
+        const ia = this.agentById.get(a.idA);
+        if (ia === undefined) continue;
+        a.idxA = ia;
+        A = this.agents[ia];
+      }
+      if (!B || B.id !== a.idB || !B.active) {
+        const ib = this.agentById.get(a.idB);
+        if (ib === undefined) continue;
+        a.idxB = ib;
+        B = this.agents[ib];
+      }
       if (!A.active || !B.active) continue;
+      if (A.quiet && B.quiet) {
+        a.quiet = true;
+        continue;
+      }
+      a.quiet = false;
       const d = a.lengthTarget - a.length;
       if (d !== 0) a.length += d * LENGTH_GLIDE;
       if (!Number.isFinite(a.length)) a.length = a.lengthTarget;
       const yFwd = flush(this.readAir(a.bufFwd, a.pos, a.length));
       const yBack = flush(this.readAir(a.bufBack, a.pos, a.length));
-      A.airIn += yBack;
-      B.airIn += yFwd;
+      const magA = yBack < 0 ? -yBack : yBack;
+      const magB = yFwd < 0 ? -yFwd : yFwd;
+      if (!A.quiet || magA >= AIR_WAKE) {
+        A.airIn += yBack;
+        if (magA >= AIR_WAKE) this.wakeAgent(A, magA);
+      }
+      if (!B.quiet || magB >= AIR_WAKE) {
+        B.airIn += yFwd;
+        if (magB >= AIR_WAKE) this.wakeAgent(B, magB);
+      }
     }
   }
 
@@ -935,6 +1123,7 @@ export class WaveguideNet {
   private applyAirWrites(): void {
     for (let k = 0; k < this.liveAirN; k++) {
       const a = this.airs[this.liveAirs[k]];
+      if (a.quiet) continue;
       const A = this.agents[a.idxA];
       const B = this.agents[a.idxB];
       const xA = A && A.active && A.id === a.idA ? A.radiate * a.gain : 0;
@@ -1057,6 +1246,11 @@ export class WaveguideNet {
   private applyStubReads(): void {
     for (let k = 0; k < this.liveStubN; k++) {
       const s = this.stubs[this.liveStubs[k]];
+      const agent = this.agents[s.agentIdx];
+      if (!agent || agent.quiet) {
+        s.inJ = 0;
+        continue;
+      }
       const d = s.lengthTarget - s.length;
       if (d !== 0) s.length += d * LENGTH_GLIDE;
       if (!Number.isFinite(s.length)) s.length = s.lengthTarget;
@@ -1068,6 +1262,8 @@ export class WaveguideNet {
   private applyStubWrites(): void {
     for (let k = 0; k < this.liveStubN; k++) {
       const s = this.stubs[this.liveStubs[k]];
+      const agent = this.agents[s.agentIdx];
+      if (!agent || agent.quiet) continue;
       const yJ = flush(s.outJ);
       s.bufFwd[s.pos] = yJ;
       const lipIn = flush(this.readStub(s.bufFwd, s.pos, s.length));
@@ -1077,9 +1273,8 @@ export class WaveguideNet {
       const lipOut = OPEN_END_LOSS * s.lp;
       s.bufBack[s.pos] = lipOut;
       const flow = lipIn - lipOut;
-      const a = this.agents[s.agentIdx];
-      if (a && a.active && a.id === s.agentId) {
-        a.radiate += flow * STUB_TO_AIR;
+      if (agent.active && agent.id === s.agentId) {
+        agent.radiate += flow * STUB_TO_AIR;
       }
       s.pos++;
       if (s.pos >= MAX_STUB_DELAY) s.pos = 0;
@@ -1169,11 +1364,29 @@ export class WaveguideNet {
     for (let k = 0; k < this.liveContactN; k++) {
       const c = this.contacts[this.liveContacts[k]];
       if (c.load <= 1e-6) continue;
-      const A = this.agents[c.idxA];
-      const B = this.agents[c.idxB];
-      if (!A || !B || !A.active || !B.active) continue;
-      const vA = this.surfaceVel(A, A.sumYIn);
-      const vB = this.surfaceVel(B, B.sumYIn);
+      let A = this.agents[c.idxA];
+      let B = this.agents[c.idxB];
+      // Agent slots are packed in topo order, so erasing one body shifts every
+      // body after it down a slot. An index captured when the contact arrived
+      // then addresses a different agent, and the pair stays stale until the
+      // next contact message — up to a frame of a Hertzian spring and a
+      // friction force applied between two bodies that are not touching.
+      // Air paths already re-resolve by id; contacts have to do the same.
+      if (!A || A.id !== c.idA || !A.active) {
+        const ia = this.agentById.get(c.idA);
+        if (ia === undefined) continue;
+        c.idxA = ia;
+        A = this.agents[ia];
+      }
+      if (!B || B.id !== c.idB || !B.active) {
+        const ib = this.agentById.get(c.idB);
+        if (ib === undefined) continue;
+        c.idxB = ib;
+        B = this.agents[ib];
+      }
+      if (!A.active || !B.active || A === B) continue;
+      const vA = this.surfaceVel(A, A.domIn);
+      const vB = this.surfaceVel(B, B.domIn);
       const du = this.surfaceDisp(A) - this.surfaceDisp(B);
       const dv = vA - vB;
       const Fn = -CONTACT_K * c.load * du - CONTACT_C * c.load * dv;
@@ -1183,20 +1396,50 @@ export class WaveguideNet {
       const F = Fn + Ft;
       A.contactF += F;
       B.contactF -= F;
+      // Compression. The force above is antisymmetric — A is pushed one way and
+      // B the other — which is a dipole, and a dipole of two identical bodies
+      // cancels. That is real physics, not a modelling error: a tuning fork's
+      // two tines radiate almost nothing until the stem touches something.
+      //
+      // But pressing two bodies together does not only shove them apart, it
+      // squeezes both, and a change of volume is a monopole, which radiates
+      // properly. Both are squeezed by the same amount at the same instant, so
+      // that component is in phase and survives the sum. Translation cancels,
+      // compression adds — and both are heard.
+      const squeeze = Fn * CONTACT_SQUEEZE;
+      A.contactC += squeeze;
+      B.contactC += squeeze;
+      this.wakeAgent(A);
+      this.wakeAgent(B);
 
-      // Newton's third law makes the force above exactly antisymmetric, which
-      // is right for the dynamics and wrong for what radiates: two identical
-      // bodies rubbing would cancel to literal silence at the pickup. What you
-      // actually hear from a slide is each surface's own asperities exciting
-      // its own body — correlated between the two, never identical. So the
-      // roughness is drawn per body and added with the *same* sign, leaving the
-      // coupled dynamics untouched.
+      // Ridges. A scraped surface is a row of them, and crossing one is a small
+      // collision — a tap, not a hiss. The rate follows sliding speed, so
+      // dragging faster raises the pitch of the rasp, which is what a güiro is
+      // and what broadband noise never sounds like. Both bodies cross the same
+      // ridge at the same instant, so this rides the compression path and
+      // radiates instead of cancelling.
       if (sliding) {
-        const rough = c.load * (slide < 0 ? -slide : slide) * ROUGHNESS;
+        const speed = slide < 0 ? -slide : slide;
+        c.ridgePhase += speed * RIDGE_DENSITY;
+        if (c.ridgePhase >= 1) {
+          c.ridgePhase -= Math.floor(c.ridgePhase);
+          c.ridgeEnv = c.load * RIDGE_GAIN;
+        }
+        if (c.ridgeEnv !== 0) {
+          const tap = c.ridgeEnv;
+          c.ridgeEnv = flush(c.ridgeEnv * RIDGE_DECAY);
+          A.contactC += tap;
+          B.contactC += tap;
+        }
+        // A trace of incoherent surface noise under the ridges, for grain.
+        const rough = c.load * speed * ROUGHNESS;
         if (rough > 0) {
           A.contactF += this.surfaceNoise(A) * rough;
           B.contactF += this.surfaceNoise(B) * rough;
         }
+      } else {
+        c.ridgePhase = 0;
+        c.ridgeEnv = 0;
       }
     }
   }
@@ -1210,10 +1453,21 @@ export class WaveguideNet {
    * becoming a click train. String bleed is mix-only and never written back
    * into the junction. Air is a delayed pressure into the same modes.
    */
-  private bodyVoice(a: AgentState, contact: number, stringIn: number, force = 0, air = 0): number {
+  private bodyVoice(
+    a: AgentState,
+    contact: number,
+    stringIn: number,
+    force = 0,
+    air = 0,
+    squeeze = 0,
+  ): number {
     const bleed = stringIn * BODY_FROM_STRING;
-    const drive = contact + bleed + force * BOW_TO_MODE + air * AIR_TO_BODY;
-    if (drive === 0 && a.bodyEnv < QUIET_FLOOR && a.dForce === 0) return 0;
+    const drive =
+      contact + bleed + (force + squeeze) * BOW_TO_MODE + air * AIR_TO_BODY;
+    if (drive === 0 && a.bodyEnv < QUIET_FLOOR && a.dForce === 0) {
+      if (!a.touching) a.quiet = true;
+      return 0;
+    }
     const d = contact - a.prevForce;
     a.prevForce = contact;
     a.dForce = flush(a.dForce * 0.72 + d);
@@ -1233,6 +1487,7 @@ export class WaveguideNet {
       a.bodyEnv = 0;
       a.dForce = 0;
       a.prevForce = 0;
+      a.quiet = true;
       for (let m = 0; m < BODY_MODES; m++) {
         a.modeY1[m] = 0;
         a.modeY2[m] = 0;
@@ -1441,6 +1696,7 @@ export class WaveguideNet {
       // computed by the topology builder every frame and then dropped.
       a.loadY = junctionLoadY() / Math.max(0.05, spec.impedance || 1);
       a.excite = this.savedExcite.get(spec.id) ?? 0;
+      a.quiet = a.bodyEnv < QUIET_FLOOR && a.excite === 0 && !a.touching;
       let p = 0;
       while (node >= 0 && p < MAX_PORTS) {
         const wi = this.portWire[node];
@@ -1459,6 +1715,12 @@ export class WaveguideNet {
     this.bindStubs(topo);
     this.refreshLiveWires();
     this.refreshLiveAgents();
+    for (let k = 0; k < this.liveWireN; k++) {
+      const w = this.wires[this.liveWires[k]];
+      if (w.quiet) continue;
+      this.wakeAgentId(w.agentA);
+      this.wakeAgentId(w.agentB);
+    }
   }
 
   /**
@@ -1520,15 +1782,17 @@ export class WaveguideNet {
     const gain = spec.modeGain;
     if (!hz || !t60 || !gain) return;
     for (let m = 0; m < BODY_MODES; m++) {
-      const f = hz[m] !== undefined ? hz[m] : 200;
-      const d = t60[m] !== undefined ? t60[m] : 0.2;
+      // A NaN here would poison the biquad coefficients permanently: the mode
+      // state never recovers because every later sample multiplies through it.
+      const f = Math.max(1, Math.min(SAMPLE_RATE * 0.45, num(hz[m], 200)));
+      const d = Math.max(0.005, Math.min(30, num(t60[m], 0.2)));
       const w = (2 * Math.PI * f) / SAMPLE_RATE;
       // Pole radius for a given T60: r^(T60*fs) = 1e-3.
       const r = Math.exp(-6.9078 / Math.max(1, d * SAMPLE_RATE));
       a.modeA1[m] = 2 * r * Math.cos(w);
       a.modeA2[m] = r * r;
       // Normalize so peak response is independent of Q.
-      a.modeGain[m] = (gain[m] !== undefined ? gain[m] : 0.5) * (1 - r) * Math.sin(w) * 4;
+      a.modeGain[m] = num(gain[m], 0.5) * (1 - r) * Math.sin(w) * 4;
       if (!keep) {
         a.modeY1[m] = 0;
         a.modeY2[m] = 0;
@@ -1601,8 +1865,62 @@ export class WaveguideNet {
     return w.loss * y;
   }
 
+  /**
+   * Once per quantum: if more bodies are ringing than the budget allows, lift
+   * the steal floor so the quietest drop out; otherwise let it settle back.
+   * Costs one pass over the live agents 375 times a second.
+   */
+  private capVoices(): void {
+    let awake = 0;
+    for (let k = 0; k < this.liveAgentN; k++) {
+      if (!this.agents[this.liveAgents[k]].quiet) awake++;
+    }
+    let excess = awake - MAX_AWAKE;
+    if (excess <= 0) return;
+    if (excess > MAX_STEALS) excess = MAX_STEALS;
+
+    // Steal the quietest voices, and only as many as are actually over budget.
+    //
+    // This was a rising threshold before, which was wrong twice over: it does
+    // not steal the quietest N, it steals *everything* below a number that
+    // ratchets upward, and while a busy soup holds the count near the cap that
+    // number runs away to its ceiling. A typical body sits around 0.01-0.1, so
+    // a ceiling of 0.5 silenced the entire net a few seconds in and never let
+    // it back. Ranking cannot run away: it removes exactly the overflow.
+    for (let s = 0; s < excess; s++) {
+      let worst = -1;
+      let worstEnv = Infinity;
+      for (let k = 0; k < this.liveAgentN; k++) {
+        const a = this.agents[this.liveAgents[k]];
+        if (a.quiet || a.touching) continue;
+        if (a.bodyEnv < worstEnv) {
+          worstEnv = a.bodyEnv;
+          worst = k;
+        }
+      }
+      if (worst < 0) return;
+      this.silenceAgent(this.agents[this.liveAgents[worst]]);
+    }
+  }
+
+  /** Drop a body out of the mix and reset the state that would keep it there. */
+  private silenceAgent(a: AgentState): void {
+    a.quiet = true;
+    a.bodyEnv = 0;
+    a.dForce = 0;
+    a.prevForce = 0;
+    a.airLp = 0;
+    for (let m = 0; m < BODY_MODES; m++) {
+      a.modeY1[m] = 0;
+      a.modeY2[m] = 0;
+    }
+  }
+
   /** Advance one sample. Fills outL/outR; returns the mono sum. */
-  tick(): number {
+  tick(shedAir = false): number {
+    if (this.quantumPos === 0) this.capVoices();
+    this.quantumPos = this.quantumPos + 1 === 128 ? 0 : this.quantumPos + 1;
+
     for (let k = 0; k < this.liveWireN; k++) {
       const w = this.wires[this.liveWires[k]];
       if (w.quiet) continue;
@@ -1623,30 +1941,21 @@ export class WaveguideNet {
     this.wetR = 0;
     for (let k = 0; k < this.liveAgentN; k++) {
       const agent = this.agents[this.liveAgents[k]];
-      agent.strikeNow = this.strikeForce(agent);
-      let sumY = agent.loadY;
-      let sumYIn = 0;
-      for (let p = 0; p < agent.portCount; p++) {
-        const w = this.wires[agent.wireIdx[p]];
-        if (!w) continue;
-        const y = agent.admittance[p];
-        sumY += y;
-        sumYIn += y * (agent.wireEnd[p] === 0 ? w.inA : w.inB);
-      }
-      for (let s = 0; s < agent.stubCount; s++) {
-        const st = this.stubs[agent.stubIdx[s]];
-        if (!st) continue;
-        sumY += st.y;
-        sumYIn += st.y * st.inJ;
-      }
-      agent.sumY = sumY;
-      agent.sumYIn = sumYIn;
       agent.contactF = 0;
+      agent.contactC = 0;
       agent.airIn = 0;
       agent.radiate = 0;
+      if (agent.quiet) {
+        agent.strikeNow = 0;
+        agent.sumY = 0;
+        agent.sumYIn = 0;
+        agent.domIn = 0;
+        continue;
+      }
+      this.prepAgent(agent);
     }
 
-    this.applyAirReads();
+    if (!shedAir) this.applyAirReads();
     this.applyContacts();
 
     for (let k = 0; k < this.liveAgentN; k++) {
@@ -1654,6 +1963,11 @@ export class WaveguideNet {
       const strike = agent.strikeNow;
       const force = agent.contactF;
       const air = agent.airIn;
+      if (agent.quiet && strike === 0 && force === 0 && agent.contactC === 0 && agent.excite === 0) {
+        const mag = air < 0 ? -air : air;
+        if (mag < AIR_WAKE) continue;
+      }
+      if (agent.sumY === 0) this.prepAgent(agent);
       if (air > QUIET_FLOOR || air < -QUIET_FLOOR) {
         agent.bodyEnv = Math.max(agent.bodyEnv, air < 0 ? -air : air);
         this.wakeWires(agent, Math.min(1, air < 0 ? -air : air));
@@ -1664,6 +1978,7 @@ export class WaveguideNet {
         agent.sumYIn + (agent.portCount === 0 && agent.stubCount === 0 ? agent.excite : 0),
         force,
         air,
+        agent.contactC,
       );
       agent.radiate = body;
       if (body !== 0) this.place(body * 1.5, agent.pan, agent);
@@ -1686,6 +2001,8 @@ export class WaveguideNet {
           if (m > QUIET_FLOOR) {
             w.quiet = false;
             w.env = Math.max(w.env, m);
+            const other = agent.wireEnd[p] === 0 ? w.agentB : w.agentA;
+            this.wakeAgentId(other, m);
           }
         }
       }
@@ -1697,7 +2014,7 @@ export class WaveguideNet {
     }
 
     this.applyStubWrites();
-    this.applyAirWrites();
+    if (!shedAir) this.applyAirWrites();
 
     for (let k = 0; k < this.liveWireN; k++) {
       const w = this.wires[this.liveWires[k]];
@@ -1814,6 +2131,13 @@ export class WaveguideNet {
       if (n >= 8) break;
     }
     this.waveSnap[0] = n;
+    this.waveSnap[1] = WAVE_BINS;
+    return this.waveSnap;
+  }
+
+  /** Empty header. The renderer treats n=0 as “draw the rest pose.” */
+  zeroWaveSnapshot(): Float32Array {
+    this.waveSnap[0] = 0;
     this.waveSnap[1] = WAVE_BINS;
     return this.waveSnap;
   }

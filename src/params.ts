@@ -31,8 +31,8 @@ export interface Params {
   uncross: number;
   /**
    * How hard a rope pushes off other ropes and off bodies it is not attached
-   * to. Node-only and one-way — a rope never moves an agent — so this cannot
-   * feed back into the joint solver.
+   * to. Segment-based and one-way — a rope never moves an agent — so this
+   * cannot feed back into the joint solver.
    */
   wireClear: number;
   /** Port-axis stiffness multiplier. Higher = wires hug their port axis harder. */
@@ -102,9 +102,9 @@ export function defaultParams(): Params {
     homing: 0.9,
     flockAlign: 5.5,
     flockSep: 36,
-    maxAgents: 80,
+    maxAgents: 1000,
     soupCount: 28,
-    spawnInterval: 10,
+    spawnInterval: 1,
   };
 }
 
@@ -147,6 +147,6 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'wireBreathe', label: 'Wire breathe', min: 0, max: 0.15, step: 0.005 },
   { key: 'eraMass', label: 'Era mass', min: 0.15, max: 2, step: 0.05 },
   { key: 'nodeMass', label: 'Con/Dup mass', min: 0.3, max: 4, step: 0.05 },
-  { key: 'maxAgents', label: 'Max agents', min: 8, max: 200, step: 1 },
+  { key: 'maxAgents', label: 'Max agents', min: 8, max: 1000, step: 1 },
   { key: 'spawnInterval', label: 'Auto spawn (s)', min: 0, max: 30, step: 0.5 },
 ];

@@ -3,6 +3,8 @@ import { Camera } from './camera.ts';
 import { defaultParams, SLIDERS, type Params } from './params.ts';
 import { loadPreset, type PresetName } from './presets.ts';
 import { render } from './render.ts';
+import { Interaction } from './interact.ts';
+import { portWorld } from './agents.ts';
 import { Sim } from './sim.ts';
 import type { AgentKind } from './agents.ts';
 import { audio } from './audio/engine.ts';
@@ -20,6 +22,7 @@ app.innerHTML = `
       <button type="button" id="pause">Pause</button>
       <button type="button" id="step">Step</button>
       <button type="button" id="reset">Reset</button>
+      <button type="button" id="recentre">Recentre</button>
     </div>
     <label class="check"><input type="checkbox" id="overlay" /> Field overlay</label>
     <label class="check"><input type="checkbox" id="sound" checked /> Sound</label>
@@ -42,7 +45,7 @@ app.innerHTML = `
       <button type="button" data-preset="annihilate-dup">δ–δ</button>
       <button type="button" data-preset="oscillator">Oscillator</button>
     </div>
-    <p class="hint">Click the canvas to spawn. New agents arrive every ~10s. Scroll to zoom. Keys E / D / C select type. Space pauses.</p>
+    <p class="hint">Click empty space to spawn, drag it to pan. Drag a body to move it; drag from one free port to another to wire them. Scroll to zoom. Keys E / D / C select type. Space pauses.</p>
     <p class="stats" id="stats"></p>
     <div id="sliders"></div>
   </aside>
@@ -56,6 +59,7 @@ const ctx: CanvasRenderingContext2D = maybeCtx;
 const params: Params = defaultParams();
 const sim = new Sim(800, 600);
 const camera = new Camera();
+const interaction = new Interaction(sim, camera);
 const view = { overlay: false };
 let paused = false;
 let spawnKind: AgentKind = 'era';
@@ -124,7 +128,7 @@ function sizeCanvas(): void {
 
 function syncCamera(dt: number): void {
   const com = sim.centerOfMass();
-  if (com) {
+  if (com && !interaction.freeCamera) {
     if (snapCamera) {
       camera.snap(com.x, com.y);
       snapCamera = false;
@@ -163,6 +167,10 @@ document.querySelector('#step')!.addEventListener('click', () => {
   paint();
 });
 document.querySelector('#reset')!.addEventListener('click', () => applyPreset(currentPreset));
+document.querySelector('#recentre')!.addEventListener('click', () => {
+  interaction.freeCamera = false;
+  snapCamera = true;
+});
 document.querySelector('#overlay')!.addEventListener('change', (ev) => {
   view.overlay = (ev.target as HTMLInputElement).checked;
 });
@@ -195,12 +203,36 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-preset]'))
   btn.addEventListener('click', () => applyPreset(btn.dataset.preset as PresetName));
 }
 
-canvas.addEventListener('click', (ev) => {
-  armAudio();
+function pointerWorld(ev: PointerEvent): { wx: number; wy: number; sx: number; sy: number } {
   const rect = canvas.getBoundingClientRect();
-  const world = camera.worldFromScreen(ev.clientX - rect.left, ev.clientY - rect.top);
-  sim.spawn(spawnKind, world.x, world.y, Math.random() * Math.PI * 2, params);
+  const sx = ev.clientX - rect.left;
+  const sy = ev.clientY - rect.top;
+  const w = camera.worldFromScreen(sx, sy);
+  return { wx: w.x, wy: w.y, sx, sy };
+}
+
+canvas.addEventListener('pointerdown', (ev) => {
+  armAudio();
+  canvas.setPointerCapture(ev.pointerId);
+  const { wx, wy, sx, sy } = pointerWorld(ev);
+  interaction.begin(wx, wy, sx, sy);
 });
+
+canvas.addEventListener('pointermove', (ev) => {
+  const { wx, wy, sx, sy } = pointerWorld(ev);
+  interaction.move(wx, wy, sx, sy);
+  canvas.style.cursor = interaction.cursorFor(wx, wy);
+});
+
+canvas.addEventListener('pointerup', (ev) => {
+  const { wx, wy } = pointerWorld(ev);
+  const spawnAt = interaction.end(wx, wy, (a, b) => {
+    sim.wire(a.id, a.slot, b.id, b.slot, params);
+  });
+  if (spawnAt) sim.spawn(spawnKind, spawnAt.x, spawnAt.y, Math.random() * Math.PI * 2, params);
+});
+
+canvas.addEventListener('pointercancel', () => interaction.cancel());
 
 canvas.addEventListener(
   'wheel',
@@ -225,8 +257,38 @@ window.addEventListener('keydown', (ev) => {
 
 new ResizeObserver(() => sizeCanvas()).observe(canvas);
 
+function drawGesture(): void {
+  const g = interaction.gesture;
+  if (g.kind !== 'wire') return;
+  const from = sim.agents.get(g.from.id);
+  if (!from) return;
+  const a = portWorld(from, g.from.slot, sim.w, sim.h);
+  ctx.save();
+  camera.apply(ctx);
+  ctx.lineWidth = 1.5 / camera.zoom;
+  ctx.strokeStyle = g.over ? '#7ef0c8' : '#8899aa';
+  ctx.setLineDash(g.over ? [] : [4 / camera.zoom, 4 / camera.zoom]);
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(g.x, g.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  for (const [ref, hot] of [[g.from, false], [g.over, true]] as const) {
+    if (!ref) continue;
+    const agent = sim.agents.get(ref.id);
+    if (!agent) continue;
+    const p = portWorld(agent, ref.slot, sim.w, sim.h);
+    ctx.strokeStyle = hot ? '#7ef0c8' : '#cfd8e3';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 5 / camera.zoom, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function paint(): void {
   render(ctx, sim, camera, view, audio.waves);
+  drawGesture();
   statsEl.textContent = `${sim.agents.size} agents · ${sim.graph.wires.size} wires · ${sim.rewrites.length} rewrites`;
 }
 
@@ -235,7 +297,8 @@ function frame(now: number): void {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
   try {
-    if (!paused) sim.step(dt, params);
+    if (paused) sim.dragStep(params, dt);
+    else sim.step(dt, params);
     audio.frame(sim.graph, sim.agents, dt, camera);
     syncCamera(dt);
     paint();

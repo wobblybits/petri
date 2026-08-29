@@ -12,7 +12,7 @@ import {
   type PortSlot,
 } from './agents.ts';
 import { queryHit, SLOP, type Hit } from './collide.ts';
-import { segmentsIntersect, WIRE_RADIUS } from './geom.ts';
+import { closestOnSegments, closestTOnSegment, segmentsIntersect, WIRE_RADIUS } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact, unwrapPoints } from './chain.ts';
 import { CH, Fields } from './fields.ts';
@@ -79,7 +79,20 @@ export class Sim {
   private static readonly DECLUTTER_FLOOR = 0.4;
 
   /** Most a rope node may be pushed clear in one substep, in px. */
-  static WIRE_CLEAR_STEP = 0.35;
+  static WIRE_CLEAR_STEP = 1.5;
+
+  /** Compliance of the pointer hold. Firm enough to follow, soft enough to lag. */
+  private static readonly GRAB_COMPLIANCE = 1.0e-6;
+
+  /** Most the pointer may move a held agent in one substep, in px. */
+  private static readonly GRAB_STEP = 1.5;
+
+  /**
+   * Speed cap on a held agent. The hold is a positional constraint, so its
+   * correction reappears as velocity at 1/h — 1.5 px a substep is 720 px/s, and
+   * without this the agent keeps all of it and rockets away on release.
+   */
+  private static readonly GRAB_MAX_SPEED = 160;
 
   /** Share of the homing pull that still applies to a wired agent. */
   private static readonly HOME_WIRED = 0.2;
@@ -116,6 +129,15 @@ export class Sim {
   contacts = new Map<string, LiveContact>();
   /** Momentum lost to sound this frame, applied once after the substeps. */
   private radiated = new Map<number, { x: number; y: number }>();
+  /**
+   * Agent held by the pointer, and where it is being held. Solved as a
+   * constraint inside the substep loop rather than by assigning a position:
+   * writing a pose directly is the kinematic teleport that destabilised every
+   * early version of this solver, and it would drag whole nets through their
+   * joints at 1/h velocity.
+   */
+  grabbed: { id: number; x: number; y: number } | null = null;
+
   /** Eased centre of mass. Rewrites delete agents, which jumps the true COM. */
   private home: { x: number; y: number } | null = null;
 
@@ -190,6 +212,8 @@ export class Sim {
       params,
     );
     this.agents.set(a.id, a);
+    // Queued, so it lands after the topology that first contains this agent.
+    audio.push({ type: 'spawn', agent: a.id, kind: a.kind }, this.graph, this.agents);
     return a;
   }
 
@@ -295,12 +319,11 @@ export class Sim {
   /**
    * Ropes push off other ropes, and off bodies they are not attached to.
    *
-   * Node-only and one-way: a rope never moves an agent. That is what makes it
-   * safe — letting a wire shove its own anchors is exactly the coupling that
-   * made the early drafts of this solver explode. It separates wires that would
-   * otherwise be drawn through each other; it does not forbid a crossing
-   * topologically, since two wires that genuinely cross will bow apart and
-   * still cross.
+   * Segment vs segment (and segment vs the body's bounding circle), still
+   * one-way: a rope never moves an agent. That is what makes it safe — letting
+   * a wire shove its own anchors is exactly the coupling that made the early
+   * drafts of this solver explode. Node-only tests let a chord cut through a
+   * body between two nodes that each sat just outside it.
    *
    * Solved inside the substep loop rather than after the frame, so the link,
    * bend and shape constraints get to re-settle the rope around the push
@@ -308,6 +331,117 @@ export class Sim {
    * limited for the same reason everything else here is: a displacement
    * resolved in one substep becomes that displacement times 1/h in velocity.
    */
+  private clearWires(params: Params): void {
+    const gain = params.wireClear;
+    if (gain <= 0) return;
+    const ropeGap = WIRE_RADIUS * 3;
+    const cap = Sim.WIRE_CLEAR_STEP;
+
+    for (let k = 0; k < this.clearWirePairs.length; k += 2) {
+      const P = this.clearWirePairs[k] as Wire;
+      const Q = this.clearWirePairs[k + 1] as Wire;
+      const PA = this.agents.get(P.a.id);
+      const PB = this.agents.get(P.b.id);
+      const QA = this.agents.get(Q.a.id);
+      const QB = this.agents.get(Q.b.id);
+      if (!PA || !PB || !QA || !QB) continue;
+      const pA = stemWorld(PA, P.a.slot, this.w, this.h);
+      const pB = stemWorld(PB, P.b.slot, this.w, this.h);
+      const qA = stemWorld(QA, Q.a.slot, this.w, this.h);
+      const qB = stemWorld(QB, Q.b.slot, this.w, this.h);
+      const nP = P.nodes.length;
+      const nQ = Q.nodes.length;
+      for (let i = 0; i <= nP; i++) {
+        const a0 = i === 0 ? pA : P.nodes[i - 1];
+        const a1 = i === nP ? pB : P.nodes[i];
+        for (let j = 0; j <= nQ; j++) {
+          const b0 = j === 0 ? qA : Q.nodes[j - 1];
+          const b1 = j === nQ ? qB : Q.nodes[j];
+          const slack = ropeGap;
+          if (
+            Math.max(a0.x, a1.x) + slack < Math.min(b0.x, b1.x) ||
+            Math.max(b0.x, b1.x) + slack < Math.min(a0.x, a1.x) ||
+            Math.max(a0.y, a1.y) + slack < Math.min(b0.y, b1.y) ||
+            Math.max(b0.y, b1.y) + slack < Math.min(a0.y, a1.y)
+          ) {
+            continue;
+          }
+          const c = closestOnSegments(a0.x, a0.y, a1.x, a1.y, b0.x, b0.y, b1.x, b1.y);
+          let dx = c.bx - c.ax;
+          let dy = c.by - c.ay;
+          let d = Math.hypot(dx, dy);
+          if (d >= ropeGap) continue;
+          if (d < 1e-8) {
+            const ex = a1.x - a0.x;
+            const ey = a1.y - a0.y;
+            const len = Math.hypot(ex, ey);
+            if (len < 1e-8) continue;
+            dx = -ey / len;
+            dy = ex / len;
+            const mx = (b0.x + b1.x) * 0.5 - (a0.x + a1.x) * 0.5;
+            const my = (b0.y + b1.y) * 0.5 - (a0.y + a1.y) * 0.5;
+            if (dx * mx + dy * my < 0) {
+              dx = -dx;
+              dy = -dy;
+            }
+            d = 0;
+          } else {
+            dx /= d;
+            dy /= d;
+          }
+          const step = Math.min((ropeGap - d) * 0.5 * gain, cap);
+          moveRopeClosest(P, i, c.t, -dx * step, -dy * step);
+          moveRopeClosest(Q, j, c.u, dx * step, dy * step);
+        }
+      }
+    }
+
+    for (let k = 0; k < this.clearBodyPairs.length; k += 2) {
+      const wire = this.clearBodyPairs[k] as Wire;
+      const agent = this.clearBodyPairs[k + 1] as Agent;
+      const A = this.agents.get(wire.a.id);
+      const B = this.agents.get(wire.b.id);
+      if (!A || !B) continue;
+      const sA = stemWorld(A, wire.a.slot, this.w, this.h);
+      const sB = stemWorld(B, wire.b.slot, this.w, this.h);
+      const keep = boundRadius(agent) + WIRE_RADIUS;
+      const n = wire.nodes.length;
+      for (let i = 0; i <= n; i++) {
+        const p0 = i === 0 ? sA : wire.nodes[i - 1];
+        const p1 = i === n ? sB : wire.nodes[i];
+        if (
+          Math.max(p0.x, p1.x) < agent.x - keep ||
+          Math.min(p0.x, p1.x) > agent.x + keep ||
+          Math.max(p0.y, p1.y) < agent.y - keep ||
+          Math.min(p0.y, p1.y) > agent.y + keep
+        ) {
+          continue;
+        }
+        const t = closestTOnSegment(agent.x, agent.y, p0.x, p0.y, p1.x, p1.y);
+        const qx = p0.x + (p1.x - p0.x) * t;
+        const qy = p0.y + (p1.y - p0.y) * t;
+        let dx = qx - agent.x;
+        let dy = qy - agent.y;
+        let d = Math.hypot(dx, dy);
+        if (d >= keep) continue;
+        if (d < 1e-8) {
+          const ex = p1.x - p0.x;
+          const ey = p1.y - p0.y;
+          const len = Math.hypot(ex, ey);
+          if (len < 1e-8) continue;
+          dx = -ey / len;
+          dy = ex / len;
+          d = 0;
+        } else {
+          dx /= d;
+          dy /= d;
+        }
+        const step = Math.min((keep - d) * gain, cap);
+        moveRopeClosest(wire, i, t, dx * step, dy * step);
+      }
+    }
+  }
+
   /**
    * Wire pairs and wire/body pairs close enough to be worth testing, rebuilt
    * once per frame. The broad phase is O(wires²) and the narrow phase runs every
@@ -384,50 +518,51 @@ export class Sim {
   }
 
 
-  private clearWires(params: Params): void {
-    const gain = params.wireClear;
-    if (gain <= 0) return;
-    const ropeGap = WIRE_RADIUS * 3;
-    const cap = Sim.WIRE_CLEAR_STEP;
-
-    for (let k = 0; k < this.clearWirePairs.length; k += 2) {
-      const P = this.clearWirePairs[k] as Wire;
-      const Q = this.clearWirePairs[k + 1] as Wire;
-      {
-        for (const p of P.nodes) {
-          for (const q of Q.nodes) {
-            const dx = q.x - p.x;
-            const dy = q.y - p.y;
-            const d2 = dx * dx + dy * dy;
-            if (d2 >= ropeGap * ropeGap || d2 < 1e-9) continue;
-            const d = Math.sqrt(d2);
-            const step = Math.min((ropeGap - d) * 0.5 * gain, cap);
-            const ux = (dx / d) * step;
-            const uy = (dy / d) * step;
-            p.x -= ux;
-            p.y -= uy;
-            q.x += ux;
-            q.y += uy;
-          }
-        }
-      }
+  /**
+   * Constraint relaxation with no forces and no integration, so the pointer can
+   * still arrange a net while the sim is paused — which is exactly when you
+   * would want to lay one out by hand. Velocities are cleared afterwards so
+   * unpausing does not release stored-up correction as a kick.
+   */
+  dragStep(params: Params, dt: number): void {
+    if (!this.grabbed || dt <= 0) return;
+    const h = dt / Sim.SUBSTEPS;
+    this.components = this.graph.componentIds(this.agents);
+    this.graph.syncRest(this.time, params);
+    this.graph.syncRopeShape(this.agents, this.w, this.h);
+    this.buildClearPairs(params);
+    for (let sub = 0; sub < Sim.SUBSTEPS; sub++) {
+      this.graph.solveWires(this.agents, params, h, this.time);
+      this.clearWires(params);
+      this.solveGrab(h);
+      this.solveContacts(h);
     }
-
-    for (let k = 0; k < this.clearBodyPairs.length; k += 2) {
-      const wire = this.clearBodyPairs[k] as Wire;
-      const agent = this.clearBodyPairs[k + 1] as Agent;
-      const keep = boundRadius(agent) + WIRE_RADIUS;
-      for (const node of wire.nodes) {
-        const dx = node.x - agent.x;
-        const dy = node.y - agent.y;
-        const d2 = dx * dx + dy * dy;
-        if (d2 >= keep * keep || d2 < 1e-9) continue;
-        const d = Math.sqrt(d2);
-        const step = Math.min((keep - d) * gain, cap);
-        node.x += (dx / d) * step;
-        node.y += (dy / d) * step;
-      }
+    for (const a of this.agents.values()) {
+      a.vx = 0;
+      a.vy = 0;
+      a.omega = 0;
     }
+  }
+
+  /**
+   * Pull a held agent toward the pointer. Rate limited like every other
+   * constraint here, so grabbing something across the screen reels it in rather
+   * than launching it and whatever net it belongs to.
+   */
+  private solveGrab(h: number): void {
+    const held = this.grabbed;
+    if (!held) return;
+    const agent = this.agents.get(held.id);
+    if (!agent || agent.locked) return;
+    const dx = held.x - agent.x;
+    const dy = held.y - agent.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1e-6) return;
+    const w = 1 / Math.max(0.08, agent.mass);
+    const alphaTilde = Sim.GRAB_COMPLIANCE / Math.max(1e-12, h * h);
+    const step = Math.min((dist * w) / (w + alphaTilde), Sim.GRAB_STEP);
+    agent.x += (dx / dist) * step;
+    agent.y += (dy / dist) * step;
   }
 
   /**
@@ -593,6 +728,7 @@ export class Sim {
     this.buildClearPairs(params);
     const h = dt / Sim.SUBSTEPS;
     const invH = 1 / h;
+    const held = this.grabbed?.id ?? -1;
     // Rope velocity is re-derived every substep, so a nudge of e px becomes
     // e/h — damping it once per frame is far too late to keep a slack rope calm.
     const ropeKeep = Math.exp(-Math.max(0, params.springDamp) * h);
@@ -618,6 +754,7 @@ export class Sim {
       }
 
       this.graph.solveWires(this.agents, params, h, this.time);
+      this.solveGrab(h);
       this.clearWires(params);
       this.solveContacts(h);
 
@@ -631,6 +768,14 @@ export class Sim {
         a.vx = (a.x - a.prevX) * invH;
         a.vy = (a.y - a.prevY) * invH;
         a.omega = wrapAngle(a.heading - a.prevHeading) * invH;
+        if (held === a.id) {
+          const speed = Math.hypot(a.vx, a.vy);
+          if (speed > Sim.GRAB_MAX_SPEED) {
+            const k = Sim.GRAB_MAX_SPEED / speed;
+            a.vx *= k;
+            a.vy *= k;
+          }
+        }
       }
       for (const wire of this.graph.wires.values()) {
         for (const node of wire.nodes) {
@@ -1023,11 +1168,10 @@ export class Sim {
       if (A.locked) continue;
       const fromA = hops.get(A.id);
       if (!fromA) continue;
-      for (let j = i + 1; j < list.length; j++) {
-        const B = list[j];
-        if (B.locked) continue;
-        const d = fromA.get(B.id);
-        if (d === undefined || d < 1) continue;
+      for (const [bId, d] of fromA) {
+        if (d < 1 || bId <= A.id) continue;
+        const B = byId.get(bId);
+        if (!B || B.locked) continue;
         const w = 1 / d;
         const mA = Math.max(0.08, A.mass);
         const mB = Math.max(0.08, B.mass);
@@ -1203,6 +1347,31 @@ export class Sim {
       );
     }
     if (done.length) this.rewrites = this.rewrites.filter((rw) => !done.includes(rw));
+  }
+}
+
+/** Move the closest point on polyline segment `seg` by (ux, uy). Stems stay put. */
+function moveRopeClosest(wire: Wire, seg: number, t: number, ux: number, uy: number): void {
+  const n = wire.nodes.length;
+  const a = seg === 0 ? null : wire.nodes[seg - 1];
+  const b = seg === n ? null : wire.nodes[seg];
+  if (a && b) {
+    const u = 1 - t;
+    const denom = u * u + t * t;
+    const wa = denom > 1e-9 ? u / denom : 0.5;
+    const wb = denom > 1e-9 ? t / denom : 0.5;
+    a.x += ux * wa;
+    a.y += uy * wa;
+    b.x += ux * wb;
+    b.y += uy * wb;
+    return;
+  }
+  if (a) {
+    a.x += ux;
+    a.y += uy;
+  } else if (b) {
+    b.x += ux;
+    b.y += uy;
   }
 }
 

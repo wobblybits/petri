@@ -37,6 +37,10 @@ import { bodyTone } from './body.ts';
 import { buildTopology } from './topology.ts';
 import { AudioEngine, audio } from './engine.ts';
 import {
+  distDry,
+  distWet,
+  distRoom,
+  distDamp,
   MAX_DELAY as WG_MAX_DELAY,
   MAX_WIRES as WG_MAX_WIRES,
   MAX_AIR as WG_MAX_AIR,
@@ -461,6 +465,50 @@ describe('sim latch integration', () => {
     expect(waves!.index.has(99)).toBe(false);
     const o = waves!.index.get(7)!;
     expect(waves!.packed[o + 1]).toBeGreaterThan(0);
+  });
+
+  it('an empty snapshot drops the last wave index', () => {
+    const engine = new AudioEngine();
+    engine.acceptWaves(new Float32Array([1, 4, 7, 0.5, 0, 0, 0, 0, 0, 0, 0, 0]));
+    expect(engine.waves).not.toBeNull();
+    engine.acceptWaves(new Float32Array([0, 32]));
+    expect(engine.waves).toBeNull();
+  });
+});
+
+describe('distance curves', () => {
+  it('the worklet copies stay in step with the main-thread ones', () => {
+    // waveguide.ts is inlined into the worklet as one import-free file, so it
+    // carries its own copy of these four curves. Nothing stops the two drifting
+    // apart, and the symptom would be depth that reads one way in the topology
+    // builder and another in the audio — so pin them numerically rather than
+    // trusting a comment to keep them honest.
+    for (let d = 0; d <= 6; d += 0.05) {
+      expect(distDry(d)).toBeCloseTo(distanceDry(d), 12);
+      expect(distWet(d)).toBeCloseTo(distanceWet(d), 12);
+      expect(distRoom(d)).toBeCloseTo(distanceRoom(d), 12);
+      expect(distDamp(d)).toBeCloseTo(distanceDamp(d), 12);
+    }
+    // Negative and non-finite inputs must not produce NaN gains either.
+    for (const bad of [-1, -0.001]) {
+      expect(Number.isFinite(distDry(bad))).toBe(true);
+      expect(Number.isFinite(distWet(bad))).toBe(true);
+      expect(Number.isFinite(distRoom(bad))).toBe(true);
+      expect(Number.isFinite(distDamp(bad))).toBe(true);
+    }
+  });
+
+  it('further away is quieter, darker, and proportionally wetter', () => {
+    // The three cues that actually carry distance. The third is the one that
+    // level alone cannot buy: turning a source down scales direct and reverb
+    // together, leaving D/R — the cue the ear reads — unchanged.
+    const near = 0.2;
+    const far = 3;
+    expect(distanceDry(far)).toBeLessThan(distanceDry(near));
+    expect(distanceDamp(far)).toBeLessThan(distanceDamp(near));
+    const drNear = distanceDry(near) / distanceWet(near);
+    const drFar = distanceDry(far) / distanceWet(far);
+    expect(drFar).toBeLessThan(drNear);
   });
 });
 

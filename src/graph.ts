@@ -7,6 +7,7 @@ import {
   wireCubic,
   type Agent,
   type PortRef,
+  type PortSlot,
 } from './agents.ts';
 import {
   desiredLinks,
@@ -20,6 +21,7 @@ import {
 } from './chain.ts';
 import { bezierPoint } from './curve.ts';
 import { segmentsInterfere, WIRE_RADIUS } from './geom.ts';
+import { PairGrid } from './grid.ts';
 import type { Params } from './params.ts';
 import { clamp, easeInOut, lerp, wrap, wrapDeltaVec, type Vec2 } from './wrap.ts';
 import type { LatchEvent } from './audio/types.ts';
@@ -39,12 +41,22 @@ export interface Wire {
   nodes: ChainNode[];
 }
 
+const SLOT_ORDER = { p: 0, l: 1, r: 2 } as const;
+function slotOrder(slot: PortSlot): number {
+  return SLOT_ORDER[slot];
+}
+
 export function otherEnd(wire: Wire, port: PortRef): PortRef {
   if (wire.a.id === port.id && wire.a.slot === port.slot) return wire.b;
   return wire.a;
 }
 
 export class Graph {
+  /** Broad phase for latching: ports only ever pair up within snapRadius. */
+  private portGrid = new PairGrid();
+  private portX: number[] = [];
+  private portY: number[] = [];
+
   /** Birth length floor, as a fraction of wireMinRest. */
   static BIRTH_FLOOR = 0.2;
 
@@ -254,28 +266,54 @@ export class Graph {
     const r2 = r * r;
     const touchR = 5.5;
     const touchR2 = touchR * touchR;
-    for (let i = 0; i < ports.length; i++) {
-      for (let j = i + 1; j < ports.length; j++) {
-        const A = ports[i];
-        const B = ports[j];
-        if (A.ref.id === B.ref.id) continue;
-        const d = wrapDeltaVec(A.x, A.y, B.x, B.y, w, h);
-        const dist2 = d.x * d.x + d.y * d.y;
-        if (dist2 > r2) continue;
-        const agentA = agents.get(A.ref.id);
-        const agentB = agents.get(B.ref.id);
-        if (!agentA || !agentB) continue;
-        const touching = dist2 <= touchR2;
-        if (!touching) {
-          if (!inSnapArc(agentA, A.ref.slot, B.x, B.y, w, h, r, params.snapArc)) continue;
-          if (!inSnapArc(agentB, B.ref.slot, A.x, A.y, w, h, r, params.snapArc)) continue;
-        }
-        const rank =
-          A.principal && B.principal ? 0 : A.principal || B.principal ? 1 : 2;
-        cands.push({ pa: A.ref, pb: B.ref, dist: dist2, rank: touching ? rank - 1 : rank });
-      }
+    // Ports only ever latch within snapRadius, so testing every pair against
+    // every other was work the radius check threw away immediately — millions
+    // of rejections a frame at a few thousand agents.
+    const nPorts = ports.length;
+    if (this.portX.length < nPorts) {
+      this.portX = new Array(nPorts * 2);
+      this.portY = new Array(nPorts * 2);
     }
-    cands.sort((a, b) => a.rank - b.rank || a.dist - b.dist);
+    for (let i = 0; i < nPorts; i++) {
+      this.portX[i] = ports[i].x;
+      this.portY[i] = ports[i].y;
+    }
+    this.portGrid.build(this.portX, this.portY, nPorts, Math.max(1, r));
+    this.portGrid.forEachPair((p, q) => {
+      // Keep the original lower-index-first ordering: it decides which end
+      // becomes wire.a, and the constraint solve is order-sensitive.
+      const i = p < q ? p : q;
+      const j = p < q ? q : p;
+      const A = ports[i];
+      const B = ports[j];
+      if (A.ref.id === B.ref.id) return;
+      const d = wrapDeltaVec(A.x, A.y, B.x, B.y, w, h);
+      const dist2 = d.x * d.x + d.y * d.y;
+      if (dist2 > r2) return;
+      const agentA = agents.get(A.ref.id);
+      const agentB = agents.get(B.ref.id);
+      if (!agentA || !agentB) return;
+      const touching = dist2 <= touchR2;
+      if (!touching) {
+        if (!inSnapArc(agentA, A.ref.slot, B.x, B.y, w, h, r, params.snapArc)) return;
+        if (!inSnapArc(agentB, B.ref.slot, A.x, A.y, w, h, r, params.snapArc)) return;
+      }
+      const rank = A.principal && B.principal ? 0 : A.principal || B.principal ? 1 : 2;
+      cands.push({ pa: A.ref, pb: B.ref, dist: dist2, rank: touching ? rank - 1 : rank });
+    });
+    // Total order, so the greedy pass below cannot depend on the order
+    // candidates happened to be generated in. Rank and distance alone leave
+    // exact ties — which mirror-symmetric presets produce — to be broken by
+    // Array#sort's stability, i.e. by Map iteration order.
+    cands.sort(
+      (a, b) =>
+        a.rank - b.rank ||
+        a.dist - b.dist ||
+        a.pa.id - b.pa.id ||
+        slotOrder(a.pa.slot) - slotOrder(b.pa.slot) ||
+        a.pb.id - b.pb.id ||
+        slotOrder(a.pb.slot) - slotOrder(b.pb.slot),
+    );
     const taken = new Set<string>();
     for (const c of cands) {
       const ka = portKey(c.pa);

@@ -184,7 +184,16 @@ export function contactPeak(effMass: number, vN: number, tau: number): number {
   const j = Math.max(0, effMass * Math.abs(vN));
   const raw = (Math.PI * j) / (2 * Math.max(1e-4, tau));
   // The quietest contact this sim produces sits near raw = 3600.
-  return Math.min(2.2, 0.22 * Math.pow(raw / 3600, 0.4));
+  //
+  // The exponent is doing loudness compression, and it is doing a lot of it.
+  // Measured across a real soup the raw range spans ~48 dB, most of it from
+  // effective mass rather than speed: a glancing hit off a triangle's corner
+  // carries almost no momentum. Left at 0.4 those soft contacts landed around
+  // 0.003 — far under a sustained scrape, which is what made scraping sound
+  // like it belonged to a different world. At 0.24 the same range lands in
+  // about 28 dB: the taps come up roughly nine-fold, the hard knocks do not
+  // move, and a light touch is audible next to a slide.
+  return Math.min(2.2, 0.36 * Math.pow(raw / 3600, 0.24));
 }
 
 /**

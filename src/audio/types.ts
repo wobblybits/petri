@@ -132,7 +132,13 @@ export interface RewriteEvent {
   leftovers: number[];
 }
 
-export type AudioEvent = LatchEvent | CollisionEvent | RewriteEvent;
+export interface SpawnEvent {
+  type: 'spawn';
+  agent: number;
+  kind: AgentKind;
+}
+
+export type AudioEvent = LatchEvent | CollisionEvent | RewriteEvent | SpawnEvent;
 
 /** One touching pair, sent every frame while the overlap lasts. */
 export interface ContactItem {

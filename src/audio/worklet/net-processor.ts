@@ -29,13 +29,16 @@ class NetProcessor extends AudioWorkletProcessor {
     const n = dryL.length;
 
     try {
-      const now = this.currentTime;
+      // `currentTime` is a global in AudioWorkletGlobalScope, not a property
+      // of the processor. Reading it off `this` gave undefined, so `late` was
+      // permanently false and the overload shedding never once fired.
+      const now = currentTime;
       const budget = n / sampleRate;
       const late = this.prevTime >= 0 && now - this.prevTime > budget * 1.35;
       this.prevTime = now;
 
       for (let i = 0; i < n; i++) {
-        this.net.tick();
+        this.net.tick(late);
         dryL[i] = this.net.outDryL;
         if (dryR) dryR[i] = this.net.outDryR;
         if (wetL) wetL[i] = this.net.outWetL;
@@ -45,15 +48,13 @@ class NetProcessor extends AudioWorkletProcessor {
       this.vizAcc += n;
       const period = sampleRate / 30;
       if (this.vizAcc >= period) {
-        // Skip the snapshot when the callback is already late or the net is
-        // busy: interpolating every delay line is how a full quantum overruns.
-        if (late || this.net.liveCount > 24) {
-          this.vizAcc = 0;
-        } else {
-          this.vizAcc -= period;
-          const packed = this.net.fillWaveSnapshot();
-          this.port.postMessage({ type: 'waves', packed });
-        }
+        this.vizAcc -= period;
+        // Always post, including n=0: skipping left the last wiggle on screen
+        // after the net went quiet. A late quantum skips the delay-line walk
+        // (that is the overrun) and posts an empty header so the draw path
+        // drops offsets instead of freezing them.
+        const packed = late ? this.net.zeroWaveSnapshot() : this.net.fillWaveSnapshot();
+        this.port.postMessage({ type: 'waves', packed });
       }
     } catch (err) {
       this.report(err);

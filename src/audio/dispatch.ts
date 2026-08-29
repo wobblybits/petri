@@ -135,6 +135,12 @@ export function planAirMessage(
   // which rejects the overwhelming majority on one compare.
   let worst = Infinity;
 
+  // Deliberately all-pairs. A broad phase was tried here and made it slower:
+  // the air cutoff is 240 px, comparable to the whole swarm, so every body
+  // lands in the same cell or its neighbour and the grid rejects nothing while
+  // still charging for the rebuild. The sim's contact solver is the opposite
+  // case — a ~40 px cell against the same swarm — which is why the grid pays
+  // off there and not here.
   for (let i = 0; i < n; i++) {
     const ax = airXs[i];
     const ay = airYs[i];
@@ -171,6 +177,27 @@ export function planAirMessage(
     });
   }
   return { type: 'air', items };
+}
+
+/**
+ * A body arriving. Visually this is one of the loudest things that happens —
+ * an agent simply appears — and it was the last such event making no sound at
+ * all. A long, soft, blunt contact rather than a strike: an entrance, not a hit.
+ */
+export function planSpawnMessages(
+  ev: Extract<AudioEvent, { type: 'spawn' }>,
+): WorkletInMessage[] {
+  return [
+    {
+      type: 'strike',
+      agentId: ev.agent,
+      // The dark body arrives more softly than the light one, same as
+      // everywhere else: what you see is what you hear.
+      peak: 0.16 + albedo(ev.kind) * 0.12,
+      dur: Math.round(0.006 * getSampleRate()),
+      sharp: 0.1,
+    },
+  ];
 }
 
 export function planRewriteMessages(

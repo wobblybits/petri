@@ -120,3 +120,58 @@ describe('sim to sound', () => {
     expect(strikes).toBeLessThanOrEqual(10);
   });
 });
+
+describe('sustained level', () => {
+  it('a full soup does not fade out as it runs', () => {
+    // Regression for a real cutout: with enough agents the awake count sits at
+    // the voice cap, and the old steal threshold ratcheted away until it was
+    // silencing every body. The net went ~20x quieter a few seconds in and
+    // never recovered. The cascade test above did not catch it, because it only
+    // asked whether voices come *down* — never whether any survive.
+    const sim = new Sim(700, 500);
+    const params = defaultParams();
+    const engine = new AudioEngine();
+    engine.armWithoutAudio();
+    const posted: WorkletInMessage[] = [];
+    engine.onPost = (m) => posted.push(m);
+    engine.contacts = sim.contacts as never;
+    sim.graph.onLatch = (ev) => engine.push(ev, sim.graph, sim.agents);
+
+    // A full default soup: maxAgents is 80, and the fault needed that many.
+    for (let i = 0; i < 78; i++) {
+      sim.spawn(i % 3 === 0 ? 'era' : i % 3 === 1 ? 'dup' : 'con',
+        40 + (i * 71) % 620, 40 + (i * 53) % 420, i, params, true);
+    }
+
+    const net = new WaveguideNet();
+    const view = { x: 350, y: 250, zoom: 1, viewW: 700, viewH: 500 };
+    const secRms: number[] = [];
+    for (let sec = 0; sec < 9; sec++) {
+      let sum = 0;
+      let n = 0;
+      for (let f = 0; f < 60; f++) {
+        sim.step(1 / 60, params);
+        posted.length = 0;
+        engine.frame(sim.graph, sim.agents, 1 / 60, view);
+        for (const m of posted) net.handle(m as never);
+        for (let i = 0; i < 800; i++) {
+          net.tick(false);
+          const v = net.outDryL + net.outWetL;
+          expect(Number.isFinite(v)).toBe(true);
+          sum += v * v;
+          n++;
+        }
+      }
+      secRms.push(Math.sqrt(sum / n));
+    }
+
+    // Compare the settled stretch against the opening, ignoring the first
+    // second while the net is still latching itself together.
+    const early = Math.max(secRms[1], secRms[2], secRms[3]);
+    const late = Math.max(secRms[6], secRms[7], secRms[8]);
+    expect(early).toBeGreaterThan(0.01);
+    expect(late).toBeGreaterThan(0.01);
+    // It may settle somewhat as the net stops rewiring, but not collapse.
+    expect(late).toBeGreaterThan(early * 0.15);
+  });
+});

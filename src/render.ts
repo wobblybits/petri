@@ -93,8 +93,27 @@ function ghostAsAgent(g: Ghost): Agent {
   };
 }
 
-/** World-space px of displacement at |sample| = 1. */
-const WAVE_SCALE = 12;
+/** World-space px of displacement at |sample/env| = 1 after AGC. */
+const WAVE_SCALE = 16;
+/** Below this envelope the wire is drawn as its rest pose. */
+const ENV_DEAD = 4e-4;
+/** Envelope at which AGC fade reaches 1. */
+const ENV_FULL = 0.04;
+
+/**
+ * Visible offset from a traveling-wave sample pair.
+ * Divides by the pickup envelope so a quiet pluck and a loud ring occupy
+ * similar pixels; the fade keeps silence from being amplified into noise.
+ */
+export function waveDisplace(fwd: number, back: number, env: number, pin: number): number {
+  if (!(env > ENV_DEAD) || pin === 0) return 0;
+  if (!Number.isFinite(fwd) || !Number.isFinite(back) || !Number.isFinite(env)) return 0;
+  const t = Math.max(0, Math.min(1, (env - ENV_DEAD) / (ENV_FULL - ENV_DEAD)));
+  const fade = t * t * (3 - 2 * t);
+  const unit = (fwd + back) / env;
+  const a = Math.max(-1.7, Math.min(1.7, unit));
+  return a * WAVE_SCALE * pin * fade;
+}
 
 function drawWires(
   ctx: CanvasRenderingContext2D,
@@ -171,6 +190,8 @@ function strokeOffsetWire(
   if (bins < 2) return false;
   const samples = pathSamples(wireStrokePoints(A, B, wire, w, h), bins);
   if (samples.length < 2) return false;
+  const env = packed[rec + 1];
+  if (!(env > ENV_DEAD)) return false;
   const fwd0 = rec + 2;
   const back0 = fwd0 + bins;
   const last = samples.length - 1;
@@ -178,11 +199,10 @@ function strokeOffsetWire(
   const ys = new Array<number>(last + 1);
   for (let i = 0; i <= last; i++) {
     const pin = i === 0 || i === last ? 0 : Math.sin((Math.PI * i) / last);
-    const a = packed[fwd0 + i] + packed[back0 + i];
-    if (!Number.isFinite(a) || !Number.isFinite(samples[i].x) || !Number.isFinite(samples[i].y)) {
+    if (!Number.isFinite(samples[i].x) || !Number.isFinite(samples[i].y)) {
       return false;
     }
-    const d = Math.max(-1.7, Math.min(1.7, a)) * WAVE_SCALE * pin;
+    const d = waveDisplace(packed[fwd0 + i], packed[back0 + i], env, pin);
     xs[i] = samples[i].x + samples[i].nx * d;
     ys[i] = samples[i].y + samples[i].ny * d;
     if (!Number.isFinite(xs[i]) || !Number.isFinite(ys[i])) return false;

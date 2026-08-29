@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { WaveguideNet, junctionLoadY } from './waveguide.ts';
+import { WaveguideNet, WAVE_BINS, junctionLoadY } from './waveguide.ts';
 import { bowSpeed } from './presets.ts';
-import type { NetTopology } from './types.ts';
+import type { AgentTopo, NetTopology } from './types.ts';
 
 function sampleTopo(wireId: number, agentA: number, agentB: number, length = 120): NetTopology {
   return {
@@ -61,6 +61,92 @@ function binMag(x: number[], hz: number, sr = 48000): number {
   }
   return Math.hypot(re, im) / x.length;
 }
+
+describe('voice ceiling', () => {
+  it('a cascade is reclaimed down to the voice budget', () => {
+    // Regression: this was a rising threshold that ratcheted to its ceiling
+    // whenever a busy soup held the awake count near the cap, and then silenced
+    // every body below it. A full soup went ~20x quieter a few seconds in and
+    // stayed there. Ranking removes exactly the overflow and cannot run away.
+    // Nothing else bounds concurrent voices: the net stays inside its callback
+    // budget only because gating happens to keep counts low. Strike far more
+    // bodies than the budget allows and the quietest have to be stolen back.
+    const N = 200;
+    const agents: AgentTopo[] = [];
+    for (let i = 1; i <= N; i++) {
+      agents.push({
+        id: i,
+        kind: (i % 3) as 0 | 1 | 2,
+        openPorts: 2,
+        stubs: [
+          { slot: 0 as const, length: 10, z: 1 },
+          { slot: 1 as const, length: 8, z: 0.62 },
+        ],
+        impedance: 1,
+        pan: 0,
+        dist: 0.5,
+        modeHz: [180, 380, 620],
+        modeT60: [0.9, 0.5, 0.3],
+        modeGain: [0.7, 0.4, 0.22],
+        coupling: 1,
+      });
+    }
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: { wires: [], agents } });
+    for (let i = 1; i <= N; i++) {
+      net.handle({ type: 'strike', agentId: i, peak: 1.2, dur: 60, sharp: 0.6 });
+    }
+
+    const awake = () => net.agents.filter((a) => a.active && !a.quiet).length;
+    expect(awake()).toBe(N);
+
+    // Bounded to MAX_STEALS per quantum, so a 200-body cascade needs a couple
+    // of hundred quanta to drain. Half a second is ample.
+    for (let i = 0; i < 48000 * 0.5; i++) net.tick(false);
+    expect(awake()).toBeLessThanOrEqual(44);
+
+    // And the survivors still decay to silence rather than being pinned alive.
+    for (let i = 0; i < 48000 * 6; i++) net.tick(false);
+    expect(awake()).toBe(0);
+  });
+});
+
+describe('stale index recovery', () => {
+  it('a contact follows its bodies when agent slots are reshuffled', () => {
+    // Agent slots are packed in topo order, so erasing one body shifts every
+    // later body down a slot. A contact captured before that points at the
+    // wrong pair, and the force it applies is a real Hertzian spring plus
+    // friction between two bodies that are not touching.
+    const body = (id: number) => ({
+      id,
+      kind: 0 as const,
+      openPorts: 0,
+      impedance: 1,
+      pan: 0,
+      dist: 0.5,
+      modeHz: [180, 380, 620],
+      modeT60: [0.25, 0.14, 0.08],
+      modeGain: [0.7, 0.4, 0.22],
+      coupling: 1,
+    });
+    const topoOf = (ids: number[]) => ({ wires: [], agents: ids.map(body) });
+
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: topoOf([1, 2, 3]) });
+    net.handle({ type: 'contact', items: [{ agentA: 2, agentB: 3, load: 1, slide: 0.02 }] });
+
+    const c = net.contacts.find((x) => x.active)!;
+    expect(c.idA).toBe(2);
+    expect(c.idB).toBe(3);
+
+    // Agent 1 is erased: 2 and 3 shift down, 4 arrives.
+    net.handle({ type: 'topology', topo: topoOf([2, 3, 4]) });
+    net.tick(false);
+
+    expect(net.agents[c.idxA].id).toBe(c.idA);
+    expect(net.agents[c.idxB].id).toBe(c.idB);
+  });
+});
 
 describe('WaveguideNet', () => {
   it('a closed junction still leaks a little', () => {
@@ -420,6 +506,15 @@ describe('traveling-wave snapshot', () => {
     const packed = snapCopy(net);
     expect(packed[0]).toBe(0);
     expect(packed[1]).toBeGreaterThan(1);
+  });
+
+  it('zeroWaveSnapshot is an empty header so a late callback can drop offsets', () => {
+    const net = new WaveguideNet();
+    net.handle({ type: 'latch', topo: sampleTopo(1, 10, 20, 80), wireId: 1, gain: 1 });
+    expect(snapCopy(net)[0]).toBe(1);
+    const z = new Float32Array(net.zeroWaveSnapshot());
+    expect(z[0]).toBe(0);
+    expect(z[1]).toBe(WAVE_BINS);
   });
 
   it('a pluck appears in both directions', () => {
@@ -874,5 +969,37 @@ describe('listener distance mix', () => {
     }
     expect(dry).toBeLessThan(near.dry * 0.55);
     expect(wet).toBeLessThan(near.wet * 0.55);
+  });
+});
+
+describe('silent-body skip', () => {
+  it('a strike on one body in a crowd still rings, and the others stay quiet', () => {
+    const agents: NetTopology['agents'] = [];
+    for (let i = 1; i <= 40; i++) agents.push(ringingBody(i, 0));
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: { wires: [], agents } });
+    net.handle({ type: 'strike', agentId: 1, peak: 1.5, dur: 40, sharp: 0.5 });
+    const x = collect(net, 512);
+    expect(peak(x)).toBeGreaterThan(0.01);
+    expect(net.agents[net.agentById.get(1)!].quiet).toBe(false);
+    expect(net.agents[net.agentById.get(2)!].quiet).toBe(true);
+    expect(net.agents[net.agentById.get(2)!].bodyEnv).toBeLessThan(1e-6);
+  });
+
+  it('a latch still sounds if topology was already applied', () => {
+    const net = new WaveguideNet();
+    const topo = sampleTopo(1, 10, 20, 80);
+    net.handle({ type: 'topology', topo });
+    net.handle({ type: 'latch', topo, wireId: 1, gain: 1 });
+    expect(peak(collect(net, 256))).toBeGreaterThan(0.01);
+  });
+
+  it('shedding air does not mute a ringing wire', () => {
+    const net = new WaveguideNet();
+    net.handle({ type: 'latch', topo: sampleTopo(1, 10, 20, 80), wireId: 1, gain: 1 });
+    const x = collect(net, 64);
+    for (let i = 0; i < 64; i++) net.tick(true);
+    expect(peak(x)).toBeGreaterThan(0.01);
+    expect(peak(collect(net, 64))).toBeGreaterThan(0.01);
   });
 });

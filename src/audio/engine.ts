@@ -4,6 +4,7 @@ import {
   planCollisionMessages,
   planLatchMessages,
   planRewriteMessages,
+  planSpawnMessages,
   planContactMessage,
   planAirMessage,
 } from './dispatch.ts';
@@ -22,6 +23,9 @@ const WIRE_COOLDOWN = 0.05;
 function eventGain(ev: AudioEvent): number {
   if (ev.type === 'latch') return 1.5;
   if (ev.type === 'rewrite') return ev.phase === 'commit' ? 1.4 : 1;
+  // A spawn outranks a light bump but yields to a latch, so a busy frame keeps
+  // the structural events and drops the incidental ones.
+  if (ev.type === 'spawn') return 1.2;
   return Math.min(1, ev.impact / 40);
 }
 
@@ -39,10 +43,10 @@ export class AudioEngine {
   private now = 0;
   private lastAgent = new Map<number, number>();
   private lastWire = new Map<number, number>();
-  private topoKey = '';
-  private poseKey = '';
-  private tuneKey = '';
-  private contactKey = '';
+  private topoKey = -1;
+  private poseKey = -1;
+  private tuneKey = -1;
+  private contactKey = -1;
   onPost: ((msg: WorkletInMessage) => void) | null = null;
   /** Latest traveling-wave snapshot from the worklet. Null until the first one. */
   private wavePacked: Float32Array | null = null;
@@ -54,10 +58,17 @@ export class AudioEngine {
 
   /** @internal Tests feed a snapshot without a worklet. */
   acceptWaves(packed: Float32Array): void {
-    this.wavePacked = packed;
     this.waveIndex.clear();
-    if (packed.length < 2) return;
+    if (packed.length < 2) {
+      this.wavePacked = null;
+      return;
+    }
     const n = packed[0] | 0;
+    if (n <= 0) {
+      this.wavePacked = null;
+      return;
+    }
+    this.wavePacked = packed;
     const bins = packed[1] | 0;
     const stride = 2 + bins * 2;
     let o = 2;
@@ -190,6 +201,7 @@ export class AudioEngine {
 
   /** Cooldowns keep one agent or wire from retriggering every frame. */
   private allow(ev: AudioEvent): boolean {
+    if (ev.type === 'spawn') return true;
     if (ev.type === 'latch') {
       if ((this.lastWire.get(ev.wireId) ?? -1) > this.now - WIRE_COOLDOWN) return false;
       this.lastWire.set(ev.wireId, this.now);
@@ -225,40 +237,35 @@ export class AudioEngine {
    * Graph shape: who is wired to whom, and which stems are open. Delay and
    * damping are not here — a stretching rope must not rebuild the net.
    */
-  private static topologyKey(topo: NetTopology): string {
-    const parts: string[] = [];
-    for (const w of topo.wires) {
-      parts.push(`${w.id}:${w.agentA}>${w.agentB}`);
-    }
+  private static topologyKey(topo: NetTopology): number {
+    let h = 2166136261;
+    for (const w of topo.wires) h = mix(mix(mix(h, w.id), w.agentA), w.agentB);
     for (const a of topo.agents) {
-      let s = `a${a.id}:${a.openPorts}`;
-      if (a.stubs) {
-        for (const st of a.stubs) s += `:${st.slot}`;
-      }
-      parts.push(s);
+      h = mix(mix(h, a.id), a.openPorts);
+      if (a.stubs) for (const st of a.stubs) h = mix(h, st.slot);
     }
-    return parts.join('|');
+    return h;
   }
 
   /** Rope delay and damping, quantized to a sample / a twentieth. */
-  private static tuneKey(topo: NetTopology): string {
-    const parts: string[] = [];
+  private static tuneKey(topo: NetTopology): number {
+    let h = 2166136261;
     for (const w of topo.wires) {
-      parts.push(`${w.id}:${Math.round(w.length)}:${Math.round((w.damp ?? 0) * 20)}`);
+      h = mix(mix(mix(h, w.id), Math.round(w.length)), Math.round((w.damp ?? 0) * 20));
     }
-    return parts.join('|');
+    return h;
   }
 
   /** Listener pose: height, pan, distance. Cheap to send, changes as you look. */
-  private static poseKey(topo: NetTopology): string {
-    const parts: string[] = [`h${Math.round((topo.height ?? 0) * 20)}`];
+  private static poseKey(topo: NetTopology): number {
+    let h = mix(2166136261, Math.round((topo.height ?? 0) * 20));
     for (const w of topo.wires) {
-      parts.push(`w${w.id}:${Math.round((w.pan ?? 0) * 10)}:${Math.round((w.dist ?? 0) * 20)}`);
+      h = mix(mix(mix(h, w.id), Math.round((w.pan ?? 0) * 10)), Math.round((w.dist ?? 0) * 20));
     }
     for (const a of topo.agents) {
-      parts.push(`a${a.id}:${Math.round((a.pan ?? 0) * 10)}:${Math.round((a.dist ?? 0) * 20)}`);
+      h = mix(mix(mix(h, a.id), Math.round((a.pan ?? 0) * 10)), Math.round((a.dist ?? 0) * 20));
     }
-    return parts.join('|');
+    return h;
   }
 
   /**
@@ -342,14 +349,14 @@ export class AudioEngine {
 
   private contactedLast = false;
   private airedLast = false;
-  private airKey = '';
+  private airKey = -1;
 
   invalidateTopology(): void {
-    this.topoKey = '';
-    this.poseKey = '';
-    this.tuneKey = '';
-    this.contactKey = '';
-    this.airKey = '';
+    this.topoKey = -1;
+    this.poseKey = -1;
+    this.tuneKey = -1;
+    this.contactKey = -1;
+    this.airKey = -1;
     this.airedLast = false;
     this.events.length = 0;
     this.lastAgent.clear();
@@ -374,6 +381,10 @@ export class AudioEngine {
       for (const msg of planLatchMessages(ev, graph, agents, topo)) this.post(msg);
       return;
     }
+    if (ev.type === 'spawn') {
+      for (const msg of planSpawnMessages(ev)) this.post(msg);
+      return;
+    }
     if (ev.type === 'rewrite') {
       for (const msg of planRewriteMessages(ev)) this.post(msg);
       return;
@@ -382,22 +393,30 @@ export class AudioEngine {
   }
 }
 
-function airKeyOf(items: { agentA: number; agentB: number; length: number; gain: number }[]): string {
-  if (items.length === 0) return '';
-  const parts: string[] = [];
+function airKeyOf(items: { agentA: number; agentB: number; length: number; gain: number }[]): number {
+  let h = 2166136261;
   for (const it of items) {
-    parts.push(`${it.agentA}:${it.agentB}:${it.length | 0}:${(it.gain * 200) | 0}`);
+    h = mix(mix(mix(mix(h, it.agentA), it.agentB), it.length | 0), (it.gain * 200) | 0);
   }
-  return parts.join('|');
+  return h;
 }
 
-function contactKeyOf(items: { agentA: number; agentB: number; load: number; slide: number }[]): string {
-  if (items.length === 0) return '';
-  const parts: string[] = [];
+function contactKeyOf(items: { agentA: number; agentB: number; load: number; slide: number }[]): number {
+  let h = 2166136261;
   for (const it of items) {
-    parts.push(`${it.agentA}:${it.agentB}:${(it.load * 20) | 0}:${(it.slide * 40) | 0}`);
+    h = mix(mix(mix(mix(h, it.agentA), it.agentB), (it.load * 20) | 0), (it.slide * 40) | 0);
   }
-  return parts.join('|');
+  return h;
+}
+
+/**
+ * FNV-1a step. These four keys exist only to answer "did anything change", and
+ * they used to answer it by building a string per object and joining — hundreds
+ * of allocations a frame for a boolean. A rolling hash gives the same answer
+ * with no garbage at all.
+ */
+function mix(h: number, v: number): number {
+  return Math.imul(h ^ (v | 0), 16777619) >>> 0;
 }
 
 export const audio = new AudioEngine();

@@ -90,6 +90,34 @@ export function closestOnSegments(
   };
 }
 
+/** Parameter of the closest point on AB to P, in [0, 1]. */
+export function closestTOnSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
+  const abx = bx - ax;
+  const aby = by - ay;
+  const denom = abx * abx + aby * aby;
+  if (denom < 1e-12) return 0;
+  return Math.max(0, Math.min(1, ((px - ax) * abx + (py - ay) * aby) / denom));
+}
+
+export function closestPointOnSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): { x: number; y: number; t: number } {
+  const t = closestTOnSegment(px, py, ax, ay, bx, by);
+  return { x: ax + (bx - ax) * t, y: ay + (by - ay) * t, t };
+}
+
 export function segmentsInterfere(
   ax: number,
   ay: number,

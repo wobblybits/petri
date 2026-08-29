@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createAgent } from './agents.ts';
 import { queryHit } from './collide.ts';
-import { segmentsIntersect, segmentsInterfere } from './geom.ts';
+import { closestPointOnSegment, segmentsIntersect, segmentsInterfere } from './geom.ts';
 import { defaultParams } from './params.ts';
 
 describe('shape collision', () => {
@@ -28,5 +28,15 @@ describe('segment geometry', () => {
     expect(segmentsIntersect(0, 0, 10, 0, 0, 5, 10, 5)).toBe(false);
     expect(segmentsInterfere(0, 0, 20, 0, 10, 1, 10, 8, 5)).toBe(true);
     expect(segmentsInterfere(0, 0, 20, 0, 10, 8, 10, 16, 5)).toBe(false);
+  });
+
+  it('closestPointOnSegment pins to the interval and reports t', () => {
+    const mid = closestPointOnSegment(5, 4, 0, 0, 10, 0);
+    expect(mid.t).toBeCloseTo(0.5);
+    expect(mid.x).toBeCloseTo(5);
+    expect(mid.y).toBe(0);
+    const past = closestPointOnSegment(20, 3, 0, 0, 10, 0);
+    expect(past.t).toBe(1);
+    expect(past.x).toBe(10);
   });
 });

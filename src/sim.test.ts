@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { boundRadius, stemWorld } from './agents.ts';
 import { defaultParams } from './params.ts';
 import { loadPreset } from './presets.ts';
 import { queryHit, SLOP } from './collide.ts';
+import { closestPointOnSegment, WIRE_RADIUS } from './geom.ts';
 import { mixScent, scentSlowFactor, scentTurnBoost, Sim } from './sim.ts';
 import { CH } from './fields.ts';
 import { angleDelta } from './wrap.ts';
@@ -123,13 +125,16 @@ describe('scent steering', () => {
     expect(b.vx).toBeGreaterThan(0);
   });
 
-  it('agents can occupy the same space as a wire chain', () => {
+  it('a rope drapes around a visitor instead of cutting through it', () => {
     const sim = new Sim(320, 200);
     const params = defaultParams();
     params.snapRadius = 0;
     params.stepSpeed = 0;
     params.gravity = 0;
     params.homing = 0;
+    params.flockAlign = 0;
+    params.flockSep = 0;
+    params.declutter = 0;
     params.rewriteDuration = 20;
     params.spawnInterval = 0;
     const a = sim.spawn('era', 60, 100, 0, params, true)!;
@@ -139,8 +144,29 @@ describe('scent steering', () => {
     expect(wire.nodes.length).toBeGreaterThan(2);
     const mid = wire.nodes[Math.floor(wire.nodes.length / 2)];
     const visitor = sim.spawn('con', mid.x, mid.y, 0, params, true)!;
-    step(sim, params, 10);
-    expect(Math.hypot(mid.x - visitor.x, mid.y - visitor.y)).toBeLessThan(14);
+    const vx0 = visitor.x;
+    const vy0 = visitor.y;
+    step(sim, params, 30);
+    const pts = [
+      stemWorld(a, 'p', sim.w, sim.h),
+      ...wire.nodes,
+      stemWorld(b, 'p', sim.w, sim.h),
+    ];
+    let dist = Infinity;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const q = closestPointOnSegment(
+        visitor.x,
+        visitor.y,
+        pts[i].x,
+        pts[i].y,
+        pts[i + 1].x,
+        pts[i + 1].y,
+      );
+      dist = Math.min(dist, Math.hypot(q.x - visitor.x, q.y - visitor.y));
+    }
+    const keep = boundRadius(visitor) + WIRE_RADIUS;
+    expect(dist).toBeGreaterThan(keep - 4);
+    expect(Math.hypot(visitor.x - vx0, visitor.y - vy0)).toBeLessThan(3);
   });
 });
 
