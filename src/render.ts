@@ -1,5 +1,5 @@
 import { ERA_RADIUS, portLocal, slotsFor, stemRoot, stemWorld, triangleLocal, wireCubic, type Agent, type AgentKind } from './agents.ts';
-import { WAVE_DISP_PX } from './geom.ts';
+import { clampPolylineToChord, WAVE_DISP_PX, wireBowBudget } from './geom.ts';
 import type { WaveSnapshot } from './audio/types.ts';
 import type { Camera } from './camera.ts';
 import { catmullSegment, unwrapPoints } from './chain.ts';
@@ -149,32 +149,10 @@ function strokeWire(
   w: number,
   h: number,
 ): void {
-  if (wire.nodes.length === 0) {
-    strokeCubic(ctx, wireCubic(A, wire.a.slot, B, wire.b.slot, w, h, wire.rest));
-    return;
-  }
-  const raw = [
-    stemWorld(A, wire.a.slot, w, h),
-    ...wire.nodes,
-    stemWorld(B, wire.b.slot, w, h),
-  ];
-  const pts = unwrapPoints(raw, w, h);
-  const n = pts.length;
-  for (let i = 0; i < n - 1; i++) {
-    const p0 = pts[Math.max(0, i - 1)];
-    const p1 = pts[i];
-    const p2 = pts[i + 1];
-    const p3 = pts[Math.min(n - 1, i + 2)];
-    strokeCubic(
-      ctx,
-      catmullSegment(
-        i === 0 ? { x: 2 * p1.x - p2.x, y: 2 * p1.y - p2.y } : p0,
-        p1,
-        p2,
-        i === n - 2 ? { x: 2 * p2.x - p1.x, y: 2 * p2.y - p1.y } : p3,
-      ),
-    );
-  }
+  const pts = wireStrokePoints(A, B, wire, w, h);
+  if (pts.length === 0) return;
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
 }
 
 function strokeOffsetWire(
@@ -222,19 +200,16 @@ interface PathSample {
   ny: number;
 }
 
-function wireStrokePoints(A: Agent, B: Agent, wire: Wire, w: number, h: number): { x: number; y: number }[] {
+/** Polyline the renderer strokes for a wire — cubic if no nodes, Catmull otherwise. */
+export function wireStrokePoints(A: Agent, B: Agent, wire: Wire, w: number, h: number): { x: number; y: number }[] {
+  const pts = wireControlPoints(A, B, wire, w, h);
+  if (pts.length < 2) return pts;
+  const span = Math.hypot(pts[pts.length - 1].x - pts[0].x, pts[pts.length - 1].y - pts[0].y);
+  const budget = wireBowBudget(span, wire.rest);
   if (wire.nodes.length === 0) {
-    const c = wireCubic(A, wire.a.slot, B, wire.b.slot, w, h, wire.rest);
-    const pts: { x: number; y: number }[] = [];
-    for (let i = 0; i <= 16; i++) pts.push(bezierPoint(c.p0, c.p1, c.p2, c.p3, i / 16));
+    clampPolylineToChord(pts, budget);
     return pts;
   }
-  const raw = [
-    stemWorld(A, wire.a.slot, w, h),
-    ...wire.nodes,
-    stemWorld(B, wire.b.slot, w, h),
-  ];
-  const pts = unwrapPoints(raw, w, h);
   const n = pts.length;
   const out: { x: number; y: number }[] = [];
   for (let i = 0; i < n - 1; i++) {
@@ -254,7 +229,26 @@ function wireStrokePoints(A: Agent, B: Agent, wire: Wire, w: number, h: number):
       out.push(bezierPoint(c.p0, c.p1, c.p2, c.p3, k / steps));
     }
   }
+  clampPolylineToChord(out, budget);
   return out;
+}
+
+function wireControlPoints(A: Agent, B: Agent, wire: Wire, w: number, h: number): { x: number; y: number }[] {
+  if (wire.nodes.length === 0) {
+    const c = wireCubic(A, wire.a.slot, B, wire.b.slot, w, h, wire.rest);
+    const pts: { x: number; y: number }[] = [];
+    for (let i = 0; i <= 16; i++) pts.push(bezierPoint(c.p0, c.p1, c.p2, c.p3, i / 16));
+    return pts;
+  }
+  const raw = [
+    stemWorld(A, wire.a.slot, w, h),
+    ...wire.nodes,
+    stemWorld(B, wire.b.slot, w, h),
+  ];
+  const pts = unwrapPoints(raw, w, h);
+  const span = Math.hypot(pts[pts.length - 1].x - pts[0].x, pts[pts.length - 1].y - pts[0].y);
+  clampPolylineToChord(pts, wireBowBudget(span, wire.rest));
+  return pts;
 }
 
 function pathSamples(pts: { x: number; y: number }[], n: number): PathSample[] {
@@ -304,14 +298,6 @@ function pathSamples(pts: { x: number; y: number }[], n: number): PathSample[] {
     }
   }
   return out;
-}
-
-function strokeCubic(
-  ctx: CanvasRenderingContext2D,
-  c: { p0: { x: number; y: number }; p1: { x: number; y: number }; p2: { x: number; y: number }; p3: { x: number; y: number } },
-): void {
-  ctx.moveTo(c.p0.x, c.p0.y);
-  ctx.bezierCurveTo(c.p1.x, c.p1.y, c.p2.x, c.p2.y, c.p3.x, c.p3.y);
 }
 
 function drawAgent(ctx: CanvasRenderingContext2D, agent: Agent, alpha: number, graph?: Graph): void {

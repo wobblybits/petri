@@ -12,7 +12,7 @@ import {
   type PortSlot,
 } from './agents.ts';
 import { queryHit, SLOP, type Hit } from './collide.ts';
-import { closestOnSegments, closestTOnSegment, ropeAabb, segmentsIntersect, transverseProfile, WAVE_DISP_PX, WIRE_RADIUS } from './geom.ts';
+import { closestOnSegments, closestPointOnSegment, closestTOnSegment, ropeAabb, segmentsIntersect, transverseProfile, WAVE_DISP_PX, WIRE_RADIUS, wireBowBudget } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact, unwrapPoints } from './chain.ts';
 import { CH, Fields } from './fields.ts';
@@ -25,7 +25,7 @@ import {
   type Rewrite,
 } from './rewrite.ts';
 import { audio } from './audio/engine.ts';
-import type { CollisionEvent, LiveContact, RewriteEvent } from './audio/types.ts';
+import type { CollisionEvent, LiveContact, LiveWireContact, RewriteEvent } from './audio/types.ts';
 import { angleDelta, clamp, wrapAngle, wrapDeltaVec } from './wrap.ts';
 
 /** Attraction-only chemotaxis. Own principal trails are a different channel and are ignored. */
@@ -132,9 +132,10 @@ export class Sim {
   private wireBowPrev = new Set<string>();
   private wireBowNow = new Set<string>();
   private wireBowShape = new Map<string, { samples: number[]; peak: number }>();
-  /** Bodies sliding against something this frame, and how fast. */
   /** Bodies currently overlapping, keyed by canonical `lo:hi` id pair. */
   contacts = new Map<string, LiveContact>();
+  /** Crossing / overlapping ropes this frame. Geometry is not displaced. */
+  wireContacts = new Map<string, LiveWireContact>();
   /** Momentum lost to sound this frame, applied once after the substeps. */
   private radiated = new Map<number, { x: number; y: number }>();
   /**
@@ -157,6 +158,7 @@ export class Sim {
     this.fields = new Fields(this.w, this.h);
     this.graph.onLatch = (ev) => audio.push(ev, this.graph, this.agents);
     audio.contacts = this.contacts;
+    audio.wireContacts = this.wireContacts;
   }
 
   /** Viewport / spawn-box size. World coordinates are not scaled. */
@@ -254,6 +256,7 @@ export class Sim {
     this.trackHome(t);
     this.contactAudioNow.clear();
     this.contacts.clear();
+    this.wireContacts.clear();
     this.radiated.clear();
 
     this.steer(params, t);
@@ -268,6 +271,7 @@ export class Sim {
 
     this.graph.refreshLengths(this.agents, this.w, this.h);
     this.noteWireBows();
+    this.noteWireFriction();
     this.emitWirePlucks();
     this.graph.snap(this.agents, this.w, this.h, params, this.time);
     this.startRewrites(params);
@@ -330,13 +334,15 @@ export class Sim {
   }
 
   /**
-   * Ropes push off other ropes, and off bodies they are not attached to.
+   * Ropes drape off bodies they are not attached to. Wire–wire pairs are
+   * detected for friction audio but not displaced — two strings scrape, they
+   * do not shove each other off the chord.
    *
-   * Segment vs segment (and segment vs the body's bounding circle), still
-   * one-way: a rope never moves an agent. That is what makes it safe — letting
-   * a wire shove its own anchors is exactly the coupling that made the early
-   * drafts of this solver explode. Node-only tests let a chord cut through a
-   * body between two nodes that each sat just outside it.
+   * Segment vs the body's bounding circle, still one-way: a rope never moves
+   * an agent. That is what makes it safe — letting a wire shove its own anchors
+   * is exactly the coupling that made the early drafts of this solver explode.
+   * Node-only tests let a chord cut through a body between two nodes that each
+   * sat just outside it.
    *
    * Solved inside the substep loop rather than after the frame, so the link,
    * bend and shape constraints get to re-settle the rope around the push
@@ -347,77 +353,7 @@ export class Sim {
   private clearWires(params: Params): void {
     const gain = params.wireClear;
     if (gain <= 0) return;
-    const ropeGap = WIRE_RADIUS * 3;
     const cap = Sim.WIRE_CLEAR_STEP;
-
-    for (let k = 0; k < this.clearWirePairs.length; k += 2) {
-      const P = this.clearWirePairs[k] as Wire;
-      const Q = this.clearWirePairs[k + 1] as Wire;
-      const PA = this.agents.get(P.a.id);
-      const PB = this.agents.get(P.b.id);
-      const QA = this.agents.get(Q.a.id);
-      const QB = this.agents.get(Q.b.id);
-      if (!PA || !PB || !QA || !QB) continue;
-      const pA = stemWorld(PA, P.a.slot, this.w, this.h);
-      const pB = stemWorld(PB, P.b.slot, this.w, this.h);
-      const qA = stemWorld(QA, Q.a.slot, this.w, this.h);
-      const qB = stemWorld(QB, Q.b.slot, this.w, this.h);
-      const nP = P.nodes.length;
-      const nQ = Q.nodes.length;
-      const pBox = ropeAabb(pA, P.nodes, pB);
-      const qBox = ropeAabb(qA, Q.nodes, qB);
-      if (
-        pBox.maxX + ropeGap < qBox.minX ||
-        qBox.maxX + ropeGap < pBox.minX ||
-        pBox.maxY + ropeGap < qBox.minY ||
-        qBox.maxY + ropeGap < pBox.minY
-      ) {
-        continue;
-      }
-      for (let i = 0; i <= nP; i++) {
-        const a0 = i === 0 ? pA : P.nodes[i - 1];
-        const a1 = i === nP ? pB : P.nodes[i];
-        for (let j = 0; j <= nQ; j++) {
-          const b0 = j === 0 ? qA : Q.nodes[j - 1];
-          const b1 = j === nQ ? qB : Q.nodes[j];
-          const slack = ropeGap;
-          if (
-            Math.max(a0.x, a1.x) + slack < Math.min(b0.x, b1.x) ||
-            Math.max(b0.x, b1.x) + slack < Math.min(a0.x, a1.x) ||
-            Math.max(a0.y, a1.y) + slack < Math.min(b0.y, b1.y) ||
-            Math.max(b0.y, b1.y) + slack < Math.min(a0.y, a1.y)
-          ) {
-            continue;
-          }
-          const c = closestOnSegments(a0.x, a0.y, a1.x, a1.y, b0.x, b0.y, b1.x, b1.y);
-          let dx = c.bx - c.ax;
-          let dy = c.by - c.ay;
-          let d = Math.hypot(dx, dy);
-          if (d >= ropeGap) continue;
-          if (d < 1e-8) {
-            const ex = a1.x - a0.x;
-            const ey = a1.y - a0.y;
-            const len = Math.hypot(ex, ey);
-            if (len < 1e-8) continue;
-            dx = -ey / len;
-            dy = ex / len;
-            const mx = (b0.x + b1.x) * 0.5 - (a0.x + a1.x) * 0.5;
-            const my = (b0.y + b1.y) * 0.5 - (a0.y + a1.y) * 0.5;
-            if (dx * mx + dy * my < 0) {
-              dx = -dx;
-              dy = -dy;
-            }
-            d = 0;
-          } else {
-            dx /= d;
-            dy /= d;
-          }
-          const step = Math.min((ropeGap - d) * 0.5 * gain, cap);
-          moveRopeClosest(P, i, c.t, -dx * step, -dy * step);
-          moveRopeClosest(Q, j, c.u, dx * step, dy * step);
-        }
-      }
-    }
 
     for (let k = 0; k < this.clearBodyPairs.length; k += 2) {
       const wire = this.clearBodyPairs[k] as Wire;
@@ -478,7 +414,8 @@ export class Sim {
 
   /**
    * A stacked clearance step can throw a node far off the chord. Pull it back
-   * before the cubic / Catmull handles turn that into an off-screen loop.
+   * onto the same tube the renderer will stroke, before Catmull handles turn
+   * that into an off-screen loop.
    */
   private leashRopes(): void {
     for (const wire of this.graph.wires.values()) {
@@ -488,20 +425,17 @@ export class Sim {
       if (!A || !B) continue;
       const sA = stemWorld(A, wire.a.slot, this.w, this.h);
       const sB = stemWorld(B, wire.b.slot, this.w, this.h);
-      const mx = (sA.x + sB.x) * 0.5;
-      const my = (sA.y + sB.y) * 0.5;
       const span = Math.hypot(sB.x - sA.x, sB.y - sA.y);
-      const limit = span * 1.6 + wire.rest + 48;
-      const lim2 = limit * limit;
+      const limit = wireBowBudget(span, wire.rest);
       for (const node of wire.nodes) {
-        const dx = node.x - mx;
-        const dy = node.y - my;
-        const d2 = dx * dx + dy * dy;
-        if (d2 <= lim2) continue;
-        const d = Math.sqrt(d2);
+        const q = closestPointOnSegment(node.x, node.y, sA.x, sA.y, sB.x, sB.y);
+        const dx = node.x - q.x;
+        const dy = node.y - q.y;
+        const d = Math.hypot(dx, dy);
+        if (d <= limit) continue;
         const k = limit / d;
-        node.x = mx + dx * k;
-        node.y = my + dy * k;
+        node.x = q.x + dx * k;
+        node.y = q.y + dy * k;
       }
     }
   }
@@ -562,16 +496,143 @@ export class Sim {
   }
 
   /**
+   * Closest approach of each wire pair. Overlap and slip become a bow on both
+   * strings; the ropes themselves are not moved.
+   */
+  private noteWireFriction(): void {
+    this.wireContacts.clear();
+    const ropeGap = WIRE_RADIUS * 3;
+    for (let k = 0; k < this.clearWirePairs.length; k += 2) {
+      const P = this.clearWirePairs[k] as Wire;
+      const Q = this.clearWirePairs[k + 1] as Wire;
+      const PA = this.agents.get(P.a.id);
+      const PB = this.agents.get(P.b.id);
+      const QA = this.agents.get(Q.a.id);
+      const QB = this.agents.get(Q.b.id);
+      if (!PA || !PB || !QA || !QB) continue;
+      const pA = stemWorld(PA, P.a.slot, this.w, this.h);
+      const pB = stemWorld(PB, P.b.slot, this.w, this.h);
+      const qA = stemWorld(QA, Q.a.slot, this.w, this.h);
+      const qB = stemWorld(QB, Q.b.slot, this.w, this.h);
+      const nP = P.nodes.length;
+      const nQ = Q.nodes.length;
+      const pBox = ropeAabb(pA, P.nodes, pB);
+      const qBox = ropeAabb(qA, Q.nodes, qB);
+      if (
+        pBox.maxX + ropeGap < qBox.minX ||
+        qBox.maxX + ropeGap < pBox.minX ||
+        pBox.maxY + ropeGap < qBox.minY ||
+        qBox.maxY + ropeGap < pBox.minY
+      ) {
+        continue;
+      }
+      let bestD = ropeGap;
+      let bestI = 0;
+      let bestJ = 0;
+      let bestT = 0;
+      let bestU = 0;
+      let ax = 0;
+      let ay = 0;
+      let bx = 0;
+      let by = 0;
+      let hit = false;
+      for (let i = 0; i <= nP; i++) {
+        const a0 = i === 0 ? pA : P.nodes[i - 1];
+        const a1 = i === nP ? pB : P.nodes[i];
+        for (let j = 0; j <= nQ; j++) {
+          const b0 = j === 0 ? qA : Q.nodes[j - 1];
+          const b1 = j === nQ ? qB : Q.nodes[j];
+          if (
+            Math.max(a0.x, a1.x) + ropeGap < Math.min(b0.x, b1.x) ||
+            Math.max(b0.x, b1.x) + ropeGap < Math.min(a0.x, a1.x) ||
+            Math.max(a0.y, a1.y) + ropeGap < Math.min(b0.y, b1.y) ||
+            Math.max(b0.y, b1.y) + ropeGap < Math.min(a0.y, a1.y)
+          ) {
+            continue;
+          }
+          const c = closestOnSegments(a0.x, a0.y, a1.x, a1.y, b0.x, b0.y, b1.x, b1.y);
+          const d = Math.hypot(c.bx - c.ax, c.by - c.ay);
+          if (d >= bestD) continue;
+          bestD = d;
+          bestI = i;
+          bestJ = j;
+          bestT = c.t;
+          bestU = c.u;
+          ax = c.ax;
+          ay = c.ay;
+          bx = c.bx;
+          by = c.by;
+          hit = true;
+        }
+      }
+      if (!hit) continue;
+      const vP = ropePointVel(PA, P, PB, bestI, bestT);
+      const vQ = ropePointVel(QA, Q, QB, bestJ, bestU);
+      let nx = bx - ax;
+      let ny = by - ay;
+      if (bestD < 1e-8) {
+        const a0 = bestI === 0 ? pA : P.nodes[bestI - 1];
+        const a1 = bestI === nP ? pB : P.nodes[bestI];
+        const ex = a1.x - a0.x;
+        const ey = a1.y - a0.y;
+        const len = Math.hypot(ex, ey);
+        if (len < 1e-8) continue;
+        nx = -ey / len;
+        ny = ex / len;
+      } else {
+        nx /= bestD;
+        ny /= bestD;
+      }
+      const rvx = vP.vx - vQ.vx;
+      const rvy = vP.vy - vQ.vy;
+      const vN = rvx * nx + rvy * ny;
+      const vtx = rvx - vN * nx;
+      const vty = rvy - vN * ny;
+      const a0 = bestI === 0 ? pA : P.nodes[bestI - 1];
+      const a1 = bestI === nP ? pB : P.nodes[bestI];
+      let tx = a1.x - a0.x;
+      let ty = a1.y - a0.y;
+      const tlen = Math.hypot(tx, ty) || 1;
+      tx /= tlen;
+      ty /= tlen;
+      let vT = vtx * tx + vty * ty;
+      let atA = (bestI + bestT) / (nP + 1);
+      let atB = (bestJ + bestU) / (nQ + 1);
+      let idA = P.id;
+      let idB = Q.id;
+      if (idA > idB) {
+        const tmpId = idA;
+        idA = idB;
+        idB = tmpId;
+        const tmpAt = atA;
+        atA = atB;
+        atB = tmpAt;
+        vT = -vT;
+      }
+      this.wireContacts.set(`${idA}:${idB}`, {
+        wireA: idA,
+        wireB: idB,
+        overlap: ropeGap - bestD,
+        vT,
+        atA,
+        atB,
+      });
+    }
+  }
+
+  /**
    * Wire pairs and wire/body pairs close enough to be worth testing, rebuilt
    * once per frame. The broad phase is O(wires²) and the narrow phase runs every
    * substep, so pairing them up each substep costs eight times what it needs to;
    * the margins here are generous enough that a frame of drift cannot smuggle a
    * pair past it.
+   *
+   * Wire pairs are collected even when clearance is off — they drive slip-slide
+   * audio, not displacement.
    */
   private buildClearPairs(params: Params): void {
     this.clearWirePairs.length = 0;
     this.clearBodyPairs.length = 0;
-    if (params.wireClear <= 0) return;
     const ropeGap = WIRE_RADIUS * 3;
     const slack = params.wireMinRest;
 
@@ -617,6 +678,8 @@ export class Sim {
       this.clearWirePairs.push(P, Q);
     });
 
+    if (params.wireClear <= 0) return;
+
     let maxBody = 0;
     for (const agent of this.agents.values()) maxBody = Math.max(maxBody, boundRadius(agent));
     const list = this.rebuildBodyGrid(maxRope * 0.5 + maxBody + WIRE_RADIUS + slack);
@@ -648,6 +711,7 @@ export class Sim {
     if (!this.grabbed || dt <= 0) return;
     const h = dt / Sim.SUBSTEPS;
     this.components = this.graph.componentIds(this.agents);
+    this.wireContacts.clear();
     this.graph.syncRest(this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h);
     this.buildClearPairs(params);
@@ -1488,6 +1552,22 @@ export class Sim {
     }
     if (done.length) this.rewrites = this.rewrites.filter((rw) => !done.includes(rw));
   }
+}
+
+/** Velocity of a rope point, interpolated along segment `seg`. */
+function ropePointVel(
+  A: Agent,
+  wire: Wire,
+  B: Agent,
+  seg: number,
+  t: number,
+): { vx: number; vy: number } {
+  const n = wire.nodes.length;
+  const v0x = seg === 0 ? A.vx : wire.nodes[seg - 1].vx;
+  const v0y = seg === 0 ? A.vy : wire.nodes[seg - 1].vy;
+  const v1x = seg === n ? B.vx : wire.nodes[seg].vx;
+  const v1y = seg === n ? B.vy : wire.nodes[seg].vy;
+  return { vx: v0x + (v1x - v0x) * t, vy: v0y + (v1y - v0y) * t };
 }
 
 /** Move the closest point on polyline segment `seg` by (ux, uy). Stems stay put. */

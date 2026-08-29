@@ -737,6 +737,64 @@ describe('friction bowing', () => {
     expect(net.wireEnergy(1)).toBeGreaterThan(1e-6);
   });
 
+  it('a wire-wire scrape bows both strings', () => {
+    const net = new WaveguideNet();
+    net.handle({
+      type: 'topology',
+      topo: {
+        wires: [
+          { id: 1, length: 90, loss: 0.999, bend: 0.05, agentA: 10, agentB: 20, zA: 1, zB: 1 },
+          { id: 2, length: 100, loss: 0.999, bend: 0.05, agentA: 30, agentB: 40, zA: 1, zB: 1 },
+        ],
+        agents: [
+          { id: 10, kind: 0, openPorts: 0, impedance: 1 },
+          { id: 20, kind: 0, openPorts: 0, impedance: 1 },
+          { id: 30, kind: 1, openPorts: 0, impedance: 1 },
+          { id: 40, kind: 1, openPorts: 0, impedance: 1 },
+        ],
+      },
+    });
+    net.handle({
+      type: 'wireContact',
+      items: [{ wireA: 1, wireB: 2, load: 0.85, slide: bowSpeed(50), atA: 0.4, atB: 0.55 }],
+    });
+    collect(net, 4000);
+    const e1 = net.wireEnergy(1);
+    const e2 = net.wireEnergy(2);
+    expect(e1).toBeGreaterThan(1e-6);
+    expect(e2).toBeGreaterThan(1e-6);
+    expect(Math.max(e1, e2) / Math.min(e1, e2)).toBeLessThan(8);
+  });
+
+  it('an empty wireContact list lifts the bow', () => {
+    const net = new WaveguideNet();
+    net.handle({
+      type: 'topology',
+      topo: {
+        wires: [
+          { id: 1, length: 90, loss: 0.999, bend: 0.05, agentA: 10, agentB: 20, zA: 1, zB: 1 },
+          { id: 2, length: 100, loss: 0.999, bend: 0.05, agentA: 30, agentB: 40, zA: 1, zB: 1 },
+        ],
+        agents: [
+          { id: 10, kind: 0, openPorts: 0, impedance: 1 },
+          { id: 20, kind: 0, openPorts: 0, impedance: 1 },
+          { id: 30, kind: 1, openPorts: 0, impedance: 1 },
+          { id: 40, kind: 1, openPorts: 0, impedance: 1 },
+        ],
+      },
+    });
+    net.handle({
+      type: 'wireContact',
+      items: [{ wireA: 1, wireB: 2, load: 0.9, slide: bowSpeed(50), atA: 0.5, atB: 0.5 }],
+    });
+    collect(net, 4000);
+    const hot = net.wireEnergy(1) + net.wireEnergy(2);
+    expect(hot).toBeGreaterThan(1e-6);
+    net.handle({ type: 'wireContact', items: [] });
+    collect(net, 48000);
+    expect(net.wireEnergy(1) + net.wireEnergy(2)).toBeLessThan(hot * 0.25);
+  });
+
   it('a ringing body in resting contact drives the other', () => {
     const net = new WaveguideNet();
     net.handle({ type: 'topology', topo: twoPlates() });

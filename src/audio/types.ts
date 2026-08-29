@@ -158,6 +158,16 @@ export interface ContactItem {
   slide: number;
 }
 
+/** Two strings scraping. Both are bowed at the contact; neither is displaced. */
+export interface WireContactItem {
+  wireA: number;
+  wireB: number;
+  load: number;
+  slide: number;
+  atA: number;
+  atB: number;
+}
+
 /** Live contact as the sim reports it, before load/slide mapping. */
 export interface LiveContact {
   agentA: number;
@@ -165,6 +175,18 @@ export interface LiveContact {
   overlap: number;
   /** Signed tangent speed of A relative to B, px/s. */
   vT: number;
+}
+
+/** Two ropes scraping. Geometry is not displaced; both strings bow. */
+export interface LiveWireContact {
+  wireA: number;
+  wireB: number;
+  overlap: number;
+  /** Signed slip speed of wire A relative to B, px/s. */
+  vT: number;
+  /** Contact along each string, 0 at end A, 1 at end B. */
+  atA: number;
+  atB: number;
 }
 
 /** Direct air path between two bodies. Delay is travel time, gain dies with distance. */
@@ -194,6 +216,11 @@ export type WorkletInMessage =
       /** Touching pairs this frame. Empty list = nothing in contact. */
       type: 'contact';
       items: ContactItem[];
+    }
+  | {
+      /** Scraping wire pairs this frame. Empty list = nothing scraping. */
+      type: 'wireContact';
+      items: WireContactItem[];
     }
   | {
       /** Line-of-sight air paths this frame. Empty list = nobody in range. */

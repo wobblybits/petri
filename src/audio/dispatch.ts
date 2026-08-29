@@ -17,7 +17,7 @@ import {
 } from './presets.ts';
 import { albedo, strikeSharpness } from './voice.ts';
 import { buildTopology, kindBrightness } from './topology.ts';
-import type { AudioEvent, LiveContact, WorkletInMessage } from './types.ts';
+import type { AudioEvent, LiveContact, LiveWireContact, WorkletInMessage } from './types.ts';
 import type { NetTopology } from './types.ts';
 
 /** Pure dispatch logic — maps sim events to worklet messages (testable without AudioContext). */
@@ -90,6 +90,27 @@ export function planContactMessage(
     });
   }
   return { type: 'contact', items };
+}
+
+/**
+ * One message a frame for every scraping wire pair. Empty list is how they
+ * separate. Both strings get the same load and slide — a symmetric bow.
+ */
+export function planWireContactMessage(
+  contacts: Map<string, LiveWireContact>,
+): Extract<WorkletInMessage, { type: 'wireContact' }> {
+  const items: Extract<WorkletInMessage, { type: 'wireContact' }>['items'] = [];
+  for (const c of contacts.values()) {
+    items.push({
+      wireA: c.wireA,
+      wireB: c.wireB,
+      load: Math.max(0, Math.min(1, c.overlap / 1.6)),
+      slide: Math.abs(c.vT) < SLIDE_DEADZONE ? 0 : bowSpeed(c.vT),
+      atA: Math.max(0.02, Math.min(0.98, c.atA)),
+      atB: Math.max(0.02, Math.min(0.98, c.atB)),
+    });
+  }
+  return { type: 'wireContact', items };
 }
 
 /**

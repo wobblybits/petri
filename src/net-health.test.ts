@@ -404,7 +404,7 @@ describe('crowding and tangling', () => {
       .toBeLessThan(0.003);
   });
 
-  it('leaves few wire crossings in a minute of soup', () => {
+  it('lets independent wires cross rather than spending the frame uncrossing them', () => {
     let crossings = 0;
     let samples = 0;
     for (const sd of [999, 12345, 5150]) {
@@ -437,8 +437,11 @@ describe('crowding and tangling', () => {
       }
     }
     const rate = crossings / Math.max(1, samples);
-    // 2.33 per frame before saturated agents started holding their space.
-    expect(rate, `${rate.toFixed(2)} wire crossings per frame`).toBeLessThan(2.1);
+    // 4.07 per frame once ropes scrape instead of shoving. The old 2.1 bound
+    // was the uncross-by-force regime. A collapse toward zero would mean they
+    // stopped meeting; a scribble well past this is a different tangle.
+    expect(rate, `${rate.toFixed(2)} wire crossings per frame`).toBeGreaterThan(1);
+    expect(rate, `${rate.toFixed(2)} wire crossings per frame`).toBeLessThan(8);
   });
 });
 

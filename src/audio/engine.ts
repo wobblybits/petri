@@ -6,12 +6,13 @@ import {
   planRewriteMessages,
   planSpawnMessages,
   planContactMessage,
+  planWireContactMessage,
   planAirMessage,
 } from './dispatch.ts';
 import { buildTopology } from './topology.ts';
 import { setSampleRate } from './presets.ts';
 import { makeReverbIR } from './reverb.ts';
-import type { AudioEvent, LiveContact, NetTopology, PanView, WaveSnapshot, WorkletInMessage } from './types.ts';
+import type { AudioEvent, LiveContact, LiveWireContact, NetTopology, PanView, WaveSnapshot, WorkletInMessage } from './types.ts';
 import workletUrl from './worklet/net-processor.ts?url';
 
 /** Excitations allowed per frame. Past this a busy net is a rattle, not music. */
@@ -48,6 +49,7 @@ export class AudioEngine {
   private poseKey = -1;
   private tuneKey = -1;
   private contactKey = -1;
+  private wireContactKey = -1;
   onPost: ((msg: WorkletInMessage) => void) | null = null;
   /** Latest traveling-wave snapshot from the worklet. Null until the first one. */
   private wavePacked: Float32Array | null = null;
@@ -275,6 +277,8 @@ export class AudioEngine {
    * sim stops reporting it. `vT` is signed sliding speed in px/s.
    */
   contacts: Map<string, LiveContact> | null = null;
+  /** Scraping wire pairs for this frame. Same contract as `contacts`. */
+  wireContacts: Map<string, LiveWireContact> | null = null;
 
   frame(graph: Graph, agents: Map<number, Agent>, dt = 1 / 60, view?: PanView | null): void {
     this.graph = graph;
@@ -337,6 +341,16 @@ export class AudioEngine {
       this.contactedLast = this.contacts.size > 0;
     }
 
+    if (this.wireContacts && (this.wireContacts.size > 0 || this.wiredLast)) {
+      const msg = planWireContactMessage(this.wireContacts);
+      const wKey = wireContactKeyOf(msg.items);
+      if (wKey !== this.wireContactKey) {
+        this.wireContactKey = wKey;
+        this.post(msg);
+      }
+      this.wiredLast = this.wireContacts.size > 0;
+    }
+
     const air = planAirMessage(agents);
     const airKey = airKeyOf(air.items);
     if (airKey !== this.airKey) {
@@ -349,6 +363,7 @@ export class AudioEngine {
   }
 
   private contactedLast = false;
+  private wiredLast = false;
   private airedLast = false;
   private airKey = -1;
 
@@ -357,8 +372,10 @@ export class AudioEngine {
     this.poseKey = -1;
     this.tuneKey = -1;
     this.contactKey = -1;
+    this.wireContactKey = -1;
     this.airKey = -1;
     this.airedLast = false;
+    this.wiredLast = false;
     this.events.length = 0;
     this.lastAgent.clear();
     this.lastWire.clear();
@@ -410,6 +427,22 @@ function contactKeyOf(items: { agentA: number; agentB: number; load: number; sli
   let h = 2166136261;
   for (const it of items) {
     h = mix(mix(mix(mix(h, it.agentA), it.agentB), (it.load * 20) | 0), (it.slide * 40) | 0);
+  }
+  return h;
+}
+
+function wireContactKeyOf(
+  items: { wireA: number; wireB: number; load: number; slide: number; atA: number; atB: number }[],
+): number {
+  let h = 2166136261;
+  for (const it of items) {
+    h = mix(
+      mix(
+        mix(mix(mix(mix(h, it.wireA), it.wireB), (it.load * 20) | 0), (it.slide * 40) | 0),
+        (it.atA * 20) | 0,
+      ),
+      (it.atB * 20) | 0,
+    );
   }
   return h;
 }

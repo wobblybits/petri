@@ -226,6 +226,37 @@ export function transverseProfile(
   return { samples, peak, at };
 }
 
+/**
+ * How far a live rope may sit off its stem–stem chord. A body-sized bow is
+ * fine; a loop that leaves the two anchors' neighbourhood is not.
+ */
+export function wireBowBudget(span: number, rest: number): number {
+  return Math.max(rest, span * 0.4) + 48;
+}
+
+/**
+ * Pull interior points onto a tube around the chord through the ends. The
+ * endpoints stay put — those are the stems.
+ */
+export function clampPolylineToChord(
+  pts: { x: number; y: number }[],
+  maxDev: number,
+): void {
+  if (pts.length < 3 || !(maxDev > 0)) return;
+  const a = pts[0];
+  const b = pts[pts.length - 1];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const q = closestPointOnSegment(pts[i].x, pts[i].y, a.x, a.y, b.x, b.y);
+    const dx = pts[i].x - q.x;
+    const dy = pts[i].y - q.y;
+    const d = Math.hypot(dx, dy);
+    if (d <= maxDev) continue;
+    const k = maxDev / d;
+    pts[i].x = q.x + dx * k;
+    pts[i].y = q.y + dy * k;
+  }
+}
+
 /** Axis-aligned bounds of a rope polyline, stems included. */
 export function ropeAabb(
   a: Vec2,

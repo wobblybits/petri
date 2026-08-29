@@ -15,6 +15,7 @@ export const MAX_DELAY = 4096;
 export const MAX_AGENTS = 256;
 export const MAX_PORTS = 4;
 export const MAX_CONTACTS = 48;
+export const MAX_WIRE_CONTACTS = 24;
 export const MAX_AIR = 48;
 export const MAX_AIR_DELAY = 512;
 export const MAX_STUBS = 96;
@@ -57,6 +58,8 @@ const BODY_FROM_STRING = 0.1;
 const STEAL_ENV = 0.002;
 /** Friction / Hertzian force into the junction — a bow, not a scrape-pluck. */
 const RUB_TO_JUNCTION = 0.22;
+/** Slip-slide force into both delay lines when two wires scrape. */
+const WIRE_BOW = 0.35;
 /** How hard a contact force drives the plate modes. They are quiet at contact-scale gain. */
 const BOW_TO_MODE = 6;
 /** Incoming waveguide velocity, scaled into the same units as modal velocity. */
@@ -240,6 +243,10 @@ export type WorkletMessage =
   | { type: 'junction'; agentId: number; gain: number }
   | { type: 'strike'; agentId: number; peak: number; dur: number; sharp: number }
   | { type: 'contact'; items: { agentA: number; agentB: number; load: number; slide: number }[] }
+  | {
+      type: 'wireContact';
+      items: { wireA: number; wireB: number; load: number; slide: number; atA: number; atB: number }[];
+    }
   | { type: 'air'; items: { agentA: number; agentB: number; length: number; gain: number; damp: number }[] }
   | { type: 'latch'; topo: NetTopology; wireId: number; gain: number }
   | { type: 'rewrite'; phase: 0 | 1; wireId: number; agentA: number; agentB: number; leftovers: number[]; gain: number }
@@ -376,6 +383,34 @@ function makeContact(): ContactState {
     slide: 0,
     ridgePhase: 0,
     ridgeEnv: 0,
+    noise: 1,
+  };
+}
+
+interface WireContactState {
+  active: boolean;
+  idxA: number;
+  idxB: number;
+  idA: number;
+  idB: number;
+  atA: number;
+  atB: number;
+  load: number;
+  slide: number;
+  noise: number;
+}
+
+function makeWireContact(): WireContactState {
+  return {
+    active: false,
+    idxA: 0,
+    idxB: 0,
+    idA: -1,
+    idB: -1,
+    atA: 0.5,
+    atB: 0.5,
+    load: 0,
+    slide: 0,
     noise: 1,
   };
 }
@@ -571,6 +606,7 @@ export class WaveguideNet {
   agents: AgentState[] = [];
   agentById = new Map<number, number>();
   contacts: ContactState[] = [];
+  wireContacts: WireContactState[] = [];
   airs: AirState[] = [];
   stubs: StubState[] = [];
   master = 1;
@@ -619,6 +655,8 @@ export class WaveguideNet {
   private liveAirN = 0;
   private liveContacts = new Int32Array(MAX_CONTACTS);
   private liveContactN = 0;
+  private liveWireContacts = new Int32Array(MAX_WIRE_CONTACTS);
+  private liveWireContactN = 0;
 
   private quantumPos = 0;
 
@@ -637,6 +675,7 @@ export class WaveguideNet {
     for (let i = 0; i < MAX_WIRES; i++) this.wires.push(makeWire());
     for (let i = 0; i < MAX_AGENTS; i++) this.agents.push(makeAgent());
     for (let i = 0; i < MAX_CONTACTS; i++) this.contacts.push(makeContact());
+    for (let i = 0; i < MAX_WIRE_CONTACTS; i++) this.wireContacts.push(makeWireContact());
     for (let i = 0; i < MAX_AIR; i++) this.airs.push(makeAir());
     for (let i = 0; i < MAX_STUBS; i++) this.stubs.push(makeStub());
   }
@@ -691,6 +730,10 @@ export class WaveguideNet {
       }
       if (msg.type === 'contact') {
         this.setContacts(msg.items);
+        return;
+      }
+      if (msg.type === 'wireContact') {
+        this.setWireContacts(msg.items);
         return;
       }
       if (msg.type === 'air') {
@@ -748,6 +791,14 @@ export class WaveguideNet {
       if (this.contacts[i].active) this.liveContacts[n++] = i;
     }
     this.liveContactN = n;
+  }
+
+  private refreshLiveWireContacts(): void {
+    let n = 0;
+    for (let i = 0; i < MAX_WIRE_CONTACTS; i++) {
+      if (this.wireContacts[i].active) this.liveWireContacts[n++] = i;
+    }
+    this.liveWireContactN = n;
   }
 
   private wakeAgent(a: AgentState, amt = 0): void {
@@ -1031,6 +1082,45 @@ export class WaveguideNet {
       c.idB = -1;
     }
     this.refreshLiveContacts();
+  }
+
+  /** Replace the set of scraping wire pairs. Anything not listed has separated. */
+  setWireContacts(
+    items: { wireA: number; wireB: number; load: number; slide: number; atA: number; atB: number }[],
+  ): void {
+    let n = 0;
+    for (const it of items) {
+      if (n >= MAX_WIRE_CONTACTS) break;
+      const ia = this.wireById.get(it.wireA);
+      const ib = this.wireById.get(it.wireB);
+      if (ia === undefined || ib === undefined || ia === ib) continue;
+      const c = this.wireContacts[n];
+      c.active = true;
+      c.idxA = ia;
+      c.idxB = ib;
+      c.idA = it.wireA;
+      c.idB = it.wireB;
+      c.load = Math.max(0, Math.min(1, num(it.load)));
+      c.slide = Math.max(-0.08, Math.min(0.08, num(it.slide)));
+      c.atA = Math.max(0.02, Math.min(0.98, num(it.atA, 0.5)));
+      c.atB = Math.max(0.02, Math.min(0.98, num(it.atB, 0.5)));
+      n++;
+      if (c.load > 0) {
+        const A = this.wires[ia];
+        const B = this.wires[ib];
+        A.quiet = false;
+        B.quiet = false;
+        A.env = Math.max(A.env, c.load * 0.5);
+        B.env = Math.max(B.env, c.load * 0.5);
+      }
+    }
+    for (; n < MAX_WIRE_CONTACTS; n++) {
+      const c = this.wireContacts[n];
+      c.active = false;
+      c.idA = -1;
+      c.idB = -1;
+    }
+    this.refreshLiveWireContacts();
   }
 
   /** Replace the set of line-of-sight air paths. Matching pairs keep their delay lines. */
@@ -1392,7 +1482,7 @@ export class WaveguideNet {
    * vSlip is A's material velocity minus B's, rigid slide included.
    * F_A = −μN tanh(vSlip) drags A toward stick (vSlip → 0).
    */
-  private friction(vSlip: number, N: number, c: ContactState): number {
+  private friction(vSlip: number, N: number, c: { noise: number }): number {
     if (N <= 1e-6) return 0;
     let v = vSlip;
     c.noise = (Math.imul(c.noise, 1664525) + 1013904223) >>> 0;
@@ -1491,6 +1581,67 @@ export class WaveguideNet {
         c.ridgePhase = 0;
         c.ridgeEnv = 0;
       }
+    }
+  }
+
+  /**
+   * Transverse velocity at `at` along a string. Forward minus backward is the
+   * characteristic velocity at that point; the two lines run opposite ways
+   * so sample k and L-k are the same place.
+   */
+  private stringVel(w: WireState, at: number): number {
+    const L = Math.max(8, w.length | 0);
+    const t = at > 0.98 ? 0.98 : at < 0.02 ? 0.02 : at;
+    const k = Math.max(1, Math.min(L - 1, (t * L) | 0));
+    return this.read(w.bufFwd, w.pos, k) - this.read(w.bufBack, w.pos, L - k);
+  }
+
+  /** Force at a point: half on each travelling wave so the first snapshot is a bow. */
+  private injectStringForce(w: WireState, at: number, s: number): void {
+    if (s === 0) return;
+    const L = Math.max(8, w.length | 0);
+    const t = at > 0.98 ? 0.98 : at < 0.02 ? 0.02 : at;
+    const k = Math.max(1, Math.min(L - 1, (t * L) | 0));
+    const half = s * 0.5;
+    w.bufFwd[wrapDelayIndex(w.pos, k) | 0] += half;
+    w.bufBack[wrapDelayIndex(w.pos, L - k) | 0] += half;
+    w.quiet = false;
+    const a = s < 0 ? -s : s;
+    w.env = Math.max(w.env, a);
+    this.wakeAgentId(w.agentA, a);
+    this.wakeAgentId(w.agentB, a);
+  }
+
+  /**
+   * Slip-slide bow on both strings of a scraping pair. Same signed force on
+   * each — they are two strings under one bow, not a dipole that would cancel
+   * in the mix.
+   */
+  private applyWireContacts(): void {
+    for (let k = 0; k < this.liveWireContactN; k++) {
+      const c = this.wireContacts[this.liveWireContacts[k]];
+      if (c.load <= 1e-6) continue;
+      let A = this.wires[c.idxA];
+      let B = this.wires[c.idxB];
+      if (!A || A.wireId !== c.idA || !A.active) {
+        const ia = this.wireById.get(c.idA);
+        if (ia === undefined) continue;
+        c.idxA = ia;
+        A = this.wires[ia];
+      }
+      if (!B || B.wireId !== c.idB || !B.active) {
+        const ib = this.wireById.get(c.idB);
+        if (ib === undefined) continue;
+        c.idxB = ib;
+        B = this.wires[ib];
+      }
+      if (!A.active || !B.active || A === B) continue;
+      const vA = this.stringVel(A, c.atA);
+      const vB = this.stringVel(B, c.atB);
+      const Ft = this.friction(c.slide + (vA + vB) * 0.5, c.load, c);
+      const s = Ft * WIRE_BOW;
+      this.injectStringForce(A, c.atA, s);
+      this.injectStringForce(B, c.atB, s);
     }
   }
 
@@ -2007,6 +2158,7 @@ export class WaveguideNet {
 
     if (!shedAir) this.applyAirReads();
     this.applyContacts();
+    this.applyWireContacts();
 
     for (let k = 0; k < this.liveAgentN; k++) {
       const agent = this.agents[this.liveAgents[k]];
