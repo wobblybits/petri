@@ -93,8 +93,8 @@ export function planContactMessage(
 }
 
 /**
- * One message a frame for every scraping wire pair. Empty list is how they
- * separate. Both strings get the same load and slide — a symmetric bow.
+ * One message a frame for every scraping string. Empty list is how they
+ * separate. A pair (`wireB` > 0) bows both; `wireB` 0 is a body on one string.
  */
 export function planWireContactMessage(
   contacts: Map<string, LiveWireContact>,

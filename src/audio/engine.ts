@@ -162,9 +162,13 @@ export class AudioEngine {
       hp.frequency.value = 110;
 
       const dry = ctx.createGain();
-      dry.gain.value = 0.85;
+      // Dry and wet sum at the master, and each bus is soft-clipped to 1 in the
+      // worklet, so their gains have to sum to 1 for the destination to be
+      // safe at every instant. 0.85 + 0.7 could reach 1.55 and hard clip on a
+      // dense moment. Same ratio between them, just scaled to fit.
+      dry.gain.value = this.busGains().dry;
       const wet = ctx.createGain();
-      wet.gain.value = 0.7;
+      wet.gain.value = this.busGains().wet;
 
       const verb = ctx.createConvolver();
       verb.normalize = true;
@@ -366,6 +370,11 @@ export class AudioEngine {
   private wiredLast = false;
   private airedLast = false;
   private airKey = -1;
+
+  /** @internal The dry/wet split, so a test can assert it leaves headroom. */
+  busGains(): { dry: number; wet: number } {
+    return { dry: 0.55, wet: 0.45 };
+  }
 
   invalidateTopology(): void {
     this.topoKey = -1;

@@ -168,8 +168,11 @@ describe('post-latch spin', () => {
     const msg = `commute peakω=${trace.peakOmega.toFixed(1)} maxθ=${trace.maxHeadingSpins.toFixed(1)}`;
     // This preset rewrites itself apart within the window, so the peak here is
     // rewrite.ts animating agents kinematically, not the joint solver. With
-    // rewriteDuration = 0 the same scene peaks around 8 rad/s.
-    expect(trace.peakOmega, msg).toBeLessThan(45);
+    // rewriteDuration = 0 the same scene peaks around 8 rad/s. It rose again
+    // once reconnection stopped dropping wires: more structure survives each
+    // rewrite, so the animation has more to move. Total rotation is the
+    // assertion that actually means "did not spin", and that is held tight.
+    expect(trace.peakOmega, msg).toBeLessThan(240);
     expect(trace.maxHeadingSpins, msg).toBeLessThan(6);
   });
 });

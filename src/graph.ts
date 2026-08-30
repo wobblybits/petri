@@ -3,7 +3,7 @@ import {
   portKey,
   portWorld,
   slotsFor,
-  stemWorld,
+  stemWorldInto,
   wireCubic,
   type Agent,
   type PortRef,
@@ -14,7 +14,6 @@ import {
   reduceChain,
   sampleChain,
   solveWire,
-  unwrapPoints,
   type ChainNode,
   type WireStiffness,
 } from './chain.ts';
@@ -24,6 +23,9 @@ import { PairGrid } from './grid.ts';
 import type { Params } from './params.ts';
 import { clamp, easeInOut, lerp, wrap, wrapDeltaVec, type Vec2 } from './wrap.ts';
 import type { LatchEvent } from './audio/types.ts';
+
+const stemScratchA = { x: 0, y: 0 };
+const stemScratchB = { x: 0, y: 0 };
 
 export interface Wire {
   id: number;
@@ -51,6 +53,13 @@ export function otherEnd(wire: Wire, port: PortRef): PortRef {
 }
 
 export class Graph {
+  /**
+   * Ports that must never latch on their own. A compiled lambda term has an
+   * interface — the handle on its result — and leaving that free would let it
+   * grab the first passing agent and corrupt the term.
+   */
+  sealed = new Set<string>();
+
   /** Broad phase for latching: ports only ever pair up within snapRadius. */
   private portGrid = new PairGrid();
   private portX: number[] = [];
@@ -68,10 +77,15 @@ export class Graph {
   private hops: Map<number, Map<number, number>> | null = null;
   private hopsVersion = -1;
   private hopsAgents = -1;
+  private comps: Map<number, number> | null = null;
+  private compsVersion = -1;
+  private compsAgents = -1;
+  private latchPts: { x: number; y: number }[] = [];
 
   clear(): void {
     this.wires.clear();
     this.portWire.clear();
+    this.sealed.clear();
     this.bump();
   }
 
@@ -96,9 +110,11 @@ export class Graph {
   private bump(): void {
     this.version++;
     this.hops = null;
+    this.comps = null;
   }
 
-  /** Shortest hop count along wires. Missing entry ⇒ not in the same component. */
+  /** Shortest hop count along wires. Missing entry ⇒ not in the same component.
+   *  Flocking no longer reads this; it is kept for tests and debug. */
   hopDistances(agents: Map<number, Agent>): Map<number, Map<number, number>> {
     if (this.hops && this.hopsVersion === this.version && this.hopsAgents === agents.size) {
       return this.hops;
@@ -162,14 +178,15 @@ export class Graph {
     // alignment on the spot, which moves their stems, which hands the solver a
     // fresh violation and a body overlap to resolve in one substep. The port
     // torques turn them instead, and the wire is born slack enough to allow it.
-    const sa = stemWorld(A, a.slot, w, h);
-    const sb = stemWorld(B, b.slot, w, h);
-    const stemDelta = wrapDeltaVec(sa.x, sa.y, sb.x, sb.y, w, h);
+    const sa = stemWorldInto(A, a.slot, w, h, stemScratchA);
+    const sb = stemWorldInto(B, b.slot, w, h, stemScratchB);
+    const stemDx = sb.x - sa.x;
+    const stemDy = sb.y - sa.y;
     // Born at the length it actually latched at, so the wire starts satisfied
     // and `restLength` ramps it to wireMinRest over `wireShrink`. Clamping this
     // up to wireMinRest skips the ramp and hands the solver a 30 px violation
     // to resolve in one substep, which reads as a kick.
-    const span = Math.hypot(stemDelta.x, stemDelta.y);
+    const span = Math.hypot(stemDx, stemDy);
     const len = Math.max(span, params.wireMinRest * Graph.BIRTH_FLOOR);
     const c = wireCubic(A, a.slot, B, b.slot, w, h, len);
     const wire = this.attach(a, b, len, time);
@@ -210,30 +227,33 @@ export class Graph {
     const A = agents.get(wire.a.id);
     const B = agents.get(wire.b.id);
     if (!A || !B) return wire.lastLen;
-    const sa = stemWorld(A, wire.a.slot, w, h);
-    const sb = stemWorld(B, wire.b.slot, w, h);
+    const sa = stemWorldInto(A, wire.a.slot, w, h, stemScratchA);
+    const sb = stemWorldInto(B, wire.b.slot, w, h, stemScratchB);
     let px = sa.x;
     let py = sa.y;
     let len = 0;
     for (let i = 0; i < wire.nodes.length; i++) {
       const n = wire.nodes[i];
-      const d = wrapDeltaVec(px, py, n.x, n.y, w, h);
-      len += Math.hypot(d.x, d.y);
+      const dx = n.x - px;
+      const dy = n.y - py;
+      len += Math.hypot(dx, dy);
       px = n.x;
       py = n.y;
     }
-    const d = wrapDeltaVec(px, py, sb.x, sb.y, w, h);
-    return len + Math.hypot(d.x, d.y);
+    const dx = sb.x - px;
+    const dy = sb.y - py;
+    return len + Math.hypot(dx, dy);
   }
 
   stemSpan(wire: Wire, agents: Map<number, Agent>, w: number, h: number): number {
     const A = agents.get(wire.a.id);
     const B = agents.get(wire.b.id);
     if (!A || !B) return wire.rest;
-    const pa = stemWorld(A, wire.a.slot, w, h);
-    const pb = stemWorld(B, wire.b.slot, w, h);
-    const d = wrapDeltaVec(pa.x, pa.y, pb.x, pb.y, w, h);
-    return Math.hypot(d.x, d.y);
+    const pa = stemWorldInto(A, wire.a.slot, w, h, stemScratchA);
+    const pb = stemWorldInto(B, wire.b.slot, w, h, stemScratchB);
+    const dx = pb.x - pa.x;
+    const dy = pb.y - pa.y;
+    return Math.hypot(dx, dy);
   }
 
   /**
@@ -286,6 +306,7 @@ export class Graph {
       for (const slot of slotsFor(agent.kind)) {
         const ref: PortRef = { id: agent.id, slot };
         if (!this.isFree(ref)) continue;
+        if (this.sealed.has(portKey(ref))) continue;
         const p = portWorld(agent, slot, w, h);
         ports.push({ ref, x: p.x, y: p.y, principal: slot === 'p' });
       }
@@ -368,15 +389,24 @@ export class Graph {
     const A = agents.get(pa.id);
     const B = agents.get(pb.id);
     if (!A || !B) return true;
-    const p0 = stemWorld(A, pa.slot, w, h);
-    const p1 = stemWorld(B, pb.slot, w, h);
+    const p0 = stemWorldInto(A, pa.slot, w, h, stemScratchA);
+    const p1 = stemWorldInto(B, pb.slot, w, h, stemScratchB);
     const minDist = WIRE_RADIUS * 2;
+    const pts = this.latchPts;
     for (const wire of this.wires.values()) {
       const WA = agents.get(wire.a.id);
       const WB = agents.get(wire.b.id);
       if (!WA || !WB) continue;
-      const pts = unwrapPoints(chainPoints(WA, WB, wire, w, h), w, h);
-      const nSeg = pts.length - 1;
+      const n = wire.nodes.length;
+      const need = n + 2;
+      while (pts.length < need) pts.push({ x: 0, y: 0 });
+      stemWorldInto(WA, wire.a.slot, w, h, pts[0]);
+      for (let i = 0; i < n; i++) {
+        pts[i + 1].x = wire.nodes[i].x;
+        pts[i + 1].y = wire.nodes[i].y;
+      }
+      stemWorldInto(WB, wire.b.slot, w, h, pts[n + 1]);
+      const nSeg = need - 1;
       for (let i = 0; i < nSeg; i++) {
         if (i === 0 && (wire.a.id === A.id || wire.a.id === B.id)) continue;
         if (i === nSeg - 1 && (wire.b.id === A.id || wire.b.id === B.id)) continue;
@@ -414,6 +444,9 @@ export class Graph {
 
   /** Root id of each agent's connected component. */
   componentIds(agents: Map<number, Agent>): Map<number, number> {
+    if (this.comps && this.compsVersion === this.version && this.compsAgents === agents.size) {
+      return this.comps;
+    }
     const parent = new Map<number, number>();
     const find = (x: number): number => {
       let r = parent.get(x) ?? x;
@@ -435,6 +468,9 @@ export class Graph {
     }
     const out = new Map<number, number>();
     for (const id of agents.keys()) out.set(id, find(id));
+    this.comps = out;
+    this.compsVersion = this.version;
+    this.compsAgents = agents.size;
     return out;
   }
 
@@ -538,20 +574,6 @@ export class Graph {
       wire.lastLen = this.curveLength(wire, agents, w, h);
     }
   }
-}
-
-function chainPoints(
-  A: Agent,
-  B: Agent,
-  wire: Wire,
-  w: number,
-  h: number,
-): { x: number; y: number }[] {
-  return [
-    stemWorld(A, wire.a.slot, w, h),
-    ...wire.nodes,
-    stemWorld(B, wire.b.slot, w, h),
-  ];
 }
 
 export function wrapPos(agent: Agent, w: number, h: number): void {

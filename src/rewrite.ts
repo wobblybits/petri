@@ -126,6 +126,75 @@ export function detectRule(kindA: AgentKind, kindB: AgentKind): Rule {
   return 'commute';
 }
 
+
+/**
+ * Reconnect what is left when two agents die.
+ *
+ * A rule says which of the dying agents' ports get identified with each other.
+ * Following one wire out from each is not enough: a port can lead straight back
+ * into the dying pair, and then on again. The identity function is exactly that
+ * shape — `λx.x` is a Con with its own two aux ports wired together — so an
+ * application of it used to lose both of its connections and silently drop the
+ * result on the floor.
+ *
+ * Union-find over ports instead: fuse every wire touching a dying agent and
+ * every identification the rule makes, then emit one wire per class that still
+ * has two surviving ends. A class with none was a closed loop and correctly
+ * disappears; a class with one had a free end and stays free.
+ */
+function fuse(
+  net: NetSnapshot,
+  dying: Set<number>,
+  identify: [PortRef, PortRef][],
+): NetWire[] {
+  const parent = new Map<string, string>();
+  const key = (p: PortRef): string => `${p.id}.${p.slot}`;
+  const ports = new Map<string, PortRef>();
+  const find = (x: string): string => {
+    let r = x;
+    while ((parent.get(r) ?? r) !== r) r = parent.get(r) ?? r;
+    let cur = x;
+    while ((parent.get(cur) ?? cur) !== r) {
+      const nxt = parent.get(cur) ?? cur;
+      parent.set(cur, r);
+      cur = nxt;
+    }
+    return r;
+  };
+  const add = (p: PortRef): string => {
+    const k = key(p);
+    if (!parent.has(k)) {
+      parent.set(k, k);
+      ports.set(k, p);
+    }
+    return k;
+  };
+  const union = (x: PortRef, y: PortRef): void => {
+    const rx = find(add(x));
+    const ry = find(add(y));
+    if (rx !== ry) parent.set(rx, ry);
+  };
+
+  for (const w of net.wires) {
+    if (dying.has(w.a.id) || dying.has(w.b.id)) union(w.a, w.b);
+  }
+  for (const [x, y] of identify) union(x, y);
+
+  const classes = new Map<string, PortRef[]>();
+  for (const [k, p] of ports) {
+    if (dying.has(p.id)) continue;
+    const r = find(k);
+    const list = classes.get(r) ?? [];
+    list.push(p);
+    classes.set(r, list);
+  }
+  const out: NetWire[] = [];
+  for (const ends of classes.values()) {
+    if (ends.length === 2) out.push({ a: ends[0], b: ends[1] });
+  }
+  return out;
+}
+
 export function applyRewrite(
   net: NetSnapshot,
   rule: Rule,
@@ -144,51 +213,55 @@ export function applyRewrite(
   }
 
   if (rule === 'annihilate-dup') {
-    const l1 = leftoverOf(net.wires, a, 'l', dying);
-    const r1 = leftoverOf(net.wires, a, 'r', dying);
-    const l2 = leftoverOf(net.wires, b, 'l', dying);
-    const r2 = leftoverOf(net.wires, b, 'r', dying);
+    // Straight through: l to l, r to r.
+    const joined = fuse(net, dying, [
+      [{ id: a, slot: 'l' }, { id: b, slot: 'l' }],
+      [{ id: a, slot: 'r' }, { id: b, slot: 'r' }],
+    ]);
     const next = stripAgents(net, dying);
-    pushWire(next.wires, l1, l2);
-    pushWire(next.wires, r1, r2);
+    next.wires.push(...joined);
     return { net: next, nextId, spawned: [] };
   }
 
   if (rule === 'annihilate-con') {
-    const l1 = leftoverOf(net.wires, a, 'l', dying);
-    const r1 = leftoverOf(net.wires, a, 'r', dying);
-    const l2 = leftoverOf(net.wires, b, 'l', dying);
-    const r2 = leftoverOf(net.wires, b, 'r', dying);
+    // Crossed: l to the other's r. This is beta reduction when the pair is an
+    // application meeting an abstraction.
+    const joined = fuse(net, dying, [
+      [{ id: a, slot: 'l' }, { id: b, slot: 'r' }],
+      [{ id: a, slot: 'r' }, { id: b, slot: 'l' }],
+    ]);
     const next = stripAgents(net, dying);
-    pushWire(next.wires, l1, r2);
-    pushWire(next.wires, r1, l2);
+    next.wires.push(...joined);
     return { net: next, nextId, spawned: [] };
   }
 
   if (rule === 'erase') {
     const eraId = kindA === 'era' ? a : b;
     const binId = eraId === a ? b : a;
-    const left = leftoverOf(net.wires, binId, 'l', dying);
-    const right = leftoverOf(net.wires, binId, 'r', dying);
     const eL: Spawned = { id: nextId++, kind: 'era', role: 'era-l' };
     const eR: Spawned = { id: nextId++, kind: 'era', role: 'era-r' };
+    const joined = fuse(net, dying, [
+      [{ id: binId, slot: 'l' }, { id: eL.id, slot: 'p' }],
+      [{ id: binId, slot: 'r' }, { id: eR.id, slot: 'p' }],
+    ]);
     const next = stripAgents(net, dying);
     next.agents.push({ id: eL.id, kind: 'era' }, { id: eR.id, kind: 'era' });
-    pushWire(next.wires, left, { id: eL.id, slot: 'p' });
-    pushWire(next.wires, right, { id: eR.id, slot: 'p' });
+    next.wires.push(...joined);
     return { net: next, nextId, spawned: [eL, eR] };
   }
 
   const conId = kindA === 'con' ? a : b;
   const dupId = kindA === 'dup' ? a : b;
-  const x = leftoverOf(net.wires, conId, 'l', dying);
-  const y = leftoverOf(net.wires, conId, 'r', dying);
-  const u = leftoverOf(net.wires, dupId, 'l', dying);
-  const v = leftoverOf(net.wires, dupId, 'r', dying);
   const Cu: Spawned = { id: nextId++, kind: 'con', role: 'con-u' };
   const Cv: Spawned = { id: nextId++, kind: 'con', role: 'con-v' };
   const Dx: Spawned = { id: nextId++, kind: 'dup', role: 'dup-x' };
   const Dy: Spawned = { id: nextId++, kind: 'dup', role: 'dup-y' };
+  const joined = fuse(net, dying, [
+    [{ id: dupId, slot: 'l' }, { id: Cu.id, slot: 'p' }],
+    [{ id: dupId, slot: 'r' }, { id: Cv.id, slot: 'p' }],
+    [{ id: conId, slot: 'l' }, { id: Dx.id, slot: 'p' }],
+    [{ id: conId, slot: 'r' }, { id: Dy.id, slot: 'p' }],
+  ]);
   const next = stripAgents(net, dying);
   next.agents.push(
     { id: Cu.id, kind: 'con' },
@@ -196,10 +269,7 @@ export function applyRewrite(
     { id: Dx.id, kind: 'dup' },
     { id: Dy.id, kind: 'dup' },
   );
-  pushWire(next.wires, u, { id: Cu.id, slot: 'p' });
-  pushWire(next.wires, v, { id: Cv.id, slot: 'p' });
-  pushWire(next.wires, x, { id: Dx.id, slot: 'p' });
-  pushWire(next.wires, y, { id: Dy.id, slot: 'p' });
+  next.wires.push(...joined);
   pushWire(next.wires, { id: Cu.id, slot: 'l' }, { id: Dx.id, slot: 'l' });
   pushWire(next.wires, { id: Cu.id, slot: 'r' }, { id: Dy.id, slot: 'l' });
   pushWire(next.wires, { id: Cv.id, slot: 'l' }, { id: Dx.id, slot: 'r' });

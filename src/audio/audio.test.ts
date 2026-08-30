@@ -863,3 +863,32 @@ describe('friction entrainment', () => {
     expect(bestLag).toBeLessThan(2 * L * 1.1);
   });
 });
+
+describe('output headroom', () => {
+  it('the two buses cannot sum past full scale at the master', () => {
+    // The worklet soft-clips each bus to 1, and the engine sums them through
+    // dry and wet gains, so those gains have to sum to at most 1 or a dense
+    // moment clips at the destination. They were 0.85 + 0.7.
+    const engine = new AudioEngine();
+    const gains = engine.busGains();
+    expect(gains.dry).toBeGreaterThan(0);
+    expect(gains.wet).toBeGreaterThan(0);
+    expect(gains.dry + gains.wet).toBeLessThanOrEqual(1.0000001);
+  });
+
+  it('a soft-clipped bus never leaves the worklet above full scale', () => {
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: sampleAgentTopo(1) });
+    // Drive it far harder than anything the sim produces.
+    for (let i = 0; i < 12; i++) {
+      net.handle({ type: 'strike', agentId: 1, peak: 8, dur: 40, sharp: 1 });
+      for (let s = 0; s < 200; s++) {
+        net.tick(false);
+        expect(Math.abs(net.outDryL)).toBeLessThanOrEqual(1);
+        expect(Math.abs(net.outDryR)).toBeLessThanOrEqual(1);
+        expect(Math.abs(net.outWetL)).toBeLessThanOrEqual(1);
+        expect(Math.abs(net.outWetR)).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+});

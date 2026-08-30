@@ -5,6 +5,8 @@ import { planAirMessage } from './dispatch.ts';
 import { AudioEngine } from './engine.ts';
 import { Sim } from '../sim.ts';
 import { defaultParams } from '../params.ts';
+import { loadPreset } from '../presets.ts';
+import { slotsFor } from '../agents.ts';
 
 function agentSpec(id: number, stubs: boolean): AgentTopo {
   return {
@@ -197,6 +199,46 @@ describe('audio load probe', () => {
       const t1 = performance.now();
       for (let i = 0; i < 80; i++) engine.frame(sim.graph, sim.agents, 1 / 60, { x: 400, y: 300, zoom: 1, viewW: 800, viewH: 600 });
       console.log(`AudioEngine.frame 200 agents: ${(((performance.now() - t1) * 1000) / 80).toFixed(0)} us`);
+    }
+
+    {
+      const sim = new Sim(1600, 800);
+      const params = defaultParams();
+      params.spawnInterval = 0;
+      params.maxAgents = 200;
+      const kinds = ['era', 'dup', 'con'] as const;
+      const spawned = [];
+      for (let i = 0; i < 200; i++) {
+        spawned.push(
+          sim.spawn(kinds[i % 3], 40 + (i % 20) * 40, 40 + Math.floor(i / 20) * 36, 0, params, true)!,
+        );
+      }
+      for (let i = 0; i < spawned.length - 1; i++) {
+        const a = spawned[i];
+        const b = spawned[i + 1];
+        const sa = slotsFor(a.kind).find((s) => sim.graph.isFree({ id: a.id, slot: s }));
+        const sb = slotsFor(b.kind).find((s) => sim.graph.isFree({ id: b.id, slot: s }));
+        if (sa && sb) sim.wire(a.id, sa, b.id, sb, params);
+      }
+      for (let i = 0; i < 20; i++) sim.step(1 / 60, params);
+      const t0 = performance.now();
+      const n = 40;
+      for (let i = 0; i < n; i++) sim.step(1 / 60, params);
+      console.log(`Sim.step 200 wired: ${(((performance.now() - t0) * 1000) / n).toFixed(0)} us`);
+    }
+
+    {
+      const sim = new Sim(1200, 800);
+      const params = defaultParams();
+      params.maxAgents = 200;
+      params.soupCount = 200;
+      params.spawnInterval = 1;
+      loadPreset(sim, 'soup', params);
+      for (let i = 0; i < 90; i++) sim.step(1 / 60, params);
+      const t0 = performance.now();
+      const n = 40;
+      for (let i = 0; i < n; i++) sim.step(1 / 60, params);
+      console.log(`Sim.step 200 soup: ${(((performance.now() - t0) * 1000) / n).toFixed(0)} us`);
     }
 
     console.log(`caps: agents=${MAX_AGENTS} wires=${MAX_WIRES} stubs=${MAX_STUBS} air=${MAX_AIR}`);

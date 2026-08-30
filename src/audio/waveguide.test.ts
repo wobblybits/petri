@@ -713,7 +713,10 @@ describe('friction bowing', () => {
     net.handle({ type: 'topology', topo: bowedAgainstRail() });
     net.handle(touching(1, 2, 0.8, bowSpeed(40)));
     collect(net, 8000);
-    expect(peak(collect(net, 512))).toBeGreaterThan(0.01);
+    // A scrape is deliberately the quietest thing in the mix — under a bowed
+    // string, well under a collision — so this only checks that it speaks at
+    // all. The assertion that matters is the silence below.
+    expect(peak(collect(net, 512))).toBeGreaterThan(0.003);
     net.handle({ type: 'contact', items: [] });
     collect(net, 48000 * 2);
     expect(peak(collect(net, 2048))).toBeLessThan(1e-4);
@@ -764,6 +767,17 @@ describe('friction bowing', () => {
     expect(e1).toBeGreaterThan(1e-6);
     expect(e2).toBeGreaterThan(1e-6);
     expect(Math.max(e1, e2) / Math.min(e1, e2)).toBeLessThan(8);
+  });
+
+  it('a body on a string bows that string', () => {
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: sampleTopo(1, 10, 20, 90) });
+    net.handle({
+      type: 'wireContact',
+      items: [{ wireA: 1, wireB: 0, load: 0.85, slide: bowSpeed(50), atA: 0.45, atB: 0.45 }],
+    });
+    collect(net, 4000);
+    expect(net.wireEnergy(1)).toBeGreaterThan(1e-6);
   });
 
   it('an empty wireContact list lifts the bow', () => {
@@ -1072,5 +1086,121 @@ describe('silent-body skip', () => {
     for (let i = 0; i < 64; i++) net.tick(true);
     expect(peak(x)).toBeGreaterThan(0.01);
     expect(peak(collect(net, 64))).toBeGreaterThan(0.01);
+  });
+});
+
+describe('event ducking', () => {
+  it('an event steps the sustained bed aside, then lets it back', () => {
+    // Bows, scrapes and air are continuous; collisions are short. Measured
+    // against a running bed a collision cleared it by only ~4 dB, which is
+    // where a transient stops being heard — not because it was quiet, but
+    // because it had nothing to stand out from.
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: sampleTopo(1, 10, 20, 150) });
+    net.handle({
+      type: 'contact',
+      items: [{ agentA: 10, agentB: 20, load: 0.8, slide: bowSpeed(120) }],
+    });
+    collect(net, 24000);
+    expect(net.duck).toBe(1);
+
+    net.handle({ type: 'strike', agentId: 10, peak: 0.6, dur: 90, sharp: 0.6 });
+    expect(net.duck).toBeLessThan(0.8);
+    expect(net.duck).toBeGreaterThanOrEqual(0.25);
+
+    // Recovers within a few hundred ms rather than gating the bed shut.
+    collect(net, 24000);
+    expect(net.duck).toBeGreaterThan(0.97);
+  });
+
+  it('a flurry ducks once rather than stacking to silence', () => {
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: sampleTopo(1, 10, 20, 150) });
+    for (let i = 0; i < 30; i++) {
+      net.handle({ type: 'strike', agentId: 10, peak: 1.5, dur: 60, sharp: 0.8 });
+    }
+    expect(net.duck).toBeGreaterThanOrEqual(0.25);
+  });
+});
+
+describe('loudness ordering', () => {
+  it('collision is loudest, bow sits under it, scrape is quietest', () => {
+    // A deliberate mix decision, and a fragile one: the three levels are set by
+    // constants that interact non-linearly, and two of them have already been
+    // found to flip the order when nudged. Measured at matched drive so the
+    // comparison is about the sources, not about how often each happens.
+    const body = (id: number, hz: number[]) => ({
+      id,
+      kind: 0 as const,
+      openPorts: 3,
+      impedance: 1,
+      pan: 0,
+      dist: 0.5,
+      modeHz: hz,
+      modeT60: [0.4, 0.22, 0.12],
+      modeGain: [0.7, 0.4, 0.22],
+      coupling: 1,
+    });
+    const rope = (id: number, a: number, b: number) => ({
+      id, length: 150, loss: 0.9992, bend: 0.04, agentA: a, agentB: b,
+      zA: 1, zB: 1, damp: 0.6, disp: 0, pan: 0, dist: 0.5, exAt: 0.16, exWidth: 1,
+    });
+    const topo = {
+      wires: [rope(1, 1, 2), rope(2, 3, 4)],
+      agents: [
+        body(1, [180, 380, 620]), body(2, [200, 420, 700]),
+        body(3, [170, 360, 590]), body(4, [210, 440, 720]),
+      ],
+    };
+    const rmsOf = (drive: (n: WaveguideNet) => void) => {
+      const net = new WaveguideNet();
+      net.handle({ type: 'topology', topo });
+      drive(net);
+      let sum = 0;
+      const n = 48000;
+      for (let i = 0; i < n; i++) {
+        net.tick(false);
+        const v = net.outDryL + net.outWetL;
+        sum += v * v;
+      }
+      return Math.sqrt(sum / n);
+    };
+
+    const collision = rmsOf((net) =>
+      net.handle({ type: 'strike', agentId: 1, peak: 0.73, dur: 88, sharp: 0.6 }),
+    );
+    const bow = rmsOf((net) =>
+      net.handle({
+        type: 'wireContact',
+        items: [{ wireA: 1, wireB: 2, load: 0.8, slide: bowSpeed(120), atA: 0.4, atB: 0.4 }],
+      }),
+    );
+    // Measured on bodies with nothing tied to them. Scraping a *wired* body
+    // also bows its string, and that is bowing — it belongs in the middle, not
+    // down here, so mixing the two cases would compare the wrong things.
+    const scrape = (() => {
+      const net = new WaveguideNet();
+      net.handle({
+        type: 'topology',
+        topo: { wires: [], agents: [body(1, [180, 380, 620]), body(2, [200, 420, 700])] },
+      });
+      net.handle({
+        type: 'contact',
+        items: [{ agentA: 1, agentB: 2, load: 0.8, slide: bowSpeed(120) }],
+      });
+      let sum = 0;
+      const n = 48000;
+      for (let i = 0; i < n; i++) {
+        net.tick(false);
+        const v = net.outDryL + net.outWetL;
+        sum += v * v;
+      }
+      return Math.sqrt(sum / n);
+    })();
+
+    // Every one of them still has to be audible.
+    expect(scrape).toBeGreaterThan(0.004);
+    expect(bow).toBeGreaterThan(scrape);
+    expect(collision).toBeGreaterThan(bow);
   });
 });

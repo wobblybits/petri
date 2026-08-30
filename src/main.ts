@@ -4,6 +4,8 @@ import { defaultParams, SLIDERS, type Params } from './params.ts';
 import { loadPreset, type PresetName } from './presets.ts';
 import { render } from './render.ts';
 import { Interaction } from './interact.ts';
+import { ap, church, injectTerm, readChurch, PLUS, type Term } from './lambda.ts';
+import type { PortRef } from './agents.ts';
 import { portWorld } from './agents.ts';
 import { Sim } from './sim.ts';
 import type { AgentKind } from './agents.ts';
@@ -38,6 +40,17 @@ app.innerHTML = `
       <button type="button" data-kind="dup">Dup</button>
       <button type="button" data-kind="con">Con</button>
     </div>
+    <div class="presets lambda">
+      <span>λ</span>
+      <button type="button" data-lambda="0">0</button>
+      <button type="button" data-lambda="1">1</button>
+      <button type="button" data-lambda="+">+</button>
+      <button type="button" data-lambda="2+3">2+3</button>
+      <button type="button" data-lambda="1+1">1+1</button>
+      <button type="button" data-lambda="4+5">4+5</button>
+      <button type="button" data-lambda="0+3">0+3</button>
+    </div>
+    <p class="hint" id="lambda-out"></p>
     <div class="presets">
       <button type="button" data-preset="soup">Soup</button>
       <button type="button" data-preset="commute">γ–δ</button>
@@ -153,6 +166,7 @@ function setSpawn(kind: AgentKind): void {
 }
 
 function applyPreset(name: PresetName): void {
+  lambdaRoot = null;
   currentPreset = name;
   sizeCanvas();
   loadPreset(sim, name, params);
@@ -290,6 +304,51 @@ function paint(): void {
   render(ctx, sim, camera, view, audio.waves);
   drawGesture();
   statsEl.textContent = `${sim.agents.size} agents · ${sim.graph.wires.size} wires · ${sim.rewrites.length} rewrites`;
+  if (lambdaRoot) {
+    const value = readChurch(sim.agents, sim.graph, lambdaRoot);
+    if (value !== null) lambdaOut.textContent = `${lambdaLabel} = ${value}`;
+    else if (lambdaExpectNumeral) lambdaOut.textContent = `${lambdaLabel} → reducing…`;
+    else lambdaOut.textContent = lambdaLabel;
+  } else {
+    lambdaOut.textContent = '';
+  }
+}
+
+let lambdaRoot: PortRef | null = null;
+let lambdaLabel = '';
+let lambdaExpectNumeral = false;
+const lambdaOut = document.querySelector<HTMLParagraphElement>('#lambda-out')!;
+
+function lambdaSpec(spec: string): { term: Term; label: string; numeral: boolean } {
+  if (spec === '0') return { term: church(0), label: '0', numeral: true };
+  if (spec === '1') return { term: church(1), label: '1', numeral: true };
+  if (spec === '+') return { term: PLUS, label: '+', numeral: false };
+  const [a, b] = spec.split('+').map(Number);
+  return { term: ap(PLUS, church(a), church(b)), label: `${a} + ${b}`, numeral: true };
+}
+
+/**
+ * Drop a compiled term into an empty world. Numerals and sums are read back as
+ * they reduce; combinators just sit as nets.
+ */
+function runLambda(spec: string): void {
+  const { term, label, numeral } = lambdaSpec(spec);
+  sim.clear();
+  params.spawnInterval = 0;
+  lambdaLabel = label;
+  lambdaExpectNumeral = numeral;
+  const { root } = injectTerm(sim, term, sim.w * 0.5, sim.h * 0.5, params);
+  lambdaRoot = root;
+  interaction.freeCamera = false;
+  snapCamera = true;
+  currentPreset = 'soup';
+}
+
+for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-lambda]')) {
+  btn.addEventListener('click', () => {
+    armAudio();
+    runLambda(btn.dataset.lambda!);
+  });
 }
 
 let last = performance.now();

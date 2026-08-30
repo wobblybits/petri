@@ -158,9 +158,10 @@ export interface ContactItem {
   slide: number;
 }
 
-/** Two strings scraping. Both are bowed at the contact; neither is displaced. */
+/** Two strings scraping, or a body bowing one string (`wireB` is 0). */
 export interface WireContactItem {
   wireA: number;
+  /** Partner string, or 0 when a body is the bow. */
   wireB: number;
   load: number;
   slide: number;
@@ -177,12 +178,13 @@ export interface LiveContact {
   vT: number;
 }
 
-/** Two ropes scraping. Geometry is not displaced; both strings bow. */
+/** Two ropes scraping, or a body bowing one string (`wireB` is 0). */
 export interface LiveWireContact {
   wireA: number;
+  /** Partner string, or 0 when a body is the bow. */
   wireB: number;
   overlap: number;
-  /** Signed slip speed of wire A relative to B, px/s. */
+  /** Signed slip speed of wire A relative to the partner, px/s. */
   vT: number;
   /** Contact along each string, 0 at end A, 1 at end B. */
   atA: number;
@@ -218,7 +220,7 @@ export type WorkletInMessage =
       items: ContactItem[];
     }
   | {
-      /** Scraping wire pairs this frame. Empty list = nothing scraping. */
+      /** Scraping strings this frame — wire/wire or a body on a wire. Empty = lifted. */
       type: 'wireContact';
       items: WireContactItem[];
     }

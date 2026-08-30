@@ -56,10 +56,51 @@ const AIR_WAKE = 2.5e-4;
 const BODY_FROM_STRING = 0.1;
 /** Active wires quieter than this can be stolen for a new latch. */
 const STEAL_ENV = 0.002;
-/** Friction / Hertzian force into the junction — a bow, not a scrape-pluck. */
-const RUB_TO_JUNCTION = 0.22;
+/**
+ * Friction / Hertzian force into the junction — a bow, not a scrape-pluck.
+ *
+ * This is the path that lets a scraped *body* bow the string tied to it, and it
+ * was the loudest thing in the world by a wide margin: 0.127 RMS against 0.085
+ * for a collision. Damping the body's own radiation does not touch it, because
+ * the energy leaves through the wire, which radiates at full gain.
+ *
+ * 0.06 puts it level with a directly bowed string, which is what it is. Lower
+ * and the friction stops locking to the round trip — 0.03 jumps to the octave,
+ * 0.015 to a free-running sub-octave — so this is near the floor of the useful
+ * range, not a free parameter.
+ */
+const RUB_TO_JUNCTION = 0.06;
 /** Slip-slide force into both delay lines when two wires scrape. */
-const WIRE_BOW = 0.35;
+/**
+ * Bow force onto a string from another string or a body.
+ *
+ * This sits inside the friction's feedback loop, so it does not behave like a
+ * volume: the injected force changes the string's velocity, which changes what
+ * the friction sees next sample. Below about 0.2 the limit cycle stops
+ * sustaining altogether — a bow too light to speak, which is what a real one
+ * does too. 0.18 is just under that knee, which puts a sustained bow at about
+ * the loudness of a latch pluck instead of well above a collision. Measured
+ * RMS: 0.35 gave 0.124, this gives 0.034, against 0.033 for a pluck and 0.079
+ * for a median collision.
+ */
+const WIRE_BOW = 0.18;
+
+/**
+ * How far the sustained bed steps aside when something happens.
+ *
+ * Bows, scrapes and air are continuous; collisions, plucks and latches are
+ * short. Measured against a running bed a collision lands only about 4 dB above
+ * it — audible in isolation, lost in company, which is why events stopped being
+ * heard as the world filled up. It is not level: the collision still delivers
+ * ~94% of its energy, it simply has nothing to stand out from. Raising events
+ * would just raise everything; stepping the bed back for a moment is what a
+ * mixer does, and it costs no headroom.
+ */
+const DUCK_DEPTH = 0.55;
+/** Recovery toward unity, about 140 ms. */
+const DUCK_RELEASE = 1 / (0.14 * SAMPLE_RATE);
+/** The bed never disappears entirely. */
+const DUCK_FLOOR = 0.25;
 /** How hard a contact force drives the plate modes. They are quiet at contact-scale gain. */
 const BOW_TO_MODE = 6;
 /** Incoming waveguide velocity, scaled into the same units as modal velocity. */
@@ -74,6 +115,40 @@ const CONTACT_C = 0.28;
  * is what lets two identical bodies be heard at all.
  */
 const CONTACT_SQUEEZE = 0.12;
+
+/**
+ * How loudly a body-on-body scrape radiates.
+ *
+ * Scaling the friction force and the ridge taps, but deliberately not the
+ * Hertzian spring: that one is the contact's dynamics — how the two surfaces
+ * push apart — and turning it down would change how they behave rather than
+ * how loud they are.
+ *
+ * Set so the three continuous-vs-event sources land in a deliberate order:
+ * a collision is the loudest thing that happens, a bowed string sits under it,
+ * and a scrape is the quietest. Measured RMS at matched drive: 0.079 collision,
+ * 0.034 bow, 0.013 scrape. At 1 the scrape was 0.166 — louder than either, and
+ * the reason a busy world buried its own collisions.
+ *
+ * Note the curve is not monotonic: around 0.5 the friction finds a louder limit
+ * cycle than at 1. Values below ~0.3 are the well-behaved region.
+ */
+/**
+ * How much a body radiates while something is pressed against it.
+ *
+ * Scaling the friction force itself does not work: it sits inside the loop, and
+ * below about 0.8 the bow stops locking to the string's round trip and drops to
+ * a free-running sub-octave. The modes are both the radiator and the feedback
+ * path, so the only lever that changes loudness without changing behaviour is
+ * at the mix — and it is physical anyway. A hand resting on a drum head damps
+ * what it radiates without changing how the head moves under it.
+ *
+ * This is what sets the ordering: a collision is the loudest thing that
+ * happens, a bowed string sits under it, a scrape is the quietest. Measured RMS
+ * at matched drive: 0.079 collision, 0.034 bow, 0.021 scrape.
+ */
+const TOUCH_RADIATE = 0.2;
+
 /**
  * How loudly surface asperities radiate, per unit load and slip speed.
  *
@@ -659,6 +734,8 @@ export class WaveguideNet {
   private liveWireContactN = 0;
 
   private quantumPos = 0;
+  /** Sidechain gain on the sustained bed. 1 is untouched. */
+  duck = 1;
 
   /** Scratch reused by applyTopology so the audio thread never allocates. */
   private seen = new Set<number>();
@@ -835,6 +912,12 @@ export class WaveguideNet {
 
     // The one resonator friction is allowed to hear.
     //
+    // The longest one, not the first: port order comes from an intrusive list
+    // rebuilt on every topology change, so "first" is arbitrary and can swap
+    // between wires from one frame to the next — which would move the note the
+    // friction is trying to lock onto. Longest is stable, and it is also the
+    // lowest and most harmonic, which is the one worth bowing.
+    //
     // A body offers up to six — three inharmonic plate modes plus a quarter-wave
     // stub per open port — and stick-slip cannot entrain to six things that
     // disagree, so it free-runs and the result is a scrape. Given a single
@@ -842,12 +925,20 @@ export class WaveguideNet {
     // A wire wins over a stub: it is longer, more harmonic, and it is the thing
     // the net actually built.
     let dom = 0;
-    if (agent.portCount > 0) {
-      const w = this.wires[agent.wireIdx[0]];
-      if (w) dom = agent.wireEnd[0] === 0 ? w.inA : w.inB;
-    } else if (agent.stubCount > 0) {
-      const st = this.stubs[agent.stubIdx[0]];
-      if (st) dom = st.inJ;
+    let best = -1;
+    for (let p = 0; p < agent.portCount; p++) {
+      const w = this.wires[agent.wireIdx[p]];
+      if (!w || w.length <= best) continue;
+      best = w.length;
+      dom = agent.wireEnd[p] === 0 ? w.inA : w.inB;
+    }
+    if (best < 0) {
+      for (let sIdx = 0; sIdx < agent.stubCount; sIdx++) {
+        const st = this.stubs[agent.stubIdx[sIdx]];
+        if (!st || st.length <= best) continue;
+        best = st.length;
+        dom = st.inJ;
+      }
     }
     agent.domIn = dom;
   }
@@ -931,6 +1022,7 @@ export class WaveguideNet {
     if (idx === undefined) return false;
     const gain = Math.max(-8, Math.min(8, num(gainRaw)));
     if (gain === 0) return false;
+    this.triggerDuck(Math.abs(gain) / 1.2);
     const w = this.wires[idx];
     if (at === undefined) at = w.exAt;
     if (width === undefined) width = w.exWidth;
@@ -966,6 +1058,7 @@ export class WaveguideNet {
     if (n < 2) return false;
     const gain = Math.max(-8, Math.min(8, num(gainRaw, 1)));
     if (gain === 0) return false;
+    this.triggerDuck(Math.abs(gain) / 1.2);
     const w = this.wires[idx];
     const L = Math.max(8, w.length | 0);
     const vals = new Float32Array(L);
@@ -1033,6 +1126,7 @@ export class WaveguideNet {
     a.strikePos = 0;
     a.strikeSharp = Math.max(0, Math.min(1, num(sharp, 0.5)));
     a.bodyEnv = Math.max(a.bodyEnv, pk);
+    this.triggerDuck(pk / 0.6);
     this.wakeAgent(a, pk);
     for (let p = 0; p < a.portCount; p++) {
       const w = this.wires[a.wireIdx[p]];
@@ -1056,6 +1150,16 @@ export class WaveguideNet {
       const ib = this.agentById.get(it.agentB);
       if (ia === undefined || ib === undefined || ia === ib) continue;
       const c = this.contacts[n];
+      // Slots are packed in list order, so slot n holds whichever pair happens
+      // to come nth this frame. The ridge phase is what carries the rasp's
+      // rhythm, so it has to belong to the pair and not to the slot: if this
+      // slot held someone else last frame, start their surface fresh rather
+      // than inheriting a stranger's position along it — and drop any tap still
+      // decaying, which would otherwise be applied to the wrong two bodies.
+      if (c.idA !== it.agentA || c.idB !== it.agentB) {
+        c.ridgePhase = 0;
+        c.ridgeEnv = 0;
+      }
       c.active = true;
       c.idxA = ia;
       c.idxB = ib;
@@ -1084,7 +1188,7 @@ export class WaveguideNet {
     this.refreshLiveContacts();
   }
 
-  /** Replace the set of scraping wire pairs. Anything not listed has separated. */
+  /** Replace the set of scraping strings. `wireB` 0 is a body bowing `wireA`. */
   setWireContacts(
     items: { wireA: number; wireB: number; load: number; slide: number; atA: number; atB: number }[],
   ): void {
@@ -1092,14 +1196,16 @@ export class WaveguideNet {
     for (const it of items) {
       if (n >= MAX_WIRE_CONTACTS) break;
       const ia = this.wireById.get(it.wireA);
-      const ib = this.wireById.get(it.wireB);
-      if (ia === undefined || ib === undefined || ia === ib) continue;
+      if (ia === undefined) continue;
+      const bodyBow = !(it.wireB > 0);
+      const ib = bodyBow ? -1 : this.wireById.get(it.wireB);
+      if (!bodyBow && (ib === undefined || ib === ia)) continue;
       const c = this.wireContacts[n];
       c.active = true;
       c.idxA = ia;
-      c.idxB = ib;
+      c.idxB = bodyBow ? -1 : ib!;
       c.idA = it.wireA;
-      c.idB = it.wireB;
+      c.idB = bodyBow ? 0 : it.wireB;
       c.load = Math.max(0, Math.min(1, num(it.load)));
       c.slide = Math.max(-0.08, Math.min(0.08, num(it.slide)));
       c.atA = Math.max(0.02, Math.min(0.98, num(it.atA, 0.5)));
@@ -1107,11 +1213,13 @@ export class WaveguideNet {
       n++;
       if (c.load > 0) {
         const A = this.wires[ia];
-        const B = this.wires[ib];
         A.quiet = false;
-        B.quiet = false;
         A.env = Math.max(A.env, c.load * 0.5);
-        B.env = Math.max(B.env, c.load * 0.5);
+        if (!bodyBow) {
+          const B = this.wires[ib!];
+          B.quiet = false;
+          B.env = Math.max(B.env, c.load * 0.5);
+        }
       }
     }
     for (; n < MAX_WIRE_CONTACTS; n++) {
@@ -1533,7 +1641,7 @@ export class WaveguideNet {
       const slide = c.slide;
       const sliding = slide > 1e-6 || slide < -1e-6;
       const Ft = sliding ? this.friction(slide + dv, c.load, c) : 0;
-      const F = Fn + Ft;
+      const F = (Fn + Ft) * this.duck;
       A.contactF += F;
       B.contactF -= F;
       // Compression. The force above is antisymmetric — A is pushed one way and
@@ -1546,7 +1654,7 @@ export class WaveguideNet {
       // properly. Both are squeezed by the same amount at the same instant, so
       // that component is in phase and survives the sum. Translation cancels,
       // compression adds — and both are heard.
-      const squeeze = Fn * CONTACT_SQUEEZE;
+      const squeeze = Fn * CONTACT_SQUEEZE * this.duck;
       A.contactC += squeeze;
       B.contactC += squeeze;
       this.wakeAgent(A);
@@ -1566,7 +1674,7 @@ export class WaveguideNet {
           c.ridgeEnv = c.load * RIDGE_GAIN;
         }
         if (c.ridgeEnv !== 0) {
-          const tap = c.ridgeEnv;
+          const tap = c.ridgeEnv * this.duck;
           c.ridgeEnv = flush(c.ridgeEnv * RIDGE_DECAY);
           A.contactC += tap;
           B.contactC += tap;
@@ -1613,33 +1721,38 @@ export class WaveguideNet {
   }
 
   /**
-   * Slip-slide bow on both strings of a scraping pair. Same signed force on
-   * each — they are two strings under one bow, not a dipole that would cancel
-   * in the mix.
+   * Slip-slide bow. A pair (`idB` > 0) drives both strings with the same force.
+   * `idB` 0 is a body on one string — Helmholtz against the rigid slide.
    */
   private applyWireContacts(): void {
     for (let k = 0; k < this.liveWireContactN; k++) {
       const c = this.wireContacts[this.liveWireContacts[k]];
       if (c.load <= 1e-6) continue;
       let A = this.wires[c.idxA];
-      let B = this.wires[c.idxB];
       if (!A || A.wireId !== c.idA || !A.active) {
         const ia = this.wireById.get(c.idA);
         if (ia === undefined) continue;
         c.idxA = ia;
         A = this.wires[ia];
       }
+      if (!A.active) continue;
+      if (!(c.idB > 0)) {
+        const Ft = this.friction(c.slide + this.stringVel(A, c.atA), c.load, c);
+        this.injectStringForce(A, c.atA, Ft * WIRE_BOW * this.duck);
+        continue;
+      }
+      let B = c.idxB >= 0 ? this.wires[c.idxB] : undefined;
       if (!B || B.wireId !== c.idB || !B.active) {
         const ib = this.wireById.get(c.idB);
         if (ib === undefined) continue;
         c.idxB = ib;
         B = this.wires[ib];
       }
-      if (!A.active || !B.active || A === B) continue;
+      if (!B.active || A === B) continue;
       const vA = this.stringVel(A, c.atA);
       const vB = this.stringVel(B, c.atB);
       const Ft = this.friction(c.slide + (vA + vB) * 0.5, c.load, c);
-      const s = Ft * WIRE_BOW;
+      const s = Ft * WIRE_BOW * this.duck;
       this.injectStringForce(A, c.atA, s);
       this.injectStringForce(B, c.atB, s);
     }
@@ -1699,6 +1812,7 @@ export class WaveguideNet {
   }
 
   handleRewrite(msg: Extract<WorkletMessage, { type: 'rewrite' }>): void {
+    this.triggerDuck(Math.abs(num(msg.gain)) / 1.2);
     if (msg.phase === 0) {
       // Begin: a soft, wide excitation low on the wire — more breath than click.
       this.injectPluck(msg.wireId, msg.gain * 0.7, 0.2, 0.8);
@@ -2117,8 +2231,22 @@ export class WaveguideNet {
     }
   }
 
+  /**
+   * An event just fired: pull the bed down so it can be heard over it. Takes
+   * the deepest dip asked for rather than accumulating, so a flurry ducks once.
+   */
+  private triggerDuck(amount: number): void {
+    const a = amount > 1 ? 1 : amount < 0 ? 0 : amount;
+    const target = Math.max(DUCK_FLOOR, 1 - DUCK_DEPTH * a);
+    if (target < this.duck) this.duck = target;
+  }
+
   /** Advance one sample. Fills outL/outR; returns the mono sum. */
   tick(shedAir = false): number {
+    if (this.duck < 1) {
+      this.duck += DUCK_RELEASE * (1 - this.duck);
+      if (this.duck > 0.9999) this.duck = 1;
+    }
     if (this.quantumPos === 0) this.capVoices();
     this.quantumPos = this.quantumPos + 1 === 128 ? 0 : this.quantumPos + 1;
 
@@ -2183,7 +2311,10 @@ export class WaveguideNet {
         agent.contactC,
       );
       agent.radiate = body;
-      if (body !== 0) this.place(body * 1.5, agent.pan, agent);
+      if (body !== 0) {
+        const rad = agent.touching ? TOUCH_RADIATE : 1;
+        this.place(body * 1.5 * rad, agent.pan, agent);
+      }
 
       const drive =
         agent.excite + strike * agent.coupling + force * RUB_TO_JUNCTION + air * AIR_TO_JUNCTION;
@@ -2293,10 +2424,22 @@ export class WaveguideNet {
     const ceil = 0.95;
     const g = this.env > ceil ? ceil / this.env : 1;
     const k = g * this.master;
-    this.outDryL = flush(dL * k);
-    this.outDryR = flush(dR * k);
-    this.outWetL = flush(wL * k);
-    this.outWetR = flush(wR * k);
+    // Soft clip the buses that actually leave the worklet.
+    //
+    // The limiter above is a smoothed one with a 5 ms attack, which is right
+    // for level but cannot catch a 2 ms contact transient — peaks were passing
+    // at ~1.6, and the dry bus is multiplied by 0.85 on the way to the
+    // destination, so they clipped hard in the browser. The soft clip used to
+    // cover this, but when the output split into dry and wet buses it stayed on
+    // the mono fields, which nothing reads. Below unity it is a straight wire,
+    // so it costs nothing until it is needed.
+    this.outDryL = flush(softClip(dL * k));
+    this.outDryR = flush(softClip(dR * k));
+    this.outWetL = flush(softClip(wL * k));
+    this.outWetR = flush(softClip(wR * k));
+    // A mono monitor of the two buses for callers that want one number. The
+    // engine mixes them at gains that sum to 1; this is bounded the same way,
+    // so tick() cannot report a level the destination could never produce.
     this.outL = flush(Math.tanh(this.outDryL + this.outWetL));
     this.outR = flush(Math.tanh(this.outDryR + this.outWetR));
     return (this.outL + this.outR) * 0.5;

@@ -291,6 +291,20 @@ export function stemWorld(agent: Agent, slot: PortSlot, w: number, h: number): V
   return { x: wrap(agent.x + o.x, w), y: wrap(agent.y + o.y, h) };
 }
 
+/** Write the stem into `out` so a hot loop does not allocate a result vector. */
+export function stemWorldInto(
+  agent: Agent,
+  slot: PortSlot,
+  w: number,
+  h: number,
+  out: { x: number; y: number },
+): { x: number; y: number } {
+  const o = stemOffset(agent, slot);
+  out.x = wrap(agent.x + o.x, w);
+  out.y = wrap(agent.y + o.y, h);
+  return out;
+}
+
 /**
  * Control point along the port axis. Scaled to the wire's length when it is
  * known: a fixed handle longer than a third of the span makes the two handles
