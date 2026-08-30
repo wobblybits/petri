@@ -14,13 +14,16 @@ import type { AgentTopo, NetTopology, PanView, StubTopo, WireTopo } from './type
 import { bodyCoupling, bodyTone } from './body.ts';
 import {
   AGENT_BAND,
+  COST_US,
+  LOD_NEAR,
   LodSelector,
   WIRE_BAND,
   agentKey,
   apparentPx,
+  assign,
   onScreen,
-  tierFor,
   wireKey,
+  type LodCandidate,
 } from './lod.ts';
 import { blendVoices, voiceFromAgent } from './voice.ts';
 import { kindCode } from './types.ts';
@@ -87,7 +90,7 @@ function wireTopo(
   brightness: number,
   view: PanView | null | undefined,
   height: number,
-  lod: LodSelector | null,
+  cands: LodCandidate[],
 ): WireTopo | null {
   const A = agents.get(wire.a.id);
   const B = agents.get(wire.b.id);
@@ -108,6 +111,15 @@ function wireTopo(
   const wanted = tautBrighten(Math.max(0.04, voice.damp * (1 - bend * 1.6) * brightness), taut);
   const damp = feasibleDamp(wanted, length, voice.t60);
 
+  cands.push({
+    key: wireKey(wire.id),
+    px: apparentPx(path, view),
+    visible: onScreen(midX, midY, path, view),
+    band: WIRE_BAND,
+    nearUs: COST_US.nearWire,
+    midUs: COST_US.midWire,
+  });
+
   return {
     id: wire.id,
     length,
@@ -125,27 +137,8 @@ function wireTopo(
     dist: listenerDistance(midX, midY, view, centreX, centreY, height),
     exAt: voice.at,
     exWidth: voice.width,
-    lod: tierOf(lod, wireKey(wire.id), path, midX, midY, view, WIRE_BAND),
+    lod: LOD_NEAR,
   };
-}
-
-/**
- * Detail tier for one object, from how big it lands on screen. Without a
- * selector there is no hysteresis — fine for a one-shot build, wrong for the
- * per-frame path, where a boundary-sitting object would flutter.
- */
-function tierOf(
-  lod: LodSelector | null,
-  key: number,
-  worldSize: number,
-  wx: number,
-  wy: number,
-  view: PanView | null | undefined,
-  band: { near: number; mid: number },
-): number {
-  const px = apparentPx(worldSize, view);
-  const visible = onScreen(wx, wy, worldSize, view);
-  return lod ? lod.tier(key, px, visible, band) : tierFor(px, visible, band);
 }
 
 function slotCode(slot: PortSlot): 0 | 1 | 2 {
@@ -171,7 +164,7 @@ function agentTopo(
   centreY: number,
   view: PanView | null | undefined,
   height: number,
-  lod: LodSelector | null,
+  cands: LodCandidate[],
 ): AgentTopo {
   const slots = slotsFor(agent.kind);
   const open = slots.filter((slot) => graph.isFree({ id: agent.id, slot }));
@@ -179,6 +172,15 @@ function agentTopo(
     slots.reduce((sum, slot) => sum + portImpedance(agent.kind, slot), 0) / Math.max(1, slots.length);
   const tone = bodyTone(agent);
   const stubs = open.map((slot) => stubFor(agent, slot));
+  const size = boundRadius(agent) * 2;
+  cands.push({
+    key: agentKey(agent.id),
+    px: apparentPx(size, view),
+    visible: onScreen(agent.x, agent.y, size, view),
+    band: AGENT_BAND,
+    nearUs: COST_US.nearAgent,
+    midUs: COST_US.midAgent,
+  });
   return {
     id: agent.id,
     kind: kindCode(agent.kind),
@@ -191,7 +193,7 @@ function agentTopo(
     modeT60: tone.decay,
     modeGain: tone.gain,
     coupling: bodyCoupling(agent),
-    lod: tierOf(lod, agentKey(agent.id), boundRadius(agent) * 2, agent.x, agent.y, view, AGENT_BAND),
+    lod: LOD_NEAR,
   };
 }
 
@@ -219,15 +221,22 @@ export function buildTopology(
   const brightness = 1 / (1 + graph.wires.size * 0.012);
   const height = listenerHeight(view);
 
+  // Tiers are a whole-frame decision, not a per-object one: the budget is
+  // shared, so nothing can be tiered until every candidate is on the table.
+  const cands: LodCandidate[] = [];
   const wires: WireTopo[] = [];
   for (const wire of graph.wires.values()) {
-    const t = wireTopo(wire, agents, centreX, centreY, brightness, view, height, lod);
+    const t = wireTopo(wire, agents, centreX, centreY, brightness, view, height, cands);
     if (t) wires.push(t);
   }
   const agentList: AgentTopo[] = [];
   for (const agent of agents.values()) {
-    agentList.push(agentTopo(agent, graph, centreX, centreY, view, height, lod));
+    agentList.push(agentTopo(agent, graph, centreX, centreY, view, height, cands));
   }
+
+  const tiers = assign(cands, lod);
+  for (const w of wires) w.lod = tiers.get(wireKey(w.id)) ?? LOD_NEAR;
+  for (const a of agentList) a.lod = tiers.get(agentKey(a.id)) ?? LOD_NEAR;
   lod?.sweep();
   return { wires, agents: agentList, height };
 }

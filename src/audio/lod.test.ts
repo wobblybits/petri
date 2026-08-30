@@ -7,11 +7,16 @@ import {
   LOD_NEAR,
   LodSelector,
   WIRE_BAND,
+  COST_US,
+  VOICE_BUDGET_US,
   agentKey,
   apparentPx,
+  assign,
+  assignedCostUs,
   onScreen,
   tierFor,
   wireKey,
+  type LodCandidate,
 } from './lod.ts';
 import { buildTopology } from './topology.ts';
 import { defaultParams } from '../params.ts';
@@ -197,5 +202,80 @@ describe('tiers through buildTopology', () => {
     // A body is ~24 world px across, under WIRE_BAND.near but over AGENT_BAND.near.
     expect(AGENT_BAND.near).toBeLessThan(WIRE_BAND.near);
     expect(topo.agents.some((a) => a.lod === LOD_NEAR)).toBe(true);
+  });
+});
+
+describe('ranked budget', () => {
+  const wireCand = (id: number, px: number): LodCandidate => ({
+    key: wireKey(id),
+    px,
+    visible: true,
+    band: WIRE_BAND,
+    nearUs: COST_US.nearWire,
+    midUs: COST_US.midWire,
+  });
+
+  it('never spends more than the budget', () => {
+    const cands = [];
+    for (let i = 0; i < 400; i++) cands.push(wireCand(i, 200));
+    const tiers = assign(cands, null, 500);
+    expect(assignedCostUs(cands, tiers)).toBeLessThanOrEqual(500);
+  });
+
+  it('spends it on the biggest things first', () => {
+    const cands = [wireCand(1, 60), wireCand(2, 500), wireCand(3, 300)];
+    // Room for exactly one NEAR wire.
+    const tiers = assign(cands, null, COST_US.nearWire + COST_US.midWire * 2);
+    expect(tiers.get(wireKey(2))).toBe(LOD_NEAR);
+    expect(tiers.get(wireKey(3))).toBe(LOD_MID);
+    expect(tiers.get(wireKey(1))).toBe(LOD_MID);
+  });
+
+  it('demotes rather than mutes when the budget runs out', () => {
+    const cands = [];
+    for (let i = 0; i < 200; i++) cands.push(wireCand(i, 200));
+    const tiers = assign(cands, null, 40);
+    // Everything still has a tier — nothing is dropped from the mix.
+    expect(tiers.size).toBe(200);
+    for (const c of cands) expect(tiers.get(c.key)).toBeDefined();
+  });
+
+  it('does not let a tangle of long wires blow the budget', () => {
+    // The case fixed thresholds get wrong: 200 overlapping full-size wires,
+    // all of them individually deserving NEAR.
+    const cands = [];
+    for (let i = 0; i < 200; i++) cands.push(wireCand(i, 400));
+    const naive = cands.length * COST_US.nearWire;
+    const tiers = assign(cands, null);
+    expect(naive).toBeGreaterThan(VOICE_BUDGET_US * 2);
+    expect(assignedCostUs(cands, tiers)).toBeLessThanOrEqual(VOICE_BUDGET_US);
+  });
+
+  it('leaves a small net entirely at full detail', () => {
+    const cands = [];
+    for (let i = 0; i < 12; i++) cands.push(wireCand(i, 400));
+    const tiers = assign(cands, null);
+    for (const c of cands) expect(tiers.get(c.key)).toBe(LOD_NEAR);
+  });
+
+  it('keeps objects below the threshold out of the competition entirely', () => {
+    const tiny = [];
+    for (let i = 0; i < 500; i++) tiny.push(wireCand(i, WIRE_BAND.mid - 1));
+    const big = wireCand(999, 400);
+    const tiers = assign([...tiny, big], null);
+    // The tail neither takes budget nor blocks the one wire that earned it.
+    expect(tiers.get(wireKey(999))).toBe(LOD_NEAR);
+    expect(assignedCostUs(tiny, tiers)).toBe(0);
+  });
+
+  it('holds a budget-forced demotion instead of flipping back', () => {
+    const sel = new LodSelector();
+    const cands = [wireCand(1, 400), wireCand(2, 400)];
+    const tight = assign(cands, sel, COST_US.nearWire + COST_US.midWire);
+    const demoted = cands.find((c) => tight.get(c.key) === LOD_MID)!;
+    sel.sweep();
+    // Budget opens up, but the demoted wire needs to re-earn the promotion
+    // rather than snapping back the very next frame.
+    expect(sel.peek(demoted.key)).toBe(LOD_MID);
   });
 });

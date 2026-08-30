@@ -124,6 +124,17 @@ export class LodSelector {
     return next;
   }
 
+  /** What this key was last given, without recording a fresh visit. */
+  peek(key: number): LodTier | undefined {
+    return this.prev.get(key);
+  }
+
+  /** Overwrite what a key holds — how the budget records a forced demotion. */
+  force(key: number, tier: LodTier): void {
+    this.prev.set(key, tier);
+    this.live.add(key);
+  }
+
   /**
    * Forget objects that were not tiered this pass. Called once a frame so a
    * net that churns through thousands of ids does not accumulate them.
@@ -156,4 +167,114 @@ export function wireKey(id: number): number {
 
 export function agentKey(id: number): number {
   return id * 2 + 1;
+}
+
+/**
+ * What one awake object costs per 128-sample quantum, in microseconds.
+ *
+ * NEAR figures are measured on this machine: a ringing waveguide wire is
+ * ~19.6 us and a ringing three-mode body ~8.3 us, taken as the marginal cost
+ * of the Nth object with the rest of the net held still. MID figures are the
+ * modal stand-ins, which are a small fixed filter bank rather than a delay
+ * line with interpolation, dispersion and a loop filter.
+ *
+ * They do not need to be exact. They set the shape of the ranking — a wire
+ * costs a couple of bodies — and the budget below absorbs the error.
+ */
+export const COST_US = {
+  nearWire: 19.6,
+  midWire: 3.2,
+  nearAgent: 8.3,
+  midAgent: 2,
+};
+
+/** One render quantum at 48 kHz. */
+export const QUANTUM_US = (128 / 48000) * 1e6;
+
+/**
+ * Share of the quantum the tiered voices may spend.
+ *
+ * The rest pays for the parts that do not tier: the ~500 us floor a live net
+ * costs with nothing sounding, contacts, air, the ensemble, and the master
+ * chain. Sitting at 60% leaves real headroom, which is the point — the budget
+ * exists so a busy frame degrades detail instead of missing the deadline.
+ */
+export const VOICE_BUDGET_US = QUANTUM_US * 0.6;
+
+export interface LodCandidate {
+  key: number;
+  /** Apparent size in screen px. */
+  px: number;
+  visible: boolean;
+  band: LodBand;
+  /** Cost of this object at NEAR, in us per quantum. */
+  nearUs: number;
+  /** Cost of this object at MID. */
+  midUs: number;
+}
+
+/**
+ * Tier a whole frame's worth of objects against a cost budget.
+ *
+ * Thresholds say what an object deserves; the budget says how much of that
+ * the frame can pay for. Candidates are ranked by apparent size and promoted
+ * from the top down, so when the budget binds it is the smallest things that
+ * lose detail — which is both the cheapest place to lose it and the place
+ * nobody is looking.
+ *
+ * Missing the budget is a demotion, never a mute. An object that gets nothing
+ * here still sounds, as part of the ensemble.
+ */
+export function assign(
+  cands: LodCandidate[],
+  selector: LodSelector | null = null,
+  budgetUs = VOICE_BUDGET_US,
+): Map<number, LodTier> {
+  const out = new Map<number, LodTier>();
+  const ranked: LodCandidate[] = [];
+
+  for (const c of cands) {
+    // Below the mid threshold, or not on screen: no amount of budget buys
+    // detail worth having, so these never compete for it.
+    const deserved = selector
+      ? selector.tier(c.key, c.px, c.visible, c.band)
+      : tierFor(c.px, c.visible, c.band);
+    if (deserved === LOD_FAR) {
+      out.set(c.key, LOD_FAR);
+      continue;
+    }
+    ranked.push(c);
+  }
+
+  ranked.sort((a, b) => b.px - a.px);
+
+  let spent = 0;
+  for (const c of ranked) {
+    const deserved = selector ? (selector.peek(c.key) ?? LOD_MID) : tierFor(c.px, true, c.band);
+    if (deserved === LOD_NEAR && spent + c.nearUs <= budgetUs) {
+      spent += c.nearUs;
+      out.set(c.key, LOD_NEAR);
+    } else if (spent + c.midUs <= budgetUs) {
+      spent += c.midUs;
+      out.set(c.key, LOD_MID);
+    } else {
+      out.set(c.key, LOD_FAR);
+    }
+  }
+
+  // Remember what actually plays, not what was deserved, so a budget-forced
+  // demotion does not flip straight back next frame.
+  if (selector) for (const [key, tier] of out) selector.force(key, tier);
+  return out;
+}
+
+/** Total cost of an assignment, in us per quantum. Used by tests and probes. */
+export function assignedCostUs(cands: LodCandidate[], tiers: Map<number, LodTier>): number {
+  let us = 0;
+  for (const c of cands) {
+    const t = tiers.get(c.key);
+    if (t === LOD_NEAR) us += c.nearUs;
+    else if (t === LOD_MID) us += c.midUs;
+  }
+  return us;
 }
