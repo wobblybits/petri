@@ -892,3 +892,68 @@ describe('output headroom', () => {
     }
   });
 });
+
+describe('stereo placement', () => {
+  function panned(pan: number): { l: number; r: number } {
+    const net = new WaveguideNet();
+    const agent = (id: number) => ({
+      id,
+      kind: 0 as const,
+      openPorts: 0,
+      impedance: 1,
+      pan,
+      modeHz: [283, 591, 972],
+      modeT60: [0.25, 0.12, 0.08],
+      modeGain: [1, 0.42, 0.26],
+      coupling: 1,
+    });
+    net.handle({
+      type: 'topology',
+      topo: {
+        wires: [
+          {
+            id: 1, length: 150, loss: 0.9992, bend: 0.04, agentA: 1, agentB: 2,
+            zA: 1, zB: 1, damp: 0.6, disp: 0, pan, exAt: 0.16, exWidth: 1,
+          },
+        ],
+        agents: [agent(1), agent(2)],
+      },
+    });
+    net.injectPluck(1, 0.9);
+    let l = 0;
+    let r = 0;
+    for (let i = 0; i < 4096; i++) {
+      net.tick();
+      l += net.outDryL * net.outDryL;
+      r += net.outDryR * net.outDryR;
+    }
+    return { l: Math.sqrt(l / 4096), r: Math.sqrt(r / 4096) };
+  }
+
+  it('sends a hard-left source left and a hard-right source right', () => {
+    const left = panned(-1);
+    const right = panned(1);
+    expect(left.l).toBeGreaterThan(0);
+    expect(left.r).toBeLessThan(left.l * 0.05);
+    expect(right.r).toBeGreaterThan(0);
+    expect(right.l).toBeLessThan(right.r * 0.05);
+  });
+
+  it('keeps a centred source equal in both channels', () => {
+    const mid = panned(0);
+    expect(mid.l).toBeGreaterThan(0);
+    expect(Math.abs(mid.l - mid.r)).toBeLessThan(mid.l * 1e-6);
+  });
+
+  it('holds power constant across the sweep, not amplitude', () => {
+    // Equal power: L^2 + R^2 is flat, so a source does not dip in level as it
+    // crosses the middle. The gains are cached per source now, so this is
+    // really asking whether the cache is refreshed when pan is set.
+    const power = [-1, -0.5, 0, 0.5, 1].map((p) => {
+      const { l, r } = panned(p);
+      return l * l + r * r;
+    });
+    const first = power[0];
+    for (const p of power) expect(Math.abs(p - first)).toBeLessThan(first * 0.02);
+  });
+});

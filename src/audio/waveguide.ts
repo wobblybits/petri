@@ -202,6 +202,9 @@ export interface WireState {
   quiet: boolean;
   /** Detail tier from apparent size. 0 full waveguide, 1 modal, 2 ensemble. */
   lod: number;
+  /** Cached equal-power pan gains, from setPan. */
+  panL: number;
+  panR: number;
   wireId: number;
   length: number;
   lengthTarget: number;
@@ -257,6 +260,9 @@ export interface AgentState {
   active: boolean;
   /** Detail tier from apparent size. 0 full body, 1 reduced, 2 ensemble. */
   lod: number;
+  /** Cached equal-power pan gains, from setPan. */
+  panL: number;
+  panR: number;
   id: number;
   openPorts: number;
   portCount: number;
@@ -347,6 +353,8 @@ function makeWire(): WireState {
     active: false,
     quiet: true,
     lod: 0,
+    panL: Math.SQRT1_2,
+    panR: Math.SQRT1_2,
     wireId: -1,
     length: 64,
     lengthTarget: 64,
@@ -396,6 +404,8 @@ function makeAgent(): AgentState {
   return {
     active: false,
     lod: 0,
+    panL: Math.SQRT1_2,
+    panR: Math.SQRT1_2,
     id: -1,
     openPorts: 0,
     portCount: 0,
@@ -632,6 +642,20 @@ export function distRoom(h: number): number {
 }
 export function distDamp(d: number): number {
   return Math.max(0.06, 1 / (1 + 1.9 * Math.max(0, d) * Math.max(0, d)));
+}
+
+/**
+ * Equal-power pan gains, cached on the source.
+ *
+ * These were two Math.sqrt per sounding object per sample. Pan is a camera
+ * quantity — it changes when the view moves, tens of times a second at most,
+ * not forty-eight thousand.
+ */
+function setPan(s: { pan: number; panL: number; panR: number }, pan: number): void {
+  const p = pan > 1 ? 1 : pan < -1 ? -1 : Number.isFinite(pan) ? pan : 0;
+  s.pan = p;
+  s.panL = Math.sqrt(0.5 * (1 - p));
+  s.panR = Math.sqrt(0.5 * (1 + p));
 }
 
 function listen(
@@ -1938,7 +1962,7 @@ export class WaveguideNet {
       w.bend = Number.isFinite(spec.bend) ? spec.bend : 0.05;
       w.damp = spec.damp !== undefined && Number.isFinite(spec.damp) ? spec.damp : Math.max(0.05, 1 - spec.bend * 2.4);
       w.disp = spec.disp !== undefined && Number.isFinite(spec.disp) ? spec.disp : 0;
-      w.pan = spec.pan !== undefined && Number.isFinite(spec.pan) ? spec.pan : 0;
+      setPan(w, spec.pan !== undefined && Number.isFinite(spec.pan) ? spec.pan : 0);
       w.lod = spec.lod !== undefined && Number.isFinite(spec.lod) ? spec.lod | 0 : 0;
       listen(w, spec.dist, this.listenH);
       w.exAt = spec.exAt !== undefined ? spec.exAt : 0.16;
@@ -2008,7 +2032,7 @@ export class WaveguideNet {
       a.active = true;
       a.id = spec.id;
       a.openPorts = spec.openPorts;
-      a.pan = spec.pan !== undefined ? spec.pan : 0;
+      setPan(a, spec.pan !== undefined ? spec.pan : 0);
       a.lod = spec.lod !== undefined && Number.isFinite(spec.lod) ? spec.lod | 0 : 0;
       listen(a, spec.dist, this.listenH);
       if (!same) a.airLp = 0;
@@ -2064,7 +2088,7 @@ export class WaveguideNet {
       if (idx === undefined) continue;
       const w = this.wires[idx];
       if (!w.active) continue;
-      if (spec.pan !== undefined && Number.isFinite(spec.pan)) w.pan = spec.pan;
+      if (spec.pan !== undefined && Number.isFinite(spec.pan)) setPan(w, spec.pan);
       if (spec.lod !== undefined && Number.isFinite(spec.lod)) w.lod = spec.lod | 0;
       listen(w, spec.dist, this.listenH);
     }
@@ -2074,7 +2098,7 @@ export class WaveguideNet {
       if (idx === undefined) continue;
       const a = this.agents[idx];
       if (!a.active) continue;
-      if (spec.pan !== undefined && Number.isFinite(spec.pan)) a.pan = spec.pan;
+      if (spec.pan !== undefined && Number.isFinite(spec.pan)) setPan(a, spec.pan);
       if (spec.lod !== undefined && Number.isFinite(spec.lod)) a.lod = spec.lod | 0;
       listen(a, spec.dist, this.listenH);
     }
@@ -2133,18 +2157,15 @@ export class WaveguideNet {
    */
   private place(
     x: number,
-    pan: number,
-    src: { dry: number; wet: number; airDamp: number; airLp: number },
+    _pan: number,
+    src: { dry: number; wet: number; airDamp: number; airLp: number; panL: number; panR: number },
   ): void {
     src.airLp += src.airDamp * (x - src.airLp);
     const y = flush(src.airLp);
-    const p = pan > 1 ? 1 : pan < -1 ? -1 : pan;
-    const gl = Math.sqrt(0.5 * (1 - p));
-    const gr = Math.sqrt(0.5 * (1 + p));
-    this.dryL += y * gl * src.dry;
-    this.dryR += y * gr * src.dry;
-    this.wetL += y * gl * src.wet;
-    this.wetR += y * gr * src.wet;
+    this.dryL += y * src.panL * src.dry;
+    this.dryR += y * src.panR * src.dry;
+    this.wetL += y * src.panL * src.wet;
+    this.wetR += y * src.panR * src.wet;
   }
 
   /**
