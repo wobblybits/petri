@@ -13,7 +13,7 @@ import {
   type PortSlot,
 } from './agents.ts';
 import { queryHit, SLOP, type Hit } from './collide.ts';
-import { closestOnSegments, closestPointOnSegment, closestTOnSegment, ropeAabb, segmentsIntersect, transverseProfile, WAVE_DISP_PX, WIRE_RADIUS, wireBowBudget } from './geom.ts';
+import { closestOnSegments, closestTOnSegment, ropeAabb, segmentsIntersect, transverseProfile, WAVE_DISP_PX, WIRE_RADIUS, wireBowBudget } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
 import { CH, Fields } from './fields.ts';
@@ -376,15 +376,28 @@ export class Sim {
       const A = this.agents.get(wire.a.id);
       const B = this.agents.get(wire.b.id);
       if (!A || !B) continue;
-      const sA = stemWorld(A, wire.a.slot, this.w, this.h);
-      const sB = stemWorld(B, wire.b.slot, this.w, this.h);
+      const sA = stemWorldInto(A, wire.a.slot, this.w, this.h, this.tmpStemA);
+      const sB = stemWorldInto(B, wire.b.slot, this.w, this.h, this.tmpStemB);
       const keep = boundRadius(agent) + WIRE_RADIUS;
-      const box = ropeAabb(sA, wire.nodes, sB);
+      // Bounds inline rather than through ropeAabb: this runs once per body
+      // pair per substep, eight times a frame, and the returned box was the
+      // single largest source of garbage in the step.
+      let minX = sA.x < sB.x ? sA.x : sB.x;
+      let maxX = sA.x > sB.x ? sA.x : sB.x;
+      let minY = sA.y < sB.y ? sA.y : sB.y;
+      let maxY = sA.y > sB.y ? sA.y : sB.y;
+      for (let i = 0; i < wire.nodes.length; i++) {
+        const nd = wire.nodes[i];
+        if (nd.x < minX) minX = nd.x;
+        else if (nd.x > maxX) maxX = nd.x;
+        if (nd.y < minY) minY = nd.y;
+        else if (nd.y > maxY) maxY = nd.y;
+      }
       if (
-        box.maxX < agent.x - keep ||
-        box.minX > agent.x + keep ||
-        box.maxY < agent.y - keep ||
-        box.minY > agent.y + keep
+        maxX < agent.x - keep ||
+        minX > agent.x + keep ||
+        maxY < agent.y - keep ||
+        minY > agent.y + keep
       ) {
         continue;
       }
@@ -438,19 +451,28 @@ export class Sim {
       const A = this.agents.get(wire.a.id);
       const B = this.agents.get(wire.b.id);
       if (!A || !B) continue;
-      const sA = stemWorld(A, wire.a.slot, this.w, this.h);
-      const sB = stemWorld(B, wire.b.slot, this.w, this.h);
+      const sA = stemWorldInto(A, wire.a.slot, this.w, this.h, this.tmpStemA);
+      const sB = stemWorldInto(B, wire.b.slot, this.w, this.h, this.tmpStemB);
       const span = Math.hypot(sB.x - sA.x, sB.y - sA.y);
       const limit = wireBowBudget(span, wire.rest);
+      // The chord is the same for every node, so its projection basis is
+      // hoisted and the closest point written out longhand — closestPointOnSegment
+      // returned a fresh vector per node per substep.
+      const ex = sB.x - sA.x;
+      const ey = sB.y - sA.y;
+      const eLen2 = ex * ex + ey * ey;
       for (const node of wire.nodes) {
-        const q = closestPointOnSegment(node.x, node.y, sA.x, sA.y, sB.x, sB.y);
-        const dx = node.x - q.x;
-        const dy = node.y - q.y;
+        let tt = eLen2 < 1e-12 ? 0 : ((node.x - sA.x) * ex + (node.y - sA.y) * ey) / eLen2;
+        tt = tt < 0 ? 0 : tt > 1 ? 1 : tt;
+        const qx = sA.x + ex * tt;
+        const qy = sA.y + ey * tt;
+        const dx = node.x - qx;
+        const dy = node.y - qy;
         const d = Math.hypot(dx, dy);
         if (d <= limit) continue;
         const k = limit / d;
-        node.x = q.x + dx * k;
-        node.y = q.y + dy * k;
+        node.x = qx + dx * k;
+        node.y = qy + dy * k;
       }
     }
   }
