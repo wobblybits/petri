@@ -10,6 +10,7 @@ import {
   planAirMessage,
 } from './dispatch.ts';
 import { buildTopology } from './topology.ts';
+import { LodSelector } from './lod.ts';
 import { setSampleRate } from './presets.ts';
 import { makeReverbIR } from './reverb.ts';
 import type { AudioEvent, LiveContact, LiveWireContact, NetTopology, PanView, WaveSnapshot, WorkletInMessage } from './types.ts';
@@ -45,6 +46,8 @@ export class AudioEngine {
   private now = 0;
   private lastAgent = new Map<number, number>();
   private lastWire = new Map<number, number>();
+  /** Detail tiers carry frame-to-frame, so a boundary-sitting wire holds still. */
+  private lod = new LodSelector();
   private topoKey = -1;
   private poseKey = -1;
   private tuneKey = -1;
@@ -266,11 +269,16 @@ export class AudioEngine {
   /** Listener pose: height, pan, distance. Cheap to send, changes as you look. */
   private static poseKey(topo: NetTopology): number {
     let h = mix(2166136261, Math.round((topo.height ?? 0) * 20));
+    // lod is in the key on its own account: dist is quantised to 1/20 here,
+    // so a tier change near a threshold can leave the rounded pose identical
+    // and the worklet would never be told the object changed representation.
     for (const w of topo.wires) {
       h = mix(mix(mix(h, w.id), Math.round((w.pan ?? 0) * 10)), Math.round((w.dist ?? 0) * 20));
+      h = mix(h, w.lod ?? 0);
     }
     for (const a of topo.agents) {
       h = mix(mix(mix(h, a.id), Math.round((a.pan ?? 0) * 10)), Math.round((a.dist ?? 0) * 20));
+      h = mix(h, a.lod ?? 0);
     }
     return h;
   }
@@ -298,7 +306,7 @@ export class AudioEngine {
       return;
     }
 
-    const topo = buildTopology(graph, agents, view);
+    const topo = buildTopology(graph, agents, view, this.lod);
     const key = AudioEngine.topologyKey(topo);
     const pose = AudioEngine.poseKey(topo);
     const tune = AudioEngine.tuneKey(topo);
@@ -326,8 +334,18 @@ export class AudioEngine {
         this.post({
           type: 'listen',
           height: topo.height ?? 0,
-          wires: topo.wires.map((w) => ({ id: w.id, pan: w.pan ?? 0, dist: w.dist ?? 0 })),
-          agents: topo.agents.map((a) => ({ id: a.id, pan: a.pan ?? 0, dist: a.dist ?? 0 })),
+          wires: topo.wires.map((w) => ({
+            id: w.id,
+            pan: w.pan ?? 0,
+            dist: w.dist ?? 0,
+            lod: w.lod ?? 0,
+          })),
+          agents: topo.agents.map((a) => ({
+            id: a.id,
+            pan: a.pan ?? 0,
+            dist: a.dist ?? 0,
+            lod: a.lod ?? 0,
+          })),
         });
       }
     }

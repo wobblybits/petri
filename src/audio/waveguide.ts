@@ -200,6 +200,8 @@ export interface WireState {
   active: boolean;
   /** Zeroed and skipped once the pickup envelope falls under QUIET_FLOOR. */
   quiet: boolean;
+  /** Detail tier from apparent size. 0 full waveguide, 1 modal, 2 ensemble. */
+  lod: number;
   wireId: number;
   length: number;
   lengthTarget: number;
@@ -253,6 +255,8 @@ export const BODY_MODES = 3;
 
 export interface AgentState {
   active: boolean;
+  /** Detail tier from apparent size. 0 full body, 1 reduced, 2 ensemble. */
+  lod: number;
   id: number;
   openPorts: number;
   portCount: number;
@@ -342,6 +346,7 @@ function makeWire(): WireState {
   return {
     active: false,
     quiet: true,
+    lod: 0,
     wireId: -1,
     length: 64,
     lengthTarget: 64,
@@ -390,6 +395,7 @@ function makeWire(): WireState {
 function makeAgent(): AgentState {
   return {
     active: false,
+    lod: 0,
     id: -1,
     openPorts: 0,
     portCount: 0,
@@ -1933,6 +1939,7 @@ export class WaveguideNet {
       w.damp = spec.damp !== undefined && Number.isFinite(spec.damp) ? spec.damp : Math.max(0.05, 1 - spec.bend * 2.4);
       w.disp = spec.disp !== undefined && Number.isFinite(spec.disp) ? spec.disp : 0;
       w.pan = spec.pan !== undefined && Number.isFinite(spec.pan) ? spec.pan : 0;
+      w.lod = spec.lod !== undefined && Number.isFinite(spec.lod) ? spec.lod | 0 : 0;
       listen(w, spec.dist, this.listenH);
       w.exAt = spec.exAt !== undefined ? spec.exAt : 0.16;
       w.exWidth = spec.exWidth !== undefined ? spec.exWidth : 1;
@@ -2002,6 +2009,7 @@ export class WaveguideNet {
       a.id = spec.id;
       a.openPorts = spec.openPorts;
       a.pan = spec.pan !== undefined ? spec.pan : 0;
+      a.lod = spec.lod !== undefined && Number.isFinite(spec.lod) ? spec.lod | 0 : 0;
       listen(a, spec.dist, this.listenH);
       if (!same) a.airLp = 0;
       a.coupling = spec.coupling !== undefined ? spec.coupling : 1;
@@ -2045,8 +2053,8 @@ export class WaveguideNet {
    */
   applyListen(msg: {
     height?: number;
-    wires: { id: number; pan?: number; dist?: number }[];
-    agents: { id: number; pan?: number; dist?: number }[];
+    wires: { id: number; pan?: number; dist?: number; lod?: number }[];
+    agents: { id: number; pan?: number; dist?: number; lod?: number }[];
   }): void {
     this.listenH =
       msg.height !== undefined && Number.isFinite(msg.height) ? Math.max(0, msg.height) : this.listenH;
@@ -2057,6 +2065,7 @@ export class WaveguideNet {
       const w = this.wires[idx];
       if (!w.active) continue;
       if (spec.pan !== undefined && Number.isFinite(spec.pan)) w.pan = spec.pan;
+      if (spec.lod !== undefined && Number.isFinite(spec.lod)) w.lod = spec.lod | 0;
       listen(w, spec.dist, this.listenH);
     }
     for (let i = 0; i < msg.agents.length; i++) {
@@ -2066,6 +2075,7 @@ export class WaveguideNet {
       const a = this.agents[idx];
       if (!a.active) continue;
       if (spec.pan !== undefined && Number.isFinite(spec.pan)) a.pan = spec.pan;
+      if (spec.lod !== undefined && Number.isFinite(spec.lod)) a.lod = spec.lod | 0;
       listen(a, spec.dist, this.listenH);
     }
   }

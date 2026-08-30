@@ -43,6 +43,8 @@ export interface WireTopo {
   exAt?: number;
   /** Excitation footprint: <1 is a mallet strike, 1 is a full pluck. */
   exWidth?: number;
+  /** Detail tier from apparent size: 0 full waveguide, 1 modal, 2 ensemble. */
+  lod?: number;
 }
 
 /** One unused stem, a short open pipe from the body junction to the lip. */
@@ -74,6 +76,8 @@ export interface AgentTopo {
   modeGain?: number[];
   /** How hard this body drives the wires tied to it. */
   coupling?: number;
+  /** Detail tier from apparent size: 0 full modal body, 1 reduced, 2 ensemble. */
+  lod?: number;
 }
 
 export interface NetTopology {
@@ -250,8 +254,8 @@ export type WorkletInMessage =
       /** Camera pose only. Must not rebuild delay lines. */
       type: 'listen';
       height?: number;
-      wires: { id: number; pan?: number; dist?: number }[];
-      agents: { id: number; pan?: number; dist?: number }[];
+      wires: { id: number; pan?: number; dist?: number; lod?: number }[];
+      agents: { id: number; pan?: number; dist?: number; lod?: number }[];
     }
   | {
       /** Rope delay and damping. The graph shape is unchanged. */

@@ -12,6 +12,16 @@ import {
 } from './presets.ts';
 import type { AgentTopo, NetTopology, PanView, StubTopo, WireTopo } from './types.ts';
 import { bodyCoupling, bodyTone } from './body.ts';
+import {
+  AGENT_BAND,
+  LodSelector,
+  WIRE_BAND,
+  agentKey,
+  apparentPx,
+  onScreen,
+  tierFor,
+  wireKey,
+} from './lod.ts';
 import { blendVoices, voiceFromAgent } from './voice.ts';
 import { kindCode } from './types.ts';
 
@@ -77,11 +87,14 @@ function wireTopo(
   brightness: number,
   view: PanView | null | undefined,
   height: number,
+  lod: LodSelector | null,
 ): WireTopo | null {
   const A = agents.get(wire.a.id);
   const B = agents.get(wire.b.id);
   if (!A || !B) return null;
 
+  const midX = (A.x + B.x) * 0.5;
+  const midY = (A.y + B.y) * 0.5;
   const voice = blendVoices(voiceFromAgent(A, wire.a.slot), voiceFromAgent(B, wire.b.slot));
   const taut = tautness(wire.lastLen, wire.rest, wire.ropeLen);
   // Travel time along the live rope, not the rest cubic. A body sitting on
@@ -108,11 +121,31 @@ function wireTopo(
     bend,
     damp,
     disp: voice.disp,
-    pan: stereoPan((A.x + B.x) * 0.5, view, centreX),
-    dist: listenerDistance((A.x + B.x) * 0.5, (A.y + B.y) * 0.5, view, centreX, centreY, height),
+    pan: stereoPan(midX, view, centreX),
+    dist: listenerDistance(midX, midY, view, centreX, centreY, height),
     exAt: voice.at,
     exWidth: voice.width,
+    lod: tierOf(lod, wireKey(wire.id), path, midX, midY, view, WIRE_BAND),
   };
+}
+
+/**
+ * Detail tier for one object, from how big it lands on screen. Without a
+ * selector there is no hysteresis — fine for a one-shot build, wrong for the
+ * per-frame path, where a boundary-sitting object would flutter.
+ */
+function tierOf(
+  lod: LodSelector | null,
+  key: number,
+  worldSize: number,
+  wx: number,
+  wy: number,
+  view: PanView | null | undefined,
+  band: { near: number; mid: number },
+): number {
+  const px = apparentPx(worldSize, view);
+  const visible = onScreen(wx, wy, worldSize, view);
+  return lod ? lod.tier(key, px, visible, band) : tierFor(px, visible, band);
 }
 
 function slotCode(slot: PortSlot): 0 | 1 | 2 {
@@ -138,6 +171,7 @@ function agentTopo(
   centreY: number,
   view: PanView | null | undefined,
   height: number,
+  lod: LodSelector | null,
 ): AgentTopo {
   const slots = slotsFor(agent.kind);
   const open = slots.filter((slot) => graph.isFree({ id: agent.id, slot }));
@@ -157,6 +191,7 @@ function agentTopo(
     modeT60: tone.decay,
     modeGain: tone.gain,
     coupling: bodyCoupling(agent),
+    lod: tierOf(lod, agentKey(agent.id), boundRadius(agent) * 2, agent.x, agent.y, view, AGENT_BAND),
   };
 }
 
@@ -164,6 +199,7 @@ export function buildTopology(
   graph: Graph,
   agents: Map<number, Agent>,
   view?: PanView | null,
+  lod: LodSelector | null = null,
 ): NetTopology {
   let centreX = 0;
   let centreY = 0;
@@ -185,13 +221,14 @@ export function buildTopology(
 
   const wires: WireTopo[] = [];
   for (const wire of graph.wires.values()) {
-    const t = wireTopo(wire, agents, centreX, centreY, brightness, view, height);
+    const t = wireTopo(wire, agents, centreX, centreY, brightness, view, height, lod);
     if (t) wires.push(t);
   }
   const agentList: AgentTopo[] = [];
   for (const agent of agents.values()) {
-    agentList.push(agentTopo(agent, graph, centreX, centreY, view, height));
+    agentList.push(agentTopo(agent, graph, centreX, centreY, view, height, lod));
   }
+  lod?.sweep();
   return { wires, agents: agentList, height };
 }
 
