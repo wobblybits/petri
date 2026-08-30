@@ -46,8 +46,23 @@ export function wrapMid(
   return { x: (ax + bx) * 0.5, y: (ay + by) * 0.5 };
 }
 
+const TAU = Math.PI * 2;
+
+/**
+ * Normalize an angle to [-pi, pi).
+ *
+ * This was atan2(sin a, cos a) — three transcendentals to do arithmetic, and
+ * 3.8% of a step at soup scale. Angles here are nearly always already in
+ * range (a heading plus one substep of rotation), so the common case is a
+ * pair of comparisons and no work at all.
+ */
 export function wrapAngle(a: number): number {
-  return Math.atan2(Math.sin(a), Math.cos(a));
+  if (a >= -Math.PI && a < Math.PI) return a;
+  if (!Number.isFinite(a)) return 0;
+  let r = a % TAU;
+  if (r >= Math.PI) r -= TAU;
+  else if (r < -Math.PI) r += TAU;
+  return r;
 }
 
 export function angleDelta(from: number, to: number): number {
