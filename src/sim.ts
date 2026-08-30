@@ -1621,13 +1621,27 @@ export class Sim {
       if (this.time - wire.born < params.wireShrink + 0.2) continue;
       const len = this.graph.curveLength(wire, this.agents, this.w, this.h);
       if (len > params.wireMinRest + 3) continue;
-      A.vx = 0;
-      A.vy = 0;
+      // Cancel only what the two are doing relative to each other. Zeroing
+      // both outright pinned a collapsing pair to the world for the whole
+      // rewrite while the rest of the soup drifted past it.
+      const cx = (A.vx + B.vx) * 0.5;
+      const cy = (A.vy + B.vy) * 0.5;
+      A.vx = cx;
+      A.vy = cy;
+      B.vx = cx;
+      B.vy = cy;
       A.omega = 0;
-      B.vx = 0;
-      B.vy = 0;
       B.omega = 0;
-      const rw = beginRewrite(A, B, this.graph, this.agents, this.w, this.h, params.rewriteDuration);
+      const rw = beginRewrite(
+        A,
+        B,
+        this.graph,
+        this.agents,
+        this.w,
+        this.h,
+        params.rewriteDuration,
+        wire.id,
+      );
       this.rewrites.push(rw);
       audio.push(rewriteAudio(rw, 'begin', wire.id, []), this.graph, this.agents);
       busy.add(A.id);
@@ -1641,7 +1655,11 @@ export class Sim {
       if (advanceRewrite(rw, this.agents, this.w, this.h, dt)) done.push(rw);
     }
     for (const rw of done) {
-      audio.push(rewriteAudio(rw, 'commit', 0, leftoverAgentIds(rw)), this.graph, this.agents);
+      audio.push(
+        rewriteAudio(rw, 'commit', rw.wireId, leftoverAgentIds(rw)),
+        this.graph,
+        this.agents,
+      );
       this.nextId = commitRewrite(
         rw,
         this.agents,

@@ -298,8 +298,18 @@ export function rewriteBeginGain(rule: string): number {
   return 0.58;
 }
 
+/**
+ * How much the ending is worth hearing, by what the rule actually does.
+ *
+ * Commute is the only rule that builds anything — four new agents — and it is
+ * 11% of rewrites, so it can afford to be the event. Era meeting Era is two
+ * terminators cancelling: nothing is created, nothing is reconnected, and it
+ * is 28% of everything that happens. The most common event in the net should
+ * be the least insistent, or a soup turns into a metronome.
+ */
 export function rewriteCommitGain(rule: string): number {
   if (rule === 'commute') return 1.15;
   if (rule === 'erase') return 0.95;
+  if (rule === 'era-era') return 0.4;
   return 0.82;
 }

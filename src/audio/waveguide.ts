@@ -29,6 +29,13 @@ export const WAVE_STRIDE = 2 + WAVE_BINS * 2;
 
 /** Delay length glides toward its target instead of stepping (~5 ms). */
 const LENGTH_GLIDE = 0.004;
+/**
+ * How long a wire keeps ringing after the net has finished with it, while its
+ * terminations open. Long enough to hear the string's own spectrum leave.
+ */
+const RELEASE_SEC = 0.22;
+/** Below this a dropped wire holds nothing worth hearing; take the slot back. */
+const RELEASE_FLOOR = 1e-4;
 /** Below this pickup envelope a wire is zeroed so silence is really silent. */
 const QUIET_FLOOR = 3e-6;
 /**
@@ -205,6 +212,18 @@ export interface WireState {
   /** Cached equal-power pan gains, from setPan. */
   panL: number;
   panR: number;
+  /**
+   * Samples left of the release, or 0 for a wire the net still owns.
+   *
+   * A releasing wire has been cut out of the graph but is still sounding. Its
+   * ends are opening: reflection falls toward nothing, so what is stored in
+   * the delay line radiates instead of circulating. That is what an
+   * annihilation sounds like from outside — not a burst, a Q collapse.
+   */
+  release: number;
+  releaseLen: number;
+  /** True from the moment the net lets go until the slot is reclaimed. */
+  releasing: boolean;
   wireId: number;
   length: number;
   lengthTarget: number;
@@ -355,6 +374,9 @@ function makeWire(): WireState {
     lod: 0,
     panL: Math.SQRT1_2,
     panR: Math.SQRT1_2,
+    release: 0,
+    releaseLen: 1,
+    releasing: false,
     wireId: -1,
     length: 64,
     lengthTarget: 64,
@@ -719,8 +741,6 @@ export class WaveguideNet {
   dryR = 0;
   wetL = 0;
   wetR = 0;
-  snap = 0;
-  snapLp = 0;
   outL = 0;
   outR = 0;
   outDryL = 0;
@@ -1850,7 +1870,11 @@ export class WaveguideNet {
       this.addJunction(msg.agentB, msg.gain * 0.3);
       return;
     }
-    this.snap += msg.gain * 0.5;
+    // The pair is gone. What is left in the string radiates out through the
+    // ends that used to reflect it, which is the whole sound of the event —
+    // pitched, placed, and different every time because it is made of
+    // whatever happened to be ringing.
+    this.openWire(msg.wireId, msg.gain);
     this.addJunction(msg.agentA, msg.gain * 0.25);
     this.addJunction(msg.agentB, msg.gain * 0.25);
     for (let i = 0; i < msg.leftovers.length; i++) {
@@ -1858,9 +1882,66 @@ export class WaveguideNet {
     }
   }
 
+  /**
+   * Cut a wire loose from the net and let its ends open.
+   *
+   * The wire stops taking part in junction scattering — its agents are dying
+   * with it — and its reflection coefficient falls to nothing over
+   * RELEASE_SEC. Energy that was bouncing between two terminations leaves
+   * instead, and the pickup hears it go: the string's own partials, at its
+   * own pitch, from its own position, fading as the Q collapses.
+   */
+  private openWire(wireId: number, gainRaw: number): void {
+    const idx = this.wireById.get(wireId);
+    if (idx === undefined) return;
+    const w = this.wires[idx];
+    if (!w.active) return;
+    const gain = Math.abs(num(gainRaw));
+    // Already letting go — the topology dropped it before the commit message
+    // arrived, which is the usual order. Add the event's own energy to what
+    // is on its way out rather than starting again.
+    if (!w.releasing) this.beginRelease(w);
+    if (gain > 0) {
+      w.quiet = false;
+      w.env = Math.max(w.env, gain * 0.25);
+      // A nudge at the moment of release, so a string that had already gone
+      // quiet still has something to let go of.
+      w.exciteA += gain * 0.12;
+      w.exciteB -= gain * 0.12;
+    }
+  }
+
+  private beginRelease(w: WireState): void {
+    w.release = Math.max(1, Math.round(RELEASE_SEC * SAMPLE_RATE));
+    w.releaseLen = w.release;
+    w.releasing = true;
+    // Detached: nothing scatters into it any more.
+    w.agentA = -1;
+    w.agentB = -1;
+  }
+
+  /**
+   * Give back the slots of wires that have finished letting go. Once a
+   * quantum: retiring rebuilds the live list, which is not per-sample work.
+   */
+  private sweepReleased(): void {
+    let any = false;
+    for (let k = 0; k < this.liveWireN; k++) {
+      const w = this.wires[this.liveWires[k]];
+      if (!w.releasing) continue;
+      if (w.release > 0 && !w.quiet) continue;
+      this.retireWire(w);
+      any = true;
+    }
+    if (any) this.refreshLiveWires();
+  }
+
   private retireWire(w: WireState): void {
     w.active = false;
     w.quiet = true;
+    w.release = 0;
+    w.releaseLen = 1;
+    w.releasing = false;
     w.exciteA = 0;
     w.exciteB = 0;
     w.env = 0;
@@ -1873,6 +1954,17 @@ export class WaveguideNet {
   }
 
   /** Fold leftover ringing into the two agents, then free the slot. */
+  /**
+   * The net has finished with this wire. If it still has anything in it, let
+   * it ring out through opening ends instead of cutting it off.
+   *
+   * This is what makes an annihilation audible at all. The topology rebuild
+   * reaches the worklet before the rewrite's commit message does, so by the
+   * time the event arrives the wire it describes has already been dropped.
+   * Releasing on the drop rather than on the event means the order does not
+   * matter, and it is the better rule anyway: a string that leaves the graph
+   * with energy in it should be heard leaving, whatever removed it.
+   */
   private dumpAndRetire(w: WireState): void {
     // Do not scan the delay line here: wireEnergy walks every sample, and a
     // rewrite that retires several wires would blow the audio callback.
@@ -1885,10 +1977,15 @@ export class WaveguideNet {
         this.savedExcite.set(w.agentB, (this.savedExcite.get(w.agentB) ?? 0) + g);
       }
     }
+    if (w.env > RELEASE_FLOOR && !w.quiet) {
+      this.beginRelease(w);
+      return;
+    }
     this.retireWire(w);
   }
 
   private isStealable(w: WireState): boolean {
+    if (w.releasing) return w.release * 2 <= w.releaseLen;
     return w.quiet || w.env < STEAL_ENV;
   }
 
@@ -1924,12 +2021,12 @@ export class WaveguideNet {
     this.seen.clear();
     for (let i = 0; i < topo.wires.length; i++) this.seen.add(topo.wires[i].id);
     for (const w of this.wires) {
-      if (w.active && !this.seen.has(w.wireId)) this.dumpAndRetire(w);
+      if (w.active && !w.releasing && !this.seen.has(w.wireId)) this.dumpAndRetire(w);
     }
 
     this.chooseKeep(topo);
     for (const w of this.wires) {
-      if (w.active && !this.keep.has(w.wireId)) this.dumpAndRetire(w);
+      if (w.active && !w.releasing && !this.keep.has(w.wireId)) this.dumpAndRetire(w);
     }
 
     for (const a of this.agents) {
@@ -2278,7 +2375,10 @@ export class WaveguideNet {
       this.duck += DUCK_RELEASE * (1 - this.duck);
       if (this.duck > 0.9999) this.duck = 1;
     }
-    if (this.quantumPos === 0) this.capVoices();
+    if (this.quantumPos === 0) {
+      this.capVoices();
+      this.sweepReleased();
+    }
     this.quantumPos = this.quantumPos + 1 === 128 ? 0 : this.quantumPos + 1;
 
     for (let k = 0; k < this.liveWireN; k++) {
@@ -2289,6 +2389,20 @@ export class WaveguideNet {
       if (!Number.isFinite(w.length)) w.length = w.lengthTarget;
       w.inB = this.travel(w, this.read(w.bufFwd, w.pos, w.length), 0);
       w.inA = this.travel(w, this.read(w.bufBack, w.pos, w.length), 1);
+      if (w.releasing) {
+        // Terminations opening. The junction loop will not touch this wire —
+        // it has no agents left — so the reflection it would have written is
+        // this instead, and it is on its way to zero.
+        if (w.release > 0) w.release--;
+        const u = w.release / w.releaseLen;
+        // Squared: an end that is halfway open has already lost most of what
+        // it used to send back, and a linear ramp reads as a fade rather than
+        // as something letting go.
+        const r = u * u;
+        w.outA = w.inA * r;
+        w.outB = w.inB * r;
+        continue;
+      }
       w.outA = w.inA;
       w.outB = w.inB;
     }
@@ -2414,15 +2528,6 @@ export class WaveguideNet {
         continue;
       }
       this.place(p, w.pan, w);
-    }
-
-    // Rewrite-commit "snap": a short bandlimited puff, not a DC thump.
-    if (this.snap !== 0 || this.snapLp !== 0) {
-      const noise = (Math.random() * 2 - 1) * this.snap;
-      this.snapLp = flush(this.snapLp + 0.35 * (noise - this.snapLp));
-      this.dryL += this.snapLp;
-      this.dryR += this.snapLp;
-      this.snap = flush(this.snap * 0.9992);
     }
 
     let dL = this.dryL - this.dcDryX + 0.9995 * this.dcDryY;

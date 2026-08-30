@@ -1204,3 +1204,74 @@ describe('loudness ordering', () => {
     expect(collision).toBeGreaterThan(bow);
   });
 });
+
+describe('annihilation release', () => {
+  /** Latch a wire, ring it, then take the whole net away. */
+  function annihilate(length: number, gain = 0.9): WaveguideNet {
+    const net = new WaveguideNet();
+    net.handle({ type: 'latch', topo: sampleTopo(1, 1, 2, length), wireId: 1, gain: 0.6 });
+    for (let i = 0; i < 2000; i++) net.tick();
+    net.handle({ type: 'topology', topo: { wires: [], agents: [] } });
+    net.handle({
+      type: 'rewrite', phase: 1, wireId: 1, agentA: 1, agentB: 2, leftovers: [], gain,
+    });
+    return net;
+  }
+
+  it('sounds at the pitch of the string that died, not as noise', () => {
+    // The old commit was filtered white noise, which has no period at all.
+    // A release is the string letting go, so it still has the string's own.
+    const net = annihilate(120);
+    const out = collect(net, 3000);
+    const lag = autocorrLag(out, 60, 400);
+    expect(Math.abs(lag - 240)).toBeLessThan(24);
+  });
+
+  it('takes its pitch from the wire, so different wires end differently', () => {
+    const shortLag = autocorrLag(collect(annihilate(80), 3000), 40, 400);
+    const longLag = autocorrLag(collect(annihilate(200), 3000), 40, 500);
+    expect(longLag).toBeGreaterThan(shortLag * 1.8);
+  });
+
+  it('decays away rather than ringing on, and gives the slot back', () => {
+    const net = annihilate(120);
+    expect(peak(collect(net, 2000))).toBeGreaterThan(0.01);
+    // Run past RELEASE_SEC, then listen to what is left. The reverb has its
+    // own tail, so this asks whether the source stopped, not the room.
+    collect(net, 30000);
+    expect(peak(collect(net, 4000))).toBeLessThan(1e-3);
+    for (const w of net.wires) expect(w.active).toBe(false);
+  });
+
+  it('lets a wire go even when nothing announces it', () => {
+    // No rewrite message at all: the topology just drops a ringing wire. It
+    // should still be heard leaving instead of being cut off mid-ring.
+    const net = new WaveguideNet();
+    net.handle({ type: 'latch', topo: sampleTopo(1, 1, 2, 120), wireId: 1, gain: 0.6 });
+    for (let i = 0; i < 2000; i++) net.tick();
+    net.handle({ type: 'topology', topo: { wires: [], agents: [] } });
+    expect(peak(collect(net, 1500))).toBeGreaterThan(0.005);
+  });
+
+  it('is placed where it happened, not dead centre', () => {
+    const make = (pan: number) => {
+      const topo = sampleTopo(1, 1, 2, 120);
+      topo.wires[0].pan = pan;
+      const net = new WaveguideNet();
+      net.handle({ type: 'latch', topo, wireId: 1, gain: 0.6 });
+      for (let i = 0; i < 2000; i++) net.tick();
+      net.handle({ type: 'topology', topo: { wires: [], agents: [] } });
+      let l = 0;
+      let r = 0;
+      for (let i = 0; i < 3000; i++) {
+        net.tick();
+        l = Math.max(l, Math.abs(net.outDryL));
+        r = Math.max(r, Math.abs(net.outDryR));
+      }
+      return { l, r };
+    };
+    const left = make(-1);
+    expect(left.l).toBeGreaterThan(0);
+    expect(left.r).toBeLessThan(left.l * 0.1);
+  });
+});

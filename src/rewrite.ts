@@ -47,6 +47,11 @@ export interface Rewrite {
   duration: number;
   a: number;
   b: number;
+  /** The principal wire being consumed. Needed at commit to release it. */
+  wireId: number;
+  /** Drift the pair shared when it began, so a collapse is not a dead stop. */
+  vx: number;
+  vy: number;
   eraId: number;
   binaryId: number;
   conId: number;
@@ -313,6 +318,7 @@ export function beginRewrite(
   w: number,
   h: number,
   duration: number,
+  wireId = -1,
 ): Rewrite {
   const rule = detectRule(agentA.kind, agentB.kind);
   const dying = new Set([agentA.id, agentB.id]);
@@ -330,6 +336,13 @@ export function beginRewrite(
     duration,
     a: agentA.id,
     b: agentB.id,
+    wireId,
+    // The pair keeps whatever the two bodies had in common. Only the closing
+    // half of their motion is the rewrite's business; the drift belongs to
+    // the soup and killing it pins a collapsing pair to the world while
+    // everything around it keeps moving.
+    vx: (agentA.vx + agentB.vx) * 0.5,
+    vy: (agentA.vy + agentB.vy) * 0.5,
     eraId,
     binaryId,
     conId,
