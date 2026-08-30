@@ -23,6 +23,7 @@ import {
   advanceRewrite,
   beginRewrite,
   commitRewrite,
+  PULL_END,
   type Rewrite,
 } from './rewrite.ts';
 import { audio } from './audio/engine.ts';
@@ -1649,10 +1650,104 @@ export class Sim {
     }
   }
 
+  /**
+   * Draw a collapsing wire's rope onto the chord between its two bodies.
+   *
+   * The bodies are moved kinematically during a rewrite, so the solver never
+   * sees the motion that ought to be dragging the rope along with them. Left
+   * to itself the rope is whipped by a shrinking rest length against nodes
+   * that are still where they were, and its arc length climbs to 80 px
+   * between two bodies touching each other — a knot, and a wire that sounds
+   * lower the closer they get.
+   */
+  private reelRope(wire: Wire, pull: number): void {
+    const n = wire.nodes.length;
+    if (n === 0 || pull <= 0) return;
+    const A = this.agents.get(wire.a.id);
+    const B = this.agents.get(wire.b.id);
+    if (!A || !B) return;
+    const sA = stemWorldInto(A, wire.a.slot, this.w, this.h, this.tmpStemA);
+    const sB = stemWorldInto(B, wire.b.slot, this.w, this.h, this.tmpStemB);
+    for (let i = 0; i < n; i++) {
+      const node = wire.nodes[i];
+      const t = (i + 1) / (n + 1);
+      const tx = sA.x + (sB.x - sA.x) * t;
+      const ty = sA.y + (sB.y - sA.y) * t;
+      node.x += (tx - node.x) * pull;
+      node.y += (ty - node.y) * pull;
+      // Reeled, not flung: leaving the velocity behind hands the solver a
+      // huge correction on the next substep.
+      node.vx *= 1 - pull;
+      node.vy *= 1 - pull;
+      node.prevX = node.x;
+      node.prevY = node.y;
+    }
+  }
+
+  /**
+   * The knock of two bodies meeting at the end of a rewrite's pull.
+   *
+   * The pair is locked and moved kinematically, so the ordinary contact path
+   * never sees them touch — but they visibly do, and an annihilation that
+   * ends in silence at the moment of impact reads as a glitch. The closing
+   * speed is the one the animation actually produces: the gap closes as
+   * gap0*(1 - (t/PULL_END)^2), so at contact it is shutting at
+   * 2*gap0/(PULL_END*duration).
+   */
+  private emitRewriteContact(rw: Rewrite): void {
+    const A = this.agents.get(rw.a);
+    const B = this.agents.get(rw.b);
+    if (!A || !B) return;
+    const gap0 = Math.hypot(rw.bx - rw.ax, rw.by - rw.ay);
+    if (gap0 < 1e-3) return;
+    const nx = (rw.bx - rw.ax) / gap0;
+    const ny = (rw.by - rw.ay) / gap0;
+    const vN = (2 * gap0) / Math.max(0.05, PULL_END * rw.duration);
+    const mA = Math.max(0.08, A.mass);
+    const mB = Math.max(0.08, B.mass);
+    audio.push(
+      {
+        type: 'collision',
+        agentA: A.id,
+        agentB: B.id,
+        kindA: A.kind,
+        kindB: B.kind,
+        impact: vN,
+        overlap: boundRadius(A) + boundRadius(B),
+        // Head-on and central: no lever arm, so the reduced mass is the whole
+        // of the generalized effective mass.
+        effMass: (mA * mB) / (mA + mB),
+        vN,
+        vT: 0,
+        nx,
+        ny,
+        headingA: A.heading,
+        headingB: B.heading,
+        spin: 0,
+      },
+      this.graph,
+      this.agents,
+    );
+  }
+
   private tickRewrites(params: Params, dt: number): void {
     const done: Rewrite[] = [];
     for (const rw of this.rewrites) {
       if (advanceRewrite(rw, this.agents, this.w, this.h, dt)) done.push(rw);
+      // The wire is what pulls them together, so shorten it in step with the
+      // pull. It retracts into the pair and is gone by the time they touch,
+      // and because it stays taut on the way its pitch rises instead of
+      // sagging the way a slackening rope's does.
+      if (rw.wireId < 0) continue;
+      const wire = this.graph.wires.get(rw.wireId);
+      if (!wire) continue;
+      const pull = clamp(rw.t / PULL_END, 0, 1);
+      wire.collapse = pull;
+      this.reelRope(wire, pull);
+      if (pull >= 1 && !rw.struck) {
+        rw.struck = true;
+        this.emitRewriteContact(rw);
+      }
     }
     for (const rw of done) {
       audio.push(

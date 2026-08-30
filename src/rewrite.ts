@@ -52,6 +52,8 @@ export interface Rewrite {
   /** Drift the pair shared when it began, so a collapse is not a dead stop. */
   vx: number;
   vy: number;
+  /** Set once the bodies have met, so the contact only sounds on the onset. */
+  struck: boolean;
   eraId: number;
   binaryId: number;
   conId: number;
@@ -121,6 +123,20 @@ function stripAgents(net: NetSnapshot, dying: Set<number>): NetSnapshot {
     agents: net.agents.filter((a) => !dying.has(a.id)),
     wires: net.wires.filter((w) => !dying.has(w.a.id) && !dying.has(w.b.id)),
   };
+}
+
+/** The bodies have met by here; the wire is spent. */
+export const PULL_END = 0.55;
+/** Nothing shrinks or fades before this — the collapse is its own beat. */
+export const COLLAPSE_START = 0.65;
+
+/**
+ * Accelerating ease. A wire pulling two bodies together is releasing tension,
+ * so they should arrive faster than they set off; easeInOut decelerates into
+ * the meeting, which reads as a gentle docking rather than a snap shut.
+ */
+function easeIn(t: number): number {
+  return t * t;
 }
 
 export function detectRule(kindA: AgentKind, kindB: AgentKind): Rule {
@@ -343,6 +359,7 @@ export function beginRewrite(
     // everything around it keeps moving.
     vx: (agentA.vx + agentB.vx) * 0.5,
     vy: (agentA.vy + agentB.vy) * 0.5,
+    struck: false,
     eraId,
     binaryId,
     conId,
@@ -384,14 +401,24 @@ export function advanceRewrite(
   const toA = wrapDeltaVec(rw.bx, rw.by, rw.ax, rw.ay, w, h);
 
   if (rw.rule === 'era-era' || rw.rule === 'annihilate-con' || rw.rule === 'annihilate-dup') {
-    A.x = wrap(rw.ax + toB.x * e * 0.5, w);
-    A.y = wrap(rw.ay + toB.y * e * 0.5, h);
-    B.x = wrap(rw.bx + toA.x * e * 0.5, w);
-    B.y = wrap(rw.by + toA.y * e * 0.5, h);
-    A.scale = B.scale = lerp(1, 0.15, e);
-    A.alpha = B.alpha = 1 - e;
-    A.heading = rw.ah + angleDelta(rw.ah, Math.atan2(toB.y, toB.x)) * e;
-    B.heading = rw.bh + angleDelta(rw.bh, Math.atan2(toA.y, toA.x)) * e;
+    // Three beats, not one blur. The wire hauls them together, they touch,
+    // and only then does the pair collapse. Running convergence, shrink and
+    // fade on one curve meant they were half transparent before anything had
+    // happened, and nothing read as causing anything else.
+    const pull = easeIn(clamp(t / PULL_END, 0, 1));
+    const collapse = easeInOut(clamp((t - COLLAPSE_START) / (1 - COLLAPSE_START), 0, 1));
+    // The drift the pair shared is still theirs; only the closing half of the
+    // motion belongs to the rewrite.
+    const dx = rw.vx * rw.t * rw.duration;
+    const dy = rw.vy * rw.t * rw.duration;
+    A.x = wrap(rw.ax + dx + toB.x * pull * 0.5, w);
+    A.y = wrap(rw.ay + dy + toB.y * pull * 0.5, h);
+    B.x = wrap(rw.bx + dx + toA.x * pull * 0.5, w);
+    B.y = wrap(rw.by + dy + toA.y * pull * 0.5, h);
+    A.scale = B.scale = lerp(1, 0.1, collapse);
+    A.alpha = B.alpha = 1 - collapse;
+    A.heading = rw.ah + angleDelta(rw.ah, Math.atan2(toB.y, toB.x)) * pull;
+    B.heading = rw.bh + angleDelta(rw.bh, Math.atan2(toA.y, toA.x)) * pull;
     rw.ghosts = [];
   } else if (rw.rule === 'erase') {
     const era = A.kind === 'era' ? A : B;

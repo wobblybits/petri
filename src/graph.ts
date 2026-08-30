@@ -29,6 +29,23 @@ const stemScratchB = { x: 0, y: 0 };
 
 export interface Wire {
   id: number;
+  /**
+   * How far through a rewrite's pull this wire is, 0..1.
+   *
+   * A rewrite hauls its two bodies together, and it is the wire that does the
+   * hauling — so the wire has to shorten, not go slack. Left alone the rope
+   * keeps its material length while the chord closes, which bows it out and
+   * sags its pitch; driving the rest length down instead keeps it taut, and
+   * it retracts into the pair as they meet.
+   */
+  collapse: number;
+  /**
+   * Shortest sounding length this wire will report, half its uncollapsed
+   * rest. A rope squeezed below half its rest has buckled rather than
+   * tightened, and letting the pitch keep climbing turns a wire retracting
+   * into a rewrite into a three-octave squeal.
+   */
+  pitchFloor: number;
   a: PortRef;
   b: PortRef;
   latchLen: number;
@@ -154,7 +171,7 @@ export class Graph {
     if (!this.isFree(a) || !this.isFree(b)) return null;
     const id = this.nextWireId++;
     const len = Math.max(1, latchLen);
-    const wire: Wire = { id, a, b, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [] };
+    const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [] };
     this.wires.set(id, wire);
     this.portWire.set(portKey(a), id);
     this.portWire.set(portKey(b), id);
@@ -486,6 +503,12 @@ export class Graph {
       const rate = 0.55 + (wire.id % 7) * 0.11;
       const breathe = 1 + params.wireBreathe * Math.sin(time * rate + phase);
       wire.rest = Math.max(4, base * breathe);
+      wire.pitchFloor = wire.rest * 0.5;
+      // Applied under the floor on purpose: a collapsing wire has to be able
+      // to reach nothing, and 4 px is still a visible thread.
+      if (wire.collapse > 0) {
+        wire.rest = Math.max(0.5, wire.rest * (1 - wire.collapse));
+      }
       reduceChain(wire.nodes, wire.rest);
     }
   }

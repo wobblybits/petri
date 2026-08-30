@@ -1,7 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { bezierLength } from './curve.ts';
 import { portLocal, stemRoot } from './agents.ts';
-import { applyRewrite, leftoverOf, portsConnected, type NetSnapshot } from './rewrite.ts';
+import {
+  applyRewrite,
+  leftoverOf,
+  portsConnected,
+  COLLAPSE_START,
+  PULL_END,
+  type NetSnapshot,
+} from './rewrite.ts';
+import { Sim } from './sim.ts';
+import { defaultParams, type Params } from './params.ts';
+import { buildTopology } from './audio/topology.ts';
+import { audio } from './audio/engine.ts';
+import type { WorkletInMessage } from './audio/types.ts';
 import { wrap, wrapDelta, wrapDeltaVec, wrapDist, wrapMid, nematicDelta } from './wrap.ts';
 
 describe('euclidean vectors', () => {
@@ -228,5 +240,177 @@ describe('Lafont reconnect', () => {
       { a: { id: 1, slot: 'l' as const }, b: { id: 2, slot: 'r' as const } },
     ];
     expect(leftoverOf(wires, 1, 'l', new Set([1, 2]))).toBeNull();
+  });
+});
+
+describe('annihilation staging', () => {
+  function annihilating(): { sim: Sim; params: Params; a: number; b: number } {
+    const sim = new Sim(800, 600);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    const a = sim.spawn('era', 380, 300, 0, params, true)!;
+    const b = sim.spawn('era', 460, 300, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    for (let f = 0; f < 900 && sim.rewrites.length === 0; f++) sim.step(1 / 60, params);
+    expect(sim.rewrites.length).toBe(1);
+    return { sim, params, a: a.id, b: b.id };
+  }
+
+  it('holds full size and opacity until the bodies have met', () => {
+    const { sim, params, a } = annihilating();
+    let sawPull = false;
+    for (let f = 0; f < 200; f++) {
+      const rw = sim.rewrites[0];
+      if (!rw) break;
+      const A = sim.agents.get(a);
+      if (!A) break;
+      if (rw.t < COLLAPSE_START) {
+        // Nothing has happened yet, so nothing should look like it has.
+        expect(A.scale).toBe(1);
+        expect(A.alpha).toBe(1);
+        if (rw.t > 0.2) sawPull = true;
+      }
+      sim.step(1 / 60, params);
+    }
+    expect(sawPull).toBe(true);
+  });
+
+  it('closes the gap by the end of the pull, and only then collapses', () => {
+    const { sim, params, a, b } = annihilating();
+    let gapAtPull = Infinity;
+    let scaleAtEnd = 1;
+    for (let f = 0; f < 200; f++) {
+      const rw = sim.rewrites[0];
+      if (!rw) break;
+      const A = sim.agents.get(a);
+      const B = sim.agents.get(b);
+      if (A && B && rw.t >= PULL_END && gapAtPull === Infinity) {
+        gapAtPull = Math.hypot(A.x - B.x, A.y - B.y);
+      }
+      if (A && rw.t > 0.95) scaleAtEnd = A.scale;
+      sim.step(1 / 60, params);
+    }
+    expect(gapAtPull).toBeLessThan(2);
+    expect(scaleAtEnd).toBeLessThan(0.2);
+  });
+
+  it('keeps the rope on the chord instead of whipping it', () => {
+    // The bodies move kinematically, so the solver never sees the motion that
+    // should drag the rope along. Unreeled, its arc length climbed past 80 px
+    // between two bodies already touching.
+    const { sim, params } = annihilating();
+    let worst = 0;
+    for (let f = 0; f < 200; f++) {
+      const rw = sim.rewrites[0];
+      if (!rw) break;
+      const wire = sim.graph.wires.get(rw.wireId);
+      if (wire) worst = Math.max(worst, wire.lastLen);
+      sim.step(1 / 60, params);
+    }
+    expect(worst).toBeLessThan(45);
+  });
+
+  it('lets the wire tighten and rise, but not past an octave', () => {
+    const { sim, params } = annihilating();
+    const pitches: number[] = [];
+    for (let f = 0; f < 200; f++) {
+      const rw = sim.rewrites[0];
+      if (!rw) break;
+      const w = buildTopology(sim.graph, sim.agents, null).wires[0];
+      if (w) pitches.push(48000 / (2 * w.length));
+      sim.step(1 / 60, params);
+    }
+    const first = pitches[0];
+    const top = Math.max(...pitches);
+    expect(top).toBeGreaterThan(first * 1.5);
+    expect(top).toBeLessThan(first * 2.3);
+  });
+
+  it('carries the pair along with the soup instead of pinning it', () => {
+    const { sim, params, a, b } = annihilating();
+    const A0 = sim.agents.get(a)!;
+    const B0 = sim.agents.get(b)!;
+    const rw = sim.rewrites[0];
+    // Give the pair a shared drift the way the flock would.
+    A0.vx = B0.vx = 40;
+    A0.vy = B0.vy = 0;
+    rw.vx = 40;
+    rw.vy = 0;
+    const startMidX = (A0.x + B0.x) * 0.5;
+    for (let f = 0; f < 20; f++) sim.step(1 / 60, params);
+    const A = sim.agents.get(a);
+    const B = sim.agents.get(b);
+    if (!A || !B) return;
+    expect((A.x + B.x) * 0.5).toBeGreaterThan(startMidX + 4);
+  });
+});
+
+describe('annihilation contact', () => {
+  /** The sim posts to the module singleton, not to an engine you construct. */
+  function capture(run: (sim: Sim, params: Params) => void): WorkletInMessage[] {
+    const posted: WorkletInMessage[] = [];
+    const prevPost = audio.onPost;
+    audio.armWithoutAudio();
+    audio.onPost = (m) => posted.push(m);
+    try {
+      const sim = new Sim(800, 600);
+      const params = defaultParams();
+      params.spawnInterval = 0;
+      run(sim, params);
+    } finally {
+      audio.onPost = prevPost;
+    }
+    return posted;
+  }
+
+  it('knocks when the two bodies meet', () => {
+    const posted = capture((sim, params) => {
+      const a = sim.spawn('era', 380, 300, 0, params, true)!;
+      const b = sim.spawn('era', 460, 300, Math.PI, params, true)!;
+      sim.wire(a.id, 'p', b.id, 'p', params);
+      for (let f = 0; f < 900; f++) {
+        sim.step(1 / 60, params);
+        audio.frame(sim.graph, sim.agents, 1 / 60, null);
+      }
+    });
+    const strikes = posted.filter((m) => m.type === 'strike');
+    // One per body. The pair is locked and moved kinematically, so the
+    // ordinary contact path never sees them touch — this is the only thing
+    // that makes the meeting audible.
+    expect(strikes.length).toBeGreaterThanOrEqual(2);
+    for (const s of strikes) {
+      expect(s.type === 'strike' && s.peak).toBeGreaterThan(0);
+      expect(s.type === 'strike' && s.peak).toBeLessThanOrEqual(6);
+    }
+  });
+
+  it('fires once, on the onset, not every frame after contact', () => {
+    // Count only strikes posted while a rewrite is running, so the ordinary
+    // collision the pair makes on its way to latching is not mistaken for it.
+    let duringRewrite = 0;
+    const prevPost = audio.onPost;
+    audio.armWithoutAudio();
+    const sim = new Sim(800, 600);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    let live = false;
+    audio.onPost = (m) => {
+      if (live && m.type === 'strike') duringRewrite++;
+    };
+    try {
+      const a = sim.spawn('era', 380, 300, 0, params, true)!;
+      const b = sim.spawn('era', 460, 300, Math.PI, params, true)!;
+      sim.wire(a.id, 'p', b.id, 'p', params);
+      for (let f = 0; f < 900; f++) {
+        sim.step(1 / 60, params);
+        live = sim.rewrites.length > 0;
+        audio.frame(sim.graph, sim.agents, 1 / 60, null);
+      }
+    } finally {
+      audio.onPost = prevPost;
+    }
+    // One per body, on the frame the gap closes. Not one a frame for the rest
+    // of the collapse.
+    expect(duringRewrite).toBe(2);
   });
 });

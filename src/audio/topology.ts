@@ -103,7 +103,7 @@ function wireTopo(
   // Travel time along the live rope, not the rest cubic. A body sitting on
   // the wire lengthens the path; a yank also raises tautness. Using the cubic
   // made collisions inaudible on an already-ringing string.
-  const path = Math.max(1, wire.lastLen > 1 ? wire.lastLen : wire.ropeLen);
+  const path = Math.max(1, wire.pitchFloor, wire.lastLen > 1 ? wire.lastLen : wire.ropeLen);
   const length = delaySamplesForPath(path, taut, voice.disp);
   const bend = bendLoss(wire.nodes.length, wire.ropeLen, wire.rest);
   // Slack rope and a busy net both darken the wire; taut ropes brighten;
