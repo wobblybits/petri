@@ -133,6 +133,9 @@ static float cs_a[MAX_BODIES];
 static uint8_t cs_ok[MAX_BODIES];
 static uint8_t pose_ok[MAX_BODIES];
 static uint8_t wdone[MAX_WIRES];
+static double tri_x[MAX_BODIES * 3];
+static double tri_y[MAX_BODIES * 3];
+static uint8_t tri_ok[MAX_BODIES];
 
 static float wrap_angle(float a) {
   if (a >= -PI && a < PI) return a;
@@ -157,6 +160,7 @@ static void ensure_cs(int i) {
 static void invalidate_pose(int i) {
   cs_ok[i] = 0;
   pose_ok[i] = 0;
+  tri_ok[i] = 0;
 }
 
 static int collect_pairs(int n, float cell_size) {
@@ -842,6 +846,16 @@ static void finalize_nodes(int n_wires, float h, float rope_keep) {
 }
 
 static void tri_world_d(int i, double vx[3], double vy[3]) {
+  int t = i * 3;
+  if (tri_ok[i]) {
+    vx[0] = tri_x[t];
+    vy[0] = tri_y[t];
+    vx[1] = tri_x[t + 1];
+    vy[1] = tri_y[t + 1];
+    vx[2] = tri_x[t + 2];
+    vy[2] = tri_y[t + 2];
+    return;
+  }
   double sc = (double)scale[i];
   double s = 16.0 * sc;
   double lx0 = s * 1.05, ly0 = 0.0;
@@ -857,6 +871,13 @@ static void tri_world_d(int i, double vx[3], double vy[3]) {
   vy[1] = y + lx1 * sn + ly1 * c;
   vx[2] = x + lx2 * c - ly2 * sn;
   vy[2] = y + lx2 * sn + ly2 * c;
+  tri_x[t] = vx[0];
+  tri_y[t] = vy[0];
+  tri_x[t + 1] = vx[1];
+  tri_y[t + 1] = vy[1];
+  tri_x[t + 2] = vx[2];
+  tri_y[t + 2] = vy[2];
+  tri_ok[i] = 1;
 }
 
 static void add_poly_axes_d(const double *vx, const double *vy, int n, double *ax, double *ay, int *nax) {
@@ -1239,6 +1260,7 @@ static int near_contacts(int n, float h, int reset_hits, int rebuild_pairs) {
   if (n <= 0 || h <= 0.f) return 0;
   if (n > MAX_BODIES) n = MAX_BODIES;
   memset(delta, 0, (size_t)n * 2 * sizeof(float));
+  memset(tri_ok, 0, (size_t)n);
   int np = g_pairs;
   if (rebuild_pairs || np <= 0) {
     float maxr = 0.f;
