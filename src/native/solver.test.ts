@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { createAgent, momentOfInertia, boundRadius, type Agent } from '../agents.ts';
-import { solveContact, solveWire, solveWireSpan, type ChainNode } from '../chain.ts';
+import { solveContact, solveWire, solveWireSpan, contactMechanics, type ChainNode } from '../chain.ts';
 import { queryHit, SLOP } from '../collide.ts';
 import { Fields } from '../fields.ts';
 import { FAR, FAR_STRIDE, FAR_SUBSTEPS, stepFarKernel } from '../gpu/far-kernel.ts';
 import { defaultParams } from '../params.ts';
 import { wrapAngle } from '../wrap.ts';
 import {
+  HIT,
   KIND_CON,
   KIND_ERA,
   NativeSolver,
@@ -271,16 +272,39 @@ describe('native WASM solver', () => {
     expect(np).toBeGreaterThan(0);
     expect(native.hitCount()).toBeGreaterThan(0);
     const H = native.hits!;
-    expect(Math.abs(H[2] - hit!.nx)).toBeLessThan(2e-3);
-    expect(Math.abs(H[3] - hit!.ny)).toBeLessThan(2e-3);
-    expect(Math.abs(H[4] - hit!.overlap)).toBeLessThan(2e-3);
-    expect(Math.abs(H[5] - hit!.px)).toBeLessThan(0.05);
-    expect(Math.abs(H[6] - hit!.py)).toBeLessThan(0.05);
+    expect(Math.abs(H[HIT.overlap] - hit!.overlap)).toBeLessThan(2e-3);
+    expect(Math.abs(H[HIT.nx] - hit!.nx)).toBeLessThan(2e-3);
+    expect(Math.abs(H[HIT.ny] - hit!.ny)).toBeLessThan(2e-3);
+    expect(Math.abs(H[HIT.px] - hit!.px)).toBeLessThan(0.05);
+    expect(Math.abs(H[HIT.py] - hit!.py)).toBeLessThan(0.05);
     expect(Math.abs(a.x - aTs.x)).toBeLessThan(1e-3);
     expect(Math.abs(a.y - aTs.y)).toBeLessThan(1e-3);
     expect(Math.abs(b.x - bTs.x)).toBeLessThan(1e-3);
     expect(Math.abs(wrapAngle(a.heading - aTs.heading))).toBeLessThan(1e-3);
     expect(Math.abs(wrapAngle(b.heading - bTs.heading))).toBeLessThan(1e-3);
+  });
+
+  it('snapshots Hertzian kinematics at the SAT hit, not after the impulse', async () => {
+    const native = new NativeSolver();
+    expect(await native.init(), native.lastError).toBe(true);
+    const params = defaultParams();
+    const a = createAgent(1, 'era', 0, 0, 0, params);
+    const b = createAgent(2, 'era', 4, 0, Math.PI, params);
+    a.vx = 40;
+    b.vx = -25;
+    a.omega = 1.2;
+    b.omega = -0.8;
+    packAgent(native, 0, a, true);
+    packAgent(native, 1, b, true);
+    const hit = queryHit(a, b, 240, 160);
+    expect(hit).not.toBeNull();
+    const m = contactMechanics(a, b, hit!);
+    native.nearContacts(2, 1 / 60 / 8);
+    expect(native.hitCount()).toBeGreaterThan(0);
+    const H = native.hits!;
+    expect(Math.abs(H[HIT.vN] - m.vN)).toBeLessThan(2e-3);
+    expect(Math.abs(H[HIT.vT] - m.vT)).toBeLessThan(2e-3);
+    expect(Math.abs(H[HIT.effMass] - m.effMass)).toBeLessThan(2e-3);
   });
 
   it('SAT-separates overlapping eras in one full NEAR step', async () => {

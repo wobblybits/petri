@@ -82,7 +82,7 @@
 #define GRAB_STEP 1.5f
 #define PI 3.14159265f
 #define TAU 6.2831853f
-#define HIT_STRIDE 7
+#define HIT_STRIDE 10
 #define MAX_HITS 8192
 
 static float bodies[MAX_BODIES * STRIDE];
@@ -759,6 +759,19 @@ static int sat_hit(int i, int j, float *nx_out, float *ny_out, float *o_out, flo
 
 static void record_hit(int i, int j, float nx, float ny, float overlap, float px, float py) {
   if (g_hits >= MAX_HITS) return;
+  float *pi = bodies + i * STRIDE;
+  float *pj = bodies + j * STRIDE;
+  float rAx = px - pi[FAR_X], rAy = py - pi[FAR_Y];
+  float rBx = px - pj[FAR_X], rBy = py - pj[FAR_Y];
+  float wA = gen_inv(i, rAx, rAy, nx, ny);
+  float wB = gen_inv(j, rBx, rBy, nx, ny);
+  float eff = 1.f / fmaxf(1e-9f, wA + wB);
+  float pax = pi[FAR_VX] - pi[FAR_OMEGA] * rAy;
+  float pay = pi[FAR_VY] + pi[FAR_OMEGA] * rAx;
+  float pbx = pj[FAR_VX] - pj[FAR_OMEGA] * rBy;
+  float pby = pj[FAR_VY] + pj[FAR_OMEGA] * rBx;
+  float rvx = pax - pbx;
+  float rvy = pay - pby;
   float *h = hits + g_hits * HIT_STRIDE;
   h[0] = (float)i;
   h[1] = (float)j;
@@ -767,6 +780,9 @@ static void record_hit(int i, int j, float nx, float ny, float overlap, float px
   h[4] = overlap;
   h[5] = px;
   h[6] = py;
+  h[7] = -(rvx * nx + rvy * ny);
+  h[8] = rvx * -ny + rvy * nx;
+  h[9] = eff;
   g_hits++;
 }
 

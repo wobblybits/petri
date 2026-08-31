@@ -4,7 +4,19 @@ import type { Fields } from '../fields.ts';
 
 export const WIRE_NEAR_STRIDE = 12;
 export const NODE_STRIDE = 8;
-export const HIT_STRIDE = 7;
+export const HIT_STRIDE = 10;
+export const HIT = {
+  a: 0,
+  b: 1,
+  nx: 2,
+  ny: 3,
+  overlap: 4,
+  px: 5,
+  py: 6,
+  vN: 7,
+  vT: 8,
+  effMass: 9,
+} as const;
 export const WF_FULL = 1;
 export const WF_SKIP = 2;
 export const WF_SHAPE = 4;

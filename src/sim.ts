@@ -39,6 +39,7 @@ import {
   nativeSolver,
   ND,
   NODE_STRIDE,
+  HIT,
   HIT_STRIDE,
   WF_FULL,
   WF_HOLD,
@@ -1390,7 +1391,7 @@ export class Sim {
     return true;
   }
 
-  /** Hertzian from the last WASM SAT pass. FAR-FAR discs stay silent. */
+  /** Hertzian from WASM SAT, using kinematics snapshotted at each hit. */
   private emitNativeHits(list: Agent[]): void {
     const count = nativeSolver.hitCount();
     const hits = nativeSolver.hits;
@@ -1398,20 +1399,24 @@ export class Sim {
     const n = list.length;
     for (let k = 0; k < count; k++) {
       const o = k * HIT_STRIDE;
-      const i = hits[o] | 0;
-      const j = hits[o + 1] | 0;
+      const i = hits[o + HIT.a] | 0;
+      const j = hits[o + HIT.b] | 0;
       if (i < 0 || j < 0 || i >= n || j >= n) continue;
       const A = list[i];
       const B = list[j];
       if (!A || !B) continue;
       const hit: Hit = {
-        nx: hits[o + 2],
-        ny: hits[o + 3],
-        overlap: hits[o + 4],
-        px: hits[o + 5],
-        py: hits[o + 6],
+        nx: hits[o + HIT.nx],
+        ny: hits[o + HIT.ny],
+        overlap: hits[o + HIT.overlap],
+        px: hits[o + HIT.px],
+        py: hits[o + HIT.py],
       };
-      this.emitCollision(A, B, hit);
+      this.emitCollision(A, B, hit, {
+        effMass: hits[o + HIT.effMass],
+        vN: hits[o + HIT.vN],
+        vT: hits[o + HIT.vT],
+      });
     }
   }
 
@@ -1554,9 +1559,14 @@ export class Sim {
   /** Fraction of contact momentum radiated as sound instead of bounce. */
   private static readonly RADIATION = 0.035;
 
-  private emitCollision(A: Agent, B: Agent, hit: Hit): void {
+  private emitCollision(
+    A: Agent,
+    B: Agent,
+    hit: Hit,
+    mechanics?: { effMass: number; vN: number; vT: number },
+  ): void {
     const key = A.id < B.id ? `${A.id}:${B.id}` : `${B.id}:${A.id}`;
-    const m = contactMechanics(A, B, hit);
+    const m = mechanics ?? contactMechanics(A, B, hit);
     this.noteContact(A, B, hit.overlap, m.vT);
 
     if (this.contactAudioNow.has(key)) return;
