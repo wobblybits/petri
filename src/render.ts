@@ -149,7 +149,7 @@ function drawWires(ctx: CanvasRenderingContext2D, sim: Sim, waves: WaveSnapshot 
     }
     ctx.beginPath();
     const rec = waves?.index.get(wire.id);
-    const rope = sim.wireDetailed(wire);
+    const rope = sim.wireSimulatesRope(wire);
     if (!(rec !== undefined && strokeOffsetWire(ctx, A, B, wire, w, h, waves!.packed, rec, stemA, stemB, rope))) {
       strokeWire(ctx, A, B, wire, w, h, stemA, stemB, rope);
     }

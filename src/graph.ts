@@ -58,6 +58,41 @@ export interface Wire {
   shape: Vec2[];
   born: number;
   nodes: ChainNode[];
+  /**
+   * Solver path last applied. Young / slack wires stay `'full'`; a taut
+   * latch drops shape, then the rope, and comes back if it goes slack.
+   */
+  ropePath: RopePath;
+}
+
+export type RopePath = 'full' | 'no-shape' | 'span';
+
+/**
+ * Extra lastLen/rest a coarsened wire may grow before the rope comes back.
+ * The taut threshold itself is `params.wireTaut`.
+ */
+export const ROPE_TAUT_HYSTERESIS = 0.08;
+
+export function ropePathOf(wire: Wire, time: number, params: Params): RopePath {
+  const age = Math.max(0, time - wire.born);
+  const rest = Math.max(1e-6, wire.rest);
+  const ratio = wire.lastLen / rest;
+  const tautMax = Math.max(1, params.wireTaut);
+  const slackMax = tautMax + ROPE_TAUT_HYSTERESIS;
+  const coarsened = wire.ropePath === 'span' || wire.ropePath === 'no-shape';
+  const taut = coarsened ? ratio <= slackMax : ratio <= tautMax;
+  if (!taut) return 'full';
+  const spanAge = params.wireSpanAge;
+  const shapeAge = params.wireShapeAge;
+  if (spanAge > 0 && age >= spanAge) return 'span';
+  if (shapeAge > 0 && age >= shapeAge) return 'no-shape';
+  return 'full';
+}
+
+/** Live XPBD rope, not a view-FAR chord or an age-span joint. */
+export function ropeIsLive(wire: Wire, detailed?: (wire: Wire) => boolean): boolean {
+  if (detailed && !detailed(wire)) return false;
+  return wire.ropePath !== 'span';
 }
 
 const SLOT_ORDER = { p: 0, l: 1, r: 2 } as const;
@@ -190,7 +225,7 @@ export class Graph {
     if (!this.isFree(a) || !this.isFree(b)) return null;
     const id = this.nextWireId++;
     const len = Math.max(1, latchLen);
-    const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [] };
+    const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full' };
     this.wires.set(id, wire);
     this.portWire.set(portKey(a), id);
     this.portWire.set(portKey(b), id);
@@ -267,6 +302,7 @@ export class Graph {
     wire.collapse = 0;
     wire.born = time;
     wire.shape = [];
+    wire.ropePath = 'full';
   }
 
   connect(
@@ -613,8 +649,43 @@ export class Graph {
       if (wire.collapse > 0) {
         wire.rest = Math.max(0.5, wire.rest * (1 - wire.collapse));
       }
-      reduceChain(wire.nodes, wire.rest);
+      if (wire.ropePath !== 'span') reduceChain(wire.nodes, wire.rest);
     }
+  }
+
+  /**
+   * Age + tautness → solver path. Crossing into span-only leaves the nodes
+   * in place (draw uses the port-axis cubic); coming back resamples them so
+   * a leftover that goes slack does not teleport.
+   */
+  applyRopePaths(
+    agents: Map<number, Agent>,
+    w: number,
+    h: number,
+    time: number,
+    params: Params,
+  ): void {
+    for (const wire of this.wires.values()) {
+      const next = ropePathOf(wire, time, params);
+      if (wire.ropePath === 'span' && next !== 'span') {
+        this.rebuildRope(wire, agents, w, h);
+      }
+      wire.ropePath = next;
+    }
+  }
+
+  private rebuildRope(
+    wire: Wire,
+    agents: Map<number, Agent>,
+    w: number,
+    h: number,
+  ): void {
+    const A = agents.get(wire.a.id);
+    const B = agents.get(wire.b.id);
+    if (!A || !B) return;
+    const c = wireCubic(A, wire.a.slot, B, wire.b.slot, w, h, wire.rest);
+    wire.nodes = sampleChain(c, desiredLinks(wire.rest), w, h);
+    wire.shape = [];
   }
 
   /**
@@ -631,11 +702,16 @@ export class Graph {
   ): void {
     for (const wire of this.wires.values()) {
       if (detailed && !detailed(wire)) continue;
+      if (wire.ropePath === 'span') {
+        wire.shape = [];
+        wire.ropeLen = wire.rest;
+        continue;
+      }
       const A = agents.get(wire.a.id);
       const B = agents.get(wire.b.id);
       if (!A || !B) continue;
       const n = wire.nodes.length;
-      if (n === 0) {
+      if (n === 0 || wire.ropePath === 'no-shape') {
         wire.shape = [];
         wire.ropeLen = wire.rest;
         continue;
@@ -695,7 +771,7 @@ export class Graph {
       if (A.locked && B.locked) continue;
       if (frozen && (frozen.has(A.id) || frozen.has(B.id))) continue;
       const stiff = this.stiffness(wire, time, params);
-      if (detailed && !detailed(wire)) {
+      if (!ropeIsLive(wire, detailed)) {
         solveWireSpan(A, wire.a.slot, B, wire.b.slot, wire.rest, stiff, h);
         continue;
       }
@@ -707,7 +783,7 @@ export class Graph {
         wire.nodes,
         wire.rest,
         wire.ropeLen,
-        wire.shape,
+        wire.ropePath === 'full' ? wire.shape : [],
         stiff,
         h,
       );
@@ -724,10 +800,9 @@ export class Graph {
   ): void {
     for (const wire of this.wires.values()) {
       if (frozen && frozen.has(wire.a.id) !== frozen.has(wire.b.id)) continue;
-      wire.lastLen =
-        detailed && !detailed(wire)
-          ? this.stemSpan(wire, agents, w, h)
-          : this.curveLength(wire, agents, w, h);
+      wire.lastLen = ropeIsLive(wire, detailed)
+        ? this.curveLength(wire, agents, w, h)
+        : this.stemSpan(wire, agents, w, h);
     }
   }
 }

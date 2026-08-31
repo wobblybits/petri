@@ -17,7 +17,7 @@ import { closestOnSegments, closestTOnSegment, ropeAabb, segmentsIntersect, tran
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
 import { CH, Fields } from './fields.ts';
-import { Graph, wrapPos, type Wire } from './graph.ts';
+import { Graph, ropeIsLive, wrapPos, type Wire } from './graph.ts';
 import type { Params } from './params.ts';
 import {
   advanceRewrite,
@@ -300,6 +300,7 @@ export class Sim {
     this.collectRewriteFrozen();
     this.assignPhysicsLod(view);
     this.graph.syncRest(this.time, params);
+    this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
     if (this.solveFarNative(t)) this.finishIntegrate(t);
     else this.solve(params, t);
@@ -312,6 +313,7 @@ export class Sim {
     this.collectRewriteFrozen();
     this.assignPhysicsLod(view);
     this.graph.syncRest(this.time, params);
+    this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
     if (this.solveFarNative(t)) {
       this.finishIntegrate(t);
@@ -436,6 +438,9 @@ export class Sim {
 
   wireDetailed = (wire: Wire): boolean =>
     this.agentDetailed(wire.a.id) || this.agentDetailed(wire.b.id);
+
+  /** SAT neighbourhood, and the rope is still a live XPBD chain. */
+  wireSimulatesRope = (wire: Wire): boolean => ropeIsLive(wire, this.wireDetailed);
 
   private kindCode(kind: AgentKind): number {
     return kind === 'era' ? KIND_ERA : kind === 'dup' ? KIND_DUP : KIND_CON;
@@ -625,7 +630,7 @@ export class Sim {
    */
   private leashRopes(): void {
     for (const wire of this.graph.wires.values()) {
-      if (wire.nodes.length === 0) continue;
+      if (wire.nodes.length === 0 || wire.ropePath === 'span') continue;
       const A = this.agents.get(wire.a.id);
       const B = this.agents.get(wire.b.id);
       if (!A || !B) continue;
@@ -896,7 +901,7 @@ export class Sim {
     wires.length = 0;
     let maxRope = 0;
     for (const wire of this.graph.wires.values()) {
-      if (wire.nodes.length === 0) continue;
+      if (wire.nodes.length === 0 || wire.ropePath === 'span') continue;
       wires.push(wire);
       if (wire.ropeLen > maxRope) maxRope = wire.ropeLen;
     }
@@ -969,6 +974,7 @@ export class Sim {
     this.components = this.graph.componentIds(this.agents);
     this.wireContacts.clear();
     this.graph.syncRest(this.time, params);
+    this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
     this.collectRewriteFrozen();
     this.assignPhysicsLod(view);
@@ -1201,7 +1207,7 @@ export class Sim {
         a.heading = wrapAngle(a.heading + a.omega * h);
       }
       for (const wire of this.graph.wires.values()) {
-        if (!this.wireDetailed(wire)) continue;
+        if (!this.wireSimulatesRope(wire)) continue;
         const hold = frozen.has(wire.a.id) || frozen.has(wire.b.id);
         for (const node of wire.nodes) {
           node.prevX = node.x;
@@ -1237,7 +1243,7 @@ export class Sim {
         }
       }
       for (const wire of this.graph.wires.values()) {
-        if (!this.wireDetailed(wire)) continue;
+        if (!this.wireSimulatesRope(wire)) continue;
         for (const node of wire.nodes) {
           node.vx = (node.x - node.prevX) * invH * ropeKeep;
           node.vy = (node.y - node.prevY) * invH * ropeKeep;
@@ -1365,7 +1371,7 @@ export class Sim {
     for (const w of this.graph.wires.values()) {
       if (!index.has(w.a.id) || !index.has(w.b.id)) continue;
       wireList.push(w);
-      if (this.wireDetailed(w) && w.nodes.length > 0) nNodes += w.nodes.length;
+      if (this.wireSimulatesRope(w) && w.nodes.length > 0) nNodes += w.nodes.length;
     }
     const nWires = wireList.length;
     if (!nativeSolver.canNear(n, nWires, nNodes)) return false;
@@ -1456,13 +1462,13 @@ export class Sim {
       const B = list[bi];
       const frozenEnds = frozen.has(A.id) || frozen.has(B.id);
       const skip = (A.locked && B.locked) || frozenEnds;
-      const full = this.wireDetailed(w) && w.nodes.length > 0;
+      const full = this.wireSimulatesRope(w) && w.nodes.length > 0;
       const stiff = this.graph.stiffnessOf(w, this.time, params);
       let flags = 0;
       if (full) flags |= WF_FULL;
       if (skip) flags |= WF_SKIP;
       if (frozenEnds) flags |= WF_HOLD;
-      if (full && w.shape.length === w.nodes.length) flags |= WF_SHAPE;
+      if (full && w.ropePath === 'full' && w.shape.length === w.nodes.length) flags |= WF_SHAPE;
       wires[o + WN.a] = ai;
       wires[o + WN.b] = bi;
       wires[o + WN.rest] = w.rest;
@@ -1506,7 +1512,7 @@ export class Sim {
     const nodes = nativeSolver.nodes!;
     let nodeAt = 0;
     for (const w of wireList) {
-      if (!this.wireDetailed(w) || w.nodes.length === 0) continue;
+      if (!this.wireSimulatesRope(w) || w.nodes.length === 0) continue;
       for (let i = 0; i < w.nodes.length; i++) {
         const nd = w.nodes[i];
         const o = (nodeAt + i) * NODE_STRIDE;
@@ -1539,7 +1545,7 @@ export class Sim {
     const nodes = nativeSolver.nodes!;
     let nodeAt = 0;
     for (const w of wireList) {
-      if (!this.wireDetailed(w) || w.nodes.length === 0) continue;
+      if (!this.wireSimulatesRope(w) || w.nodes.length === 0) continue;
       for (let i = 0; i < w.nodes.length; i++) {
         const nd = w.nodes[i];
         const o = (nodeAt + i) * NODE_STRIDE;
@@ -1708,7 +1714,7 @@ export class Sim {
       const A = this.agents.get(wire.a.id);
       const B = this.agents.get(wire.b.id);
       if (!A || !B) continue;
-      const n = this.wireDetailed(wire) ? wire.nodes.length : 0;
+      const n = this.wireSimulatesRope(wire) ? wire.nodes.length : 0;
       const need = n + 2;
       while (pts.length < need) pts.push({ x: 0, y: 0 });
       stemWorldInto(A, wire.a.slot, this.w, this.h, pts[0]);
@@ -2193,7 +2199,7 @@ export class Sim {
       if (!A || !B || A.locked || B.locked || A.stun > 0 || B.stun > 0) continue;
       if (busy.has(A.id) || busy.has(B.id)) continue;
       if (this.graph.shrinkU(wire, this.time, params) < Sim.REWRITE_SHRINK_READY) continue;
-      const len = this.wireDetailed(wire)
+      const len = this.wireSimulatesRope(wire)
         ? this.graph.curveLength(wire, this.agents, this.w, this.h)
         : this.graph.stemSpan(wire, this.agents, this.w, this.h);
       // Not the rest-length sit: the collapse hauls them the rest of the way.

@@ -39,6 +39,21 @@ export interface Params {
   portStiff: number;
   /** Rest-length breathing amplitude, as a fraction. 0 = a settled net freezes. */
   wireBreathe: number;
+  /**
+   * Seconds a taut wire keeps its rest-shape constraint. 0 = never drop it.
+   * Shape only matters while slack is degenerate; a taut rope does not need it.
+   */
+  wireShapeAge: number;
+  /**
+   * Seconds before a taut wire becomes span-only (joint, no rope nodes).
+   * 0 = never. A leftover that goes slack again gets the full rope back.
+   */
+  wireSpanAge: number;
+  /**
+   * Live length / rest at or below which a wire counts as taut for aging.
+   * A coarsened wire stays coarsened until it exceeds this by a small band.
+   */
+  wireTaut: number;
   wireMinRest: number;
   wireShrink: number;
   eraMass: number;
@@ -86,6 +101,9 @@ export function defaultParams(): Params {
     wireClear: 1,
     portStiff: 2,
     wireBreathe: 0.04,
+    wireShapeAge: 2,
+    wireSpanAge: 10,
+    wireTaut: 1.08,
     wireMinRest: 40,
     wireShrink: 0.9,
     eraMass: 0.45,
@@ -145,6 +163,9 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'uncross', label: 'Uncross', min: 0, max: 4, step: 0.05 },
   { key: 'wireClear', label: 'Wire clearance', min: 0, max: 4, step: 0.05 },
   { key: 'wireBreathe', label: 'Wire breathe', min: 0, max: 0.15, step: 0.005 },
+  { key: 'wireShapeAge', label: 'Shape drop (s)', min: 0, max: 30, step: 0.1 },
+  { key: 'wireSpanAge', label: 'Span-only (s)', min: 0, max: 60, step: 0.5 },
+  { key: 'wireTaut', label: 'Taut ratio', min: 1, max: 1.5, step: 0.01 },
   { key: 'eraMass', label: 'Era mass', min: 0.15, max: 2, step: 0.05 },
   { key: 'nodeMass', label: 'Con/Dup mass', min: 0.3, max: 4, step: 0.05 },
   { key: 'maxAgents', label: 'Max agents', min: 8, max: 1000, step: 1 },
