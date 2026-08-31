@@ -6,9 +6,14 @@ import { defineConfig, type Plugin } from 'vitest/config';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const processorPath = path.resolve(root, 'src/audio/worklet/net-processor.ts');
+const workerPath = path.resolve(root, 'src/audio/worklet/net-worker.ts');
 const waveguidePath = path.resolve(root, 'src/audio/waveguide.ts');
+const ringPath = path.resolve(root, 'src/audio/ring.ts');
+const fillerPath = path.resolve(root, 'src/audio/filler.ts');
 const VIRTUAL_URL = '\0audio-worklet-url';
+const VIRTUAL_WORKER_URL = '\0audio-worker-url';
 const DEV_PATH = '/__audio_worklet';
+const DEV_WORKER_PATH = '/__audio_worker';
 
 function stripModuleChrome(src: string): string {
   return src
@@ -18,29 +23,58 @@ function stripModuleChrome(src: string): string {
     .replace(/^export /gm, '');
 }
 
+function inlineAll(paths: string[]): string {
+  return paths.map((p) => stripModuleChrome(fs.readFileSync(p, 'utf8'))).join('\n');
+}
+
 function compileWorklet(): string {
-  const bundled =
-    stripModuleChrome(fs.readFileSync(waveguidePath, 'utf8')) +
-    '\n' +
-    stripModuleChrome(fs.readFileSync(processorPath, 'utf8'));
-  // stripModuleChrome is a regex, not a parser. A value import it fails to
-  // recognise would be silently dropped and the worklet would die at runtime
-  // with a ReferenceError instead of here, at build time.
+  // ring.ts first: the processor constructs an AudioRing when it is handed
+  // shared memory, and the concatenation has no module graph to order it.
+  return assertInlined(inlineAll([ringPath, waveguidePath, processorPath]), 'net-processor.ts');
+}
+
+/**
+ * stripModuleChrome is a regex, not a parser. A value import it fails to
+ * recognise would be silently dropped, and the bundle would die at runtime
+ * with a ReferenceError instead of here, at build time.
+ */
+function assertInlined(bundled: string, fileName: string): string {
   const stray = bundled.match(/^\s*(import|export)\s.*$/m);
   if (stray) {
     throw new Error(
-      `audio-worklet: module syntax survived inlining: ${stray[0].trim()}\n` +
-        'The worklet must be a single import-free file — inline the dependency ' +
+      `audio-worklet: module syntax survived inlining into ${fileName}: ${stray[0].trim()}\n` +
+        'These bundles must be single import-free files — inline the dependency ' +
         'or extend stripModuleChrome.',
     );
   }
+  return transpile(bundled, fileName);
+}
+
+/**
+ * The worker that renders when synthesis runs off the audio thread.
+ *
+ * Bundled the same import-free way as the worklet, and for a related reason:
+ * it is loaded with importScripts after a bootstrap has set `sampleRate`.
+ * waveguide.ts reads that global once, at load, and derives its filter
+ * coefficients from it — a module import would evaluate before the bootstrap
+ * could set anything, and the whole net would be tuned for 48 kHz on hardware
+ * running at 44.1.
+ */
+function compileWorker(): string {
+  return assertInlined(
+    inlineAll([ringPath, waveguidePath, fillerPath, workerPath]),
+    'net-worker.ts',
+  );
+}
+
+function transpile(bundled: string, fileName: string): string {
   const result = ts.transpileModule(bundled, {
     compilerOptions: {
       target: ts.ScriptTarget.ES2022,
       module: ts.ModuleKind.ESNext,
       strict: false,
     },
-    fileName: 'net-processor.ts',
+    fileName,
   });
   return result.outputText.replace(/^export \{\};\s*$/m, '');
 }
@@ -62,23 +96,42 @@ function audioWorklet(): Plugin {
       const abs = path.isAbsolute(spec)
         ? spec
         : path.resolve(importer ? path.dirname(importer) : root, spec);
-      if (abs !== processorPath) return null;
-      return VIRTUAL_URL;
+      if (abs === processorPath) return VIRTUAL_URL;
+      if (abs === workerPath) return VIRTUAL_WORKER_URL;
+      return null;
     },
     load(id) {
-      if (id !== VIRTUAL_URL) return null;
-      if (!isBuild) return `export default ${JSON.stringify(DEV_PATH)}`;
-      return `export default ${JSON.stringify(`${base}assets/net-processor.js`)}`;
+      if (id === VIRTUAL_URL) {
+        if (!isBuild) return `export default ${JSON.stringify(DEV_PATH)}`;
+        return `export default ${JSON.stringify(`${base}assets/net-processor.js`)}`;
+      }
+      if (id === VIRTUAL_WORKER_URL) {
+        if (!isBuild) return `export default ${JSON.stringify(DEV_WORKER_PATH)}`;
+        return `export default ${JSON.stringify(`${base}assets/net-worker.js`)}`;
+      }
+      return null;
     },
     configureServer(server) {
+      // SharedArrayBuffer only exists on a cross-origin-isolated page, which
+      // takes both of these headers. Without them the engine still works —
+      // it falls back to rendering inside the worklet — but the whole point
+      // of the ring is unavailable, and silently so.
+      server.middlewares.use((_req, res, next) => {
+        res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+        res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+        next();
+      });
       server.middlewares.use((req, res, next) => {
-        if (req.url?.split('?')[0] !== DEV_PATH) {
+        const url = req.url?.split('?')[0];
+        const body =
+          url === DEV_PATH ? compileWorklet() : url === DEV_WORKER_PATH ? compileWorker() : null;
+        if (body === null) {
           next();
           return;
         }
         res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
         res.setHeader('Cache-Control', 'no-cache');
-        res.end(compileWorklet());
+        res.end(body);
       });
     },
     generateBundle() {
@@ -86,6 +139,11 @@ function audioWorklet(): Plugin {
         type: 'asset',
         fileName: 'assets/net-processor.js',
         source: compileWorklet(),
+      });
+      this.emitFile({
+        type: 'asset',
+        fileName: 'assets/net-worker.js',
+        source: compileWorker(),
       });
     },
   };

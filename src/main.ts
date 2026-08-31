@@ -207,6 +207,22 @@ function armAudio(): void {
   void bootAudio();
 }
 
+// Dev-only handle for checking what the audio path is actually doing:
+// whether synthesis moved to the worker, how full the ring is, and whether
+// the callback has had to pad. None of it is reachable from the UI, and none
+// of it ships.
+if (import.meta.env.DEV) {
+  (globalThis as unknown as { swimmers: unknown }).swimmers = {
+    audio,
+    sim,
+    params,
+    get ring() {
+      return { fill: audio.ringFill, underruns: audio.underruns };
+    },
+    boot: () => bootAudio(),
+  };
+}
+
 document.querySelector('#app')!.addEventListener('pointerdown', armAudio, { once: true });
 document.querySelector('#app')!.addEventListener('keydown', armAudio, { once: true });
 

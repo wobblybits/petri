@@ -15,12 +15,35 @@ import { setSampleRate } from './presets.ts';
 import { makeReverbIR } from './reverb.ts';
 import type { AudioEvent, LiveContact, LiveWireContact, NetTopology, PanView, WaveSnapshot, WorkletInMessage } from './types.ts';
 import workletUrl from './worklet/net-processor.ts?url';
+import workerUrl from './worklet/net-worker.ts?url';
+import { AudioRing, ringBytes } from './ring.ts';
 
 /** Excitations allowed per frame. Past this a busy net is a rattle, not music. */
 const EVENTS_PER_FRAME = 5;
 /** Seconds an agent stays quiet after sounding, so contacts do not machine-gun. */
 const AGENT_COOLDOWN = 0.09;
 const WIRE_COOLDOWN = 0.05;
+
+/**
+ * Frames of buffer between the worker and the audio callback.
+ *
+ * This is the latency, exactly: 1024 frames is 21 ms at 48 kHz. It is also
+ * the whole protection budget — a producer that stalls has this long to
+ * recover before the callback runs dry — so the two cannot be traded
+ * separately. Wires can be plucked and bodies dragged, and interaction starts
+ * to feel detached somewhere north of 30 ms, which is what sets the ceiling.
+ */
+const RING_FRAMES = 1024;
+
+/** SharedArrayBuffer needs a cross-origin-isolated page (COOP + COEP). */
+function sharedMemoryAvailable(): boolean {
+  return (
+    typeof SharedArrayBuffer !== 'undefined' &&
+    typeof Worker !== 'undefined' &&
+    typeof globalThis.crossOriginIsolated === 'boolean' &&
+    globalThis.crossOriginIsolated
+  );
+}
 
 function eventGain(ev: AudioEvent): number {
   if (ev.type === 'latch') return 1.5;
@@ -35,6 +58,9 @@ function eventGain(ev: AudioEvent): number {
 export class AudioEngine {
   private ctx: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
+  /** Set only when synthesis runs off the audio thread. */
+  private worker: Worker | null = null;
+  private ring: AudioRing | null = null;
   private master: GainNode | null = null;
   private ready: Promise<boolean> | null = null;
   private muted = false;
@@ -191,6 +217,7 @@ export class AudioEngine {
       this.ctx = ctx;
       this.node = node;
       this.master = master;
+      this.startWorker(ctx, node);
       this.post({ type: 'gain', master: this.muted ? 0 : 1 });
       return true;
     } catch (err) {
@@ -205,8 +232,80 @@ export class AudioEngine {
 
   private post(msg: WorkletInMessage): void {
     this.onPost?.(msg);
+    // Whoever owns the net gets the control messages. In ring mode the
+    // worklet owns nothing but the copy out of shared memory.
+    if (this.worker) {
+      this.worker.postMessage(msg);
+      return;
+    }
     if (!this.node) return;
     this.node.port.postMessage(msg);
+  }
+
+  /**
+   * How full the ring is, 0..1, or null when rendering in the worklet.
+   *
+   * This is the load signal worth watching: it sags before anything is
+   * dropped, where an underrun count only rises afterwards.
+   */
+  get ringFill(): number | null {
+    return this.ring ? this.ring.fill() : null;
+  }
+
+  /** Quanta the callback has had to pad with silence. Should stay at zero. */
+  get underruns(): number | null {
+    return this.ring ? this.ring.underruns() : null;
+  }
+
+  /**
+   * Move synthesis into a Worker feeding a shared ring.
+   *
+   * Returns false when the page is not cross-origin-isolated, or the Worker
+   * cannot be built — in which case the caller keeps the in-worklet path,
+   * which still works and is what everything did before.
+   *
+   * The Worker is started from a bootstrap that sets `sampleRate` and only
+   * then pulls in the bundle. waveguide.ts reads that global once, at load,
+   * and bakes filter coefficients out of it; an ordinary module import would
+   * evaluate first and tune the whole net for 48 kHz on 44.1 kHz hardware.
+   */
+  private startWorker(ctx: AudioContext, node: AudioWorkletNode): boolean {
+    if (!sharedMemoryAvailable()) return false;
+    let url = '';
+    try {
+      const target = new URL(workerUrl, location.href).href;
+      const boot = `self.sampleRate=${ctx.sampleRate};importScripts(${JSON.stringify(target)});`;
+      url = URL.createObjectURL(new Blob([boot], { type: 'text/javascript' }));
+      const worker = new Worker(url);
+      const sab = new SharedArrayBuffer(ringBytes(RING_FRAMES));
+      const ring = new AudioRing(sab, RING_FRAMES);
+      worker.onmessage = (ev: MessageEvent) => {
+        const msg = ev.data;
+        if (msg && msg.type === '__ready') {
+          // Only now does the callback start reading. Handing it the ring at
+          // once means it drains an empty buffer while the worker is still
+          // rendering its first pass.
+          node.port.postMessage({ type: '__ring', sab, capacity: RING_FRAMES });
+          return;
+        }
+        if (msg && msg.type === 'waves' && msg.packed instanceof Float32Array) {
+          this.acceptWaves(msg.packed);
+        }
+        if (msg && msg.type === 'error') console.error('audio worker', msg.message);
+      };
+      worker.onerror = (ev) => console.error('audio worker', ev.message);
+      worker.postMessage({ type: '__ring', sab, capacity: RING_FRAMES, sampleRate: ctx.sampleRate });
+      this.worker = worker;
+      this.ring = ring;
+      return true;
+    } catch (err) {
+      console.warn('audio worker unavailable, rendering in the worklet', err);
+      this.worker = null;
+      this.ring = null;
+      return false;
+    } finally {
+      if (url) URL.revokeObjectURL(url);
+    }
   }
 
   /** Cooldowns keep one agent or wire from retriggering every frame. */

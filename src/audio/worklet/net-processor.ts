@@ -1,8 +1,24 @@
 /// <reference path="./worklet-env.d.ts" />
+import { AudioRing } from '../ring.ts';
 import { WaveguideNet } from '../waveguide.ts';
 
+/**
+ * Two modes.
+ *
+ * With a ring, synthesis happens in a Worker and this is a copy: read four
+ * planes, hand them to the outputs, wake the producer. A quantum that the
+ * producer was late for costs buffered audio rather than a click, and the
+ * buffer is what lets a slow pass be paid for out of a fast one.
+ *
+ * Without a ring — no SharedArrayBuffer, or a page that is not
+ * cross-origin-isolated — it runs the net here, exactly as before. That path
+ * is the fallback rather than the plan, but it has to keep working, because
+ * cross-origin isolation is a deployment property nobody can promise.
+ */
 class NetProcessor extends AudioWorkletProcessor {
   net = new WaveguideNet();
+  private ring: AudioRing | null = null;
+  private out: (Float32Array | undefined)[] = [undefined, undefined, undefined, undefined];
   private vizAcc = 0;
   private errSent = 0;
   private prevTime = -1;
@@ -11,7 +27,12 @@ class NetProcessor extends AudioWorkletProcessor {
     super();
     this.port.onmessage = (ev: MessageEvent) => {
       try {
-        this.net.handle(ev.data);
+        const msg = ev.data;
+        if (msg && msg.type === '__ring') {
+          this.ring = new AudioRing(msg.sab, msg.capacity);
+          return;
+        }
+        this.net.handle(msg);
       } catch (err) {
         this.report(err);
       }
@@ -27,6 +48,19 @@ class NetProcessor extends AudioWorkletProcessor {
     const wetL = wet && wet[0];
     const wetR = wet && wet[1];
     const n = dryL.length;
+
+    if (this.ring) {
+      this.out[0] = dryL;
+      this.out[1] = dryR;
+      this.out[2] = wetL;
+      this.out[3] = wetR;
+      try {
+        this.ring.read(this.out, n);
+      } catch (err) {
+        this.report(err);
+      }
+      return true;
+    }
 
     try {
       // `currentTime` is a global in AudioWorkletGlobalScope, not a property
