@@ -16,7 +16,6 @@ function fastParams() {
   params.rewriteDuration = 0.12;
   params.springK = 90;
   params.gravity = 0;
-  params.homing = 0;
   params.spawnInterval = 0;
   return params;
 }
@@ -49,7 +48,6 @@ describe('scent steering', () => {
       params.snapWell = 0;
       params.snapRadius = 0;
       params.gravity = 0;
-      params.homing = 0;
       const heading = 0.4;
       const agent = sim.spawn(kind, 120, 80, heading, params, true)!;
       step(sim, params, 45);
@@ -66,7 +64,6 @@ describe('scent steering', () => {
     const sim = new Sim(320, 200);
     const params = defaultParams();
     params.gravity = 0;
-    params.homing = 0;
     params.flockAlign = 0;
     params.flockSep = 0;
     params.snapRadius = 0;
@@ -117,7 +114,6 @@ describe('scent steering', () => {
     params.snapWell = 0;
     params.stepSpeed = 0;
     params.gravity = 0;
-    params.homing = 0;
     const a = sim.spawn('con', 100, 80, 0, params, true)!;
     const b = sim.spawn('con', 118, 80, Math.PI, params, true)!;
     a.vx = 60;
@@ -132,7 +128,6 @@ describe('scent steering', () => {
     params.snapRadius = 0;
     params.stepSpeed = 0;
     params.gravity = 0;
-    params.homing = 0;
     params.flockAlign = 0;
     params.flockSep = 0;
     params.declutter = 0;
@@ -383,7 +378,6 @@ describe('conservative mechanics', () => {
   function passiveParams() {
     const params = defaultParams();
     params.gravity = 0;
-    params.homing = 0;
     params.stepSpeed = 0;
     params.turnRate = 0;
     params.snapRadius = 0;
@@ -431,53 +425,16 @@ describe('conservative mechanics', () => {
     expect(com1.y).toBeCloseTo(com0.y, 3);
   });
 
-  it('homing does not crumple a net toward its own centre', () => {
+  it('gravity does not crumple a net toward its own centre', () => {
     const sim = new Sim(480, 240);
     const params = passiveParams();
-    params.homing = 2;
-    params.homeComp = 2;
+    params.gravity = 0.4;
     params.wireShrink = 30;
     const nodes = [80, 160, 240, 320].map((x) => sim.spawn('con', x, 120, 0, params, true)!);
     for (let i = 0; i < 3; i++) sim.wire(nodes[i].id, 'r', nodes[i + 1].id, 'l', params);
     const width0 = nodes[3].x - nodes[0].x;
     step(sim, params, 90);
     expect(nodes[3].x - nodes[0].x).toBeGreaterThan(width0 * 0.85);
-  });
-
-  it('a scentless stray does not know where a far free port is', () => {
-    const sim = new Sim(480, 240);
-    const params = passiveParams();
-    params.homing = 2;
-    params.drag = 0.4;
-    const stray = sim.spawn('era', 80, 200, 0, params, true)!;
-    sim.spawn('con', 360, 80, 0, params, true);
-    const x0 = stray.x;
-    const y0 = stray.y;
-    step(sim, params, 50);
-    expect(Math.hypot(stray.x - x0, stray.y - y0)).toBeLessThan(4);
-  });
-
-  it('homing climbs a scent trail toward open ports', () => {
-    const sim = new Sim(480, 240);
-    const params = passiveParams();
-    params.homing = 2;
-    params.drag = 0.4;
-    params.deposit = 0;
-    params.diffuse = 0;
-    params.decay = 0;
-    const stray = sim.spawn('era', 240, 120, 0, params, true)!;
-    const paint = () => {
-      for (let x = 160; x <= 360; x += 4) {
-        sim.fields.deposit(CH.conP, x, 120, (x - 160) * 0.6);
-      }
-    };
-    for (let i = 0; i < 40; i++) {
-      paint();
-      sim.step(1 / 60, params);
-    }
-    expect(stray.x).toBeGreaterThan(248);
-    expect(stray.x).toBeLessThan(360);
-    expect(Math.abs(stray.y - 120)).toBeLessThan(16);
   });
 
   it('does not latch through an intervening wire', () => {
@@ -548,7 +505,6 @@ describe('conservative mechanics', () => {
 function quietParams() {
   const params = defaultParams();
   params.gravity = 0;
-  params.homing = 0;
   params.flockAlign = 0;
   params.flockSep = 0;
   params.snapRadius = 0;

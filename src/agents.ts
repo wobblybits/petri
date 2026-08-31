@@ -25,7 +25,7 @@ export interface Agent {
   stun: number;
   /** Ornstein-Uhlenbeck self-propulsion magnitude along the heading. */
   drive: number;
-  /** Local scent sampled once per frame, shared by steering and homing. */
+  /** Trail sampled for steering. */
   trail: number;
   /** Pose at the start of the current integrate step (for XPBD velocity writeback). */
   prevX: number;

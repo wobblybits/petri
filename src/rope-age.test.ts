@@ -91,7 +91,6 @@ describe('aged taut wires in the sim', () => {
     params.rewriteDuration = 20;
     params.wireShrink = 0.2;
     params.gravity = 0;
-    params.homing = 0;
     params.flockAlign = 0;
     params.flockSep = 0;
     params.deposit = 0;

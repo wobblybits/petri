@@ -14,7 +14,6 @@ function quietParams() {
   const params = defaultParams();
   params.spawnInterval = 0;
   params.gravity = 0;
-  params.homing = 0;
   params.flockAlign = 0;
   params.flockSep = 0;
   params.stepSpeed = 0;

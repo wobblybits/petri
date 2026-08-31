@@ -90,13 +90,13 @@ export class Sim {
   /** Neighbourhood lifted onto the detailed physics path around a NEAR/MID body. */
   private static readonly PHYS_HOPS = 2;
 
-  /** Local scent scale for homing: half climb when trail equals this. */
-  private static readonly HOME_SCENT = 0.35;
+  /**
+   * Gravity only touches components this small, so a finished net does not
+   * fall into its own centre of mass. 1 = loners, 2 = a fresh latch.
+   */
+  private static readonly GRAV_MAX_COMP = 2;
 
-  /** Probe radius for the homing gradient, in px. */
-  private static readonly HOME_GRAD = 8;
-
-  /** Distance past which the pull home stops growing. */
+  /** Distance past which the gravity pull stops growing. */
   private static readonly HOME_REACH = 320;
 
   /** Repulsion in px/s² at exactly one wire's length; inverse-square inside that. */
@@ -1024,8 +1024,7 @@ export class Sim {
    * pure crowding, and crowding is what tangles nets. Nothing else does this —
    * flocking separation only walks same-net neighbours (and then only a few
    * hops out), so those pairs are skipped entirely and separate nets have never
-   * repelled at all. Homing used to haul every net toward the flock centre,
-   * which made this the only thing standing between two machines.
+   * repelled at all.
    *
    * Inverse-square rather than linear, which matters: at a wire's length the
    * push is gentle enough to be ignored, but it climbs steeply as the gap
@@ -2106,39 +2105,25 @@ export class Sim {
   }
 
   /**
-   * Early-phase mixing without a well at the origin.
-   *
-   * Gravity and homing only touch components of size `homeComp` or smaller, so
-   * a finished net keeps the shape the wires gave it. Homing is a climb of
-   * the scent field — free ports already deposit — not a search for the
-   * nearest open agent. No trail, no pull.
+   * Optional cohesion toward the flock centre, for loners and tiny latches
+   * only. Larger nets keep the shape the wires gave them — a pull toward
+   * their own centre of mass is what used to crumple machines into a ball.
    */
   private gravitate(params: Params, dt: number): void {
     const base = params.gravity;
-    const home = params.homing;
-    if ((base <= 0 && home <= 0) || dt <= 0) return;
-    const cap = Math.max(1, params.homeComp | 0);
+    if (base <= 0 || dt <= 0) return;
+    const com = this.home ?? this.centerOfMass();
+    if (!com) return;
     const sizes = this.compSize;
     sizes.clear();
     for (const root of this.components.values()) {
       sizes.set(root, (sizes.get(root) ?? 0) + 1);
     }
-    const com = base > 0 ? (this.home ?? this.centerOfMass()) : null;
+    const cap = Sim.GRAV_MAX_COMP;
     for (const agent of this.agents.values()) {
       if (agent.locked) continue;
       const root = this.components.get(agent.id) ?? agent.id;
       if ((sizes.get(root) ?? 1) > cap) continue;
-      if (home > 0 && agent.trail > 1e-6) {
-        const g = this.scentGradient(agent, params);
-        const mag = Math.hypot(g.x, g.y);
-        if (mag > 1e-6) {
-          const k = (home * agent.trail) / (Sim.HOME_SCENT + agent.trail);
-          const accel = k * Sim.HOME_REACH;
-          agent.vx += (g.x / mag) * accel * dt;
-          agent.vy += (g.y / mag) * accel * dt;
-        }
-      }
-      if (base <= 0 || !com) continue;
       const dx = com.x - agent.x;
       const dy = com.y - agent.y;
       const dist = Math.hypot(dx, dy);
@@ -2147,16 +2132,6 @@ export class Sim {
       agent.vx += dx * pull * dt;
       agent.vy += dy * pull * dt;
     }
-  }
-
-  /** Same mix as steering, differenced so homing walks a trail that is there. */
-  private scentGradient(agent: Agent, params: Params): { x: number; y: number } {
-    const e = Sim.HOME_GRAD;
-    const at = (x: number, y: number) => this.scentAt(agent, x, y, params);
-    return {
-      x: at(agent.x + e, agent.y) - at(agent.x - e, agent.y),
-      y: at(agent.x, agent.y + e) - at(agent.x, agent.y - e),
-    };
   }
 
   momentum(): { px: number; py: number; L: number } {

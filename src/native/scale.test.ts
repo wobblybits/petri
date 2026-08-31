@@ -210,7 +210,6 @@ describe('NEAR densely connected growth', () => {
           p.swimNoise = 0;
           p.portStiff = 0;
           p.declutter = 0;
-          p.homing = 0;
         },
       },
     ];

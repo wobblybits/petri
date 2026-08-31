@@ -8,7 +8,6 @@ import { angleDelta } from './wrap.ts';
 function quietOrganizeParams() {
   const params = defaultParams();
   params.gravity = 0;
-  params.homing = 0;
   params.flockAlign = 0;
   params.flockSep = 0;
   params.snapRadius = 0;

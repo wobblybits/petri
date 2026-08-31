@@ -43,7 +43,6 @@ function passiveParams(): Params {
   p.stepSpeed = 0;
   p.faceAttract = 0;
   p.gravity = 0;
-  p.homing = 0;
   p.flockAlign = 0;
   p.flockSep = 0;
   p.deposit = 0;
@@ -346,7 +345,7 @@ describe('crowding and tangling', () => {
 
   it('keeps other nets out of a saturated agent\'s space', () => {
     // Flocking separation is scoped to one net, so nothing but this constraint
-    // pushes separate nets apart. Homing no longer hauls machines together.
+    // pushes separate nets apart.
     let saturated = 0;
     let invaded = 0;
     for (const sd of [999, 12345, 5150]) {
