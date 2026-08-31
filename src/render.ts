@@ -6,7 +6,14 @@ import { catmullSegment, unwrapPoints } from './chain.ts';
 import { bezierPoint } from './curve.ts';
 import type { Fields } from './fields.ts';
 import type { Graph, Wire } from './graph.ts';
-import type { Ghost } from './rewrite.ts';
+import {
+  COMMUTE_K22,
+  commuteGhost,
+  rewriteHandoffStems,
+  stemFromGhost,
+  type Ghost,
+  type Rewrite,
+} from './rewrite.ts';
 import type { Sim } from './sim.ts';
 
 export interface ViewOpts {
@@ -57,8 +64,9 @@ export function render(
     ctx.globalAlpha = 1;
   }
 
-  drawWires(ctx, sim.graph, sim.agents, sim.w, sim.h, waves);
+  drawWires(ctx, sim.graph, sim.agents, sim.w, sim.h, waves, sim.rewrites);
   for (const rw of sim.rewrites) {
+    drawCommuteGhostWires(ctx, rw, sim.w, sim.h);
     for (const g of rw.ghosts) drawAgent(ctx, ghostAsAgent(g), 1);
   }
   for (const agent of sim.agents.values()) {
@@ -95,7 +103,7 @@ function ghostAsAgent(g: Ghost): Agent {
 }
 
 /** World-space px of displacement at |sample/env| = 1 after AGC. */
-const WAVE_SCALE = WAVE_DISP_PX;
+const WAVE_SCALE = WAVE_DISP_PX * 0.75;
 /** Below this envelope the wire is drawn as its rest pose. */
 const ENV_DEAD = 4e-4;
 /** Envelope at which AGC fade reaches 1. */
@@ -123,6 +131,7 @@ function drawWires(
   w: number,
   h: number,
   waves: WaveSnapshot | null,
+  rewrites: Rewrite[],
 ): void {
   ctx.lineWidth = 1.35;
   ctx.strokeStyle = '#ffffff';
@@ -132,13 +141,50 @@ function drawWires(
       const A = agents.get(wire.a.id);
       const B = agents.get(wire.b.id);
       if (!A || !B) continue;
+      let stemA: { x: number; y: number } | undefined;
+      let stemB: { x: number; y: number } | undefined;
+      for (const rw of rewrites) {
+        const handoff = rewriteHandoffStems(rw, wire, agents, w, h);
+        if (!handoff) continue;
+        stemA = { x: handoff.ax, y: handoff.ay };
+        stemB = { x: handoff.bx, y: handoff.by };
+        break;
+      }
       ctx.beginPath();
       const rec = waves?.index.get(wire.id);
-      if (!(rec !== undefined && strokeOffsetWire(ctx, A, B, wire, w, h, waves!.packed, rec))) {
-        strokeWire(ctx, A, B, wire, w, h);
+      if (!(rec !== undefined && strokeOffsetWire(ctx, A, B, wire, w, h, waves!.packed, rec, stemA, stemB))) {
+        strokeWire(ctx, A, B, wire, w, h, stemA, stemB);
       }
       ctx.stroke();
     }
+}
+
+function drawCommuteGhostWires(
+  ctx: CanvasRenderingContext2D,
+  rw: Rewrite,
+  w: number,
+  h: number,
+): void {
+  if (rw.rule !== 'commute' || rw.ghosts.length !== 4) return;
+  const alpha = rw.ghosts[0]?.alpha ?? 0;
+  if (alpha < 0.02) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.lineWidth = 1.35;
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineCap = 'round';
+  for (const link of COMMUTE_K22) {
+    const ga = commuteGhost(rw, link.a);
+    const gb = commuteGhost(rw, link.b);
+    if (!ga || !gb) continue;
+    const sa = stemFromGhost(ga, link.aSlot, w, h);
+    const sb = stemFromGhost(gb, link.bSlot, w, h);
+    ctx.beginPath();
+    ctx.moveTo(sa.x, sa.y);
+    ctx.lineTo(sb.x, sb.y);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function strokeWire(
@@ -148,8 +194,10 @@ function strokeWire(
   wire: Wire,
   w: number,
   h: number,
+  stemA?: { x: number; y: number },
+  stemB?: { x: number; y: number },
 ): void {
-  const pts = wireStrokePoints(A, B, wire, w, h);
+  const pts = wireStrokePoints(A, B, wire, w, h, stemA, stemB);
   if (pts.length === 0) return;
   ctx.moveTo(pts[0].x, pts[0].y);
   for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
@@ -164,10 +212,12 @@ function strokeOffsetWire(
   h: number,
   packed: Float32Array,
   rec: number,
+  stemA?: { x: number; y: number },
+  stemB?: { x: number; y: number },
 ): boolean {
   const bins = packed[1] | 0;
   if (bins < 2) return false;
-  const samples = pathSamples(wireStrokePoints(A, B, wire, w, h), bins);
+  const samples = pathSamples(wireStrokePoints(A, B, wire, w, h, stemA, stemB), bins);
   if (samples.length < 2) return false;
   const env = packed[rec + 1];
   if (!(env > ENV_DEAD)) return false;
@@ -201,8 +251,16 @@ interface PathSample {
 }
 
 /** Polyline the renderer strokes for a wire — cubic if no nodes, Catmull otherwise. */
-export function wireStrokePoints(A: Agent, B: Agent, wire: Wire, w: number, h: number): { x: number; y: number }[] {
-  const pts = wireControlPoints(A, B, wire, w, h);
+export function wireStrokePoints(
+  A: Agent,
+  B: Agent,
+  wire: Wire,
+  w: number,
+  h: number,
+  stemA?: { x: number; y: number },
+  stemB?: { x: number; y: number },
+): { x: number; y: number }[] {
+  const pts = wireControlPoints(A, B, wire, w, h, stemA, stemB);
   if (pts.length < 2) return pts;
   const span = Math.hypot(pts[pts.length - 1].x - pts[0].x, pts[pts.length - 1].y - pts[0].y);
   const budget = wireBowBudget(span, wire.rest);
@@ -233,7 +291,15 @@ export function wireStrokePoints(A: Agent, B: Agent, wire: Wire, w: number, h: n
   return out;
 }
 
-function wireControlPoints(A: Agent, B: Agent, wire: Wire, w: number, h: number): { x: number; y: number }[] {
+function wireControlPoints(
+  A: Agent,
+  B: Agent,
+  wire: Wire,
+  w: number,
+  h: number,
+  stemA?: { x: number; y: number },
+  stemB?: { x: number; y: number },
+): { x: number; y: number }[] {
   if (wire.nodes.length === 0) {
     const c = wireCubic(A, wire.a.slot, B, wire.b.slot, w, h, wire.rest);
     const pts: { x: number; y: number }[] = [];
@@ -241,9 +307,9 @@ function wireControlPoints(A: Agent, B: Agent, wire: Wire, w: number, h: number)
     return pts;
   }
   const raw = [
-    stemWorld(A, wire.a.slot, w, h),
+    stemA ?? stemWorld(A, wire.a.slot, w, h),
     ...wire.nodes,
-    stemWorld(B, wire.b.slot, w, h),
+    stemB ?? stemWorld(B, wire.b.slot, w, h),
   ];
   const pts = unwrapPoints(raw, w, h);
   const span = Math.hypot(pts[pts.length - 1].x - pts[0].x, pts[pts.length - 1].y - pts[0].y);

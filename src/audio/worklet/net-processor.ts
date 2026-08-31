@@ -2,13 +2,18 @@
 import { AudioRing } from '../ring.ts';
 import { WaveguideNet } from '../waveguide.ts';
 
+function mixClip(x: number): number {
+  if (x > -1 && x < 1) return x;
+  return Math.tanh(x);
+}
+
 /**
  * Two modes.
  *
- * With a ring, synthesis happens in a Worker and this is a copy: read four
- * planes, hand them to the outputs, wake the producer. A quantum that the
- * producer was late for costs buffered audio rather than a click, and the
- * buffer is what lets a slow pass be paid for out of a fast one.
+ * With rings, synthesis happens in one or more Workers and this is a mixer:
+ * read four planes from each ring, sum them, hand them to the outputs. A
+ * quantum that one producer was late for costs that ring's buffer rather than
+ * a click, and the other nets still speak — which is the point of sharding.
  *
  * Without a ring — no SharedArrayBuffer, or a page that is not
  * cross-origin-isolated — it runs the net here, exactly as before. That path
@@ -17,8 +22,8 @@ import { WaveguideNet } from '../waveguide.ts';
  */
 class NetProcessor extends AudioWorkletProcessor {
   net = new WaveguideNet();
-  private ring: AudioRing | null = null;
-  private out: (Float32Array | undefined)[] = [undefined, undefined, undefined, undefined];
+  private rings: (AudioRing | null)[] = [];
+  private mix: Float32Array[] = [];
   private vizAcc = 0;
   private errSent = 0;
   private prevTime = -1;
@@ -29,7 +34,9 @@ class NetProcessor extends AudioWorkletProcessor {
       try {
         const msg = ev.data;
         if (msg && msg.type === '__ring') {
-          this.ring = new AudioRing(msg.sab, msg.capacity);
+          const slot = Number.isFinite(msg.slot) ? msg.slot | 0 : 0;
+          while (this.rings.length <= slot) this.rings.push(null);
+          this.rings[slot] = new AudioRing(msg.sab, msg.capacity);
           return;
         }
         this.net.handle(msg);
@@ -49,16 +56,8 @@ class NetProcessor extends AudioWorkletProcessor {
     const wetR = wet && wet[1];
     const n = dryL.length;
 
-    if (this.ring) {
-      this.out[0] = dryL;
-      this.out[1] = dryR;
-      this.out[2] = wetL;
-      this.out[3] = wetR;
-      try {
-        this.ring.read(this.out, n);
-      } catch (err) {
-        this.report(err);
-      }
+    if (this.hasRing()) {
+      this.mixRings(n, dryL, dryR, wetL, wetR);
       return true;
     }
 
@@ -94,6 +93,63 @@ class NetProcessor extends AudioWorkletProcessor {
       this.report(err);
     }
     return true;
+  }
+
+  private hasRing(): boolean {
+    for (let i = 0; i < this.rings.length; i++) if (this.rings[i]) return true;
+    return false;
+  }
+
+  private ensureMix(n: number): void {
+    if (this.mix.length === 4 && this.mix[0].length >= n) return;
+    this.mix = [
+      new Float32Array(n),
+      new Float32Array(n),
+      new Float32Array(n),
+      new Float32Array(n),
+    ];
+  }
+
+  /**
+   * Sum every live ring into the worklet outputs.
+   *
+   * Each net already limits itself. The sum of independent instruments can
+   * still exceed 1, so the last stage is the same soft clip the waveguide
+   * uses — linear below unity, then it rounds off rather than folds.
+   */
+  private mixRings(
+    n: number,
+    dryL: Float32Array,
+    dryR: Float32Array | undefined,
+    wetL: Float32Array | undefined,
+    wetR: Float32Array | undefined,
+  ): void {
+    dryL.fill(0);
+    dryR?.fill(0);
+    wetL?.fill(0);
+    wetR?.fill(0);
+    this.ensureMix(n);
+    try {
+      for (let s = 0; s < this.rings.length; s++) {
+        const ring = this.rings[s];
+        if (!ring) continue;
+        ring.read(this.mix, n);
+        for (let i = 0; i < n; i++) {
+          dryL[i] += this.mix[0][i];
+          if (dryR) dryR[i] += this.mix[1][i];
+          if (wetL) wetL[i] += this.mix[2][i];
+          if (wetR) wetR[i] += this.mix[3][i];
+        }
+      }
+      for (let i = 0; i < n; i++) {
+        dryL[i] = mixClip(dryL[i]);
+        if (dryR) dryR[i] = mixClip(dryR[i]);
+        if (wetL) wetL[i] = mixClip(wetL[i]);
+        if (wetR) wetR[i] = mixClip(wetR[i]);
+      }
+    } catch (err) {
+      this.report(err);
+    }
   }
 
   private report(err: unknown): void {

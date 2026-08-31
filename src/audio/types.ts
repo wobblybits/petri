@@ -76,13 +76,44 @@ export interface AgentTopo {
   modeGain?: number[];
   /** How hard this body drives the wires tied to it. */
   coupling?: number;
+  /** Agents in this body's connected component. 1 = unwired, 2 = a pair. */
+  compN?: number;
   /** Detail tier from apparent size: 0 full modal body, 1 reduced, 2 ensemble. */
+  lod?: number;
+  /**
+   * True when this body is the interior of a commute-mesh: no delay lines,
+   * no stubs, strikes dump into `tissueId`.
+   */
+  tissue?: boolean;
+  /** Component resonator this body belongs to, when `tissue` or on the skin boundary. */
+  tissueId?: number;
+  /**
+   * Extra junction admittance into that resonator. Skin agents on the edge of
+   * tissue present this as one more port; fully-skin and fully-tissue are 0.
+   */
+  tissueY?: number;
+}
+
+/**
+ * One collapsed commute-mesh interior. A handful of lattice modes standing
+ * in for the delay lines we are not running. Driven by dumped wires, by
+ * strikes on tissue bodies, and by the boundary junctions of the skin.
+ */
+export interface TissueTopo {
+  /** Stable id: the smallest agent id in the component. */
+  id: number;
+  n: number;
+  /** Characteristic one-way delay in samples (median of the mesh wires). */
+  delay: number;
+  pan?: number;
+  dist?: number;
   lod?: number;
 }
 
 export interface NetTopology {
   wires: WireTopo[];
   agents: AgentTopo[];
+  tissues?: TissueTopo[];
   /** Listener height above the pond, in the same units as `dist`. */
   height?: number;
 }

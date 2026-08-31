@@ -24,6 +24,7 @@ import {
   beginRewrite,
   commitRewrite,
   PULL_END,
+  rewriteHandoffStems,
   type Rewrite,
 } from './rewrite.ts';
 import { audio } from './audio/engine.ts';
@@ -162,6 +163,8 @@ export class Sim {
    * joints at 1/h velocity.
    */
   grabbed: { id: number; x: number; y: number } | null = null;
+  /** Agents in an active rewrite — their incident ropes are kinematic. */
+  private rewriteFrozen = new Set<number>();
 
   /** Eased centre of mass. Rewrites delete agents, which jumps the true COM. */
   private home: { x: number; y: number } | null = null;
@@ -285,7 +288,7 @@ export class Sim {
     this.applyRadiationLoss();
     this.dampVelocities(params, t);
 
-    this.graph.refreshLengths(this.agents, this.w, this.h);
+    this.graph.refreshLengths(this.agents, this.w, this.h, this.rewriteFrozen);
     this.noteWireFriction();
     this.emitWirePlucks();
     this.graph.snap(this.agents, this.w, this.h, params, this.time);
@@ -348,6 +351,14 @@ export class Sim {
     }
   }
 
+  private collectRewriteFrozen(): void {
+    this.rewriteFrozen.clear();
+    for (const rw of this.rewrites) {
+      this.rewriteFrozen.add(rw.a);
+      this.rewriteFrozen.add(rw.b);
+    }
+  }
+
   /**
    * Ropes drape off bodies they are not attached to. Wire–wire pairs are
    * detected for friction audio but not displaced — two strings scrape, they
@@ -369,6 +380,7 @@ export class Sim {
     const gain = params.wireClear;
     if (gain <= 0) return;
     const cap = Sim.WIRE_CLEAR_STEP;
+    const frozen = this.rewriteFrozen;
 
     for (let k = 0; k < this.clearBodyPairs.length; k += 2) {
       const wire = this.clearBodyPairs[k] as Wire;
@@ -376,6 +388,7 @@ export class Sim {
       const A = this.agents.get(wire.a.id);
       const B = this.agents.get(wire.b.id);
       if (!A || !B) continue;
+      if (frozen.has(A.id) || frozen.has(B.id)) continue;
       const sA = stemWorldInto(A, wire.a.slot, this.w, this.h, this.tmpStemA);
       const sB = stemWorldInto(B, wire.b.slot, this.w, this.h, this.tmpStemB);
       const keep = boundRadius(agent) + WIRE_RADIUS;
@@ -791,8 +804,9 @@ export class Sim {
     this.graph.syncRest(this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h);
     this.buildClearPairs(params);
+    this.collectRewriteFrozen();
     for (let sub = 0; sub < Sim.SUBSTEPS; sub++) {
-      this.graph.solveWires(this.agents, params, h, this.time);
+      this.graph.solveWires(this.agents, params, h, this.time, this.rewriteFrozen);
       this.clearWires(params);
       this.solveGrab(h);
       this.solveContacts(h);
@@ -998,6 +1012,8 @@ export class Sim {
     this.graph.syncRest(this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h);
     this.buildClearPairs(params);
+    this.collectRewriteFrozen();
+    const frozen = this.rewriteFrozen;
     const h = dt / Sim.SUBSTEPS;
     const invH = 1 / h;
     const held = this.grabbed?.id ?? -1;
@@ -1019,15 +1035,17 @@ export class Sim {
         a.heading = wrapAngle(a.heading + a.omega * h);
       }
       for (const wire of this.graph.wires.values()) {
+        const hold = frozen.has(wire.a.id) || frozen.has(wire.b.id);
         for (const node of wire.nodes) {
           node.prevX = node.x;
           node.prevY = node.y;
+          if (hold) continue;
           node.x += node.vx * h;
           node.y += node.vy * h;
         }
       }
 
-      this.graph.solveWires(this.agents, params, h, this.time);
+      this.graph.solveWires(this.agents, params, h, this.time, frozen);
       this.solveGrab(h);
       this.clearWires(params);
       this.solveContacts(h);
@@ -1625,6 +1643,18 @@ export class Sim {
     return e;
   }
 
+  /**
+   * A rewrite is a principal-port meeting, not a fully dressed net.
+   *
+   * Waiting until both agents are saturated, the shrink curve has finished,
+   * and the rope has settled onto `wireMinRest` meant the solver did the
+   * haul that the rewrite animation is for, and Dup/Con almost never fired
+   * because their aux ports were still free. Leftovers may be null; that is
+   * a legal net. We only wait until shrink has *started* so a latch is
+   * visible for a beat, and so tests that stretch `wireShrink` still hold.
+   */
+  private static readonly REWRITE_SHRINK_READY = 0.45;
+
   private startRewrites(params: Params): void {
     if (params.rewriteDuration <= 0) return;
     const busy = new Set<number>();
@@ -1638,12 +1668,12 @@ export class Sim {
       const B = this.agents.get(wire.b.id);
       if (!A || !B || A.locked || B.locked || A.stun > 0 || B.stun > 0) continue;
       if (busy.has(A.id) || busy.has(B.id)) continue;
-      if (!this.graph.portsFilled(A) || !this.graph.portsFilled(B)) continue;
-      const shrinkU = this.graph.shrinkU(wire, this.time, params);
-      if (shrinkU < 1) continue;
-      if (this.time - wire.born < params.wireShrink + 0.2) continue;
+      if (this.graph.shrinkU(wire, this.time, params) < Sim.REWRITE_SHRINK_READY) continue;
       const len = this.graph.curveLength(wire, this.agents, this.w, this.h);
-      if (len > params.wireMinRest + 3) continue;
+      // Not the rest-length sit: the collapse hauls them the rest of the way.
+      // Still skip a cable that has barely started to take, so the pull is a
+      // close and not a fling.
+      if (len > params.wireMinRest * 1.3) continue;
       // Cancel only what the two are doing relative to each other. Zeroing
       // both outright pinned a collapsing pair to the world for the whole
       // rewrite while the rest of the soup drifted past it.
@@ -1683,26 +1713,70 @@ export class Sim {
    * lower the closer they get.
    */
   private reelRope(wire: Wire, pull: number): void {
-    const n = wire.nodes.length;
-    if (n === 0 || pull <= 0) return;
     const A = this.agents.get(wire.a.id);
     const B = this.agents.get(wire.b.id);
     if (!A || !B) return;
     const sA = stemWorldInto(A, wire.a.slot, this.w, this.h, this.tmpStemA);
     const sB = stemWorldInto(B, wire.b.slot, this.w, this.h, this.tmpStemB);
+    this.reelRopeTo(wire, sA.x, sA.y, sB.x, sB.y, pull);
+  }
+
+  private reelRopeTo(
+    wire: Wire,
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number,
+    pull: number,
+  ): void {
+    const n = wire.nodes.length;
+    if (n === 0 || pull <= 0) return;
     for (let i = 0; i < n; i++) {
       const node = wire.nodes[i];
       const t = (i + 1) / (n + 1);
-      const tx = sA.x + (sB.x - sA.x) * t;
-      const ty = sA.y + (sB.y - sA.y) * t;
+      const tx = ax + (bx - ax) * t;
+      const ty = ay + (by - ay) * t;
       node.x += (tx - node.x) * pull;
       node.y += (ty - node.y) * pull;
-      // Reeled, not flung: leaving the velocity behind hands the solver a
-      // huge correction on the next substep.
       node.vx *= 1 - pull;
       node.vy *= 1 - pull;
       node.prevX = node.x;
       node.prevY = node.y;
+    }
+    if (pull >= 1) {
+      let len = 0;
+      let px = ax;
+      let py = ay;
+      for (const node of wire.nodes) {
+        len += Math.hypot(node.x - px, node.y - py);
+        px = node.x;
+        py = node.y;
+      }
+      len += Math.hypot(bx - px, by - py);
+      wire.lastLen = len;
+    }
+  }
+
+  /**
+   * Leftover ropes on a rewriting pair are not the collapsing principal, but
+   * they share a kinematic end. Unreeled they freeze in world space while the
+   * stem slams, and the polyline grows into a several-hundred-pixel knot.
+   * Snap them onto the handoff chord (leftover ↔ ghost, or leftover ↔ leftover
+   * mate) so commit does not jump the endpoint.
+   */
+  private reelRewriteLeftovers(rw: Rewrite): void {
+    const seen = new Set<number>();
+    for (const id of [rw.a, rw.b]) {
+      const ag = this.agents.get(id);
+      if (!ag) continue;
+      for (const slot of slotsFor(ag.kind)) {
+        const wire = this.graph.wireAt({ id, slot });
+        if (!wire || wire.id === rw.wireId || seen.has(wire.id)) continue;
+        seen.add(wire.id);
+        const handoff = rewriteHandoffStems(rw, wire, this.agents, this.w, this.h);
+        if (handoff) this.reelRopeTo(wire, handoff.ax, handoff.ay, handoff.bx, handoff.by, 1);
+        else this.reelRope(wire, 1);
+      }
     }
   }
 
@@ -1760,16 +1834,19 @@ export class Sim {
       // pull. It retracts into the pair and is gone by the time they touch,
       // and because it stays taut on the way its pitch rises instead of
       // sagging the way a slackening rope's does.
-      if (rw.wireId < 0) continue;
-      const wire = this.graph.wires.get(rw.wireId);
-      if (!wire) continue;
       const pull = clamp(rw.t / PULL_END, 0, 1);
-      wire.collapse = pull;
-      this.reelRope(wire, pull);
-      if (pull >= 1 && !rw.struck) {
-        rw.struck = true;
-        this.emitRewriteContact(rw);
+      if (rw.wireId >= 0) {
+        const wire = this.graph.wires.get(rw.wireId);
+        if (wire) {
+          wire.collapse = pull;
+          this.reelRope(wire, pull);
+          if (pull >= 1 && !rw.struck) {
+            rw.struck = true;
+            this.emitRewriteContact(rw);
+          }
+        }
       }
+      this.reelRewriteLeftovers(rw);
     }
     for (const rw of done) {
       audio.push(

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { WaveguideNet, WAVE_BINS, junctionLoadY } from './waveguide.ts';
-import { bowSpeed } from './presets.ts';
+import { bowSpeed, componentLoadScale } from './presets.ts';
 import type { AgentTopo, NetTopology } from './types.ts';
+import { LOD_FAR, LOD_MID, LOD_NEAR } from './lod.ts';
+import { buildTopology } from './topology.ts';
+import { bodyTone } from './body.ts';
+import { Sim } from '../sim.ts';
+import { defaultParams } from '../params.ts';
+import { loadPreset } from '../presets.ts';
 
 function sampleTopo(wireId: number, agentA: number, agentB: number, length = 120): NetTopology {
   return {
@@ -152,6 +158,9 @@ describe('WaveguideNet', () => {
   it('a closed junction still leaks a little', () => {
     expect(junctionLoadY(0)).toBeGreaterThan(0.004);
     expect(junctionLoadY(0)).toBeLessThan(0.05);
+    expect(junctionLoadY(0, 1)).toBe(junctionLoadY(0, 2));
+    expect(junctionLoadY(0, 32)).toBeGreaterThan(junctionLoadY(0, 2) * 1.4);
+    expect(junctionLoadY(0, 32)).toBeLessThan(0.05);
   });
 
   it('a NaN delay does not poison the output', () => {
@@ -1273,5 +1282,343 @@ describe('annihilation release', () => {
     const left = make(-1);
     expect(left.l).toBeGreaterThan(0);
     expect(left.r).toBeLessThan(left.l * 0.1);
+  });
+});
+
+describe('lod mix', () => {
+  function agent(id: number, lod: number): AgentTopo {
+    return {
+      id,
+      kind: (id % 3) as 0 | 1 | 2,
+      openPorts: 0,
+      impedance: 1,
+      pan: 0,
+      dist: 0.5,
+      lod,
+      modeHz: [180, 380, 620],
+      modeT60: [0.4, 0.22, 0.12],
+      modeGain: [0.7, 0.4, 0.22],
+      coupling: 1,
+    };
+  }
+
+  function islands(n: number, lod: number): NetTopology {
+    const wires = [];
+    const agents: AgentTopo[] = [];
+    for (let i = 0; i < n; i++) {
+      const a = i * 2 + 1;
+      const b = i * 2 + 2;
+      wires.push({
+        id: i + 1,
+        length: 140,
+        loss: 0.9992,
+        bend: 0.04,
+        agentA: a,
+        agentB: b,
+        zA: 1,
+        zB: 1,
+        damp: 0.6,
+        disp: 0,
+        pan: 0,
+        dist: 0.5,
+        exAt: 0.16,
+        exWidth: 1,
+        lod,
+      });
+      agents.push(agent(a, lod), agent(b, lod));
+    }
+    return { wires, agents, height: 0.45 };
+  }
+
+  function drive(topo: NetTopology, plucked: number[], n = 8192): { rms: number; peak: number; rail: number } {
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo });
+    for (const id of plucked) net.injectPluck(id, 0.9);
+    let sum = 0;
+    let pk = 0;
+    let rail = 0;
+    for (let i = 0; i < n; i++) {
+      net.tick();
+      const d = Math.max(Math.abs(net.outDryL), Math.abs(net.outDryR));
+      const w = Math.max(Math.abs(net.outWetL), Math.abs(net.outWetR));
+      const v = net.outDryL + net.outWetL;
+      sum += v * v;
+      if (d > pk) pk = d;
+      if (w > pk) pk = w;
+      if (d > 0.98 || w > 0.98) rail++;
+    }
+    return { rms: Math.sqrt(sum / n), peak: pk, rail: rail / n };
+  }
+
+  it('a NEAR pluck is not turned down by silent FAR objects', () => {
+    const solo = drive(islands(1, LOD_NEAR), [1]);
+    const withFar = new WaveguideNet();
+    const topo = islands(16, LOD_FAR);
+    topo.wires[0].lod = LOD_NEAR;
+    topo.agents[0].lod = LOD_NEAR;
+    topo.agents[1].lod = LOD_NEAR;
+    withFar.handle({ type: 'topology', topo });
+    withFar.injectPluck(1, 0.9);
+    let sum = 0;
+    for (let i = 0; i < 8192; i++) {
+      withFar.tick();
+      const v = withFar.outDryL + withFar.outWetL;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / 8192);
+    expect(rms).toBeGreaterThan(solo.rms * 0.9);
+    expect(rms).toBeLessThan(solo.rms * 1.15);
+  });
+
+  it('sixteen FAR plucks stay off the clip rail', () => {
+    const far = drive(islands(16, LOD_FAR), Array.from({ length: 16 }, (_, i) => i + 1));
+    expect(far.peak).toBeLessThan(0.95);
+    expect(far.rail).toBe(0);
+    expect(far.rms).toBeGreaterThan(0.01);
+  });
+
+  it('sixteen FAR plucks do not turn a NEAR pluck down', () => {
+    const nearOnly = drive(islands(1, LOD_NEAR), [1]);
+    const mixedTopo = islands(16, LOD_FAR);
+    mixedTopo.wires[0].lod = LOD_NEAR;
+    mixedTopo.agents[0].lod = LOD_NEAR;
+    mixedTopo.agents[1].lod = LOD_NEAR;
+    const mixed = drive(mixedTopo, Array.from({ length: 16 }, (_, i) => i + 1));
+    // FAR adds a bed, so the mix can be louder — it must not be quieter.
+    expect(mixed.rms).toBeGreaterThan(nearOnly.rms * 0.9);
+    expect(mixed.peak).toBeLessThan(0.95);
+  });
+
+  it('a MID clump is quieter than the same clump at NEAR', () => {
+    const ids = Array.from({ length: 8 }, (_, i) => i + 1);
+    const near = drive(islands(8, LOD_NEAR), ids);
+    const mid = drive(islands(8, LOD_MID), ids);
+    expect(mid.rms).toBeLessThan(near.rms * 0.85);
+    expect(mid.rms).toBeGreaterThan(0.01);
+  });
+});
+
+describe('component loading', () => {
+  it('leaves a pair and an unwired body unscaled', () => {
+    expect(componentLoadScale(1)).toBe(1);
+    expect(componentLoadScale(2)).toBe(1);
+    expect(componentLoadScale(32)).toBeLessThan(0.45);
+    expect(componentLoadScale(32)).toBeGreaterThan(0.3);
+  });
+
+  function chain(n: number): Sim {
+    const sim = new Sim(1600, 400);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.maxAgents = n;
+    const made = [];
+    for (let i = 0; i < n; i++) {
+      made.push(sim.spawn('dup', 40 + i * 36, 180, 0, params, true)!);
+    }
+    for (let i = 0; i < n - 1; i++) {
+      sim.wire(made[i].id, i === 0 ? 'p' : 'l', made[i + 1].id, 'p', params);
+    }
+    return sim;
+  }
+
+  it('a lone pair keeps the free-body T60, a 32-agent clump does not', () => {
+    const pairSim = chain(2);
+    const clumpSim = chain(32);
+    const pair = buildTopology(pairSim.graph, pairSim.agents);
+    const clump = buildTopology(clumpSim.graph, clumpSim.agents);
+    const pairAgent = [...pairSim.agents.values()][0];
+    const free = bodyTone(pairAgent).decay[0];
+    expect(pair.agents[0].compN).toBe(2);
+    expect(clump.agents[0].compN).toBe(32);
+    expect(pair.agents[0].modeT60![0]).toBeCloseTo(free, 5);
+    expect(clump.agents[0].modeT60![0]).toBeLessThan(free * 0.5);
+    expect(clump.agents[0].modeT60![0]).toBeCloseTo(free * componentLoadScale(32), 5);
+  });
+
+  it('the bed of a large component is quieter; a knock still hits', () => {
+    const strikePeak = (sim: Sim) => {
+      const topo = buildTopology(sim.graph, sim.agents);
+      const net = new WaveguideNet();
+      net.handle({ type: 'topology', topo });
+      net.handle({ type: 'strike', agentId: topo.agents[0].id, peak: 1.2, dur: 48, sharp: 0.6 });
+      let peak = 0;
+      for (let i = 0; i < 400; i++) {
+        net.tick();
+        peak = Math.max(peak, Math.abs(net.outDryL), Math.abs(net.outDryR));
+      }
+      return peak;
+    };
+    const pluckTail = (sim: Sim) => {
+      const topo = buildTopology(sim.graph, sim.agents);
+      const net = new WaveguideNet();
+      net.handle({ type: 'topology', topo });
+      if (topo.wires[0]) net.injectPluck(topo.wires[0].id, 0.9);
+      for (let i = 0; i < 2000; i++) net.tick();
+      let sum = 0;
+      for (let i = 0; i < 4000; i++) {
+        net.tick();
+        const v = net.outDryL + net.outWetL;
+        sum += v * v;
+      }
+      return Math.sqrt(sum / 4000);
+    };
+
+    const pairSim = chain(2);
+    const clumpSim = chain(32);
+    const pairPeak = strikePeak(pairSim);
+    const clumpPeak = strikePeak(clumpSim);
+    expect(clumpPeak).toBeGreaterThan(pairPeak * 0.7);
+    expect(pluckTail(clumpSim)).toBeLessThan(pluckTail(pairSim) * 0.75);
+  });
+});
+
+describe('tissue resonator', () => {
+  function skinWire(id: number, a: number, b: number): NetTopology['wires'][number] {
+    return { id, length: 80, loss: 0.999, bend: 0.04, agentA: a, agentB: b, zA: 1, zB: 1 };
+  }
+
+  function body(id: number, tissue = false, tissueId?: number, tissueY = 0): AgentTopo {
+    return {
+      id,
+      kind: 1,
+      openPorts: tissue ? 0 : 1,
+      impedance: 1,
+      pan: 0,
+      dist: 0.5,
+      lod: tissue ? 2 : 0,
+      tissue,
+      tissueId,
+      tissueY,
+      modeHz: [180, 380, 620],
+      modeT60: [0.4, 0.22, 0.12],
+      modeGain: [0.7, 0.4, 0.22],
+      coupling: 1,
+    };
+  }
+
+  it('collapses interior strings so only the skin wire is a delay line', () => {
+    const net = new WaveguideNet();
+    net.handle({
+      type: 'topology',
+      topo: {
+        wires: [skinWire(1, 1, 2)],
+        agents: [
+          body(1, false, 1, 0.4),
+          body(2, false, 1, 0.4),
+          body(3, true, 1),
+          body(4, true, 1),
+        ],
+        tissues: [{ id: 1, n: 4, delay: 64, lod: 2 }],
+      },
+    });
+    expect(net.liveCount).toBe(1);
+    expect(net.tissues.filter((t) => t.active)).toHaveLength(1);
+  });
+
+  it('a knock on a tissue body is still audible', () => {
+    const net = new WaveguideNet();
+    net.handle({
+      type: 'topology',
+      topo: {
+        wires: [],
+        agents: [body(1, true, 1), body(2, true, 1)],
+        tissues: [{ id: 1, n: 8, delay: 80, pan: 0, dist: 0.4, lod: 2 }],
+      },
+    });
+    net.handle({ type: 'strike', agentId: 1, peak: 1.4, dur: 48, sharp: 0.5 });
+    expect(peak(collect(net, 800))).toBeGreaterThan(0.01);
+  });
+
+  it('folding a ringing skin wire into tissue does not release it', () => {
+    const skin: NetTopology = {
+      wires: [skinWire(1, 1, 2), skinWire(2, 2, 3), skinWire(3, 3, 4)],
+      agents: [body(1), body(2), body(3), body(4)],
+    };
+    const folded: NetTopology = {
+      wires: [skinWire(1, 1, 2)],
+      agents: [body(1, false, 1, 0.5), body(2, false, 1, 0.5), body(3, true, 1), body(4, true, 1)],
+      tissues: [{ id: 1, n: 4, delay: 64, lod: 2 }],
+    };
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: skin });
+    net.injectPluck(2, 0.9);
+    collect(net, 240);
+    const ringing = net.wires.find((w) => w.wireId === 2);
+    expect(ringing?.env ?? 0).toBeGreaterThan(0.05);
+    net.handle({ type: 'topology', topo: folded });
+    expect(net.wires.some((w) => w.releasing)).toBe(false);
+    expect(net.wires.find((w) => w.wireId === 2)?.active ?? false).toBe(false);
+    expect(net.liveCount).toBe(1);
+    const tissue = net.tissues.find((t) => t.active);
+    expect(tissue?.env ?? 0).toBeGreaterThan(0);
+    net.injectPluck(1, 0.9);
+    expect(peak(collect(net, 400))).toBeGreaterThan(0.02);
+  });
+});
+
+describe('leftover delay lines', () => {
+  it('a wire that keeps its id keeps its ringing across a topology rebuild', () => {
+    const net = new WaveguideNet();
+    net.handle({
+      type: 'topology',
+      topo: sampleTopo(7, 1, 2, 90),
+    });
+    net.injectPluck(7, 0.9);
+    collect(net, 240);
+    const before = net.wires.find((w) => w.wireId === 7)!;
+    expect(before.env).toBeGreaterThan(0.05);
+    const env = before.env;
+    net.handle({
+      type: 'topology',
+      topo: {
+        wires: [
+          {
+            id: 7,
+            length: 90,
+            loss: 0.999,
+            bend: 0.05,
+            agentA: 1,
+            agentB: 5,
+            zA: 1,
+            zB: 1,
+          },
+        ],
+        agents: [
+          { id: 1, kind: 0, openPorts: 0, impedance: 1 },
+          { id: 5, kind: 1, openPorts: 0, impedance: 1 },
+        ],
+      },
+    });
+    const after = net.wires.find((w) => w.wireId === 7)!;
+    expect(after.active).toBe(true);
+    expect(after.env).toBeGreaterThan(env * 0.5);
+    expect(after.agentB).toBe(5);
+    expect(net.wires.some((w) => w.releasing)).toBe(false);
+  });
+
+  it('an oscillator leftover still rings after the commute', () => {
+    const sim = new Sim(480, 320);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    loadPreset(sim, 'oscillator', params);
+    const era = [...sim.agents.values()].find((a) => a.kind === 'era')!;
+    const leftover = [...sim.graph.wires.values()].find((w) => w.a.id === era.id || w.b.id === era.id)!;
+    const topo0 = buildTopology(sim.graph, sim.agents);
+    const net = new WaveguideNet();
+    net.handle({ type: 'topology', topo: topo0 });
+    net.injectPluck(leftover.id, 0.9);
+    collect(net, 200);
+    expect(net.wires.find((w) => w.wireId === leftover.id)?.env ?? 0).toBeGreaterThan(0.05);
+    for (let f = 0; f < 300; f++) {
+      const nRw = sim.rewrites.length;
+      sim.step(1 / 60, params);
+      if (nRw > 0 && sim.rewrites.length === 0) break;
+    }
+    expect(sim.graph.wires.has(leftover.id)).toBe(true);
+    net.handle({ type: 'topology', topo: buildTopology(sim.graph, sim.agents) });
+    const kept = net.wires.find((w) => w.wireId === leftover.id);
+    expect(kept?.active).toBe(true);
+    expect(kept?.env ?? 0).toBeGreaterThan(0.02);
+    expect(net.wires.some((w) => w.releasing && w.wireId === leftover.id)).toBe(false);
   });
 });

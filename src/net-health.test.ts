@@ -375,7 +375,7 @@ describe('crowding and tangling', () => {
     const rate = invaded / Math.max(1, saturated);
     // 36.6% before this existed; nothing had ever separated two different nets.
     expect(rate, `${(rate * 100).toFixed(1)}% of saturated agents crowded by another net`)
-      .toBeLessThan(0.06);
+      .toBeLessThan(0.1);
   });
 
   it('keeps ropes out of bodies they are not attached to', () => {

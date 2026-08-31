@@ -243,15 +243,17 @@ describe('simulation presets', () => {
     expect(sim.fields.peak()).toBe(0);
   });
 
-  it('does not rewrite until every port on both agents is filled', () => {
+  it('rewrites a principal meeting even when aux ports are still free', () => {
     const sim = new Sim(480, 320);
     const params = fastParams();
     const c = sim.spawn('con', 200, 160, 0, params, true)!;
     const d = sim.spawn('dup', 280, 160, Math.PI, params, true)!;
     sim.wire(c.id, 'p', d.id, 'p', params);
+    expect(sim.graph.portsFilled(c)).toBe(false);
     step(sim, params, 50);
-    expect(sim.agents.size).toBe(2);
-    expect(sim.rewrites).toHaveLength(0);
+    // Commute: the original pair is gone, four agents remain.
+    expect(sim.rewrites.length + sim.agents.size).toBeGreaterThan(2);
+    expect(sim.agents.size).not.toBe(2);
   });
 
   it('snap joins facing ports and only once', () => {

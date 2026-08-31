@@ -69,6 +69,24 @@ export function otherEnd(wire: Wire, port: PortRef): PortRef {
   return wire.a;
 }
 
+function samePort(a: PortRef, b: PortRef): boolean {
+  return a.id === b.id && a.slot === b.slot;
+}
+
+/** Keep a surviving end on the same delay-line side. */
+function orientRebind(
+  oldA: PortRef,
+  oldB: PortRef,
+  na: PortRef,
+  nb: PortRef,
+): [PortRef, PortRef] {
+  if (samePort(oldA, na) || samePort(oldB, nb)) return [na, nb];
+  if (samePort(oldA, nb) || samePort(oldB, na)) return [nb, na];
+  if (oldA.id === na.id || oldB.id === nb.id) return [na, nb];
+  if (oldA.id === nb.id || oldB.id === na.id) return [nb, na];
+  return [na, nb];
+}
+
 export class Graph {
   /**
    * Ports that must never latch on their own. A compiled lambda term has an
@@ -179,6 +197,77 @@ export class Graph {
     return wire;
   }
 
+  /**
+   * Move a live wire onto new ports without minting an id. The delay line
+   * keeps ringing; `restitchChord` then sits the rope on the new stems.
+   * Surviving ends stay on the same side of the delay line.
+   */
+  rebind(id: number, a: PortRef, b: PortRef): boolean {
+    const w = this.wires.get(id);
+    if (!w) return false;
+    if (a.id === b.id && a.slot === b.slot) return false;
+    const held = (p: PortRef) => {
+      const at = this.portWire.get(portKey(p));
+      return at === undefined || at === id;
+    };
+    if (!held(a) || !held(b)) return false;
+    this.portWire.delete(portKey(w.a));
+    this.portWire.delete(portKey(w.b));
+    const [na, nb] = orientRebind(w.a, w.b, a, b);
+    w.a = na;
+    w.b = nb;
+    this.portWire.set(portKey(w.a), id);
+    this.portWire.set(portKey(w.b), id);
+    this.bump();
+    return true;
+  }
+
+  /**
+   * Drop the rope onto the current stem chord. Used after `rebind` so a
+   * leftover does not keep a polyline that belonged to the dying ports.
+   */
+  restitchChord(
+    id: number,
+    agents: Map<number, Agent>,
+    w: number,
+    h: number,
+    time: number,
+  ): void {
+    const wire = this.wires.get(id);
+    if (!wire) return;
+    const A = agents.get(wire.a.id);
+    const B = agents.get(wire.b.id);
+    if (!A || !B) return;
+    const sa = stemWorldInto(A, wire.a.slot, w, h, stemScratchA);
+    const sax = sa.x;
+    const say = sa.y;
+    const sb = stemWorldInto(B, wire.b.slot, w, h, stemScratchB);
+    const sbx = sb.x;
+    const sby = sb.y;
+    const dx = sbx - sax;
+    const dy = sby - say;
+    const span = Math.max(1, Math.hypot(dx, dy));
+    wire.nodes = sampleChain(
+      {
+        p0: { x: sax, y: say },
+        p1: { x: sax + dx / 3, y: say + dy / 3 },
+        p2: { x: sax + (2 * dx) / 3, y: say + (2 * dy) / 3 },
+        p3: { x: sbx, y: sby },
+      },
+      desiredLinks(span),
+      w,
+      h,
+    );
+    wire.lastLen = span;
+    wire.ropeLen = span;
+    wire.latchLen = span;
+    wire.rest = span;
+    wire.pitchFloor = span * 0.5;
+    wire.collapse = 0;
+    wire.born = time;
+    wire.shape = [];
+  }
+
   connect(
     agents: Map<number, Agent>,
     a: PortRef,
@@ -187,6 +276,7 @@ export class Graph {
     h: number,
     params: Params,
     time: number,
+    opts?: { chord?: boolean; silent?: boolean },
   ): Wire | null {
     const A = agents.get(a.id);
     const B = agents.get(b.id);
@@ -196,31 +286,44 @@ export class Graph {
     // fresh violation and a body overlap to resolve in one substep. The port
     // torques turn them instead, and the wire is born slack enough to allow it.
     const sa = stemWorldInto(A, a.slot, w, h, stemScratchA);
+    const sax = sa.x;
+    const say = sa.y;
     const sb = stemWorldInto(B, b.slot, w, h, stemScratchB);
-    const stemDx = sb.x - sa.x;
-    const stemDy = sb.y - sa.y;
+    const sbx = sb.x;
+    const sby = sb.y;
     // Born at the length it actually latched at, so the wire starts satisfied
     // and `restLength` ramps it to wireMinRest over `wireShrink`. Clamping this
     // up to wireMinRest skips the ramp and hands the solver a 30 px violation
     // to resolve in one substep, which reads as a kick.
+    const stemDx = sbx - sax;
+    const stemDy = sby - say;
     const span = Math.hypot(stemDx, stemDy);
     const len = Math.max(span, params.wireMinRest * Graph.BIRTH_FLOOR);
-    const c = wireCubic(A, a.slot, B, b.slot, w, h, len);
+    const c = opts?.chord
+      ? {
+          p0: { x: sax, y: say },
+          p1: { x: sax + stemDx / 3, y: say + stemDy / 3 },
+          p2: { x: sax + (2 * stemDx) / 3, y: say + (2 * stemDy) / 3 },
+          p3: { x: sbx, y: sby },
+        }
+      : wireCubic(A, a.slot, B, b.slot, w, h, len);
     const wire = this.attach(a, b, len, time);
     if (wire) {
       wire.nodes = sampleChain(c, desiredLinks(len), w, h);
-      this.onLatch?.({
-        type: 'latch',
-        wireId: wire.id,
-        agentA: a.id,
-        agentB: b.id,
-        slotA: a.slot,
-        slotB: b.slot,
-        kindA: A.kind,
-        kindB: B.kind,
-        rest: wire.rest,
-        latchLen: len,
-      });
+      if (!opts?.silent) {
+        this.onLatch?.({
+          type: 'latch',
+          wireId: wire.id,
+          agentA: a.id,
+          agentB: b.id,
+          slotA: a.slot,
+          slotB: b.slot,
+          kindA: A.kind,
+          kindB: B.kind,
+          rest: wire.rest,
+          latchLen: len,
+        });
+      }
     }
     return wire;
   }
@@ -570,12 +673,14 @@ export class Graph {
     params: Params,
     h: number,
     time: number,
+    frozen?: Set<number>,
   ): void {
     for (const wire of this.wires.values()) {
       const A = agents.get(wire.a.id);
       const B = agents.get(wire.b.id);
       if (!A || !B) continue;
       if (A.locked && B.locked) continue;
+      if (frozen && (frozen.has(A.id) || frozen.has(B.id))) continue;
       solveWire(
         A,
         wire.a.slot,
@@ -592,8 +697,14 @@ export class Graph {
   }
 
   /** Bookkeeping the renderer and rewrite gate read. */
-  refreshLengths(agents: Map<number, Agent>, w: number, h: number): void {
+  refreshLengths(
+    agents: Map<number, Agent>,
+    w: number,
+    h: number,
+    frozen?: Set<number>,
+  ): void {
     for (const wire of this.wires.values()) {
+      if (frozen && frozen.has(wire.a.id) !== frozen.has(wire.b.id)) continue;
       wire.lastLen = this.curveLength(wire, agents, w, h);
     }
   }

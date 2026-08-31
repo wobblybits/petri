@@ -90,7 +90,110 @@ describe('sim to sound', () => {
     expect(tail).toBeLessThan(1e-10);
   });
 
-  it('caps how many excitations a single busy frame can fire', () => {
+  it('a visible knock still sounds when the frame is full of latches', () => {
+    const sim = new Sim(200, 200);
+    const params = defaultParams();
+    const engine = new AudioEngine();
+    engine.armWithoutAudio();
+    const posted: WorkletInMessage[] = [];
+    engine.onPost = (m) => posted.push(m);
+    const agents = [];
+    for (let i = 0; i < 12; i++) {
+      agents.push(sim.spawn('era', 20 + i * 12, 40, 0, params, true)!);
+    }
+    for (let i = 0; i < 5; i++) {
+      const a = agents[i * 2];
+      const b = agents[i * 2 + 1];
+      sim.wire(a.id, 'p', b.id, 'p', params);
+      const wire = [...sim.graph.wires.values()].at(-1)!;
+      engine.push(
+        {
+          type: 'latch',
+          wireId: wire.id,
+          agentA: a.id,
+          agentB: b.id,
+          slotA: 'p',
+          slotB: 'p',
+          kindA: 'era',
+          kindB: 'era',
+          rest: wire.rest,
+          latchLen: wire.latchLen,
+        },
+        sim.graph,
+        sim.agents,
+      );
+    }
+    const hitA = agents[10];
+    const hitB = agents[11];
+    engine.push(
+      {
+        type: 'collision',
+        agentA: hitA.id,
+        agentB: hitB.id,
+        kindA: 'era',
+        kindB: 'era',
+        impact: 12,
+        overlap: 2,
+        nx: 1,
+        ny: 0,
+        headingA: 0,
+        headingB: Math.PI,
+        spin: 0,
+        effMass: 1.4,
+        vN: 18,
+        vT: 0,
+      },
+      sim.graph,
+      sim.agents,
+    );
+    posted.length = 0;
+    engine.frame(sim.graph, sim.agents, 1 / 60);
+    const strikes = posted.filter((m) => m.type === 'strike');
+    expect(strikes.some((m) => m.type === 'strike' && m.agentId === hitA.id)).toBe(true);
+    expect(strikes.some((m) => m.type === 'strike' && m.agentId === hitB.id)).toBe(true);
+  });
+
+  it('distinct knocks in one frame all sound', () => {
+    const sim = new Sim(400, 200);
+    const params = defaultParams();
+    const engine = new AudioEngine();
+    engine.armWithoutAudio();
+    const posted: WorkletInMessage[] = [];
+    engine.onPost = (m) => posted.push(m);
+    const agents = [];
+    for (let i = 0; i < 16; i++) {
+      agents.push(sim.spawn('era', 20 + i * 20, 80, 0, params, true)!);
+    }
+    for (let i = 0; i < 8; i++) {
+      engine.push(
+        {
+          type: 'collision',
+          agentA: agents[i * 2].id,
+          agentB: agents[i * 2 + 1].id,
+          kindA: 'era',
+          kindB: 'era',
+          impact: 20,
+          overlap: 2,
+          nx: 1,
+          ny: 0,
+          headingA: 0,
+          headingB: Math.PI,
+          spin: 0,
+          effMass: 1.4,
+          vN: 16,
+          vT: 0,
+        },
+        sim.graph,
+        sim.agents,
+      );
+    }
+    posted.length = 0;
+    engine.frame(sim.graph, sim.agents, 1 / 60);
+    const strikes = posted.filter((m) => m.type === 'strike');
+    expect(strikes).toHaveLength(16);
+  });
+
+  it('a pile-up of knocks is still finite', () => {
     const { posted } = (() => {
       const sim = new Sim(200, 200);
       const params = defaultParams();
@@ -102,7 +205,7 @@ describe('sim to sound', () => {
       for (let i = 0; i < 12; i++) {
         agents.push(sim.spawn('era', 100 + i * 0.4, 100, i, params, true)!);
       }
-      for (let i = 0; i < 40; i++) {
+      for (let i = 0; i < 80; i++) {
         engine.push(
           { type: 'collision', agentA: agents[i % 12].id, agentB: agents[(i + 1) % 12].id,
             kindA: 'era', kindB: 'era', impact: 30 + i, overlap: 2, nx: 1, ny: 0,
@@ -116,8 +219,8 @@ describe('sim to sound', () => {
     })();
     const strikes = posted.filter((m) => m.type === 'strike').length;
     expect(strikes).toBeGreaterThan(0);
-    // 5 events per frame, 2 strike messages each.
-    expect(strikes).toBeLessThanOrEqual(10);
+    // Safety valve, not the five-event structural budget. Two strikes per knock.
+    expect(strikes).toBeLessThanOrEqual(48);
   });
 });
 

@@ -123,6 +123,23 @@ export function lossForT60(lengthSamples: number, t60: number, damp = 1): number
   return Math.max(0.5, Math.min(0.99999, g / dampGainAt(damp, f0)));
 }
 
+/**
+ * How much a connected component loads each resonator.
+ *
+ * A pair is one instrument: energy already has somewhere to go, and that is
+ * the sound we tuned. Extra members are a heavier elastic structure, so Q
+ * drops. Unwired bodies (n = 1) and lone pairs (n = 2) are unscaled.
+ *
+ * 0.05 → a 32-agent clump rings about 0.4× as long. That is the bed, not the
+ * knock: an impulse still hits, it just does not occupy the mix afterwards.
+ */
+export const COMP_T60_LOAD = 0.05;
+
+export function componentLoadScale(n: number): number {
+  const extra = Math.max(0, (Number.isFinite(n) ? n : 1) - 2);
+  return 1 / (1 + COMP_T60_LOAD * extra);
+}
+
 /** Slack and node count darken a wire rather than just attenuating it. */
 export function bendLoss(nodeCount: number, ropeLen: number, rest: number): number {
   const slack = Math.max(0, ropeLen / Math.max(1, rest) - 1);

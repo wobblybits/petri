@@ -217,7 +217,7 @@ if (import.meta.env.DEV) {
     sim,
     params,
     get ring() {
-      return { fill: audio.ringFill, underruns: audio.underruns };
+      return { fill: audio.ringFill, underruns: audio.underruns, shards: audio.shardFills, sharded: audio.sharded };
     },
     boot: () => bootAudio(),
   };

@@ -14,6 +14,11 @@ const VIRTUAL_URL = '\0audio-worklet-url';
 const VIRTUAL_WORKER_URL = '\0audio-worker-url';
 const DEV_PATH = '/__audio_worklet';
 const DEV_WORKER_PATH = '/__audio_worker';
+const ISO_HEADERS = {
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Embedder-Policy': 'require-corp',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+};
 
 function stripModuleChrome(src: string): string {
   return src
@@ -112,15 +117,6 @@ function audioWorklet(): Plugin {
       return null;
     },
     configureServer(server) {
-      // SharedArrayBuffer only exists on a cross-origin-isolated page, which
-      // takes both of these headers. Without them the engine still works —
-      // it falls back to rendering inside the worklet — but the whole point
-      // of the ring is unavailable, and silently so.
-      server.middlewares.use((_req, res, next) => {
-        res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-        res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
-        next();
-      });
       server.middlewares.use((req, res, next) => {
         const url = req.url?.split('?')[0];
         const body =
@@ -151,6 +147,12 @@ function audioWorklet(): Plugin {
 
 export default defineConfig({
   plugins: [audioWorklet()],
+  // SharedArrayBuffer (and the worker ring) only exist on a cross-origin
+  // isolated page. Both headers have to be on the document; CORP on the
+  // responses lets the isolated page load its own worklet and workers.
+  // `vite` used to set these in middleware, which `vite preview` never ran.
+  server: { headers: ISO_HEADERS },
+  preview: { headers: ISO_HEADERS },
   build: {
     // Worklet must be a real file URL — never inline raw source as a data: URL.
     assetsInlineLimit: 0,

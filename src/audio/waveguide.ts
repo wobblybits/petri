@@ -21,6 +21,8 @@ export const MAX_AIR_DELAY = 512;
 export const MAX_STUBS = 96;
 export const MAX_STUB_DELAY = 64;
 export const IMPULSE_TAPS = 12;
+export const MAX_TISSUES = 8;
+export const TISSUE_MODES = 4;
 
 /** Spatial bins in a traveling-wave snapshot. t=0 is end A, t=1 is end B. */
 export const WAVE_BINS = 32;
@@ -61,6 +63,12 @@ const MAX_STEALS = 8;
 const AIR_WAKE = 2.5e-4;
 /** Junction incoming bled into body modes. Mix-only — never written back. */
 const BODY_FROM_STRING = 0.1;
+/**
+ * Boundary junction into the mesh resonator. Same idea as BODY_FROM_STRING:
+ * a mix, not a second delay line. Too high and the skin string locks to the
+ * lattice instead of its own round trip.
+ */
+const TISSUE_FROM_SKIN = 0.12;
 /** Active wires quieter than this can be stolen for a new latch. */
 const STEAL_ENV = 0.002;
 /**
@@ -155,6 +163,20 @@ const CONTACT_SQUEEZE = 0.12;
  * at matched drive: 0.079 collision, 0.034 bow, 0.021 scrape.
  */
 const TOUCH_RADIATE = 0.2;
+
+/**
+ * Mix send for a MID voice, before 1/√n of how many MID sources spoke this
+ * sample. Junctions and delay lines still run at full; this is the fader.
+ * Under NEAR so a tangle the budget demoted does not sit as loud as the
+ * thing under the cursor.
+ */
+const MID_SEND = 0.7;
+/**
+ * Mix send for the FAR ensemble, before 1/√n. One FAR object still speaks;
+ * sixteen of them share a bus instead of taking the clip rail. Matches
+ * `LOD_FAR` in lod.ts — this file cannot import that.
+ */
+const FAR_SEND = 0.5;
 
 /**
  * How loudly surface asperities radiate, per unit load and slip speed.
@@ -339,6 +361,12 @@ export interface AgentState {
   dForce: number;
   /** This body's own surface-roughness stream, independent of any partner's. */
   noise: number;
+  /** Interior of a collapsed commute-mesh. */
+  tissue: boolean;
+  /** Index into `tissues`, or -1. */
+  tissueIdx: number;
+  /** Extra junction admittance into that resonator. */
+  tissueY: number;
 }
 
 export type WorkletMessage =
@@ -468,6 +496,61 @@ function makeAgent(): AgentState {
     prevForce: 0,
     dForce: 0,
     noise: 1,
+    tissue: false,
+    tissueIdx: -1,
+    tissueY: 0,
+  };
+}
+
+interface TissueState {
+  active: boolean;
+  id: number;
+  n: number;
+  delay: number;
+  pan: number;
+  panL: number;
+  panR: number;
+  dist: number;
+  dry: number;
+  wet: number;
+  airDamp: number;
+  airLp: number;
+  lod: number;
+  wave: number;
+  excite: number;
+  env: number;
+  quiet: boolean;
+  modeA1: Float32Array;
+  modeA2: Float32Array;
+  modeGain: Float32Array;
+  modeY1: Float32Array;
+  modeY2: Float32Array;
+}
+
+function makeTissue(): TissueState {
+  return {
+    active: false,
+    id: -1,
+    n: 1,
+    delay: 64,
+    pan: 0,
+    panL: Math.SQRT1_2,
+    panR: Math.SQRT1_2,
+    dist: 0.5,
+    dry: 1,
+    wet: 0.85,
+    airDamp: 1,
+    airLp: 0,
+    lod: 2,
+    wave: 0,
+    excite: 0,
+    env: 0,
+    quiet: true,
+    modeA1: new Float32Array(TISSUE_MODES),
+    modeA2: new Float32Array(TISSUE_MODES),
+    modeGain: new Float32Array(TISSUE_MODES),
+    modeY1: new Float32Array(TISSUE_MODES),
+    modeY2: new Float32Array(TISSUE_MODES),
   };
 }
 
@@ -718,9 +801,17 @@ function flush(x: number): number {
  * Resistive load at a junction. The body always leaks a little so a cycle
  * cannot sit on the clip rail. Open stems are stubs with an inverting lip,
  * not extra shunt here.
+ *
+ * A large connected component is a bigger rest-of-the-world than the wires
+ * we actually simulate, so the shunt grows with how many extra agents sit
+ * past a pair. Milder than the T60 load: the string's own loss already
+ * shortened, and this is only the truncated graph leaking.
  */
-export function junctionLoadY(_openPorts = 0): number {
-  return 0.012;
+const COMP_Y_LOAD = 0.025;
+
+export function junctionLoadY(_openPorts = 0, compN = 1): number {
+  const extra = Math.max(0, (Number.isFinite(compN) ? compN : 1) - 2);
+  return 0.012 * (1 + COMP_Y_LOAD * extra);
 }
 
 /**
@@ -732,15 +823,29 @@ export class WaveguideNet {
   wireById = new Map<number, number>();
   agents: AgentState[] = [];
   agentById = new Map<number, number>();
+  tissueById = new Map<number, number>();
   contacts: ContactState[] = [];
   wireContacts: WireContactState[] = [];
   airs: AirState[] = [];
+  tissues: TissueState[] = [];
   stubs: StubState[] = [];
   master = 1;
   dryL = 0;
   dryR = 0;
   wetL = 0;
   wetR = 0;
+  /** MID group, summed then scaled by a once-per-quantum 1/√n. */
+  private midDryL = 0;
+  private midDryR = 0;
+  private midWetL = 0;
+  private midWetR = 0;
+  private midMixG = MID_SEND;
+  /** FAR ensemble. Same idea, quieter send. */
+  private farDryL = 0;
+  private farDryR = 0;
+  private farWetL = 0;
+  private farWetR = 0;
+  private farMixG = FAR_SEND;
   outL = 0;
   outR = 0;
   outDryL = 0;
@@ -778,6 +883,8 @@ export class WaveguideNet {
   private liveStubN = 0;
   private liveAirs = new Int32Array(MAX_AIR);
   private liveAirN = 0;
+  private liveTissues = new Int32Array(MAX_TISSUES);
+  private liveTissueN = 0;
   private liveContacts = new Int32Array(MAX_CONTACTS);
   private liveContactN = 0;
   private liveWireContacts = new Int32Array(MAX_WIRE_CONTACTS);
@@ -795,6 +902,7 @@ export class WaveguideNet {
   private portEnd = new Int8Array(MAX_WIRES * 2);
   private portNext = new Int16Array(MAX_WIRES * 2);
   private savedExcite = new Map<number, number>();
+  private savedTissueDump = new Map<number, number>();
   /** Preallocated traveling-wave snapshot. [n, bins, ...records of WAVE_STRIDE]. */
   private waveSnap = new Float32Array(2 + MAX_WIRES * WAVE_STRIDE);
 
@@ -804,6 +912,7 @@ export class WaveguideNet {
     for (let i = 0; i < MAX_CONTACTS; i++) this.contacts.push(makeContact());
     for (let i = 0; i < MAX_WIRE_CONTACTS; i++) this.wireContacts.push(makeWireContact());
     for (let i = 0; i < MAX_AIR; i++) this.airs.push(makeAir());
+    for (let i = 0; i < MAX_TISSUES; i++) this.tissues.push(makeTissue());
     for (let i = 0; i < MAX_STUBS; i++) this.stubs.push(makeStub());
   }
 
@@ -912,6 +1021,12 @@ export class WaveguideNet {
     this.liveAirN = n;
   }
 
+  private refreshLiveTissues(): void {
+    let n = 0;
+    for (let i = 0; i < MAX_TISSUES; i++) if (this.tissues[i].active) this.liveTissues[n++] = i;
+    this.liveTissueN = n;
+  }
+
   private refreshLiveContacts(): void {
     let n = 0;
     for (let i = 0; i < MAX_CONTACTS; i++) {
@@ -956,6 +1071,13 @@ export class WaveguideNet {
       if (!st) continue;
       sumY += st.y;
       sumYIn += st.y * st.inJ;
+    }
+    if (agent.tissueY > 0 && agent.tissueIdx >= 0) {
+      const t = this.tissues[agent.tissueIdx];
+      if (t && t.active) {
+        sumY += agent.tissueY;
+        sumYIn += agent.tissueY * t.wave;
+      }
     }
     agent.sumY = sumY;
     agent.sumYIn = sumYIn;
@@ -1147,6 +1269,15 @@ export class WaveguideNet {
     const gain = Math.max(-8, Math.min(8, num(gainRaw)));
     if (gain === 0) return;
     const a = this.agents[aIdx];
+    if (a.tissue && a.tissueIdx >= 0) {
+      const t = this.tissues[a.tissueIdx];
+      if (t && t.active) {
+        t.excite += gain;
+        t.quiet = false;
+        t.env = Math.max(t.env, Math.abs(gain));
+      }
+      return;
+    }
     a.excite += gain;
     this.wakeAgent(a, Math.abs(gain));
     for (let p = 0; p < a.portCount; p++) {
@@ -1175,6 +1306,15 @@ export class WaveguideNet {
     a.strikeDur = Math.max(2, Math.min(2048, num(dur, 2)));
     a.strikePos = 0;
     a.strikeSharp = Math.max(0, Math.min(1, num(sharp, 0.5)));
+    if (a.tissue && a.tissueIdx >= 0) {
+      const t = this.tissues[a.tissueIdx];
+      if (t && t.active) {
+        t.quiet = false;
+        t.env = Math.max(t.env, pk);
+      }
+      this.triggerDuck(pk / 0.6);
+      return;
+    }
     a.bodyEnv = Math.max(a.bodyEnv, pk);
     this.triggerDuck(pk / 0.6);
     this.wakeAgent(a, pk);
@@ -1504,7 +1644,7 @@ export class WaveguideNet {
       const s = this.stubs[i];
       if (!s.active) continue;
       const a = this.agents[s.agentIdx];
-      if (!a || !a.active || a.stubCount >= MAX_PORTS) continue;
+      if (!a || !a.active || a.tissue || a.stubCount >= MAX_PORTS) continue;
       a.stubIdx[a.stubCount] = i;
       a.stubCount++;
     }
@@ -1683,6 +1823,7 @@ export class WaveguideNet {
         B = this.agents[ib];
       }
       if (!A.active || !B.active || A === B) continue;
+      if (A.tissue && B.tissue) continue;
       const vA = this.surfaceVel(A, A.domIn);
       const vB = this.surfaceVel(B, B.domIn);
       const du = this.surfaceDisp(A) - this.surfaceDisp(B);
@@ -1953,6 +2094,22 @@ export class WaveguideNet {
     w.wireId = -1;
   }
 
+  /**
+   * Fold a dropping wire into tissue if it is becoming interior, otherwise
+   * let it ring out. A LOD demotion is not an annihilation — the string is
+   * still in the graph, we just stopped simulating it.
+   */
+  private retireOrFold(w: WireState, tissueOfAgent: Map<number, number>): void {
+    const tid = tissueOfAgent.get(w.agentA) ?? tissueOfAgent.get(w.agentB);
+    if (tid !== undefined) {
+      const g = w.env > 0 ? Math.min(0.85, w.env * 0.25) : 0;
+      if (g > 0) this.savedTissueDump.set(tid, (this.savedTissueDump.get(tid) ?? 0) + g);
+      this.retireWire(w);
+      return;
+    }
+    this.dumpAndRetire(w);
+  }
+
   /** Fold leftover ringing into the two agents, then free the slot. */
   /**
    * The net has finished with this wire. If it still has anything in it, let
@@ -2018,15 +2175,24 @@ export class WaveguideNet {
       this.savedExcite.set(id, this.agents[idx].excite);
     }
 
+    this.savedTissueDump.clear();
+    const tissueOfAgent = new Map<number, number>();
+    const list = topo.tissues;
+    if (list) {
+      for (const spec of topo.agents) {
+        if (spec.tissue && spec.tissueId !== undefined) tissueOfAgent.set(spec.id, spec.tissueId);
+      }
+    }
+
     this.seen.clear();
     for (let i = 0; i < topo.wires.length; i++) this.seen.add(topo.wires[i].id);
     for (const w of this.wires) {
-      if (w.active && !w.releasing && !this.seen.has(w.wireId)) this.dumpAndRetire(w);
+      if (w.active && !w.releasing && !this.seen.has(w.wireId)) this.retireOrFold(w, tissueOfAgent);
     }
 
     this.chooseKeep(topo);
     for (const w of this.wires) {
-      if (w.active && !w.releasing && !this.keep.has(w.wireId)) this.dumpAndRetire(w);
+      if (w.active && !w.releasing && !this.keep.has(w.wireId)) this.retireOrFold(w, tissueOfAgent);
     }
 
     for (const a of this.agents) {
@@ -2099,6 +2265,8 @@ export class WaveguideNet {
       this.wireById.set(spec.id, slot);
     }
 
+    this.applyTissues(topo);
+
     // Intrusive linked lists over preallocated arrays: no per-agent garbage.
     this.portHead.clear();
     let n = 0;
@@ -2134,11 +2302,23 @@ export class WaveguideNet {
       listen(a, spec.dist, this.listenH);
       if (!same) a.airLp = 0;
       a.coupling = spec.coupling !== undefined ? spec.coupling : 1;
+      a.tissue = !!spec.tissue;
+      a.tissueY = spec.tissueY !== undefined && Number.isFinite(spec.tissueY) ? spec.tissueY : 0;
+      a.tissueIdx = spec.tissueId !== undefined ? (this.tissueById.get(spec.tissueId) ?? -1) : -1;
+      if (a.tissue) {
+        a.loadY = 0;
+        a.quiet = true;
+        a.portCount = 0;
+        a.stubCount = 0;
+        this.agentById.set(spec.id, ai);
+        ai++;
+        continue;
+      }
       this.setBodyModes(a, spec, same);
       // Scale the resistive load by the agent's own admittance, so a heavy Con
       // and a light Dup do not leak identically. Without this, `impedance` was
       // computed by the topology builder every frame and then dropped.
-      a.loadY = junctionLoadY() / Math.max(0.05, spec.impedance || 1);
+      a.loadY = junctionLoadY(spec.openPorts, spec.compN) / Math.max(0.05, spec.impedance || 1);
       a.excite = this.savedExcite.get(spec.id) ?? 0;
       a.quiet = a.bodyEnv < QUIET_FLOOR && a.excite === 0 && !a.touching;
       let p = 0;
@@ -2159,11 +2339,165 @@ export class WaveguideNet {
     this.bindStubs(topo);
     this.refreshLiveWires();
     this.refreshLiveAgents();
+    this.refreshLiveTissues();
     for (let k = 0; k < this.liveWireN; k++) {
       const w = this.wires[this.liveWires[k]];
       if (w.quiet) continue;
       this.wakeAgentId(w.agentA);
       this.wakeAgentId(w.agentB);
+    }
+  }
+
+  /**
+   * Match tissue resonators by id so a mesh that stays a mesh keeps ringing
+   * across a topology update. Dump from wires that just folded in is applied
+   * after the table exists.
+   */
+  private applyTissues(topo: NetTopology): void {
+    const specs = topo.tissues ?? [];
+    this.tissueById.clear();
+    const used = new Set<number>();
+
+    for (const spec of specs) {
+      let slot = -1;
+      for (let i = 0; i < MAX_TISSUES; i++) {
+        if (this.tissues[i].active && this.tissues[i].id === spec.id) {
+          slot = i;
+          break;
+        }
+      }
+      if (slot < 0) {
+        for (let i = 0; i < MAX_TISSUES; i++) {
+          if (!this.tissues[i].active) {
+            slot = i;
+            break;
+          }
+        }
+      }
+      if (slot < 0) {
+        for (let i = 0; i < MAX_TISSUES; i++) {
+          if (!used.has(i)) {
+            slot = i;
+            break;
+          }
+        }
+      }
+      if (slot < 0) continue;
+      used.add(slot);
+      const t = this.tissues[slot];
+      const keep = t.active && t.id === spec.id;
+      t.active = true;
+      t.id = spec.id;
+      t.n = spec.n;
+      t.delay = Math.max(8, spec.delay);
+      t.lod = spec.lod !== undefined && Number.isFinite(spec.lod) ? spec.lod | 0 : 2;
+      setPan(t, spec.pan !== undefined && Number.isFinite(spec.pan) ? spec.pan : 0);
+      listen(t, spec.dist, this.listenH);
+      this.setTissueModes(t, spec.delay, spec.n, keep);
+      const dump = this.savedTissueDump.get(spec.id) ?? 0;
+      if (dump > 0) {
+        t.excite += dump;
+        t.quiet = false;
+        t.env = Math.max(t.env, dump);
+      }
+      this.tissueById.set(spec.id, slot);
+    }
+
+    for (let i = 0; i < MAX_TISSUES; i++) {
+      if (used.has(i) || !this.tissues[i].active) continue;
+      const t = this.tissues[i];
+      t.active = false;
+      t.quiet = true;
+      t.excite = 0;
+      t.wave = 0;
+      t.env = 0;
+      t.id = -1;
+    }
+  }
+
+  /**
+   * Lattice modes for a square-ish mesh: f0, √2 f0, √3 f0, √5 f0.
+   * f0 is the characteristic round-trip of the median delay.
+   */
+  private setTissueModes(t: TissueState, delay: number, n: number, keep: boolean): void {
+    const f0 = SAMPLE_RATE / (2 * Math.max(8, delay));
+    const ratios = [1, 1.414, 1.732, 2.236];
+    const t60s = [0.55, 0.32, 0.2, 0.12];
+    const gains = [0.55, 0.32, 0.18, 0.1];
+    const load = 1 / (1 + 0.05 * Math.max(0, n - 2));
+    for (let m = 0; m < TISSUE_MODES; m++) {
+      const f = Math.max(1, Math.min(SAMPLE_RATE * 0.45, f0 * ratios[m]));
+      const d = Math.max(0.02, t60s[m] * load);
+      const w = (2 * Math.PI * f) / SAMPLE_RATE;
+      const r = Math.exp(-6.9078 / Math.max(1, d * SAMPLE_RATE));
+      t.modeA1[m] = 2 * r * Math.cos(w);
+      t.modeA2[m] = r * r;
+      t.modeGain[m] = gains[m] * (1 - r) * Math.sin(w) * 4;
+      if (!keep) {
+        t.modeY1[m] = 0;
+        t.modeY2[m] = 0;
+      }
+    }
+    if (!keep) {
+      t.wave = 0;
+      t.env = 0;
+      t.airLp = 0;
+      t.quiet = true;
+    }
+  }
+
+  private refreshTissueListen(): void {
+    for (let k = 0; k < this.liveTissueN; k++) {
+      const t = this.tissues[this.liveTissues[k]];
+      let pan = 0;
+      let dist = 0;
+      let n = 0;
+      for (let i = 0; i < this.liveAgentN; i++) {
+        const a = this.agents[this.liveAgents[i]];
+        if (a.tissueIdx !== this.liveTissues[k]) continue;
+        pan += a.pan;
+        dist += a.dist;
+        n++;
+      }
+      if (n === 0) continue;
+      setPan(t, pan / n);
+      listen(t, dist / n, this.listenH);
+    }
+  }
+
+  private tickTissues(): void {
+    for (let k = 0; k < this.liveTissueN; k++) {
+      const t = this.tissues[this.liveTissues[k]];
+      const drive = t.excite;
+      t.excite = 0;
+      if (drive === 0 && t.env < QUIET_FLOOR) {
+        t.wave = 0;
+        t.quiet = true;
+        continue;
+      }
+      let sum = 0;
+      for (let m = 0; m < TISSUE_MODES; m++) {
+        const y = t.modeA1[m] * t.modeY1[m] - t.modeA2[m] * t.modeY2[m] + t.modeGain[m] * drive;
+        t.modeY2[m] = t.modeY1[m];
+        t.modeY1[m] = flush(y);
+        sum += y;
+      }
+      const y = flush(sum);
+      const abs = y < 0 ? -y : y;
+      t.env += (abs > t.env ? 0.01 : 0.0002) * (abs - t.env);
+      if (!Number.isFinite(t.env) || t.env < QUIET_FLOOR) {
+        t.env = 0;
+        t.wave = 0;
+        t.quiet = true;
+        for (let m = 0; m < TISSUE_MODES; m++) {
+          t.modeY1[m] = 0;
+          t.modeY2[m] = 0;
+        }
+        continue;
+      }
+      t.quiet = false;
+      t.wave = y;
+      this.place(y, t.pan, t);
     }
   }
 
@@ -2199,6 +2533,7 @@ export class WaveguideNet {
       if (spec.lod !== undefined && Number.isFinite(spec.lod)) a.lod = spec.lod | 0;
       listen(a, spec.dist, this.listenH);
     }
+    this.refreshTissueListen();
   }
 
   /** Delay and damping only. Must not touch buffers or port lists. */
@@ -2251,18 +2586,96 @@ export class WaveguideNet {
    * Listen to one source: air-absorption lowpass, then split into a dry bus
    * (falls with distance) and a wet send (almost flat). D/R is the distance
    * cue; the two gains are what produce it.
+   *
+   * LOD is a mix decision, not a physics one. NEAR lands on the buses at
+   * unity. MID and FAR accumulate on their own buses and are scaled by
+   * 1/√n at the end of the sample, so a demoted clump is heard as a bed
+   * instead of N full-gain pickups folding the clipper. Junctions still
+   * see every wire.
    */
   private place(
     x: number,
     _pan: number,
-    src: { dry: number; wet: number; airDamp: number; airLp: number; panL: number; panR: number },
+    src: {
+      dry: number;
+      wet: number;
+      airDamp: number;
+      airLp: number;
+      panL: number;
+      panR: number;
+      lod?: number;
+    },
   ): void {
     src.airLp += src.airDamp * (x - src.airLp);
     const y = flush(src.airLp);
-    this.dryL += y * src.panL * src.dry;
-    this.dryR += y * src.panR * src.dry;
-    this.wetL += y * src.panL * src.wet;
-    this.wetR += y * src.panR * src.wet;
+    const dryL = y * src.panL * src.dry;
+    const dryR = y * src.panR * src.dry;
+    const wetL = y * src.panL * src.wet;
+    const wetR = y * src.panR * src.wet;
+    const lod = src.lod | 0;
+    if (lod >= 2) {
+      this.farDryL += dryL;
+      this.farDryR += dryR;
+      this.farWetL += wetL;
+      this.farWetR += wetR;
+      return;
+    }
+    if (lod === 1) {
+      this.midDryL += dryL;
+      this.midDryR += dryR;
+      this.midWetL += wetL;
+      this.midWetR += wetR;
+      return;
+    }
+    this.dryL += dryL;
+    this.dryR += dryR;
+    this.wetL += wetL;
+    this.wetR += wetR;
+  }
+
+  /**
+   * How many MID/FAR voices are actually speaking, and the 1/√n that follows.
+   *
+   * Done once a quantum, not once a sample: counting inside `place` made the
+   * fader chatter at audio rate whenever a body crossed zero, which was a
+   * second path to the same crushed sound as the instant limiter.
+   */
+  private refreshMixGains(): void {
+    let mid = 0;
+    let far = 0;
+    for (let k = 0; k < this.liveWireN; k++) {
+      const w = this.wires[this.liveWires[k]];
+      if (w.quiet) continue;
+      const lod = w.lod | 0;
+      if (lod >= 2) far++;
+      else if (lod === 1) mid++;
+    }
+    for (let k = 0; k < this.liveAgentN; k++) {
+      const a = this.agents[this.liveAgents[k]];
+      if (a.quiet || a.tissue) continue;
+      const lod = a.lod | 0;
+      if (lod >= 2) far++;
+      else if (lod === 1) mid++;
+    }
+    for (let k = 0; k < this.liveTissueN; k++) {
+      if (!this.tissues[this.liveTissues[k]].quiet) far++;
+    }
+    this.midMixG = mid > 0 ? MID_SEND / Math.sqrt(mid) : MID_SEND;
+    this.farMixG = far > 0 ? FAR_SEND / Math.sqrt(far) : FAR_SEND;
+  }
+
+  /** Fold MID/FAR group buses into the main mix. */
+  private flushMixTiers(): void {
+    const mg = this.midMixG;
+    this.dryL += this.midDryL * mg;
+    this.dryR += this.midDryR * mg;
+    this.wetL += this.midWetL * mg;
+    this.wetR += this.midWetR * mg;
+    const fg = this.farMixG;
+    this.dryL += this.farDryL * fg;
+    this.dryR += this.farDryR * fg;
+    this.wetL += this.farWetL * fg;
+    this.wetR += this.farWetR * fg;
   }
 
   /**
@@ -2316,7 +2729,8 @@ export class WaveguideNet {
   private capVoices(): void {
     let awake = 0;
     for (let k = 0; k < this.liveAgentN; k++) {
-      if (!this.agents[this.liveAgents[k]].quiet) awake++;
+      const a = this.agents[this.liveAgents[k]];
+      if (!a.quiet && !a.tissue) awake++;
     }
     let excess = awake - MAX_AWAKE;
     if (excess <= 0) return;
@@ -2335,7 +2749,7 @@ export class WaveguideNet {
       let worstEnv = Infinity;
       for (let k = 0; k < this.liveAgentN; k++) {
         const a = this.agents[this.liveAgents[k]];
-        if (a.quiet || a.touching) continue;
+        if (a.quiet || a.touching || a.tissue) continue;
         if (a.bodyEnv < worstEnv) {
           worstEnv = a.bodyEnv;
           worst = k;
@@ -2378,6 +2792,7 @@ export class WaveguideNet {
     if (this.quantumPos === 0) {
       this.capVoices();
       this.sweepReleased();
+      this.refreshMixGains();
     }
     this.quantumPos = this.quantumPos + 1 === 128 ? 0 : this.quantumPos + 1;
 
@@ -2413,13 +2828,22 @@ export class WaveguideNet {
     this.dryR = 0;
     this.wetL = 0;
     this.wetR = 0;
+    this.midDryL = 0;
+    this.midDryR = 0;
+    this.midWetL = 0;
+    this.midWetR = 0;
+    this.farDryL = 0;
+    this.farDryR = 0;
+    this.farWetL = 0;
+    this.farWetR = 0;
     for (let k = 0; k < this.liveAgentN; k++) {
       const agent = this.agents[this.liveAgents[k]];
       agent.contactF = 0;
       agent.contactC = 0;
       agent.airIn = 0;
       agent.radiate = 0;
-      if (agent.quiet) {
+      if (agent.tissue) continue;
+      if (agent.quiet && agent.tissueY <= 0) {
         agent.strikeNow = 0;
         agent.sumY = 0;
         agent.sumYIn = 0;
@@ -2435,6 +2859,18 @@ export class WaveguideNet {
 
     for (let k = 0; k < this.liveAgentN; k++) {
       const agent = this.agents[this.liveAgents[k]];
+      if (agent.tissue) {
+        const strike = this.strikeForce(agent);
+        if (strike !== 0 && agent.tissueIdx >= 0) {
+          const t = this.tissues[agent.tissueIdx];
+          if (t && t.active) {
+            t.excite += strike;
+            t.quiet = false;
+            t.env = Math.max(t.env, strike);
+          }
+        }
+        continue;
+      }
       const strike = agent.strikeNow;
       const force = agent.contactF;
       const air = agent.airIn;
@@ -2489,10 +2925,19 @@ export class WaveguideNet {
         if (!st) continue;
         st.outJ = pJ - st.inJ;
       }
+      if (agent.tissueY > 0 && agent.tissueIdx >= 0) {
+        const t = this.tissues[agent.tissueIdx];
+        if (t && t.active) {
+          const outgoing = pJ - t.wave;
+          t.excite += outgoing * agent.tissueY * TISSUE_FROM_SKIN;
+          t.quiet = false;
+        }
+      }
     }
 
     this.applyStubWrites();
     if (!shedAir) this.applyAirWrites();
+    this.tickTissues();
 
     for (let k = 0; k < this.liveWireN; k++) {
       const w = this.wires[this.liveWires[k]];
@@ -2530,6 +2975,8 @@ export class WaveguideNet {
       this.place(p, w.pan, w);
     }
 
+    this.flushMixTiers();
+
     let dL = this.dryL - this.dcDryX + 0.9995 * this.dcDryY;
     this.dcDryX = this.dryL;
     this.dcDryY = flush(dL);
@@ -2556,7 +3003,9 @@ export class WaveguideNet {
     this.env += (peak > this.env ? 0.00417 : 0.00007) * (peak - this.env);
     this.env = flush(this.env);
     // Ceiling only: a compressor with makeup was pulling quiet (far) mixes
-    // back up to the same loudness as near ones.
+    // back up to the same loudness as near ones. Attack is smoothed on
+    // purpose — a per-sample `ceil/peak` turns a dense mix into a square
+    // wave, which is the bitcrush that sounded like the sample rate died.
     const ceil = 0.95;
     const g = this.env > ceil ? ceil / this.env : 1;
     const k = g * this.master;
@@ -2594,7 +3043,7 @@ export class WaveguideNet {
     let o = 2;
     for (let k = 0; k < this.liveWireN; k++) {
       const w = this.wires[this.liveWires[k]];
-      if (!w.active || w.quiet) continue;
+      if (!w.active || w.quiet || (w.lod | 0) >= 2) continue;
       const L = Math.max(1, w.length);
       const span = Math.max(1, L - 1);
       this.waveSnap[o] = w.wireId;

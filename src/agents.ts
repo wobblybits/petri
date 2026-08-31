@@ -291,6 +291,21 @@ export function stemWorld(agent: Agent, slot: PortSlot, w: number, h: number): V
   return { x: wrap(agent.x + o.x, w), y: wrap(agent.y + o.y, h) };
 }
 
+export function stemFromPose(
+  kind: AgentKind,
+  x: number,
+  y: number,
+  heading: number,
+  scale: number,
+  slot: PortSlot,
+  w: number,
+  h: number,
+): Vec2 {
+  const loc = stemRoot(kind, slot);
+  const r = rotate(loc.x * scale, loc.y * scale, heading);
+  return { x: wrap(x + r.x, w), y: wrap(y + r.y, h) };
+}
+
 /** Write the stem into `out` so a hot loop does not allocate a result vector. */
 export function stemWorldInto(
   agent: Agent,

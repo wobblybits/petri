@@ -1,13 +1,20 @@
-import { createAgent, portWorld, type Agent, type AgentKind, type PortRef } from './agents.ts';
-import type { Graph } from './graph.ts';
+import { createAgent, portWorld, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
+import { otherEnd, type Graph } from './graph.ts';
 import type { Params } from './params.ts';
-import { angleDelta, clamp, easeInOut, lerp, wrap, wrapDeltaVec, wrapMid } from './wrap.ts';
+import { angleDelta, clamp, easeInOut, lerp, rotate, wrap, wrapDeltaVec, wrapMid } from './wrap.ts';
 
 export type Rule = 'era-era' | 'erase' | 'annihilate-con' | 'annihilate-dup' | 'commute';
 
 export interface NetWire {
   a: PortRef;
   b: PortRef;
+  /** Live graph id, when this snapshot came from a Graph. */
+  id?: number;
+  /**
+   * Graph ids that fused into this reconnection. Commit rebinds the keeper
+   * instead of minting a new wire, so leftover delay lines keep ringing.
+   */
+  sources?: number[];
 }
 
 export interface NetAgent {
@@ -125,10 +132,46 @@ function stripAgents(net: NetSnapshot, dying: Set<number>): NetSnapshot {
   };
 }
 
+/** Ghosts start spreading from the mid at this rewrite time. */
+export const GHOST_APPEAR_START = 0.35;
+
+export function rewriteAppear(t: number): number {
+  return easeInOut(clamp((t - GHOST_APPEAR_START) / (1 - GHOST_APPEAR_START), 0, 1));
+}
+
+export const COMMUTE_ROLES = ['con-u', 'con-v', 'dup-x', 'dup-y'] as const;
+export type CommuteRole = (typeof COMMUTE_ROLES)[number];
+
+/** Lafont square among commute children. Drawn as ghost wires during appear. */
+export const COMMUTE_K22: { a: CommuteRole; aSlot: PortSlot; b: CommuteRole; bSlot: PortSlot }[] = [
+  { a: 'con-u', aSlot: 'l', b: 'dup-x', bSlot: 'l' },
+  { a: 'con-u', aSlot: 'r', b: 'dup-y', bSlot: 'l' },
+  { a: 'con-v', aSlot: 'l', b: 'dup-x', bSlot: 'r' },
+  { a: 'con-v', aSlot: 'r', b: 'dup-y', bSlot: 'r' },
+];
+
+export function commuteGhost(rw: Rewrite, role: CommuteRole): Ghost | null {
+  const src = rw.ghosts.length ? rw.ghosts : rw.targets;
+  if (src.length !== 4) return null;
+  return src[COMMUTE_ROLES.indexOf(role)] ?? null;
+}
+
+export function stemFromGhost(g: Ghost, slot: PortSlot, w: number, h: number): { x: number; y: number } {
+  return stemFromPose(g.kind, g.x, g.y, g.heading, g.scale, slot, w, h);
+}
+
 /** The bodies have met by here; the wire is spent. */
 export const PULL_END = 0.55;
 /** Nothing shrinks or fades before this — the collapse is its own beat. */
 export const COLLAPSE_START = 0.65;
+/**
+ * Commute children sit on a Dup–Con frame, not on the old aux tips.
+ * Those tips are only ~18px apart across the pair, so pushOut from mid
+ * made a pancake and the K₂,₂ chords stacked. Half-width is two-plus
+ * body sizes so the rectangle has two sides, two diagonals, one crossing.
+ */
+export const COMMUTE_ALONG_MIN = 48;
+export const COMMUTE_ACROSS_MIN = 40;
 
 /**
  * Accelerating ease. A wire pulling two bodies together is releasing tension,
@@ -209,9 +252,22 @@ function fuse(
     list.push(p);
     classes.set(r, list);
   }
+  const sources = new Map<string, number[]>();
+  for (const w of net.wires) {
+    if (w.id === undefined) continue;
+    if (!dying.has(w.a.id) && !dying.has(w.b.id)) continue;
+    const r = find(key(w.a));
+    const list = sources.get(r);
+    if (list) list.push(w.id);
+    else sources.set(r, [w.id]);
+  }
+
   const out: NetWire[] = [];
-  for (const ends of classes.values()) {
-    if (ends.length === 2) out.push({ a: ends[0], b: ends[1] });
+  for (const [r, ends] of classes) {
+    if (ends.length !== 2) continue;
+    const src = sources.get(r);
+    if (src && src.length) out.push({ a: ends[0], b: ends[1], sources: src });
+    else out.push({ a: ends[0], b: ends[1] });
   }
   return out;
 }
@@ -304,7 +360,7 @@ export function snapshotOf(
 ): NetSnapshot {
   return {
     agents: [...agents.values()].map((a) => ({ id: a.id, kind: a.kind })),
-    wires: [...graph.wires.values()].map((w) => ({ a: w.a, b: w.b })),
+    wires: [...graph.wires.values()].map((w) => ({ a: w.a, b: w.b, id: w.id })),
   };
 }
 
@@ -379,7 +435,7 @@ export function beginRewrite(
     ghosts: [],
     targets: [],
   };
-  rw.targets = snapshotTargets(rw, agents, w, h);
+  rw.targets = snapshotTargets(rw, agents, graph, w, h);
   return rw;
 }
 
@@ -432,8 +488,8 @@ export function advanceRewrite(
     era.alpha = 1 - e;
     bin.scale = lerp(1, 0.2, e);
     bin.alpha = 1 - e * 0.85;
-    const appear = clamp((t - 0.35) / 0.65, 0, 1);
-    const ae = easeInOut(appear);
+    const appear = rewriteAppear(t);
+    const ae = appear;
     rw.ghosts = rw.targets.map((g) => ({
       kind: g.kind,
       x: wrap(rw.midX + wrapDeltaVec(rw.midX, rw.midY, g.x, g.y, w, h).x * ae, w),
@@ -449,8 +505,8 @@ export function advanceRewrite(
     B.y = wrap(rw.by + toA.y * e, h);
     A.alpha = B.alpha = 1 - e;
     A.scale = B.scale = lerp(1, 0.35, e);
-    const appear = clamp((t - 0.35) / 0.65, 0, 1);
-    const ae = easeInOut(appear);
+    const appear = rewriteAppear(t);
+    const ae = appear;
     rw.ghosts = rw.targets.map((g) => ({
       kind: g.kind,
       x: wrap(rw.midX + wrapDeltaVec(rw.midX, rw.midY, g.x, g.y, w, h).x * ae, w),
@@ -474,25 +530,97 @@ function leftoverPair(rw: Rewrite, who: 'dup' | 'con', slot: 'l' | 'r'): PortRef
   return slot === 'l' ? rw.leftoverBL : rw.leftoverBR;
 }
 
-function pushOut(
-  midX: number,
-  midY: number,
-  x: number,
-  y: number,
+function roleForAux(rw: Rewrite, agentId: number, slot: PortRef['slot']): CommuteRole | null {
+  if (slot !== 'l' && slot !== 'r') return null;
+  if (agentId === rw.dupId) return slot === 'l' ? 'con-u' : 'con-v';
+  if (agentId === rw.conId) return slot === 'l' ? 'dup-x' : 'dup-y';
+  return null;
+}
+
+function annihilateMateLeftover(rw: Rewrite, agentId: number, slot: PortRef['slot']): PortRef | null {
+  if (slot !== 'l' && slot !== 'r') return null;
+  const fromA = agentId === rw.a;
+  if (rw.rule === 'annihilate-dup') {
+    if (fromA) return slot === 'l' ? rw.leftoverBL : rw.leftoverBR;
+    return slot === 'l' ? rw.leftoverAL : rw.leftoverAR;
+  }
+  if (rw.rule === 'annihilate-con') {
+    if (fromA) return slot === 'l' ? rw.leftoverBR : rw.leftoverBL;
+    return slot === 'l' ? rw.leftoverAR : rw.leftoverAL;
+  }
+  return null;
+}
+
+/**
+ * Where a leftover or fused rope should be drawn and reeled during a rewrite:
+ * dying stems lerp onto the inheriting ghost (commute) or the identified
+ * leftover mate (annihilate). Null means use the live agent stems.
+ */
+export function rewriteHandoffStems(
+  rw: Rewrite,
+  wire: { id: number; a: PortRef; b: PortRef },
+  agents: Map<number, Agent>,
   w: number,
   h: number,
-  extra: number,
-): { x: number; y: number } {
-  const d = wrapDeltaVec(midX, midY, x, y, w, h);
-  const m = Math.hypot(d.x, d.y);
-  if (m < 1e-4) return { x, y };
-  const s = (m + extra) / m;
-  return { x: wrap(midX + d.x * s, w), y: wrap(midY + d.y * s, h) };
+): { ax: number; ay: number; bx: number; by: number } | null {
+  if (wire.id === rw.wireId) return null;
+  const dying = (id: number) => id === rw.a || id === rw.b;
+  if (!dying(wire.a.id) && !dying(wire.b.id)) return null;
+  const ae = rewriteAppear(rw.t);
+  const liveStem = (port: PortRef) => {
+    const ag = agents.get(port.id);
+    if (!ag) return { x: 0, y: 0 };
+    return stemWorld(ag, port.slot, w, h);
+  };
+  const resolve = (port: PortRef): { x: number; y: number } => {
+    const live = liveStem(port);
+    if (!dying(port.id)) return live;
+    if (rw.rule === 'commute') {
+      const role = roleForAux(rw, port.id, port.slot);
+      const g = role ? commuteGhost(rw, role) : null;
+      if (!g) return live;
+      const gs = stemFromGhost(g, 'p', w, h);
+      return { x: lerp(live.x, gs.x, ae), y: lerp(live.y, gs.y, ae) };
+    }
+    if (rw.rule === 'annihilate-con' || rw.rule === 'annihilate-dup') {
+      const mate = annihilateMateLeftover(rw, port.id, port.slot);
+      if (!mate || dying(mate.id)) return live;
+      const ms = liveStem(mate);
+      return { x: lerp(live.x, ms.x, ae), y: lerp(live.y, ms.y, ae) };
+    }
+    return live;
+  };
+  const A = resolve(wire.a);
+  const B = resolve(wire.b);
+  return { ax: A.x, ay: A.y, bx: B.x, by: B.y };
+}
+
+/** Aux wired into the other dying agent becomes a principal among the children. */
+function fusedPartnerRole(
+  graph: Graph,
+  rw: Rewrite,
+  parentId: number,
+  slot: 'l' | 'r',
+): CommuteRole | null {
+  const w = graph.wireAt({ id: parentId, slot });
+  if (!w) return null;
+  const o = otherEnd(w, { id: parentId, slot });
+  if (o.id !== rw.a && o.id !== rw.b) return null;
+  return roleForAux(rw, o.id, o.slot);
+}
+
+function acrossSign(agent: Agent, slot: 'l' | 'r', vx: number, vy: number): number {
+  const localY = slot === 'l' ? -1 : 1;
+  const world = rotate(0, localY, agent.heading);
+  const s = world.x * vx + world.y * vy;
+  if (Math.abs(s) < 1e-6) return localY;
+  return s > 0 ? 1 : -1;
 }
 
 function snapshotTargets(
   rw: Rewrite,
   agents: Map<number, Agent>,
+  graph: Graph,
   w: number,
   h: number,
 ): Ghost[] {
@@ -529,19 +657,120 @@ function snapshotTargets(
   const con = agents.get(rw.conId);
   const dup = agents.get(rw.dupId);
   if (!con || !dup) return [];
+
+  const axis = wrapDeltaVec(dup.x, dup.y, con.x, con.y, w, h);
+  let ux = axis.x;
+  let uy = axis.y;
+  const axisLen = Math.hypot(ux, uy);
+  if (axisLen < 1e-4) {
+    ux = Math.cos(dup.heading);
+    uy = Math.sin(dup.heading);
+  } else {
+    ux /= axisLen;
+    uy /= axisLen;
+  }
+  const vx = -uy;
+  const vy = ux;
+
+  const alongOf = (x: number, y: number) => {
+    const d = wrapDeltaVec(rw.midX, rw.midY, x, y, w, h);
+    return d.x * ux + d.y * uy;
+  };
+  const acrossOf = (x: number, y: number) => {
+    const d = wrapDeltaVec(rw.midX, rw.midY, x, y, w, h);
+    return d.x * vx + d.y * vy;
+  };
   const ul = portWorld(dup, 'l', w, h);
   const ur = portWorld(dup, 'r', w, h);
   const cl = portWorld(con, 'l', w, h);
   const cr = portWorld(con, 'r', w, h);
-  const u0 = pushOut(rw.midX, rw.midY, ul.x, ul.y, w, h, 22);
-  const v0 = pushOut(rw.midX, rw.midY, ur.x, ur.y, w, h, 22);
-  const x0 = pushOut(rw.midX, rw.midY, cl.x, cl.y, w, h, 22);
-  const y0 = pushOut(rw.midX, rw.midY, cr.x, cr.y, w, h, 22);
+  // Keep the old along span (ports, not an extra pushOut) so leftover eras
+  // stay outside the quad. Floor the pancake's ~9px across to a real width.
+  const alongHalf = Math.max(
+    COMMUTE_ALONG_MIN,
+    Math.abs(alongOf(ul.x, ul.y)),
+    Math.abs(alongOf(ur.x, ur.y)),
+    Math.abs(alongOf(cl.x, cl.y)),
+    Math.abs(alongOf(cr.x, cr.y)),
+  );
+  const acrossHalf = Math.max(
+    COMMUTE_ACROSS_MIN,
+    Math.abs(acrossOf(ul.x, ul.y)),
+    Math.abs(acrossOf(ur.x, ur.y)),
+    Math.abs(acrossOf(cl.x, cl.y)),
+    Math.abs(acrossOf(cr.x, cr.y)),
+  );
+
+  const at = (sAlong: number, sAcross: number) => ({
+    x: wrap(rw.midX + ux * sAlong * alongHalf + vx * sAcross * acrossHalf, w),
+    y: wrap(rw.midY + uy * sAlong * alongHalf + vy * sAcross * acrossHalf, h),
+  });
+  const uAcross = acrossSign(dup, 'l', vx, vy);
+  const vAcross = acrossSign(dup, 'r', vx, vy);
+  const xAcross = acrossSign(con, 'l', vx, vy);
+  const yAcross = acrossSign(con, 'r', vx, vy);
+  const poses: Record<CommuteRole, { x: number; y: number }> = {
+    'con-u': at(-1, uAcross),
+    'con-v': at(-1, vAcross),
+    'dup-x': at(1, xAcross),
+    'dup-y': at(1, yAcross),
+  };
+  const leftovers: Record<CommuteRole, PortRef | null> = {
+    'con-u': leftoverPair(rw, 'dup', 'l'),
+    'con-v': leftoverPair(rw, 'dup', 'r'),
+    'dup-x': leftoverPair(rw, 'con', 'l'),
+    'dup-y': leftoverPair(rw, 'con', 'r'),
+  };
+  const fused: Record<CommuteRole, CommuteRole | null> = {
+    'con-u': fusedPartnerRole(graph, rw, rw.dupId, 'l'),
+    'con-v': fusedPartnerRole(graph, rw, rw.dupId, 'r'),
+    'dup-x': fusedPartnerRole(graph, rw, rw.conId, 'l'),
+    'dup-y': fusedPartnerRole(graph, rw, rw.conId, 'r'),
+  };
+  const headingFor = (role: CommuteRole, sAlong: number, sAcross: number) => {
+    const p = poses[role];
+    const outAlong = Math.atan2(uy * sAlong, ux * sAlong);
+    const outAcross = Math.atan2(vy * sAcross, vx * sAcross);
+    const lo = leftovers[role];
+    if (lo) return headingTo(p.x, p.y, lo, agents, w, h, outAlong);
+    // Fused principals face out of the rectangle along v̂ so aux ports sit
+    // on the interior; the fused p–p is then a short exterior edge.
+    if (fused[role]) return outAcross;
+    return outAlong;
+  };
   return [
-    { kind: 'con', x: u0.x, y: u0.y, heading: headingTo(u0.x, u0.y, leftoverPair(rw, 'dup', 'l'), agents, w, h, outward(u0.x, u0.y)), alpha: 1, scale: 1 },
-    { kind: 'con', x: v0.x, y: v0.y, heading: headingTo(v0.x, v0.y, leftoverPair(rw, 'dup', 'r'), agents, w, h, outward(v0.x, v0.y)), alpha: 1, scale: 1 },
-    { kind: 'dup', x: x0.x, y: x0.y, heading: headingTo(x0.x, x0.y, leftoverPair(rw, 'con', 'l'), agents, w, h, outward(x0.x, x0.y)), alpha: 1, scale: 1 },
-    { kind: 'dup', x: y0.x, y: y0.y, heading: headingTo(y0.x, y0.y, leftoverPair(rw, 'con', 'r'), agents, w, h, outward(y0.x, y0.y)), alpha: 1, scale: 1 },
+    {
+      kind: 'con',
+      x: poses['con-u'].x,
+      y: poses['con-u'].y,
+      heading: headingFor('con-u', -1, uAcross),
+      alpha: 1,
+      scale: 1,
+    },
+    {
+      kind: 'con',
+      x: poses['con-v'].x,
+      y: poses['con-v'].y,
+      heading: headingFor('con-v', -1, vAcross),
+      alpha: 1,
+      scale: 1,
+    },
+    {
+      kind: 'dup',
+      x: poses['dup-x'].x,
+      y: poses['dup-x'].y,
+      heading: headingFor('dup-x', 1, xAcross),
+      alpha: 1,
+      scale: 1,
+    },
+    {
+      kind: 'dup',
+      x: poses['dup-y'].x,
+      y: poses['dup-y'].y,
+      heading: headingFor('dup-y', 1, yAcross),
+      alpha: 1,
+      scale: 1,
+    },
   ];
 }
 
@@ -557,10 +786,6 @@ export function commitRewrite(
 ): number {
   const result = applyRewrite(snapshotOf(agents, graph), rw.rule, rw.a, rw.b, nextId);
   const poses = spawnPoses(rw);
-  graph.detachAgent(rw.a);
-  graph.detachAgent(rw.b);
-  agents.delete(rw.a);
-  agents.delete(rw.b);
   for (const s of result.spawned) {
     const pose = poses[s.role];
     const ag = createAgent(s.id, s.kind, pose.x, pose.y, pose.heading, params);
@@ -569,13 +794,50 @@ export function commitRewrite(
     ag.stun = 0.45;
     agents.set(s.id, ag);
   }
+  inheritLeftoverWires(graph, result.net.wires, agents, w, h, time);
+  graph.detachAgent(rw.a);
+  graph.detachAgent(rw.b);
+  agents.delete(rw.a);
+  agents.delete(rw.b);
   for (const wire of result.net.wires) {
     if (!agents.has(wire.a.id) || !agents.has(wire.b.id)) continue;
     if (graph.isFree(wire.a) && graph.isFree(wire.b)) {
-      graph.connect(agents, wire.a, wire.b, w, h, params, time);
+      graph.connect(agents, wire.a, wire.b, w, h, params, time, { chord: true, silent: true });
     }
   }
   return result.nextId;
+}
+
+/**
+ * Leftover strings are the same instruments with new owners. Rebind the
+ * surviving graph wire onto the fused ports so its id, rest, and rope stay.
+ * The principal that was consumed is not in `desired` and still detaches.
+ */
+function inheritLeftoverWires(
+  graph: Graph,
+  desired: NetWire[],
+  agents: Map<number, Agent>,
+  w: number,
+  h: number,
+  time: number,
+): void {
+  const claimed = new Set<number>();
+  for (const spec of desired) {
+    const src = spec.sources;
+    if (!src || src.length === 0) continue;
+    let keeper = -1;
+    for (const id of src) {
+      if (!graph.wires.has(id) || claimed.has(id)) continue;
+      if (keeper < 0 || id < keeper) keeper = id;
+    }
+    if (keeper < 0) continue;
+    if (!graph.rebind(keeper, spec.a, spec.b)) continue;
+    graph.restitchChord(keeper, agents, w, h, time);
+    claimed.add(keeper);
+    for (const id of src) {
+      if (id !== keeper) graph.detach(id);
+    }
+  }
 }
 
 function spawnPoses(rw: Rewrite): Record<Spawned['role'], { x: number; y: number; heading: number }> {

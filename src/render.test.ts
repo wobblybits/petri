@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { waveDisplace } from './render.ts';
+import { WAVE_DISP_PX } from './geom.ts';
 
 describe('waveDisplace', () => {
   it('is silent below the envelope floor', () => {
@@ -16,5 +17,10 @@ describe('waveDisplace', () => {
     expect(quiet).toBeGreaterThan(8);
     expect(loud).toBeGreaterThan(8);
     expect(loud / quiet).toBeLessThan(3);
+  });
+
+  it('caps a full-scale ring at three-quarters of WAVE_DISP_PX', () => {
+    const peak = Math.abs(waveDisplace(2, 2, 1, 1));
+    expect(peak).toBeCloseTo(WAVE_DISP_PX * 0.75 * 1.7, 5);
   });
 });
