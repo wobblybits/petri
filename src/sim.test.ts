@@ -5,6 +5,7 @@ import { loadPreset } from './presets.ts';
 import { queryHit, SLOP } from './collide.ts';
 import { closestPointOnSegment, transverseProfile, WIRE_RADIUS } from './geom.ts';
 import { mixScent, scentSlowFactor, scentTurnBoost, Sim } from './sim.ts';
+import { nativeSolver } from './native/solver.ts';
 import { CH } from './fields.ts';
 import { angleDelta } from './wrap.ts';
 
@@ -771,5 +772,158 @@ describe('isolated motion rules', () => {
     expect(
       sim.graph.latchCrosses(sim.agents, { id: left.id, slot: 'p' }, { id: right.id, slot: 'p' }, sim.w, sim.h),
     ).toBe(false);
+  });
+});
+
+describe('physics lod', () => {
+  const zoomedOut = { x: 120, y: 80, zoom: 0.18, viewW: 800, viewH: 600 };
+  const closeUp = { x: 120, y: 80, zoom: 2, viewW: 400, viewH: 300 };
+
+  it('still separates overlapping agents when they are FAR', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.faceAttract = 0;
+    params.snapWell = 0;
+    params.stepSpeed = 0;
+    const a = sim.spawn('era', 120, 80, 0, params, true)!;
+    const b = sim.spawn('era', 121, 80, Math.PI, params, true)!;
+    for (let i = 0; i < 12; i++) sim.step(1 / 60, params, zoomedOut);
+    expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeGreaterThan(12);
+  });
+
+  it('does not emit Hertzian contacts for FAR pairs', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.faceAttract = 0;
+    params.snapWell = 0;
+    params.stepSpeed = 0;
+    sim.spawn('era', 120, 80, 0, params, true);
+    sim.spawn('era', 121, 80, Math.PI, params, true);
+    sim.step(1 / 60, params, zoomedOut);
+    expect(sim.contacts.size).toBe(0);
+  });
+
+  it('keeps Hertzian contacts when the same pair is NEAR', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.faceAttract = 0;
+    params.snapWell = 0;
+    params.stepSpeed = 0;
+    sim.spawn('era', 120, 80, 0, params, true);
+    sim.spawn('era', 121, 80, Math.PI, params, true);
+    sim.step(1 / 60, params, closeUp);
+    expect(sim.contacts.size).toBeGreaterThan(0);
+  });
+
+  it('stepAsync without a GPU device still separates FAR overlap', async () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.faceAttract = 0;
+    params.snapWell = 0;
+    params.stepSpeed = 0;
+    const a = sim.spawn('era', 120, 80, 0, params, true)!;
+    const b = sim.spawn('era', 121, 80, Math.PI, params, true)!;
+    for (let i = 0; i < 12; i++) await sim.stepAsync(1 / 60, params, zoomedOut);
+    expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeGreaterThan(12);
+  });
+
+  it('does not change the no-view path: overlapping triangles still sit on SAT', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.faceAttract = 0;
+    params.snapWell = 0;
+    params.stepSpeed = 0;
+    const a = sim.spawn('con', 120, 80, 0, params, true)!;
+    const b = sim.spawn('con', 121, 80, Math.PI, params, true)!;
+    sim.step(1 / 60, params);
+    expect(sim.contacts.size).toBeGreaterThan(0);
+    for (let i = 0; i < 11; i++) sim.step(1 / 60, params);
+    expect(queryHit(a, b, sim.w, sim.h)?.overlap ?? 0).toBeLessThanOrEqual(SLOP + 0.08);
+  });
+
+  it('does not promote a whole chain because one end is on screen', () => {
+    const sim = new Sim(2000, 200);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.spawnInterval = 0;
+    params.stepSpeed = 0;
+    const ids: number[] = [];
+    for (let i = 0; i < 16; i++) {
+      ids.push(sim.spawn('era', 80 + i * 70, 100, 0, params, true)!.id);
+      if (i > 0) sim.wire(ids[i - 1], 'p', ids[i], 'p', params);
+    }
+    sim.step(1 / 60, params, { x: 80, y: 100, zoom: 2, viewW: 400, viewH: 300 });
+    expect(sim.isPhysicsDetailed(ids[0])).toBe(true);
+    expect(sim.isPhysicsDetailed(ids[15])).toBe(false);
+  });
+
+  it('still rewrites a FAR era–era pair', () => {
+    const sim = new Sim(240, 160);
+    const params = fastParams();
+    params.snapRadius = 0;
+    params.stepSpeed = 0;
+    const a = sim.spawn('era', 100, 80, 0, params, true)!;
+    const b = sim.spawn('era', 140, 80, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    const far = { x: 120, y: 80, zoom: 0.18, viewW: 800, viewH: 600 };
+    for (let i = 0; i < 80; i++) sim.step(1 / 60, params, far);
+    expect(sim.rewrites.length + (2 - sim.agents.size)).toBeGreaterThan(0);
+    expect(sim.agents.size).toBeLessThan(2);
+  });
+});
+
+describe('native mixed solve', () => {
+  it('SAT still separates overlapping triangles with no view', async () => {
+    expect(await nativeSolver.init(), nativeSolver.lastError).toBe(true);
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.faceAttract = 0;
+    params.snapWell = 0;
+    params.stepSpeed = 0;
+    const a = sim.spawn('con', 120, 80, 0, params, true)!;
+    const b = sim.spawn('con', 121, 80, Math.PI, params, true)!;
+    sim.step(1 / 60, params);
+    expect(sim.contacts.size).toBeGreaterThan(0);
+    for (let i = 0; i < 11; i++) sim.step(1 / 60, params);
+    expect(queryHit(a, b, sim.w, sim.h)?.overlap ?? 0).toBeLessThanOrEqual(SLOP + 0.08);
+  });
+
+  it('keeps Hertzian contacts when the same pair is NEAR', async () => {
+    expect(await nativeSolver.init(), nativeSolver.lastError).toBe(true);
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.faceAttract = 0;
+    params.snapWell = 0;
+    params.stepSpeed = 0;
+    sim.spawn('era', 120, 80, 0, params, true);
+    sim.spawn('era', 121, 80, Math.PI, params, true);
+    sim.step(1 / 60, params, { x: 120, y: 80, zoom: 2, viewW: 400, viewH: 300 });
+    expect(sim.contacts.size).toBeGreaterThan(0);
+  });
+
+  it('holds a wired pair near rest without injecting energy', async () => {
+    expect(await nativeSolver.init(), nativeSolver.lastError).toBe(true);
+    const sim = new Sim(320, 200);
+    const params = quietParams();
+    params.stepSpeed = 0;
+    params.drag = 0.8;
+    const a = sim.spawn('era', 80, 100, 0, params, true)!;
+    const b = sim.spawn('era', 200, 100, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    const rest = [...sim.graph.wires.values()][0].rest;
+    for (let i = 0; i < 90; i++) sim.step(1 / 60, params);
+    const sa = stemWorld(a, 'p', sim.w, sim.h);
+    const sb = stemWorld(b, 'p', sim.w, sim.h);
+    expect(Math.abs(Math.hypot(sb.x - sa.x, sb.y - sa.y) - rest)).toBeLessThan(8);
+    const e0 = sim.kineticEnergy();
+    for (let i = 0; i < 60; i++) sim.step(1 / 60, params);
+    expect(sim.kineticEnergy()).toBeLessThan(e0 + 8);
   });
 });

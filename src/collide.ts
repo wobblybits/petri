@@ -115,6 +115,30 @@ function shapeAt(agent: Agent, x: number, y: number): Shape {
   return { tag: 'poly', x, y, r: boundRadius(agent), points: triangleWorld(agent, x, y) };
 }
 
+/**
+ * Disc overlap from bounding radii. FAR physics uses this instead of SAT:
+ * same separation axis convention as `queryHit`, cheap enough to run on every
+ * pair the broadphase still reports.
+ */
+export function queryDiscHit(A: Agent, B: Agent, w: number, h: number): Hit | null {
+  const d = wrapDeltaVec(A.x, A.y, B.x, B.y, w, h);
+  const minDist = boundRadius(A) + boundRadius(B);
+  const dist = Math.hypot(d.x, d.y);
+  if (dist >= minDist) return null;
+  if (dist < 1e-6) {
+    return { nx: 1, ny: 0, overlap: minDist, px: A.x + boundRadius(A), py: A.y };
+  }
+  const nx = d.x / dist;
+  const ny = d.y / dist;
+  return {
+    nx,
+    ny,
+    overlap: minDist - dist,
+    px: A.x + nx * boundRadius(A),
+    py: A.y + ny * boundRadius(A),
+  };
+}
+
 export function queryHit(A: Agent, B: Agent, w: number, h: number): Hit | null {
   const d = wrapDeltaVec(A.x, A.y, B.x, B.y, w, h);
   if (Math.hypot(d.x, d.y) > boundRadius(A) + boundRadius(B) + SKIN * 2 + 2) return null;

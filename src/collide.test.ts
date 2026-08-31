@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createAgent } from './agents.ts';
-import { queryHit } from './collide.ts';
+import { queryHit, queryDiscHit } from './collide.ts';
 import { closestPointOnSegment, segmentsIntersect, segmentsInterfere } from './geom.ts';
 import { defaultParams } from './params.ts';
 
@@ -19,6 +19,15 @@ describe('shape collision', () => {
     const era = createAgent(1, 'era', 80, 80, 0, params);
     const con = createAgent(2, 'con', 90, 80, Math.PI, params);
     expect(queryHit(era, con, 240, 160)).not.toBeNull();
+  });
+
+  it('disc hit agrees with bound radii and misses a gap', () => {
+    const params = defaultParams();
+    const a = createAgent(1, 'era', 80, 80, 0, params);
+    const b = createAgent(2, 'era', 82, 80, 0, params);
+    expect(queryDiscHit(a, b, 240, 160)).not.toBeNull();
+    b.x = 160;
+    expect(queryDiscHit(a, b, 240, 160)).toBeNull();
   });
 });
 

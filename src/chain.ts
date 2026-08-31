@@ -334,7 +334,20 @@ export function solveWire(
   if (shape.length === n) {
     for (let i = 0; i < n; i++) solveShape(nodes[i], shape[i], aShape);
   }
+}
 
+/** Joint only — no rope nodes. FAR wires keep their rest length this way. */
+export function solveWireSpan(
+  A: Agent,
+  aSlot: PortSlot,
+  B: Agent,
+  bSlot: PortSlot,
+  rest: number,
+  stiff: WireStiffness,
+  h: number,
+): void {
+  const invH2 = 1 / Math.max(1e-12, h * h);
+  solveSpan(A, aSlot, B, bSlot, rest, COMPLIANCE.span * stiff.scale * stiff.slack * invH2);
 }
 
 /**

@@ -46,11 +46,11 @@ export class PairGrid {
       if (y > maxY) maxY = y;
     }
 
-    // A scattered swarm could otherwise ask for an enormous grid; coarsen until
-    // the cell count is bounded. Worst case it degrades toward all-pairs, which
-    // is where we started.
+    // A scattered swarm could otherwise ask for billions of empty buckets.
+    // Prefer more cells (tighter buckets) until the cap: coarsening toward
+    // all-pairs is how a spread of 400 became as expensive as 400 stacked.
     let cell = Math.max(1e-3, cellSize);
-    const maxCells = Math.max(64, count * 4);
+    const maxCells = Math.min(65536, Math.max(256, count * 32));
     let cols = Math.floor((maxX - minX) / cell) + 1;
     let rows = Math.floor((maxY - minY) / cell) + 1;
     while (cols * rows > maxCells) {

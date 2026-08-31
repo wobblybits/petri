@@ -12,7 +12,7 @@ import {
   type AgentKind,
   type PortSlot,
 } from './agents.ts';
-import { queryHit, SLOP, type Hit } from './collide.ts';
+import { queryHit, queryDiscHit, SLOP, type Hit } from './collide.ts';
 import { closestOnSegments, closestTOnSegment, ropeAabb, segmentsIntersect, transverseProfile, WAVE_DISP_PX, WIRE_RADIUS, wireBowBudget } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
@@ -28,7 +28,24 @@ import {
   type Rewrite,
 } from './rewrite.ts';
 import { audio } from './audio/engine.ts';
-import type { CollisionEvent, LiveContact, LiveWireContact, RewriteEvent } from './audio/types.ts';
+import type { CollisionEvent, LiveContact, LiveWireContact, PanView, RewriteEvent } from './audio/types.ts';
+import { AGENT_BAND, LOD_FAR, LodSelector, agentKey, apparentPx, onScreen } from './audio/lod.ts';
+import { farGpu } from './gpu/far-gpu.ts';
+import { FAR, FAR_STRIDE } from './gpu/far-kernel.ts';
+import {
+  KIND_CON,
+  KIND_DUP,
+  KIND_ERA,
+  nativeSolver,
+  ND,
+  NODE_STRIDE,
+  WF_FULL,
+  WF_HOLD,
+  WF_SHAPE,
+  WF_SKIP,
+  WIRE_NEAR_STRIDE,
+  WN,
+} from './native/solver.ts';
 import { angleDelta, clamp, wrapAngle, wrapDeltaVec } from './wrap.ts';
 
 /** Attraction-only chemotaxis. Own principal trails are a different channel and are ignored. */
@@ -68,6 +85,8 @@ export class Sim {
 
   /** Hop radius for flocking. Farther pairs are 1/hops anyway. */
   private static readonly FLOCK_HOPS = 6;
+  /** Neighbourhood lifted onto the detailed physics path around a NEAR/MID body. */
+  private static readonly PHYS_HOPS = 2;
 
   /** Local scent below which an agent counts as having lost the trail. */
   private static readonly HOME_SCENT = 0.35;
@@ -127,6 +146,9 @@ export class Sim {
   private wx: number[] = [];
   private wy: number[] = [];
   private agentList: Agent[] = [];
+  private wirePack: Wire[] = [];
+  private packIndex = new Map<number, number>();
+  private touchMark = new Uint8Array(0);
   private clearWireList: Wire[] = [];
   private wallPts: { x: number; y: number }[] = [];
   private flockAdj: number[][] = [];
@@ -165,6 +187,14 @@ export class Sim {
   grabbed: { id: number; x: number; y: number } | null = null;
   /** Agents in an active rewrite — their incident ropes are kinematic. */
   private rewriteFrozen = new Set<number>();
+  /**
+   * Physics detail. When a view is passed, FAR agents keep disc contacts and a
+   * chord constraint but skip SAT, rope XPBD, wire clearance, and Hertzian.
+   * Missing view = everyone NEAR, which is what tests and a paused layout want.
+   */
+  private lodActive = false;
+  private readonly physLod = new LodSelector();
+  private readonly detailedAgents = new Set<number>();
 
   /** Eased centre of mass. Rewrites delete agents, which jumps the true COM. */
   private home: { x: number; y: number } | null = null;
@@ -219,6 +249,9 @@ export class Sim {
     this.wireBowNow.clear();
     this.wireBowShape.clear();
     this.contacts.clear();
+    this.physLod.clear();
+    this.detailedAgents.clear();
+    this.lodActive = false;
     audio.invalidateTopology();
   }
 
@@ -261,7 +294,36 @@ export class Sim {
     );
   }
 
-  step(dt: number, params: Params): void {
+  step(dt: number, params: Params, view?: PanView | null): void {
+    const t = this.beginFrame(dt, params);
+    this.collectRewriteFrozen();
+    this.assignPhysicsLod(view);
+    this.graph.syncRest(this.time, params);
+    this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
+    if (this.solveFarNative(t)) this.finishIntegrate(t);
+    else this.solve(params, t, view);
+    this.endFrame(params, t);
+  }
+
+  /** Same as `step`, but will wait on the WebGPU FAR pass when WASM is not live. */
+  async stepAsync(dt: number, params: Params, view?: PanView | null): Promise<void> {
+    const t = this.beginFrame(dt, params);
+    this.collectRewriteFrozen();
+    this.assignPhysicsLod(view);
+    this.graph.syncRest(this.time, params);
+    this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
+    if (this.solveFarNative(t)) {
+      this.finishIntegrate(t);
+    } else if (this.canFarGpu()) {
+      await this.solveFarGpu(t);
+      this.finishIntegrate(t);
+    } else {
+      this.solve(params, t, view);
+    }
+    this.endFrame(params, t);
+  }
+
+  private beginFrame(dt: number, params: Params): number {
     const t = clamp(dt, 0, 0.05);
     this.time += t;
     const com = this.centerOfMass();
@@ -284,11 +346,14 @@ export class Sim {
     this.uncrossPrincipals(params, t);
     this.flock(params, t);
     this.gravitate(params, t);
-    this.solve(params, t);
+    return t;
+  }
+
+  private endFrame(params: Params, t: number): void {
     this.applyRadiationLoss();
     this.dampVelocities(params, t);
 
-    this.graph.refreshLengths(this.agents, this.w, this.h, this.rewriteFrozen);
+    this.graph.refreshLengths(this.agents, this.w, this.h, this.rewriteFrozen, this.wireDetailed);
     this.noteWireFriction();
     this.emitWirePlucks();
     this.graph.snap(this.agents, this.w, this.h, params, this.time);
@@ -357,6 +422,105 @@ export class Sim {
       this.rewriteFrozen.add(rw.a);
       this.rewriteFrozen.add(rw.b);
     }
+  }
+
+  private agentDetailed(id: number): boolean {
+    return !this.lodActive || this.detailedAgents.has(id);
+  }
+
+  /** True when this body is on the SAT / XPBD rope path. */
+  isPhysicsDetailed(id: number): boolean {
+    return this.agentDetailed(id);
+  }
+
+  wireDetailed = (wire: Wire): boolean =>
+    this.agentDetailed(wire.a.id) || this.agentDetailed(wire.b.id);
+
+  private kindCode(kind: AgentKind): number {
+    return kind === 'era' ? KIND_ERA : kind === 'dup' ? KIND_DUP : KIND_CON;
+  }
+
+  private slotCode(slot: PortSlot): number {
+    return slot === 'p' ? 0 : slot === 'l' ? 1 : 2;
+  }
+
+  /**
+   * Size on screen, then lift a small neighbourhood so a machine under the
+   * cursor does not have half its ropes on the cheap path. The whole
+   * connected component used to come along, which at a few hundred latched
+   * agents meant one on-screen body put the entire soup on SAT.
+   */
+  private assignPhysicsLod(view: PanView | null | undefined): void {
+    this.detailedAgents.clear();
+    this.lodActive = !!(view && view.zoom > 0 && view.viewW > 0 && view.viewH > 0);
+    if (!this.lodActive) {
+      this.physLod.sweep();
+      return;
+    }
+    const seeds: number[] = [];
+    for (const a of this.agents.values()) {
+      const size = boundRadius(a) * 2;
+      const px = apparentPx(size, view);
+      const vis = onScreen(a.x, a.y, size, view);
+      if (this.physLod.tier(agentKey(a.id), px, vis, AGENT_BAND) !== LOD_FAR) seeds.push(a.id);
+    }
+    if (this.grabbed) seeds.push(this.grabbed.id);
+    for (const id of this.rewriteFrozen) seeds.push(id);
+    if (seeds.length === 0) {
+      this.physLod.sweep();
+      return;
+    }
+
+    const index = this.packIndex;
+    index.clear();
+    const list = this.agentList;
+    list.length = 0;
+    for (const a of this.agents.values()) {
+      index.set(a.id, list.length);
+      list.push(a);
+    }
+    const n = list.length;
+    const adj = this.flockAdj;
+    while (adj.length < n) adj.push([]);
+    for (let i = 0; i < n; i++) adj[i].length = 0;
+    for (const w of this.graph.wires.values()) {
+      const ia = index.get(w.a.id);
+      const ib = index.get(w.b.id);
+      if (ia === undefined || ib === undefined || ia === ib) continue;
+      adj[ia].push(ib);
+      adj[ib].push(ia);
+    }
+    if (this.flockDist.length < n) {
+      const cap = Math.max(n * 2, 16);
+      this.flockDist = new Int32Array(cap);
+      this.flockQ = new Int32Array(cap);
+    }
+    const hop = this.flockDist;
+    const q = this.flockQ;
+    hop.fill(-1, 0, n);
+    let qt = 0;
+    for (const id of seeds) {
+      const i = index.get(id);
+      if (i === undefined || hop[i] >= 0) continue;
+      hop[i] = 0;
+      q[qt++] = i;
+      this.detailedAgents.add(list[i].id);
+    }
+    let qh = 0;
+    while (qh < qt) {
+      const u = q[qh++];
+      const du = hop[u];
+      if (du >= Sim.PHYS_HOPS) continue;
+      const nei = adj[u];
+      for (let k = 0; k < nei.length; k++) {
+        const v = nei[k];
+        if (hop[v] >= 0) continue;
+        hop[v] = du + 1;
+        q[qt++] = v;
+        this.detailedAgents.add(list[v].id);
+      }
+    }
+    this.physLod.sweep();
   }
 
   /**
@@ -754,6 +918,7 @@ export class Sim {
     this.wireGrid.forEachPair((i, j) => {
       const P = wires[i];
       const Q = wires[j];
+      if (!this.wireDetailed(P) && !this.wireDetailed(Q)) return;
       if (
         P.a.id === Q.a.id ||
         P.a.id === Q.b.id ||
@@ -780,6 +945,7 @@ export class Sim {
       this.bodyGrid.forEachNear(px, py, reach, (k) => {
         const agent = list[k];
         if (agent.id === P.a.id || agent.id === P.b.id) return;
+        if (!this.wireDetailed(P) && !this.agentDetailed(agent.id)) return;
         const span = P.ropeLen * 0.5 + boundRadius(agent) + WIRE_RADIUS + slack;
         const dx = agent.x - px;
         const dy = agent.y - py;
@@ -796,17 +962,18 @@ export class Sim {
    * would want to lay one out by hand. Velocities are cleared afterwards so
    * unpausing does not release stored-up correction as a kick.
    */
-  dragStep(params: Params, dt: number): void {
+  dragStep(params: Params, dt: number, view?: PanView | null): void {
     if (!this.grabbed || dt <= 0) return;
     const h = dt / Sim.SUBSTEPS;
     this.components = this.graph.componentIds(this.agents);
     this.wireContacts.clear();
     this.graph.syncRest(this.time, params);
-    this.graph.syncRopeShape(this.agents, this.w, this.h);
-    this.buildClearPairs(params);
+    this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
     this.collectRewriteFrozen();
+    this.assignPhysicsLod(view);
+    this.buildClearPairs(params);
     for (let sub = 0; sub < Sim.SUBSTEPS; sub++) {
-      this.graph.solveWires(this.agents, params, h, this.time, this.rewriteFrozen);
+      this.graph.solveWires(this.agents, params, h, this.time, this.rewriteFrozen, this.wireDetailed);
       this.clearWires(params);
       this.solveGrab(h);
       this.solveContacts(h);
@@ -1007,12 +1174,14 @@ export class Sim {
    * Many substeps with a single iteration each converge far better than the
    * reverse at equal cost — Macklin et al., "Small Steps in Physics Simulation".
    */
-  private solve(params: Params, dt: number): void {
+  private solve(params: Params, dt: number, view?: PanView | null): void {
     if (dt <= 0) return;
     this.graph.syncRest(this.time, params);
-    this.graph.syncRopeShape(this.agents, this.w, this.h);
-    this.buildClearPairs(params);
+    this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
     this.collectRewriteFrozen();
+    this.assignPhysicsLod(view);
+    this.buildClearPairs(params);
+    if (this.solveNearNative(params, dt)) return;
     const frozen = this.rewriteFrozen;
     const h = dt / Sim.SUBSTEPS;
     const invH = 1 / h;
@@ -1035,6 +1204,7 @@ export class Sim {
         a.heading = wrapAngle(a.heading + a.omega * h);
       }
       for (const wire of this.graph.wires.values()) {
+        if (!this.wireDetailed(wire)) continue;
         const hold = frozen.has(wire.a.id) || frozen.has(wire.b.id);
         for (const node of wire.nodes) {
           node.prevX = node.x;
@@ -1045,7 +1215,7 @@ export class Sim {
         }
       }
 
-      this.graph.solveWires(this.agents, params, h, this.time, frozen);
+      this.graph.solveWires(this.agents, params, h, this.time, frozen, this.wireDetailed);
       this.solveGrab(h);
       this.clearWires(params);
       this.solveContacts(h);
@@ -1070,6 +1240,7 @@ export class Sim {
         }
       }
       for (const wire of this.graph.wires.values()) {
+        if (!this.wireDetailed(wire)) continue;
         for (const node of wire.nodes) {
           node.vx = (node.x - node.prevX) * invH * ropeKeep;
           node.vy = (node.y - node.prevY) * invH * ropeKeep;
@@ -1080,6 +1251,346 @@ export class Sim {
     for (const a of list) {
       a.stun = Math.max(0, a.stun - dt);
       wrapPos(a, this.w, this.h);
+    }
+  }
+
+  private finishIntegrate(dt: number): void {
+    for (const a of this.agents.values()) {
+      a.stun = Math.max(0, a.stun - dt);
+      wrapPos(a, this.w, this.h);
+    }
+  }
+
+  private canFarPacked(): boolean {
+    return this.lodActive && this.detailedAgents.size === 0 && !this.grabbed;
+  }
+
+  private canFarGpu(): boolean {
+    return farGpu.ready && this.canFarPacked() && this.agents.size >= 8;
+  }
+
+  private packFar(): {
+    list: Agent[];
+    data: Float32Array;
+    wires: Float32Array;
+    nWires: number;
+  } | null {
+    const list = this.agentList;
+    list.length = 0;
+    for (const a of this.agents.values()) list.push(a);
+    const n = list.length;
+    if (n === 0) return null;
+    const index = new Map<number, number>();
+    for (let i = 0; i < n; i++) index.set(list[i].id, i);
+    const wireList: Wire[] = [];
+    for (const w of this.graph.wires.values()) {
+      if (index.has(w.a.id) && index.has(w.b.id)) wireList.push(w);
+    }
+    const { data, wires } = farGpu.packTarget(n, wireList.length);
+    for (let i = 0; i < n; i++) {
+      const a = list[i];
+      const o = i * FAR_STRIDE;
+      const locked = a.locked || this.rewriteFrozen.has(a.id);
+      data[o + FAR.x] = a.x;
+      data[o + FAR.y] = a.y;
+      data[o + FAR.vx] = a.vx;
+      data[o + FAR.vy] = a.vy;
+      data[o + FAR.heading] = a.heading;
+      data[o + FAR.omega] = a.omega;
+      data[o + FAR.invMass] = locked ? 0 : 1 / Math.max(0.08, a.mass);
+      data[o + FAR.radius] = boundRadius(a);
+      data[o + FAR.locked] = locked ? 1 : 0;
+    }
+    for (let k = 0; k < wireList.length; k++) {
+      const w = wireList[k];
+      wires[k * 4] = index.get(w.a.id)!;
+      wires[k * 4 + 1] = index.get(w.b.id)!;
+      wires[k * 4 + 2] = w.rest;
+      wires[k * 4 + 3] = 0;
+    }
+    return { list, data, wires, nWires: wireList.length };
+  }
+
+  private unpackFar(list: Agent[], data: Float32Array): void {
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      if (a.locked || this.rewriteFrozen.has(a.id)) continue;
+      const o = i * FAR_STRIDE;
+      a.x = data[o + FAR.x];
+      a.y = data[o + FAR.y];
+      a.vx = data[o + FAR.vx];
+      a.vy = data[o + FAR.vy];
+      a.heading = data[o + FAR.heading];
+      a.omega = data[o + FAR.omega];
+    }
+  }
+
+  private solveFarNative(dt: number): boolean {
+    if (!nativeSolver.ready || !this.canFarPacked()) return false;
+    const packed = this.packFar();
+    if (!packed) return true;
+    nativeSolver.stepFar(packed.data, packed.list.length, packed.wires, packed.nWires, dt);
+    this.unpackFar(packed.list, packed.data);
+    return true;
+  }
+
+  /** Packed FAR pass on the GPU. True when the kernel ran. */
+  private async solveFarGpu(dt: number): Promise<boolean> {
+    const packed = this.packFar();
+    if (!packed) return true;
+    await farGpu.step(packed.data, packed.list.length, packed.wires, packed.nWires, dt);
+    this.unpackFar(packed.list, packed.data);
+    return true;
+  }
+
+  /**
+   * Eight-substep CPU solve in WASM: integrate, XPBD wires, FAR-FAR discs.
+   * Grab, wire clearance, and SAT on any detailed pair stay in JS.
+   */
+  private solveNearNative(params: Params, dt: number): boolean {
+    if (!nativeSolver.ready || !nativeSolver.bodies || !nativeSolver.wiresNear || !nativeSolver.nodes) {
+      return false;
+    }
+    const list = this.agentList;
+    list.length = 0;
+    for (const a of this.agents.values()) list.push(a);
+    const n = list.length;
+    if (n === 0) return true;
+
+    const index = this.packIndex;
+    index.clear();
+    for (let i = 0; i < n; i++) index.set(list[i].id, i);
+
+    const wireList = this.wirePack;
+    wireList.length = 0;
+    let nNodes = 0;
+    for (const w of this.graph.wires.values()) {
+      if (!index.has(w.a.id) || !index.has(w.b.id)) continue;
+      wireList.push(w);
+      if (this.wireDetailed(w) && w.nodes.length > 0) nNodes += w.nodes.length;
+    }
+    const nWires = wireList.length;
+    if (!nativeSolver.canNear(n, nWires, nNodes)) return false;
+
+    this.packNearMeta(list, wireList, index, params);
+    this.packNearState(list, wireList);
+
+    const h = dt / Sim.SUBSTEPS;
+    const ropeKeep = Math.exp(-Math.max(0, params.springDamp) * h);
+    const heldId = this.grabbed?.id ?? -1;
+    const heldIndex = heldId < 0 ? -1 : (index.get(heldId) ?? -1);
+    if (this.touchMark.length < n) this.touchMark = new Uint8Array(n * 2);
+
+    for (let sub = 0; sub < Sim.SUBSTEPS; sub++) {
+      nativeSolver.nearIntegrate(n, nWires, h);
+      nativeSolver.nearWires(n, nWires, h);
+      this.markNearTouched(list, index, heldId, false);
+      this.unpackNearState(list, wireList, true);
+      this.solveGrab(h);
+      this.clearWires(params);
+      this.packNearState(list, wireList, true);
+      nativeSolver.nearDisc(n, h);
+      this.markNearTouched(list, index, heldId, true);
+      this.unpackNearState(list, wireList, true);
+      this.solveContactsFromPairs(h, list);
+      this.packNearState(list, wireList, true);
+      nativeSolver.nearFinalize(n, nWires, h, ropeKeep, heldIndex, Sim.GRAB_MAX_SPEED);
+    }
+    this.unpackNearState(list, wireList);
+    for (const a of list) {
+      a.stun = Math.max(0, a.stun - dt);
+      wrapPos(a, this.w, this.h);
+    }
+    return true;
+  }
+
+  /** Bodies JS still has to see this substep: detailed, grabbed, clearance, SAT partners. */
+  private markNearTouched(
+    list: Agent[],
+    index: Map<number, number>,
+    heldId: number,
+    includePairs: boolean,
+  ): void {
+    const n = list.length;
+    const mark = this.touchMark;
+    mark.fill(0, 0, n);
+    for (let i = 0; i < n; i++) {
+      if (this.agentDetailed(list[i].id) || list[i].id === heldId) mark[i] = 1;
+    }
+    for (let k = 1; k < this.clearBodyPairs.length; k += 2) {
+      const agent = this.clearBodyPairs[k] as Agent;
+      const i = index.get(agent.id);
+      if (i !== undefined) mark[i] = 1;
+    }
+    if (!includePairs) return;
+    const count = nativeSolver.pairCount();
+    const pa = nativeSolver.pairA;
+    const pb = nativeSolver.pairB;
+    if (!pa || !pb) return;
+    for (let k = 0; k < count; k++) {
+      const i = pa[k];
+      const j = pb[k];
+      if (i < 0 || j < 0 || i >= n || j >= n) continue;
+      if (!this.agentDetailed(list[i].id) && !this.agentDetailed(list[j].id)) continue;
+      mark[i] = 1;
+      mark[j] = 1;
+    }
+  }
+
+  private packNearMeta(
+    list: Agent[],
+    wireList: Wire[],
+    index: Map<number, number>,
+    params: Params,
+  ): void {
+    const bodies = nativeSolver.bodies!;
+    const invI = nativeSolver.invInertia!;
+    const sc = nativeSolver.scale!;
+    const kinds = nativeSolver.kind!;
+    const det = nativeSolver.detailed!;
+    const frozen = this.rewriteFrozen;
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      const o = i * FAR_STRIDE;
+      const locked = a.locked;
+      bodies[o + FAR.invMass] = locked ? 0 : 1 / Math.max(0.08, a.mass);
+      bodies[o + FAR.radius] = boundRadius(a);
+      bodies[o + FAR.locked] = locked ? 1 : 0;
+      invI[i] = locked ? 0 : 1 / Math.max(1e-4, momentOfInertia(a));
+      sc[i] = a.scale;
+      kinds[i] = this.kindCode(a.kind);
+      det[i] = this.agentDetailed(a.id) ? 1 : 0;
+    }
+    const wires = nativeSolver.wiresNear!;
+    const nodes = nativeSolver.nodes!;
+    let nodeAt = 0;
+    for (let k = 0; k < wireList.length; k++) {
+      const w = wireList[k];
+      const o = k * WIRE_NEAR_STRIDE;
+      const ai = index.get(w.a.id)!;
+      const bi = index.get(w.b.id)!;
+      const A = list[ai];
+      const B = list[bi];
+      const frozenEnds = frozen.has(A.id) || frozen.has(B.id);
+      const skip = (A.locked && B.locked) || frozenEnds;
+      const full = this.wireDetailed(w) && w.nodes.length > 0;
+      const stiff = this.graph.stiffnessOf(w, this.time, params);
+      let flags = 0;
+      if (full) flags |= WF_FULL;
+      if (skip) flags |= WF_SKIP;
+      if (frozenEnds) flags |= WF_HOLD;
+      if (full && w.shape.length === w.nodes.length) flags |= WF_SHAPE;
+      wires[o + WN.a] = ai;
+      wires[o + WN.b] = bi;
+      wires[o + WN.rest] = w.rest;
+      wires[o + WN.rope] = w.ropeLen;
+      wires[o + WN.scale] = stiff.scale;
+      wires[o + WN.slack] = stiff.slack;
+      wires[o + WN.aSlot] = this.slotCode(w.a.slot);
+      wires[o + WN.bSlot] = this.slotCode(w.b.slot);
+      wires[o + WN.node0] = full ? nodeAt : 0;
+      wires[o + WN.nNodes] = full ? w.nodes.length : 0;
+      wires[o + WN.flags] = flags;
+      if (full) {
+        const hasShape = (flags & WF_SHAPE) !== 0;
+        for (let i = 0; i < w.nodes.length; i++) {
+          const no = (nodeAt + i) * NODE_STRIDE;
+          if (hasShape) {
+            nodes[no + ND.shapeX] = w.shape[i].x;
+            nodes[no + ND.shapeY] = w.shape[i].y;
+          }
+        }
+        nodeAt += w.nodes.length;
+      }
+    }
+  }
+
+  private packNearState(list: Agent[], wireList: Wire[], touchedOnly = false): void {
+    const bodies = nativeSolver.bodies!;
+    const mark = this.touchMark;
+    for (let i = 0; i < list.length; i++) {
+      if (touchedOnly && !mark[i]) continue;
+      const a = list[i];
+      const o = i * FAR_STRIDE;
+      bodies[o + FAR.x] = a.x;
+      bodies[o + FAR.y] = a.y;
+      bodies[o + FAR.vx] = a.vx;
+      bodies[o + FAR.vy] = a.vy;
+      bodies[o + FAR.heading] = a.heading;
+      bodies[o + FAR.omega] = a.omega;
+      bodies[o + FAR.prevX] = a.prevX;
+      bodies[o + FAR.prevY] = a.prevY;
+      bodies[o + FAR.prevHeading] = a.prevHeading;
+    }
+    const nodes = nativeSolver.nodes!;
+    let nodeAt = 0;
+    for (const w of wireList) {
+      if (!this.wireDetailed(w) || w.nodes.length === 0) continue;
+      for (let i = 0; i < w.nodes.length; i++) {
+        const nd = w.nodes[i];
+        const o = (nodeAt + i) * NODE_STRIDE;
+        nodes[o + ND.x] = nd.x;
+        nodes[o + ND.y] = nd.y;
+        nodes[o + ND.vx] = nd.vx;
+        nodes[o + ND.vy] = nd.vy;
+        nodes[o + ND.prevX] = nd.prevX;
+        nodes[o + ND.prevY] = nd.prevY;
+      }
+      nodeAt += w.nodes.length;
+    }
+  }
+
+  private unpackNearState(list: Agent[], wireList: Wire[], touchedOnly = false): void {
+    const bodies = nativeSolver.bodies!;
+    const mark = this.touchMark;
+    for (let i = 0; i < list.length; i++) {
+      if (touchedOnly && !mark[i]) continue;
+      const a = list[i];
+      const o = i * FAR_STRIDE;
+      a.x = bodies[o + FAR.x];
+      a.y = bodies[o + FAR.y];
+      a.vx = bodies[o + FAR.vx];
+      a.vy = bodies[o + FAR.vy];
+      a.heading = bodies[o + FAR.heading];
+      a.omega = bodies[o + FAR.omega];
+      a.prevX = bodies[o + FAR.prevX];
+      a.prevY = bodies[o + FAR.prevY];
+      a.prevHeading = bodies[o + FAR.prevHeading];
+    }
+    const nodes = nativeSolver.nodes!;
+    let nodeAt = 0;
+    for (const w of wireList) {
+      if (!this.wireDetailed(w) || w.nodes.length === 0) continue;
+      for (let i = 0; i < w.nodes.length; i++) {
+        const nd = w.nodes[i];
+        const o = (nodeAt + i) * NODE_STRIDE;
+        nd.x = nodes[o + ND.x];
+        nd.y = nodes[o + ND.y];
+        nd.vx = nodes[o + ND.vx];
+        nd.vy = nodes[o + ND.vy];
+        nd.prevX = nodes[o + ND.prevX];
+        nd.prevY = nodes[o + ND.prevY];
+      }
+      nodeAt += w.nodes.length;
+    }
+  }
+
+  /** SAT + Hertzian for any pair that involves a detailed body. FAR-FAR already ran in C. */
+  private solveContactsFromPairs(h: number, list: Agent[]): void {
+    const count = nativeSolver.pairCount();
+    const pa = nativeSolver.pairA;
+    const pb = nativeSolver.pairB;
+    if (!pa || !pb || count <= 0) return;
+    for (let k = 0; k < count; k++) {
+      const A = list[pa[k]];
+      const B = list[pb[k]];
+      if (!A || !B) continue;
+      if (A.locked && B.locked) continue;
+      if (!this.agentDetailed(A.id) && !this.agentDetailed(B.id)) continue;
+      const hit = queryHit(A, B, this.w, this.h);
+      if (!hit) continue;
+      this.emitCollision(A, B, hit);
+      solveContact(A, B, hit, SLOP, h);
     }
   }
 
@@ -1182,11 +1693,13 @@ export class Sim {
       const A = list[i];
       const B = list[j];
       if (A.locked && B.locked) return;
-      const hit = queryHit(A, B, this.w, this.h);
-      if (hit) {
-        this.emitCollision(A, B, hit);
-        solveContact(A, B, hit, SLOP, h);
-      }
+      const detailed = this.agentDetailed(A.id) || this.agentDetailed(B.id);
+      const hit = detailed
+        ? queryHit(A, B, this.w, this.h)
+        : queryDiscHit(A, B, this.w, this.h);
+      if (!hit) return;
+      if (detailed) this.emitCollision(A, B, hit);
+      solveContact(A, B, hit, SLOP, h);
     });
   }
 
@@ -1230,7 +1743,7 @@ export class Sim {
       const A = this.agents.get(wire.a.id);
       const B = this.agents.get(wire.b.id);
       if (!A || !B) continue;
-      const n = wire.nodes.length;
+      const n = this.wireDetailed(wire) ? wire.nodes.length : 0;
       const need = n + 2;
       while (pts.length < need) pts.push({ x: 0, y: 0 });
       const sA = stemWorld(A, wire.a.slot, this.w, this.h);
@@ -1669,7 +2182,9 @@ export class Sim {
       if (!A || !B || A.locked || B.locked || A.stun > 0 || B.stun > 0) continue;
       if (busy.has(A.id) || busy.has(B.id)) continue;
       if (this.graph.shrinkU(wire, this.time, params) < Sim.REWRITE_SHRINK_READY) continue;
-      const len = this.graph.curveLength(wire, this.agents, this.w, this.h);
+      const len = this.wireDetailed(wire)
+        ? this.graph.curveLength(wire, this.agents, this.w, this.h)
+        : this.graph.stemSpan(wire, this.agents, this.w, this.h);
       // Not the rest-length sit: the collapse hauls them the rest of the way.
       // Still skip a cable that has barely started to take, so the pull is a
       // close and not a fling.

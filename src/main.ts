@@ -11,6 +11,8 @@ import { Sim } from './sim.ts';
 import type { AgentKind } from './agents.ts';
 import { audio } from './audio/engine.ts';
 import { getWaveSpeed, setWaveSpeed } from './audio/presets.ts';
+import { farGpu } from './gpu/far-gpu.ts';
+import { nativeSolver } from './native/solver.ts';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('missing #app');
@@ -176,9 +178,10 @@ function applyPreset(name: PresetName): void {
 
 pauseBtn.addEventListener('click', () => setPaused(!paused));
 document.querySelector('#step')!.addEventListener('click', () => {
-  sim.step(1 / 60, params);
-  syncCamera(1 / 60);
-  paint();
+  void sim.stepAsync(1 / 60, params, camera).then(() => {
+    syncCamera(1 / 60);
+    paint();
+  });
 });
 document.querySelector('#reset')!.addEventListener('click', () => applyPreset(currentPreset));
 document.querySelector('#recentre')!.addEventListener('click', () => {
@@ -368,21 +371,32 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-lambda]'))
 }
 
 let last = performance.now();
-function frame(now: number): void {
+let ticking = false;
+async function tick(now: number): Promise<void> {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
   try {
-    if (paused) sim.dragStep(params, dt);
-    else sim.step(dt, params);
+    if (paused) sim.dragStep(params, dt, camera);
+    else await sim.stepAsync(dt, params, camera);
     audio.frame(sim.graph, sim.agents, dt, camera);
     syncCamera(dt);
     paint();
   } catch (err) {
     console.error(err);
   }
-  requestAnimationFrame(frame);
+}
+
+function frame(now: number): void {
+  if (ticking) return;
+  ticking = true;
+  void tick(now).finally(() => {
+    ticking = false;
+    requestAnimationFrame(frame);
+  });
 }
 
 sizeCanvas();
 applyPreset('soup');
+void nativeSolver.init();
+void farGpu.init();
 requestAnimationFrame(frame);

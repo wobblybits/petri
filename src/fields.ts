@@ -1,3 +1,5 @@
+import { nativeSolver } from './native/solver.ts';
+
 export const CH = {
   conP: 0,
   dupP: 1,
@@ -170,6 +172,7 @@ export class Fields {
    */
   diffuse(mix: number): void {
     if (mix <= 0) return;
+    if (nativeSolver.scentDiffuse(this, mix)) return;
     const m = mix;
     const keep = 1 - m;
     const { cols, rows, walls } = this;
@@ -213,6 +216,7 @@ export class Fields {
 
   decay(rate: number): void {
     const k = Math.max(0, 1 - rate);
+    if (nativeSolver.scentDecay(this, k)) return;
     const d = this.data;
     for (let i = 0; i < d.length; i++) d[i] *= k;
   }

@@ -14,6 +14,7 @@ import {
   reduceChain,
   sampleChain,
   solveWire,
+  solveWireSpan,
   type ChainNode,
   type WireStiffness,
 } from './chain.ts';
@@ -622,8 +623,14 @@ export class Graph {
    * target, which is what makes a slack rope well-posed, and its arc length is
    * the rope's length, so links, bending and shape all agree.
    */
-  syncRopeShape(agents: Map<number, Agent>, w: number, h: number): void {
+  syncRopeShape(
+    agents: Map<number, Agent>,
+    w: number,
+    h: number,
+    detailed?: (wire: Wire) => boolean,
+  ): void {
     for (const wire of this.wires.values()) {
+      if (detailed && !detailed(wire)) continue;
       const A = agents.get(wire.a.id);
       const B = agents.get(wire.b.id);
       if (!A || !B) continue;
@@ -667,6 +674,11 @@ export class Graph {
     };
   }
 
+  /** Public for the WASM pack — same numbers the JS XPBD path uses. */
+  stiffnessOf(wire: Wire, time: number, params: Params): WireStiffness {
+    return this.stiffness(wire, time, params);
+  }
+
   /** One XPBD iteration over every wire. Called once per substep. */
   solveWires(
     agents: Map<number, Agent>,
@@ -674,6 +686,7 @@ export class Graph {
     h: number,
     time: number,
     frozen?: Set<number>,
+    detailed?: (wire: Wire) => boolean,
   ): void {
     for (const wire of this.wires.values()) {
       const A = agents.get(wire.a.id);
@@ -681,6 +694,11 @@ export class Graph {
       if (!A || !B) continue;
       if (A.locked && B.locked) continue;
       if (frozen && (frozen.has(A.id) || frozen.has(B.id))) continue;
+      const stiff = this.stiffness(wire, time, params);
+      if (detailed && !detailed(wire)) {
+        solveWireSpan(A, wire.a.slot, B, wire.b.slot, wire.rest, stiff, h);
+        continue;
+      }
       solveWire(
         A,
         wire.a.slot,
@@ -690,7 +708,7 @@ export class Graph {
         wire.rest,
         wire.ropeLen,
         wire.shape,
-        this.stiffness(wire, time, params),
+        stiff,
         h,
       );
     }
@@ -702,10 +720,14 @@ export class Graph {
     w: number,
     h: number,
     frozen?: Set<number>,
+    detailed?: (wire: Wire) => boolean,
   ): void {
     for (const wire of this.wires.values()) {
       if (frozen && frozen.has(wire.a.id) !== frozen.has(wire.b.id)) continue;
-      wire.lastLen = this.curveLength(wire, agents, w, h);
+      wire.lastLen =
+        detailed && !detailed(wire)
+          ? this.stemSpan(wire, agents, w, h)
+          : this.curveLength(wire, agents, w, h);
     }
   }
 }

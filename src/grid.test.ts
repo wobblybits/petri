@@ -58,7 +58,7 @@ describe('PairGrid', () => {
     let visited = 0;
     grid.forEachPair(() => visited++);
     const allPairs = (400 * 399) / 2;
-    expect(visited, `visited ${visited} of ${allPairs}`).toBeLessThan(allPairs * 0.1);
+    expect(visited, `visited ${visited} of ${allPairs}`).toBeLessThan(allPairs * 0.05);
   });
 
   it('degrades safely when everything is stacked in one spot', () => {
