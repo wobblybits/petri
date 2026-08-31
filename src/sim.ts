@@ -301,7 +301,7 @@ export class Sim {
     this.graph.syncRest(this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
     if (this.solveFarNative(t)) this.finishIntegrate(t);
-    else this.solve(params, t, view);
+    else this.solve(params, t);
     this.endFrame(params, t);
   }
 
@@ -318,7 +318,7 @@ export class Sim {
       await this.solveFarGpu(t);
       this.finishIntegrate(t);
     } else {
-      this.solve(params, t, view);
+      this.solve(params, t);
     }
     this.endFrame(params, t);
   }
@@ -1174,12 +1174,8 @@ export class Sim {
    * Many substeps with a single iteration each converge far better than the
    * reverse at equal cost — Macklin et al., "Small Steps in Physics Simulation".
    */
-  private solve(params: Params, dt: number, view?: PanView | null): void {
+  private solve(params: Params, dt: number): void {
     if (dt <= 0) return;
-    this.graph.syncRest(this.time, params);
-    this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
-    this.collectRewriteFrozen();
-    this.assignPhysicsLod(view);
     this.buildClearPairs(params);
     if (this.solveNearNative(params, dt)) return;
     const frozen = this.rewriteFrozen;

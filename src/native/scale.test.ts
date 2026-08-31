@@ -177,4 +177,53 @@ describe('NEAR densely connected growth', () => {
     expect(at400!.p50, `400 NEAR p50 ${at400!.p50.toFixed(2)}ms`).toBeLessThan(BUDGET_60);
     expect(cliff60).toBeGreaterThanOrEqual(400);
   }, 180_000);
+
+  it('shows which leftovers still eat the frame at 576 NEAR', async () => {
+    expect(await nativeSolver.init(), nativeSolver.lastError).toBe(true);
+    const variants: { name: string; apply: (p: Params) => void }[] = [
+      { name: 'full', apply: () => {} },
+      {
+        name: 'no flock',
+        apply: (p) => {
+          p.flockAlign = 0;
+          p.flockSep = 0;
+        },
+      },
+      {
+        name: 'no scent',
+        apply: (p) => {
+          p.deposit = 0;
+          p.diffuse = 0;
+          p.decay = 0;
+        },
+      },
+      {
+        name: 'no clear',
+        apply: (p) => {
+          p.wireClear = 0;
+        },
+      },
+      {
+        name: 'no motors',
+        apply: (p) => {
+          p.stepSpeed = 0;
+          p.swimNoise = 0;
+          p.portStiff = 0;
+          p.declutter = 0;
+          p.homing = 0;
+        },
+      },
+    ];
+    for (const v of variants) {
+      const params = meshParams();
+      v.apply(params);
+      const mesh = new GrowingMesh(params);
+      mesh.seed(24);
+      timeSteps(mesh.sim, params, 2);
+      const samples = timeSteps(mesh.sim, params, 8);
+      const p50 = percentile(samples, 0.5);
+      console.log(`576 NEAR ${v.name}: p50=${p50.toFixed(2)}ms  wires=${mesh.wires}`);
+    }
+    expect(true).toBe(true);
+  }, 120_000);
 });
