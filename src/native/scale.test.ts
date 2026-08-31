@@ -175,7 +175,7 @@ describe('NEAR densely connected growth', () => {
     expect(rows[0].p50).toBeLessThan(BUDGET_60);
     expect(at400, 'mesh should grow to 400 agents').toBeTruthy();
     expect(at400!.p50, `400 NEAR p50 ${at400!.p50.toFixed(2)}ms`).toBeLessThan(BUDGET_60);
-    expect(cliff60).toBeGreaterThanOrEqual(400);
+    expect(cliff60).toBeGreaterThanOrEqual(576);
   }, 180_000);
 
   it('shows which leftovers still eat the frame at 576 NEAR', async () => {
