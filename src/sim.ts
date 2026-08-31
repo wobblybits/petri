@@ -90,8 +90,11 @@ export class Sim {
   /** Neighbourhood lifted onto the detailed physics path around a NEAR/MID body. */
   private static readonly PHYS_HOPS = 2;
 
-  /** Local scent below which an agent counts as having lost the trail. */
+  /** Local scent scale for homing: half climb when trail equals this. */
   private static readonly HOME_SCENT = 0.35;
+
+  /** Probe radius for the homing gradient, in px. */
+  private static readonly HOME_GRAD = 8;
 
   /** Distance past which the pull home stops growing. */
   private static readonly HOME_REACH = 320;
@@ -2106,12 +2109,9 @@ export class Sim {
    * Early-phase mixing without a well at the origin.
    *
    * Gravity and homing only touch components of size `homeComp` or smaller, so
-   * a finished net keeps the shape the wires gave it. A stray that has lost
-   * the scent walks toward the nearest agent that still has a free port —
-   * another loner, or an open aux on a neighbouring machine — instead of
-   * toward the flock centroid. That is what used to fold large nets into a
-   * ball: every body still felt a share of the pull home, and for a lone
-   * machine "home" is its own centre of mass.
+   * a finished net keeps the shape the wires gave it. Homing is a climb of
+   * the scent field — free ports already deposit — not a search for the
+   * nearest open agent. No trail, no pull.
    */
   private gravitate(params: Params, dt: number): void {
     const base = params.gravity;
@@ -2128,56 +2128,35 @@ export class Sim {
       if (agent.locked) continue;
       const root = this.components.get(agent.id) ?? agent.id;
       if ((sizes.get(root) ?? 1) > cap) continue;
-      let tx = 0;
-      let ty = 0;
-      let k = 0;
-      if (home > 0) {
-        const scentK = home / (1 + agent.trail / Sim.HOME_SCENT);
-        if (scentK > 1e-6) {
-          const t = this.nearestOpenPort(agent);
-          if (t) {
-            tx = t.x;
-            ty = t.y;
-            k += scentK;
-          }
+      if (home > 0 && agent.trail > 1e-6) {
+        const g = this.scentGradient(agent, params);
+        const mag = Math.hypot(g.x, g.y);
+        if (mag > 1e-6) {
+          const k = (home * agent.trail) / (Sim.HOME_SCENT + agent.trail);
+          const accel = k * Sim.HOME_REACH;
+          agent.vx += (g.x / mag) * accel * dt;
+          agent.vy += (g.y / mag) * accel * dt;
         }
       }
-      if (base > 0 && com) {
-        if (k <= 0) {
-          tx = com.x;
-          ty = com.y;
-        }
-        k += base;
-      }
-      if (k <= 0) continue;
-      const dx = tx - agent.x;
-      const dy = ty - agent.y;
+      if (base <= 0 || !com) continue;
+      const dx = com.x - agent.x;
+      const dy = com.y - agent.y;
       const dist = Math.hypot(dx, dy);
       if (dist < 1e-6) continue;
-      // Saturating: a spring close in, a steady walk from far out, so a stray
-      // is not slingshot through whoever it is meeting.
-      const pull = (k * Math.min(dist, Sim.HOME_REACH)) / dist;
+      const pull = (base * Math.min(dist, Sim.HOME_REACH)) / dist;
       agent.vx += dx * pull * dt;
       agent.vy += dy * pull * dt;
     }
   }
 
-  /** Closest agent in another component that still has a free port. */
-  private nearestOpenPort(agent: Agent): Agent | null {
-    const mine = this.components.get(agent.id);
-    let best: Agent | null = null;
-    let bestD = Infinity;
-    for (const other of this.agents.values()) {
-      if (other.id === agent.id) continue;
-      if (this.components.get(other.id) === mine) continue;
-      if (this.graph.portsFilled(other)) continue;
-      const d = Math.hypot(other.x - agent.x, other.y - agent.y);
-      if (d < bestD && d > 1e-6) {
-        bestD = d;
-        best = other;
-      }
-    }
-    return best;
+  /** Same mix as steering, differenced so homing walks a trail that is there. */
+  private scentGradient(agent: Agent, params: Params): { x: number; y: number } {
+    const e = Sim.HOME_GRAD;
+    const at = (x: number, y: number) => this.scentAt(agent, x, y, params);
+    return {
+      x: at(agent.x + e, agent.y) - at(agent.x - e, agent.y),
+      y: at(agent.x, agent.y + e) - at(agent.x, agent.y - e),
+    };
   }
 
   momentum(): { px: number; py: number; L: number } {

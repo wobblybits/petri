@@ -70,9 +70,10 @@ export interface Params {
   angDrag: number;
   gravity: number;
   /**
-   * How hard a stray (and nets of at most `homeComp` agents) seeks the nearest
-   * free port when it has lost the scent. Not a pull toward the map centre —
-   * that crumples large nets into a clump.
+   * Extra climb along the scent gradient for a stray (and nets of at most
+   * `homeComp` agents). Open ports already deposit; this walks a trail that
+   * is actually there. Zero scent means no pull — a body cannot smell a
+   * free port across the map.
    */
   homing: number;
   /**
@@ -156,7 +157,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'swimTau', label: 'Swim persistence', min: 0.1, max: 4, step: 0.05 },
   { key: 'swimNoise', label: 'Swim noise', min: 0, max: 2, step: 0.05 },
   { key: 'gravity', label: 'Gravity', min: 0, max: 0.8, step: 0.01 },
-  { key: 'homing', label: 'Homing (strays)', min: 0, max: 4, step: 0.05 },
+  { key: 'homing', label: 'Homing (scent climb)', min: 0, max: 4, step: 0.05 },
   { key: 'homeComp', label: 'Home net cap', min: 1, max: 12, step: 1 },
   { key: 'drag', label: 'Fluid drag', min: 0, max: 4, step: 0.05 },
   { key: 'angDrag', label: 'Spin damp', min: 0, max: 8, step: 0.05 },

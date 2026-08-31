@@ -444,19 +444,40 @@ describe('conservative mechanics', () => {
     expect(nodes[3].x - nodes[0].x).toBeGreaterThan(width0 * 0.85);
   });
 
-  it('a scentless stray walks toward the nearest free port, not the origin', () => {
+  it('a scentless stray does not know where a far free port is', () => {
     const sim = new Sim(480, 240);
     const params = passiveParams();
     params.homing = 2;
     params.drag = 0.4;
     const stray = sim.spawn('era', 80, 200, 0, params, true)!;
-    const host = sim.spawn('con', 360, 80, 0, params, true)!;
-    host.locked = true;
+    sim.spawn('con', 360, 80, 0, params, true);
+    const x0 = stray.x;
+    const y0 = stray.y;
     step(sim, params, 50);
-    const d1 = Math.hypot(stray.x - host.x, stray.y - host.y);
-    expect(d1).toBeLessThan(Math.hypot(80 - 360, 200 - 80) - 12);
-    expect(stray.x).toBeGreaterThan(80);
-    expect(host.x).toBeLessThan(360 + 8);
+    expect(Math.hypot(stray.x - x0, stray.y - y0)).toBeLessThan(4);
+  });
+
+  it('homing climbs a scent trail toward open ports', () => {
+    const sim = new Sim(480, 240);
+    const params = passiveParams();
+    params.homing = 2;
+    params.drag = 0.4;
+    params.deposit = 0;
+    params.diffuse = 0;
+    params.decay = 0;
+    const stray = sim.spawn('era', 240, 120, 0, params, true)!;
+    const paint = () => {
+      for (let x = 160; x <= 360; x += 4) {
+        sim.fields.deposit(CH.conP, x, 120, (x - 160) * 0.6);
+      }
+    };
+    for (let i = 0; i < 40; i++) {
+      paint();
+      sim.step(1 / 60, params);
+    }
+    expect(stray.x).toBeGreaterThan(248);
+    expect(stray.x).toBeLessThan(360);
+    expect(Math.abs(stray.y - 120)).toBeLessThan(16);
   });
 
   it('does not latch through an intervening wire', () => {
