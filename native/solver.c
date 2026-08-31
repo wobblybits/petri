@@ -10,14 +10,26 @@
  * src/collide.ts and src/chain.ts solveContact. FAR-FAR stays disc.
  *
  * Rebuild: npm run wasm
+ *
+ * Compiled with -msimd128. Independent wires are batched 4-wide when they
+ * commute with the original Gauss-Seidel order (no shared bodies with any
+ * skipped predecessor). SAT stays sequential GS; triangle math is f32.
  */
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
 
+#if defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#define HAVE_SIMD 1
+typedef v128_t v128;
+#else
+#define HAVE_SIMD 0
+#endif
+
 #define MAX_BODIES 16384
-#define MAX_WIRES 8192
-#define MAX_NODES 65536
+#define MAX_WIRES 16384
+#define MAX_NODES 131072
 #define MAX_CELLS 65536
 #define MAX_PAIRS 262144
 #define STRIDE 12
@@ -115,6 +127,12 @@ static float flock_mass[MAX_BODIES];
 static uint8_t swim[MAX_BODIES];
 static float port_rx[MAX_BODIES * 3];
 static float port_ry[MAX_BODIES * 3];
+static float cs_c[MAX_BODIES];
+static float cs_s[MAX_BODIES];
+static float cs_a[MAX_BODIES];
+static uint8_t cs_ok[MAX_BODIES];
+static uint8_t pose_ok[MAX_BODIES];
+static uint8_t wdone[MAX_WIRES];
 
 static float wrap_angle(float a) {
   if (a >= -PI && a < PI) return a;
@@ -126,6 +144,20 @@ static float wrap_angle(float a) {
 
 static int imax(int a, int b) { return a > b ? a : b; }
 static int imin(int a, int b) { return a < b ? a : b; }
+
+static void ensure_cs(int i) {
+  float a = bodies[i * STRIDE + FAR_HEADING];
+  if (cs_ok[i] && a == cs_a[i]) return;
+  cs_c[i] = cosf(a);
+  cs_s[i] = sinf(a);
+  cs_a[i] = a;
+  cs_ok[i] = 1;
+}
+
+static void invalidate_pose(int i) {
+  cs_ok[i] = 0;
+  pose_ok[i] = 0;
+}
 
 static int collect_pairs(int n, float cell_size) {
   if (n <= 0) return 0;
@@ -331,14 +363,15 @@ static void stem_local(uint8_t k, int slot, float sc, float *lx, float *ly) {
 }
 
 static void refresh_pose(int i) {
-  float a = bodies[i * STRIDE + FAR_HEADING];
-  float c = cosf(a), s = sinf(a);
+  ensure_cs(i);
+  float c = cs_c[i], s = cs_s[i];
   for (int slot = 0; slot < 3; slot++) {
     float lx, ly;
     stem_local(kind[i], slot, scale[i], &lx, &ly);
     port_rx[i * 3 + slot] = lx * c - ly * s;
     port_ry[i * 3 + slot] = lx * s + ly * c;
   }
+  pose_ok[i] = 1;
 }
 
 static void refresh_poses(int n) {
@@ -348,6 +381,8 @@ static void refresh_poses(int n) {
 static void attach(int i, int slot, float *rx, float *ry) {
   if (slot < 0) slot = 0;
   if (slot > 2) slot = 2;
+  float a = bodies[i * STRIDE + FAR_HEADING];
+  if (!pose_ok[i] || !cs_ok[i] || a != cs_a[i]) refresh_pose(i);
   int k = i * 3 + slot;
   *rx = port_rx[k];
   *ry = port_ry[k];
@@ -365,7 +400,7 @@ static void apply_imp(int i, float rx, float ry, float nx, float ny, float lambd
   p[FAR_X] += im * lambda * nx;
   p[FAR_Y] += im * lambda * ny;
   p[FAR_HEADING] = wrap_angle(p[FAR_HEADING] + inv_inertia[i] * (rx * ny - ry * nx) * lambda);
-  refresh_pose(i);
+  invalidate_pose(i);
 }
 
 static void solve_span(int i, int si, int j, int sj, float rest, float alpha) {
@@ -508,6 +543,261 @@ static void solve_one_wire(int n, float *W, float h) {
     for (int k = 0; k < nn; k++) {
       float *b = nodes + (n0 + k) * NODE_STRIDE;
       solve_shape(b, b[ND_SX], b[ND_SY], aShape);
+    }
+  }
+}
+
+#if HAVE_SIMD
+static v128 load4_off(const float *p0, const float *p1, const float *p2, const float *p3, int off) {
+  return wasm_f32x4_make(p0[off], p1[off], p2[off], p3[off]);
+}
+
+static void store4_off(float *p0, float *p1, float *p2, float *p3, int off, v128 v) {
+  p0[off] = wasm_f32x4_extract_lane(v, 0);
+  p1[off] = wasm_f32x4_extract_lane(v, 1);
+  p2[off] = wasm_f32x4_extract_lane(v, 2);
+  p3[off] = wasm_f32x4_extract_lane(v, 3);
+}
+
+static void solve_node_link4(float *a0, float *a1, float *a2, float *a3,
+                             float *b0, float *b1, float *b2, float *b3,
+                             v128 rest, v128 alpha) {
+  v128 ax = load4_off(a0, a1, a2, a3, ND_X);
+  v128 ay = load4_off(a0, a1, a2, a3, ND_Y);
+  v128 bx = load4_off(b0, b1, b2, b3, ND_X);
+  v128 by = load4_off(b0, b1, b2, b3, ND_Y);
+  v128 dx = wasm_f32x4_sub(bx, ax);
+  v128 dy = wasm_f32x4_sub(by, ay);
+  v128 dist = wasm_f32x4_sqrt(wasm_f32x4_add(wasm_f32x4_mul(dx, dx), wasm_f32x4_mul(dy, dy)));
+  v128 ok = wasm_f32x4_gt(dist, wasm_f32x4_splat(1e-9f));
+  v128 dist_s = wasm_v128_bitselect(dist, wasm_f32x4_splat(1.f), ok);
+  v128 C = wasm_f32x4_sub(dist, rest);
+  v128 w = wasm_f32x4_splat(1.f / CHAIN_MASS);
+  v128 slack = wasm_f32x4_lt(C, wasm_f32x4_splat(0.f));
+  v128 a_use = wasm_v128_bitselect(wasm_f32x4_mul(alpha, wasm_f32x4_splat(SLACK_RATIO)), alpha, slack);
+  v128 denom = wasm_f32x4_add(wasm_f32x4_add(w, w), a_use);
+  v128 lambda = wasm_f32x4_div(wasm_f32x4_neg(C), denom);
+  v128 nx = wasm_f32x4_div(dx, dist_s);
+  v128 ny = wasm_f32x4_div(dy, dist_s);
+  v128 s = wasm_v128_bitselect(wasm_f32x4_mul(w, lambda), wasm_f32x4_splat(0.f), ok);
+  store4_off(a0, a1, a2, a3, ND_X, wasm_f32x4_sub(ax, wasm_f32x4_mul(s, nx)));
+  store4_off(a0, a1, a2, a3, ND_Y, wasm_f32x4_sub(ay, wasm_f32x4_mul(s, ny)));
+  store4_off(b0, b1, b2, b3, ND_X, wasm_f32x4_add(bx, wasm_f32x4_mul(s, nx)));
+  store4_off(b0, b1, b2, b3, ND_Y, wasm_f32x4_add(by, wasm_f32x4_mul(s, ny)));
+}
+
+static void solve_bend4(float *b0, float *b1, float *b2, float *b3,
+                        v128 ax, v128 ay, v128 cx, v128 cy, v128 wA, v128 wC, v128 alpha) {
+  v128 bx = load4_off(b0, b1, b2, b3, ND_X);
+  v128 by = load4_off(b0, b1, b2, b3, ND_Y);
+  v128 Cx = wasm_f32x4_add(wasm_f32x4_sub(ax, wasm_f32x4_mul(bx, wasm_f32x4_splat(2.f))), cx);
+  v128 Cy = wasm_f32x4_add(wasm_f32x4_sub(ay, wasm_f32x4_mul(by, wasm_f32x4_splat(2.f))), cy);
+  v128 wB = wasm_f32x4_splat(1.f / CHAIN_MASS);
+  v128 denom = wasm_f32x4_add(wasm_f32x4_add(wA, wasm_f32x4_mul(wB, wasm_f32x4_splat(4.f))),
+                              wasm_f32x4_add(wC, alpha));
+  v128 ok = wasm_f32x4_gt(denom, wasm_f32x4_splat(1e-12f));
+  v128 s = wasm_v128_bitselect(wasm_f32x4_div(wasm_f32x4_mul(wB, wasm_f32x4_splat(2.f)), denom),
+                               wasm_f32x4_splat(0.f), ok);
+  store4_off(b0, b1, b2, b3, ND_X, wasm_f32x4_add(bx, wasm_f32x4_mul(s, Cx)));
+  store4_off(b0, b1, b2, b3, ND_Y, wasm_f32x4_add(by, wasm_f32x4_mul(s, Cy)));
+}
+
+static void solve_shape4(float *n0, float *n1, float *n2, float *n3, v128 alpha) {
+  v128 px = load4_off(n0, n1, n2, n3, ND_X);
+  v128 py = load4_off(n0, n1, n2, n3, ND_Y);
+  v128 tx = load4_off(n0, n1, n2, n3, ND_SX);
+  v128 ty = load4_off(n0, n1, n2, n3, ND_SY);
+  v128 dx = wasm_f32x4_sub(px, tx);
+  v128 dy = wasm_f32x4_sub(py, ty);
+  v128 C = wasm_f32x4_sqrt(wasm_f32x4_add(wasm_f32x4_mul(dx, dx), wasm_f32x4_mul(dy, dy)));
+  v128 ok = wasm_f32x4_gt(C, wasm_f32x4_splat(1e-9f));
+  v128 Cs = wasm_v128_bitselect(C, wasm_f32x4_splat(1.f), ok);
+  v128 w = wasm_f32x4_splat(1.f / CHAIN_MASS);
+  v128 lambda = wasm_f32x4_div(wasm_f32x4_neg(C), wasm_f32x4_add(w, alpha));
+  v128 s = wasm_v128_bitselect(wasm_f32x4_div(wasm_f32x4_mul(w, lambda), Cs), wasm_f32x4_splat(0.f), ok);
+  store4_off(n0, n1, n2, n3, ND_X, wasm_f32x4_add(px, wasm_f32x4_mul(s, dx)));
+  store4_off(n0, n1, n2, n3, ND_Y, wasm_f32x4_add(py, wasm_f32x4_mul(s, dy)));
+}
+
+static void solve_four_full(int n, const int batch[4], float h) {
+  float *W[4];
+  int ia[4], ja[4], si[4], sj[4], n0[4];
+  float aSpan[4], aLink[4], aBend[4], aShape[4], rest[4], linkRest[4];
+  int nn = (int)wires[batch[0] * WIRE_NEAR + WN_NNODES];
+  int shape_all = 1;
+  float invH2 = 1.f / fmaxf(1e-12f, h * h);
+  for (int b = 0; b < 4; b++) {
+    W[b] = wires + batch[b] * WIRE_NEAR;
+    ia[b] = (int)W[b][WN_A];
+    ja[b] = (int)W[b][WN_B];
+    if (ia[b] < 0 || ja[b] < 0 || ia[b] >= n || ja[b] >= n || ia[b] == ja[b]) {
+      for (int k = 0; k < 4; k++) solve_one_wire(n, wires + batch[k] * WIRE_NEAR, h);
+      return;
+    }
+    si[b] = (int)W[b][WN_ASLOT];
+    sj[b] = (int)W[b][WN_BSLOT];
+    n0[b] = (int)W[b][WN_NODE0];
+    if (n0[b] < 0 || n0[b] + nn > MAX_NODES) {
+      for (int k = 0; k < 4; k++) solve_one_wire(n, wires + batch[k] * WIRE_NEAR, h);
+      return;
+    }
+    float soft = W[b][WN_SCALE] * W[b][WN_SLACK];
+    aSpan[b] = SPAN_COMP * soft * invH2;
+    aLink[b] = LINK_COMP * soft * invH2;
+    aBend[b] = BEND_COMP * soft * invH2;
+    aShape[b] = SHAPE_COMP * soft * invH2;
+    rest[b] = W[b][WN_REST];
+    linkRest[b] = W[b][WN_ROPE] / (float)(nn + 1);
+    if (!((int)W[b][WN_FLAGS] & WF_SHAPE)) shape_all = 0;
+  }
+  for (int b = 0; b < 4; b++) solve_span(ia[b], si[b], ja[b], sj[b], rest[b], aSpan[b]);
+  for (int b = 0; b < 4; b++) {
+    solve_body_node(ia[b], si[b], nodes + n0[b] * NODE_STRIDE, linkRest[b], aLink[b]);
+  }
+  v128 rest4 = wasm_f32x4_make(linkRest[0], linkRest[1], linkRest[2], linkRest[3]);
+  v128 link4 = wasm_f32x4_make(aLink[0], aLink[1], aLink[2], aLink[3]);
+  v128 bend4 = wasm_f32x4_make(aBend[0], aBend[1], aBend[2], aBend[3]);
+  v128 shape4 = wasm_f32x4_make(aShape[0], aShape[1], aShape[2], aShape[3]);
+  for (int k = 0; k < nn - 1; k++) {
+    solve_node_link4(nodes + (n0[0] + k) * NODE_STRIDE, nodes + (n0[1] + k) * NODE_STRIDE,
+                     nodes + (n0[2] + k) * NODE_STRIDE, nodes + (n0[3] + k) * NODE_STRIDE,
+                     nodes + (n0[0] + k + 1) * NODE_STRIDE, nodes + (n0[1] + k + 1) * NODE_STRIDE,
+                     nodes + (n0[2] + k + 1) * NODE_STRIDE, nodes + (n0[3] + k + 1) * NODE_STRIDE,
+                     rest4, link4);
+  }
+  for (int b = 0; b < 4; b++) {
+    solve_body_node(ja[b], sj[b], nodes + (n0[b] + nn - 1) * NODE_STRIDE, linkRest[b], aLink[b]);
+  }
+  float sAx[4], sAy[4], sBx[4], sBy[4];
+  for (int b = 0; b < 4; b++) {
+    float rAx, rAy, rBx, rBy;
+    attach(ia[b], si[b], &rAx, &rAy);
+    attach(ja[b], sj[b], &rBx, &rBy);
+    sAx[b] = bodies[ia[b] * STRIDE + FAR_X] + rAx;
+    sAy[b] = bodies[ia[b] * STRIDE + FAR_Y] + rAy;
+    sBx[b] = bodies[ja[b] * STRIDE + FAR_X] + rBx;
+    sBy[b] = bodies[ja[b] * STRIDE + FAR_Y] + rBy;
+  }
+  v128 stemAx = wasm_f32x4_make(sAx[0], sAx[1], sAx[2], sAx[3]);
+  v128 stemAy = wasm_f32x4_make(sAy[0], sAy[1], sAy[2], sAy[3]);
+  v128 stemBx = wasm_f32x4_make(sBx[0], sBx[1], sBx[2], sBx[3]);
+  v128 stemBy = wasm_f32x4_make(sBy[0], sBy[1], sBy[2], sBy[3]);
+  v128 wNode = wasm_f32x4_splat(1.f / CHAIN_MASS);
+  v128 z = wasm_f32x4_splat(0.f);
+  for (int k = 0; k < nn; k++) {
+    v128 px, py, nx, ny, wP, wN;
+    if (k == 0) {
+      px = stemAx;
+      py = stemAy;
+      wP = z;
+    } else {
+      px = load4_off(nodes + (n0[0] + k - 1) * NODE_STRIDE, nodes + (n0[1] + k - 1) * NODE_STRIDE,
+                     nodes + (n0[2] + k - 1) * NODE_STRIDE, nodes + (n0[3] + k - 1) * NODE_STRIDE, ND_X);
+      py = load4_off(nodes + (n0[0] + k - 1) * NODE_STRIDE, nodes + (n0[1] + k - 1) * NODE_STRIDE,
+                     nodes + (n0[2] + k - 1) * NODE_STRIDE, nodes + (n0[3] + k - 1) * NODE_STRIDE, ND_Y);
+      wP = wNode;
+    }
+    if (k == nn - 1) {
+      nx = stemBx;
+      ny = stemBy;
+      wN = z;
+    } else {
+      nx = load4_off(nodes + (n0[0] + k + 1) * NODE_STRIDE, nodes + (n0[1] + k + 1) * NODE_STRIDE,
+                     nodes + (n0[2] + k + 1) * NODE_STRIDE, nodes + (n0[3] + k + 1) * NODE_STRIDE, ND_X);
+      ny = load4_off(nodes + (n0[0] + k + 1) * NODE_STRIDE, nodes + (n0[1] + k + 1) * NODE_STRIDE,
+                     nodes + (n0[2] + k + 1) * NODE_STRIDE, nodes + (n0[3] + k + 1) * NODE_STRIDE, ND_Y);
+      wN = wNode;
+    }
+    solve_bend4(nodes + (n0[0] + k) * NODE_STRIDE, nodes + (n0[1] + k) * NODE_STRIDE,
+                nodes + (n0[2] + k) * NODE_STRIDE, nodes + (n0[3] + k) * NODE_STRIDE,
+                px, py, nx, ny, wP, wN, bend4);
+  }
+  if (shape_all) {
+    for (int k = 0; k < nn; k++) {
+      solve_shape4(nodes + (n0[0] + k) * NODE_STRIDE, nodes + (n0[1] + k) * NODE_STRIDE,
+                   nodes + (n0[2] + k) * NODE_STRIDE, nodes + (n0[3] + k) * NODE_STRIDE, shape4);
+    }
+  } else {
+    for (int b = 0; b < 4; b++) {
+      if (!((int)W[b][WN_FLAGS] & WF_SHAPE)) continue;
+      for (int k = 0; k < nn; k++) {
+        float *nd = nodes + (n0[b] + k) * NODE_STRIDE;
+        solve_shape(nd, nd[ND_SX], nd[ND_SY], aShape[b]);
+      }
+    }
+  }
+}
+#endif
+
+static int wires_share(int u, int v) {
+  int ua = (int)wires[u * WIRE_NEAR + WN_A], ub = (int)wires[u * WIRE_NEAR + WN_B];
+  int va = (int)wires[v * WIRE_NEAR + WN_A], vb = (int)wires[v * WIRE_NEAR + WN_B];
+  return ua == va || ua == vb || ub == va || ub == vb;
+}
+
+static void solve_wires_batched(int n, int n_wires, float h) {
+  memset(wdone, 0, (size_t)n_wires);
+  int cursor = 0;
+  while (cursor < n_wires) {
+    while (cursor < n_wires && wdone[cursor]) cursor++;
+    if (cursor >= n_wires) break;
+    if ((int)wires[cursor * WIRE_NEAR + WN_FLAGS] & WF_SKIP) {
+      wdone[cursor] = 1;
+      continue;
+    }
+    int batch[4];
+    int nb = 0;
+    for (int w = cursor; w < n_wires && nb < 4; w++) {
+      if (wdone[w]) continue;
+      if ((int)wires[w * WIRE_NEAR + WN_FLAGS] & WF_SKIP) {
+        wdone[w] = 1;
+        continue;
+      }
+      int conflict = 0;
+      for (int k = cursor; k < w; k++) {
+        if (wdone[k]) continue;
+        int inb = 0;
+        for (int b = 0; b < nb; b++) {
+          if (batch[b] == k) {
+            inb = 1;
+            break;
+          }
+        }
+        if (inb) continue;
+        if (wires_share(k, w)) {
+          conflict = 1;
+          break;
+        }
+      }
+      if (conflict) continue;
+      for (int b = 0; b < nb; b++) {
+        if (wires_share(batch[b], w)) {
+          conflict = 1;
+          break;
+        }
+      }
+      if (conflict) continue;
+      batch[nb++] = w;
+    }
+#if HAVE_SIMD
+    if (nb == 4) {
+      int nn0 = (int)wires[batch[0] * WIRE_NEAR + WN_NNODES];
+      int ok = ((int)wires[batch[0] * WIRE_NEAR + WN_FLAGS] & WF_FULL) && nn0 >= 2;
+      for (int b = 1; b < 4 && ok; b++) {
+        int f = (int)wires[batch[b] * WIRE_NEAR + WN_FLAGS];
+        int nn = (int)wires[batch[b] * WIRE_NEAR + WN_NNODES];
+        if (!(f & WF_FULL) || nn != nn0) ok = 0;
+      }
+      if (ok) {
+        solve_four_full(n, batch, h);
+        for (int b = 0; b < 4; b++) wdone[batch[b]] = 1;
+        continue;
+      }
+    }
+#endif
+    for (int b = 0; b < nb; b++) {
+      solve_one_wire(n, wires + batch[b] * WIRE_NEAR, h);
+      wdone[batch[b]] = 1;
     }
   }
 }
@@ -1053,7 +1343,7 @@ void solver_near_wires(int n, int n_wires, float h) {
   if (n > MAX_BODIES) n = MAX_BODIES;
   if (n_wires > MAX_WIRES) n_wires = MAX_WIRES;
   refresh_poses(n);
-  for (int w = 0; w < n_wires; w++) solve_one_wire(n, wires + w * WIRE_NEAR, h);
+  solve_wires_batched(n, n_wires, h);
 }
 
 int solver_near_disc(int n, float h) {
@@ -1128,7 +1418,7 @@ void solver_step_near(int n, int n_wires, float dt, int substeps,
     integrate(n, h);
     integrate_nodes(n_wires, h);
     refresh_poses(n);
-    for (int w = 0; w < n_wires; w++) solve_one_wire(n, wires + w * WIRE_NEAR, h);
+    solve_wires_batched(n, n_wires, h);
     solve_grab(held, gx, gy, h);
     near_contacts(n, h, 0, !have_pairs);
     have_pairs = 1;
@@ -1160,16 +1450,31 @@ void solver_scent_diffuse(int cols, int rows, float mix) {
       int cell = j * cols + i;
       int base = cell * CHANNELS;
       if (walls[cell]) {
+#if HAVE_SIMD
+        wasm_v128_store(dst + base, wasm_v128_load(src + base));
+#else
         dst[base] = src[base];
         dst[base + 1] = src[base + 1];
         dst[base + 2] = src[base + 2];
         dst[base + 3] = src[base + 3];
+#endif
         continue;
       }
       int left = (i > 0 && !walls[cell - 1]) ? base - CHANNELS : -1;
       int right = (i < cols - 1 && !walls[cell + 1]) ? base + CHANNELS : -1;
       int up = (has_up && !walls[cell - cols]) ? base - row_stride : -1;
       int down = (has_down && !walls[cell + cols]) ? base + row_stride : -1;
+#if HAVE_SIMD
+      v128 self = wasm_v128_load(src + base);
+      v128 a = left >= 0 ? wasm_v128_load(src + left) : self;
+      v128 b = right >= 0 ? wasm_v128_load(src + right) : self;
+      v128 c = up >= 0 ? wasm_v128_load(src + up) : self;
+      v128 e = down >= 0 ? wasm_v128_load(src + down) : self;
+      v128 sum = wasm_f32x4_add(wasm_f32x4_add(a, b), wasm_f32x4_add(c, e));
+      v128 out = wasm_f32x4_add(wasm_f32x4_mul(wasm_f32x4_splat(keep), self),
+                                wasm_f32x4_mul(wasm_f32x4_splat(m * 0.25f), sum));
+      wasm_v128_store(dst + base, out);
+#else
       for (int ch = 0; ch < CHANNELS; ch++) {
         int k = base + ch;
         float self = src[k];
@@ -1179,6 +1484,7 @@ void solver_scent_diffuse(int cols, int rows, float mix) {
         float e = down >= 0 ? src[down + ch] : self;
         dst[k] = keep * self + m * (a + b + c + e) * 0.25f;
       }
+#endif
     }
   }
   memcpy(scent, scent_tmp, (size_t)cols * (size_t)rows * CHANNELS * sizeof(float));
@@ -1192,5 +1498,14 @@ void solver_scent_decay(int n, float keep) {
     memset(scent, 0, (size_t)n * sizeof(float));
     return;
   }
+#if HAVE_SIMD
+  v128 k4 = wasm_f32x4_splat(keep);
+  int i = 0;
+  for (; i + 4 <= n; i += 4) {
+    wasm_v128_store(scent + i, wasm_f32x4_mul(wasm_v128_load(scent + i), k4));
+  }
+  for (; i < n; i++) scent[i] *= keep;
+#else
   for (int i = 0; i < n; i++) scent[i] *= keep;
+#endif
 }
