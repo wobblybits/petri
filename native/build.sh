@@ -6,7 +6,7 @@ mkdir -p "$root/src/native"
 emcc "$root/native/solver.c" -O3 --no-entry -sSTANDALONE_WASM=1 \
   -sINITIAL_MEMORY=16777216 \
   -sALLOW_MEMORY_GROWTH=0 \
-  -sEXPORTED_FUNCTIONS=_solver_bodies,_solver_wires,_solver_nodes,_solver_inv_inertia,_solver_scale,_solver_kind,_solver_detailed,_solver_pair_a,_solver_pair_b,_solver_cap,_solver_wire_cap,_solver_node_cap,_solver_pair_cap,_solver_pair_count,_solver_wire_near_stride,_solver_node_stride,_solver_step_far,_solver_near_integrate,_solver_near_wires,_solver_near_disc,_solver_near_finalize,_solver_scent,_solver_scent_tmp,_solver_walls,_solver_scent_cap,_solver_wall_cap,_solver_scent_diffuse,_solver_scent_decay \
+  -sEXPORTED_FUNCTIONS=_solver_bodies,_solver_wires,_solver_nodes,_solver_inv_inertia,_solver_scale,_solver_kind,_solver_detailed,_solver_pair_a,_solver_pair_b,_solver_cap,_solver_wire_cap,_solver_node_cap,_solver_pair_cap,_solver_pair_count,_solver_wire_near_stride,_solver_node_stride,_solver_hits,_solver_hit_count,_solver_hit_stride,_solver_hit_cap,_solver_step_far,_solver_near_integrate,_solver_near_wires,_solver_near_disc,_solver_near_finalize,_solver_near_contacts,_solver_step_near,_solver_scent,_solver_scent_tmp,_solver_walls,_solver_scent_cap,_solver_wall_cap,_solver_scent_diffuse,_solver_scent_decay \
   -o "$out"
 python3 - "$out" "$root/src/native/solver.b64.ts" <<'PY'
 import base64, sys

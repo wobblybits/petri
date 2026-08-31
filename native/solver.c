@@ -1,11 +1,13 @@
 /*
- * Packed FAR solver + NEAR XPBD + scent field. No libc heap; static buffers.
+ * Packed FAR solver + NEAR XPBD + SAT + scent field. No libc heap; static
+ * buffers.
  *
  * Body layout matches src/gpu/far-kernel.ts (12 floats / body).
  * FAR wires are 4 floats. NEAR wires are 12 floats in the same buffer.
  * Discs use a spatial hash, not N². FAR chord span is one Jacobi impulse.
  * NEAR wires are Gauss-Seidel XPBD (span + links + bend + shape) matching
- * src/chain.ts. FAR-FAR discs skip detailed bodies so JS can SAT those pairs.
+ * src/chain.ts. Detailed pairs use SAT + angular contact matching
+ * src/collide.ts and src/chain.ts solveContact. FAR-FAR stays disc.
  *
  * Rebuild: npm run wasm
  */
@@ -67,6 +69,8 @@
 #define ND_SY 7
 
 #define SLOP 0.35f
+#define SKIN 0.85f
+#define ERA_R 8.0f
 #define CONTACT_COMP 4.0e-6f
 #define SPAN_COMP 3.0e-6f
 #define LINK_COMP 2.0e-6f
@@ -74,8 +78,12 @@
 #define SHAPE_COMP 3.0e-4f
 #define CHAIN_MASS 0.08f
 #define SLACK_RATIO 2.0f
+#define GRAB_COMP 1.0e-6f
+#define GRAB_STEP 1.5f
 #define PI 3.14159265f
 #define TAU 6.2831853f
+#define HIT_STRIDE 7
+#define MAX_HITS 8192
 
 static float bodies[MAX_BODIES * STRIDE];
 static float wires[MAX_WIRES * WIRE_NEAR];
@@ -95,6 +103,8 @@ static int32_t order[MAX_BODIES];
 static int32_t start[MAX_CELLS + 1];
 static int32_t pair_a[MAX_PAIRS];
 static int32_t pair_b[MAX_PAIRS];
+static float hits[MAX_HITS * HIT_STRIDE];
+static int g_hits = 0;
 
 static float wrap_angle(float a) {
   if (a >= -PI && a < PI) return a;
@@ -516,6 +526,337 @@ static void finalize_nodes(int n_wires, float h, float rope_keep) {
   }
 }
 
+static void tri_world_d(int i, double vx[3], double vy[3]) {
+  double sc = (double)scale[i];
+  double s = 16.0 * sc;
+  double lx0 = s * 1.05, ly0 = 0.0;
+  double lx1 = -s * 0.55, ly1 = -s * 0.82;
+  double lx2 = -s * 0.55, ly2 = s * 0.82;
+  double a = (double)bodies[i * STRIDE + FAR_HEADING];
+  double c = cos(a), sn = sin(a);
+  double x = (double)bodies[i * STRIDE + FAR_X];
+  double y = (double)bodies[i * STRIDE + FAR_Y];
+  vx[0] = x + lx0 * c - ly0 * sn;
+  vy[0] = y + lx0 * sn + ly0 * c;
+  vx[1] = x + lx1 * c - ly1 * sn;
+  vy[1] = y + lx1 * sn + ly1 * c;
+  vx[2] = x + lx2 * c - ly2 * sn;
+  vy[2] = y + lx2 * sn + ly2 * c;
+}
+
+static void add_poly_axes_d(const double *vx, const double *vy, int n, double *ax, double *ay, int *nax) {
+  for (int i = 0; i < n; i++) {
+    int j = i + 1;
+    if (j == n) j = 0;
+    double ex = vx[j] - vx[i];
+    double ey = vy[j] - vy[i];
+    double len = sqrt(ex * ex + ey * ey);
+    if (len < 1e-12) len = 1.0;
+    int k = *nax;
+    ax[k] = -ey / len;
+    ay[k] = ex / len;
+    *nax = k + 1;
+  }
+}
+
+static void project_poly_d(const double *vx, const double *vy, int n, double nx, double ny, double *mn, double *mx) {
+  double lo = vx[0] * nx + vy[0] * ny;
+  double hi = lo;
+  for (int i = 1; i < n; i++) {
+    double d = vx[i] * nx + vy[i] * ny;
+    if (d < lo) lo = d;
+    if (d > hi) hi = d;
+  }
+  *mn = lo - (double)SKIN;
+  *mx = hi + (double)SKIN;
+}
+
+static void project_circle_d(double x, double y, double r, double nx, double ny, double *mn, double *mx) {
+  double m = x * nx + y * ny;
+  double rad = r + (double)SKIN;
+  *mn = m - rad;
+  *mx = m + rad;
+}
+
+static int overlap_axis_d(double amin, double amax, double bmin, double bmax, double *o) {
+  double left = bmax - amin;
+  double right = amax - bmin;
+  if (left <= 0.0 || right <= 0.0) return 0;
+  *o = left < right ? left : right;
+  return 1;
+}
+
+static void closest_on_seg_d(double px, double py, double ax, double ay, double bx, double by, double *qx, double *qy) {
+  double abx = bx - ax;
+  double aby = by - ay;
+  double denom = abx * abx + aby * aby;
+  if (denom < 1e-12) denom = 1.0;
+  double t = ((px - ax) * abx + (py - ay) * aby) / denom;
+  if (t < 0.0) t = 0.0;
+  if (t > 1.0) t = 1.0;
+  *qx = ax + abx * t;
+  *qy = ay + aby * t;
+}
+
+static void closest_on_poly_d(double px, double py, const double *vx, const double *vy, int n, double *qx, double *qy) {
+  double bx, by;
+  closest_on_seg_d(px, py, vx[0], vy[0], vx[1], vy[1], &bx, &by);
+  double best = (bx - px) * (bx - px) + (by - py) * (by - py);
+  *qx = bx;
+  *qy = by;
+  for (int i = 1; i < n; i++) {
+    int j = i + 1;
+    if (j == n) j = 0;
+    closest_on_seg_d(px, py, vx[i], vy[i], vx[j], vy[j], &bx, &by);
+    double d = (bx - px) * (bx - px) + (by - py) * (by - py);
+    if (d < best) {
+      best = d;
+      *qx = bx;
+      *qy = by;
+    }
+  }
+}
+
+static void support_poly_d(const double *vx, const double *vy, int n, double nx, double ny, double *px, double *py) {
+  double best = vx[0] * nx + vy[0] * ny;
+  int bi = 0;
+  for (int i = 1; i < n; i++) {
+    double d = vx[i] * nx + vy[i] * ny;
+    if (d > best) {
+      best = d;
+      bi = i;
+    }
+  }
+  *px = vx[bi];
+  *py = vy[bi];
+}
+
+static int sat_hit(int i, int j, float *nx_out, float *ny_out, float *o_out, float *px_out, float *py_out) {
+  float *pi = bodies + i * STRIDE;
+  float *pj = bodies + j * STRIDE;
+  double ax = (double)pi[FAR_X], ay = (double)pi[FAR_Y];
+  double bx = (double)pj[FAR_X], by = (double)pj[FAR_Y];
+  double toBx = bx - ax, toBy = by - ay;
+  double dist = sqrt(toBx * toBx + toBy * toBy);
+  if (dist > (double)pi[FAR_RADIUS] + (double)pj[FAR_RADIUS] + (double)SKIN * 2.0 + 2.0) return 0;
+
+  int eraA = kind[i] == 0;
+  int eraB = kind[j] == 0;
+  double ra = (double)ERA_R * (double)scale[i];
+  double rb = (double)ERA_R * (double)scale[j];
+
+  if (eraA && eraB) {
+    double minDist = ra + rb + (double)SKIN * 2.0;
+    if (dist >= minDist) return 0;
+    if (dist < 1e-6) {
+      *nx_out = 1.f;
+      *ny_out = 0.f;
+      *o_out = (float)minDist;
+      *px_out = (float)(ax + ra);
+      *py_out = (float)ay;
+      return 1;
+    }
+    double nx = toBx / dist, ny = toBy / dist;
+    *nx_out = (float)nx;
+    *ny_out = (float)ny;
+    *o_out = (float)(minDist - dist);
+    *px_out = (float)(ax + nx * ra);
+    *py_out = (float)(ay + ny * ra);
+    return 1;
+  }
+
+  double avx[3], avy[3], bvx[3], bvy[3];
+  int na = 0, nb = 0;
+  if (!eraA) {
+    tri_world_d(i, avx, avy);
+    na = 3;
+  }
+  if (!eraB) {
+    tri_world_d(j, bvx, bvy);
+    nb = 3;
+  }
+
+  double axes_x[8], axes_y[8];
+  int nax = 0;
+  if (na) add_poly_axes_d(avx, avy, na, axes_x, axes_y, &nax);
+  if (nb) add_poly_axes_d(bvx, bvy, nb, axes_x, axes_y, &nax);
+  if (eraA && nb) {
+    double qx, qy;
+    closest_on_poly_d(ax, ay, bvx, bvy, nb, &qx, &qy);
+    double dx = qx - ax, dy = qy - ay;
+    double len = sqrt(dx * dx + dy * dy);
+    if (len > 1e-6) {
+      axes_x[nax] = dx / len;
+      axes_y[nax] = dy / len;
+      nax++;
+    }
+  } else if (eraB && na) {
+    double qx, qy;
+    closest_on_poly_d(bx, by, avx, avy, na, &qx, &qy);
+    double dx = qx - bx, dy = qy - by;
+    double len = sqrt(dx * dx + dy * dy);
+    if (len > 1e-6) {
+      axes_x[nax] = dx / len;
+      axes_y[nax] = dy / len;
+      nax++;
+    }
+  }
+
+  double bestO = 1e30;
+  double nx = 1.0, ny = 0.0;
+  for (int k = 0; k < nax; k++) {
+    double ux = axes_x[k], uy = axes_y[k];
+    double amin, amax, bmin, bmax, o;
+    if (eraA) project_circle_d(ax, ay, ra, ux, uy, &amin, &amax);
+    else project_poly_d(avx, avy, na, ux, uy, &amin, &amax);
+    if (eraB) project_circle_d(bx, by, rb, ux, uy, &bmin, &bmax);
+    else project_poly_d(bvx, bvy, nb, ux, uy, &bmin, &bmax);
+    if (!overlap_axis_d(amin, amax, bmin, bmax, &o)) return 0;
+    double len = sqrt(ux * ux + uy * uy);
+    if (len < 1e-12) len = 1.0;
+    ux /= len;
+    uy /= len;
+    if (ux * toBx + uy * toBy < 0.0) {
+      ux = -ux;
+      uy = -uy;
+    }
+    if (o < bestO) {
+      bestO = o;
+      nx = ux;
+      ny = uy;
+    }
+  }
+  if (!(bestO < 1e29) || bestO <= 0.0) return 0;
+
+  double pax, pay, pbx, pby;
+  if (eraA) {
+    pax = ax + nx * ra;
+    pay = ay + ny * ra;
+  } else {
+    support_poly_d(avx, avy, na, nx, ny, &pax, &pay);
+  }
+  if (eraB) {
+    pbx = bx - nx * rb;
+    pby = by - ny * rb;
+  } else {
+    support_poly_d(bvx, bvy, nb, -nx, -ny, &pbx, &pby);
+  }
+  *nx_out = (float)nx;
+  *ny_out = (float)ny;
+  *o_out = (float)bestO;
+  *px_out = (float)((pax + pbx) * 0.5);
+  *py_out = (float)((pay + pby) * 0.5);
+  return 1;
+}
+
+static void record_hit(int i, int j, float nx, float ny, float overlap, float px, float py) {
+  if (g_hits >= MAX_HITS) return;
+  float *h = hits + g_hits * HIT_STRIDE;
+  h[0] = (float)i;
+  h[1] = (float)j;
+  h[2] = nx;
+  h[3] = ny;
+  h[4] = overlap;
+  h[5] = px;
+  h[6] = py;
+  g_hits++;
+}
+
+static void solve_sat_contact(int i, int j, float h) {
+  float nx, ny, overlap, px, py;
+  if (!sat_hit(i, j, &nx, &ny, &overlap, &px, &py)) return;
+  record_hit(i, j, nx, ny, overlap, px, py);
+  float depth = overlap - SLOP;
+  if (depth <= 0.f) return;
+  float *pi = bodies + i * STRIDE;
+  float *pj = bodies + j * STRIDE;
+  float rAx = px - pi[FAR_X], rAy = py - pi[FAR_Y];
+  float rBx = px - pj[FAR_X], rBy = py - pj[FAR_Y];
+  float wA = gen_inv(i, rAx, rAy, nx, ny);
+  float wB = gen_inv(j, rBx, rBy, nx, ny);
+  float denom = wA + wB + CONTACT_COMP / fmaxf(1e-12f, h * h);
+  if (denom < 1e-12f) return;
+  float lambda = depth / denom;
+  apply_imp(i, rAx, rAy, -nx, -ny, lambda);
+  apply_imp(j, rBx, rBy, nx, ny, lambda);
+}
+
+static void solve_grab(int held, float gx, float gy, float h) {
+  if (held < 0 || held >= MAX_BODIES) return;
+  float *p = bodies + held * STRIDE;
+  if (p[FAR_LOCKED] >= 0.5f) return;
+  float dx = gx - p[FAR_X];
+  float dy = gy - p[FAR_Y];
+  float dist = sqrtf(dx * dx + dy * dy);
+  if (dist < 1e-6f) return;
+  float w = p[FAR_INVMASS];
+  if (w <= 0.f) return;
+  float alpha = GRAB_COMP / fmaxf(1e-12f, h * h);
+  float step = (dist * w) / (w + alpha);
+  if (step > GRAB_STEP) step = GRAB_STEP;
+  p[FAR_X] += (dx / dist) * step;
+  p[FAR_Y] += (dy / dist) * step;
+}
+
+static void grab_cap(int n, int held, float grab_max) {
+  if (held < 0 || held >= n) return;
+  float *p = bodies + held * STRIDE;
+  float speed = sqrtf(p[FAR_VX] * p[FAR_VX] + p[FAR_VY] * p[FAR_VY]);
+  if (speed > grab_max && grab_max > 0.f) {
+    float k = grab_max / speed;
+    p[FAR_VX] *= k;
+    p[FAR_VY] *= k;
+  }
+}
+
+static int near_contacts(int n, float h, int reset_hits) {
+  if (reset_hits) g_hits = 0;
+  g_pairs = 0;
+  if (n <= 0 || h <= 0.f) return 0;
+  if (n > MAX_BODIES) n = MAX_BODIES;
+  memset(delta, 0, (size_t)n * 2 * sizeof(float));
+  float maxr = 0.f;
+  for (int i = 0; i < n; i++) {
+    float r = bodies[i * STRIDE + FAR_RADIUS];
+    if (r > maxr) maxr = r;
+  }
+  int np = collect_pairs(n, maxr * 2.f + SLOP + 4.f);
+  g_pairs = np;
+  float alpha = CONTACT_COMP / fmaxf(1e-12f, h * h);
+  for (int p = 0; p < np; p++) {
+    int i = pair_a[p], j = pair_b[p];
+    float *pi = bodies + i * STRIDE;
+    float *pj = bodies + j * STRIDE;
+    if (pi[FAR_LOCKED] >= 0.5f && pj[FAR_LOCKED] >= 0.5f) continue;
+    if (detailed[i] || detailed[j]) {
+      solve_sat_contact(i, j, h);
+      continue;
+    }
+    float dx = pj[FAR_X] - pi[FAR_X];
+    float dy = pj[FAR_Y] - pi[FAR_Y];
+    float dist = sqrtf(dx * dx + dy * dy);
+    float keep = pi[FAR_RADIUS] + pj[FAR_RADIUS];
+    if (dist >= keep || dist < 1e-6f) continue;
+    float depth = keep - dist - SLOP;
+    if (depth <= 0.f) continue;
+    float wA = pi[FAR_INVMASS], wB = pj[FAR_INVMASS];
+    float denom = wA + wB + alpha;
+    if (denom < 1e-12f) continue;
+    float lam = depth / denom;
+    float s = lam / dist;
+    if (pi[FAR_LOCKED] < 0.5f && wA > 0.f) {
+      delta[i * 2] -= dx * s * wA;
+      delta[i * 2 + 1] -= dy * s * wA;
+    }
+    if (pj[FAR_LOCKED] < 0.5f && wB > 0.f) {
+      delta[j * 2] += dx * s * wB;
+      delta[j * 2 + 1] += dy * s * wB;
+    }
+  }
+  apply(n);
+  return np;
+}
+
 float *solver_bodies(void) { return bodies; }
 float *solver_wires(void) { return wires; }
 float *solver_nodes(void) { return nodes; }
@@ -532,6 +873,10 @@ int solver_pair_cap(void) { return MAX_PAIRS; }
 int solver_pair_count(void) { return g_pairs; }
 int solver_wire_near_stride(void) { return WIRE_NEAR; }
 int solver_node_stride(void) { return NODE_STRIDE; }
+float *solver_hits(void) { return hits; }
+int solver_hit_count(void) { return g_hits; }
+int solver_hit_stride(void) { return HIT_STRIDE; }
+int solver_hit_cap(void) { return MAX_HITS; }
 
 void solver_step_far(int n, int n_wires, float dt, int substeps) {
   if (n <= 0 || dt <= 0.f || substeps <= 0) return;
@@ -617,16 +962,33 @@ void solver_near_finalize(int n, int n_wires, float h, float rope_keep, int held
   if (n_wires > MAX_WIRES) n_wires = MAX_WIRES;
   if (n_wires < 0) n_wires = 0;
   finalize(n, h);
-  if (held >= 0 && held < n) {
-    float *p = bodies + held * STRIDE;
-    float speed = sqrtf(p[FAR_VX] * p[FAR_VX] + p[FAR_VY] * p[FAR_VY]);
-    if (speed > grab_max && grab_max > 0.f) {
-      float k = grab_max / speed;
-      p[FAR_VX] *= k;
-      p[FAR_VY] *= k;
-    }
-  }
+  grab_cap(n, held, grab_max);
   finalize_nodes(n_wires, h, rope_keep);
+}
+
+int solver_near_contacts(int n, float h) {
+  return near_contacts(n, h, 1);
+}
+
+void solver_step_near(int n, int n_wires, float dt, int substeps,
+                      float rope_keep, int held, float grab_max,
+                      float gx, float gy) {
+  if (n <= 0 || dt <= 0.f || substeps <= 0) return;
+  if (n > MAX_BODIES) n = MAX_BODIES;
+  if (n_wires > MAX_WIRES) n_wires = MAX_WIRES;
+  if (n_wires < 0) n_wires = 0;
+  float h = dt / (float)substeps;
+  g_hits = 0;
+  for (int s = 0; s < substeps; s++) {
+    integrate(n, h);
+    integrate_nodes(n_wires, h);
+    for (int w = 0; w < n_wires; w++) solve_one_wire(n, wires + w * WIRE_NEAR, h);
+    solve_grab(held, gx, gy, h);
+    near_contacts(n, h, 0);
+    finalize(n, h);
+    grab_cap(n, held, grab_max);
+    finalize_nodes(n_wires, h, rope_keep);
+  }
 }
 
 float *solver_scent(void) { return scent; }

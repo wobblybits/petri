@@ -39,6 +39,7 @@ import {
   nativeSolver,
   ND,
   NODE_STRIDE,
+  HIT_STRIDE,
   WF_FULL,
   WF_HOLD,
   WF_SHAPE,
@@ -148,7 +149,6 @@ export class Sim {
   private agentList: Agent[] = [];
   private wirePack: Wire[] = [];
   private packIndex = new Map<number, number>();
-  private touchMark = new Uint8Array(0);
   private clearWireList: Wire[] = [];
   private wallPts: { x: number; y: number }[] = [];
   private flockAdj: number[][] = [];
@@ -1344,8 +1344,9 @@ export class Sim {
   }
 
   /**
-   * Eight-substep CPU solve in WASM: integrate, XPBD wires, FAR-FAR discs.
-   * Grab, wire clearance, and SAT on any detailed pair stay in JS.
+   * One WASM call for all eight substeps: integrate, XPBD wires, grab, SAT on
+   * any detailed pair, disc on FAR-FAR, finalize. Hertzian audio and wire
+   * clearance stay in JS, once per frame after unpack.
    */
   private solveNearNative(params: Params, dt: number): boolean {
     if (!nativeSolver.ready || !nativeSolver.bodies || !nativeSolver.wiresNear || !nativeSolver.nodes) {
@@ -1375,28 +1376,17 @@ export class Sim {
     this.packNearMeta(list, wireList, index, params);
     this.packNearState(list, wireList);
 
-    const h = dt / Sim.SUBSTEPS;
-    const ropeKeep = Math.exp(-Math.max(0, params.springDamp) * h);
+    const ropeKeep = Math.exp(-Math.max(0, params.springDamp) * (dt / Sim.SUBSTEPS));
     const heldId = this.grabbed?.id ?? -1;
     const heldIndex = heldId < 0 ? -1 : (index.get(heldId) ?? -1);
-    if (this.touchMark.length < n) this.touchMark = new Uint8Array(n * 2);
-
-    for (let sub = 0; sub < Sim.SUBSTEPS; sub++) {
-      nativeSolver.nearIntegrate(n, nWires, h);
-      nativeSolver.nearWires(n, nWires, h);
-      this.markNearTouched(list, index, heldId, false);
-      this.unpackNearState(list, wireList, true);
-      this.solveGrab(h);
-      this.clearWires(params);
-      this.packNearState(list, wireList, true);
-      nativeSolver.nearDisc(n, h);
-      this.markNearTouched(list, index, heldId, true);
-      this.unpackNearState(list, wireList, true);
-      this.solveContactsFromPairs(h, list);
-      this.packNearState(list, wireList, true);
-      nativeSolver.nearFinalize(n, nWires, h, ropeKeep, heldIndex, Sim.GRAB_MAX_SPEED);
+    const gx = this.grabbed?.x ?? 0;
+    const gy = this.grabbed?.y ?? 0;
+    if (!nativeSolver.stepNear(n, nWires, dt, Sim.SUBSTEPS, ropeKeep, heldIndex, Sim.GRAB_MAX_SPEED, gx, gy)) {
+      return false;
     }
     this.unpackNearState(list, wireList);
+    this.emitNativeHits(list);
+    if (params.wireClear > 0) this.clearWires(params);
     for (const a of list) {
       a.stun = Math.max(0, a.stun - dt);
       wrapPos(a, this.w, this.h);
@@ -1404,36 +1394,28 @@ export class Sim {
     return true;
   }
 
-  /** Bodies JS still has to see this substep: detailed, grabbed, clearance, SAT partners. */
-  private markNearTouched(
-    list: Agent[],
-    index: Map<number, number>,
-    heldId: number,
-    includePairs: boolean,
-  ): void {
+  /** Hertzian from the last WASM SAT pass. FAR-FAR discs stay silent. */
+  private emitNativeHits(list: Agent[]): void {
+    const count = nativeSolver.hitCount();
+    const hits = nativeSolver.hits;
+    if (!hits || count <= 0) return;
     const n = list.length;
-    const mark = this.touchMark;
-    mark.fill(0, 0, n);
-    for (let i = 0; i < n; i++) {
-      if (this.agentDetailed(list[i].id) || list[i].id === heldId) mark[i] = 1;
-    }
-    for (let k = 1; k < this.clearBodyPairs.length; k += 2) {
-      const agent = this.clearBodyPairs[k] as Agent;
-      const i = index.get(agent.id);
-      if (i !== undefined) mark[i] = 1;
-    }
-    if (!includePairs) return;
-    const count = nativeSolver.pairCount();
-    const pa = nativeSolver.pairA;
-    const pb = nativeSolver.pairB;
-    if (!pa || !pb) return;
     for (let k = 0; k < count; k++) {
-      const i = pa[k];
-      const j = pb[k];
+      const o = k * HIT_STRIDE;
+      const i = hits[o] | 0;
+      const j = hits[o + 1] | 0;
       if (i < 0 || j < 0 || i >= n || j >= n) continue;
-      if (!this.agentDetailed(list[i].id) && !this.agentDetailed(list[j].id)) continue;
-      mark[i] = 1;
-      mark[j] = 1;
+      const A = list[i];
+      const B = list[j];
+      if (!A || !B) continue;
+      const hit: Hit = {
+        nx: hits[o + 2],
+        ny: hits[o + 3],
+        overlap: hits[o + 4],
+        px: hits[o + 5],
+        py: hits[o + 6],
+      };
+      this.emitCollision(A, B, hit);
     }
   }
 
@@ -1505,11 +1487,9 @@ export class Sim {
     }
   }
 
-  private packNearState(list: Agent[], wireList: Wire[], touchedOnly = false): void {
+  private packNearState(list: Agent[], wireList: Wire[]): void {
     const bodies = nativeSolver.bodies!;
-    const mark = this.touchMark;
     for (let i = 0; i < list.length; i++) {
-      if (touchedOnly && !mark[i]) continue;
       const a = list[i];
       const o = i * FAR_STRIDE;
       bodies[o + FAR.x] = a.x;
@@ -1540,11 +1520,9 @@ export class Sim {
     }
   }
 
-  private unpackNearState(list: Agent[], wireList: Wire[], touchedOnly = false): void {
+  private unpackNearState(list: Agent[], wireList: Wire[]): void {
     const bodies = nativeSolver.bodies!;
-    const mark = this.touchMark;
     for (let i = 0; i < list.length; i++) {
-      if (touchedOnly && !mark[i]) continue;
       const a = list[i];
       const o = i * FAR_STRIDE;
       a.x = bodies[o + FAR.x];
@@ -1572,25 +1550,6 @@ export class Sim {
         nd.prevY = nodes[o + ND.prevY];
       }
       nodeAt += w.nodes.length;
-    }
-  }
-
-  /** SAT + Hertzian for any pair that involves a detailed body. FAR-FAR already ran in C. */
-  private solveContactsFromPairs(h: number, list: Agent[]): void {
-    const count = nativeSolver.pairCount();
-    const pa = nativeSolver.pairA;
-    const pb = nativeSolver.pairB;
-    if (!pa || !pb || count <= 0) return;
-    for (let k = 0; k < count; k++) {
-      const A = list[pa[k]];
-      const B = list[pb[k]];
-      if (!A || !B) continue;
-      if (A.locked && B.locked) continue;
-      if (!this.agentDetailed(A.id) && !this.agentDetailed(B.id)) continue;
-      const hit = queryHit(A, B, this.w, this.h);
-      if (!hit) continue;
-      this.emitCollision(A, B, hit);
-      solveContact(A, B, hit, SLOP, h);
     }
   }
 

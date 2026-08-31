@@ -4,6 +4,7 @@ import type { Fields } from '../fields.ts';
 
 export const WIRE_NEAR_STRIDE = 12;
 export const NODE_STRIDE = 8;
+export const HIT_STRIDE = 7;
 export const WF_FULL = 1;
 export const WF_SKIP = 2;
 export const WF_SHAPE = 4;
@@ -68,6 +69,22 @@ type Exp = {
     held: number,
     grabMax: number,
   ): void;
+  solver_near_contacts(n: number, h: number): number;
+  solver_step_near(
+    n: number,
+    nWires: number,
+    dt: number,
+    substeps: number,
+    ropeKeep: number,
+    held: number,
+    grabMax: number,
+    gx: number,
+    gy: number,
+  ): void;
+  solver_hits(): number;
+  solver_hit_count(): number;
+  solver_hit_stride(): number;
+  solver_hit_cap(): number;
   solver_scent(): number;
   solver_scent_tmp(): number;
   solver_walls(): number;
@@ -99,6 +116,8 @@ export class NativeSolver {
   detailed: Uint8Array | null = null;
   pairA: Int32Array | null = null;
   pairB: Int32Array | null = null;
+  hits: Float32Array | null = null;
+  hitCap = 0;
   private exp: Exp | null = null;
   private scent: Float32Array | null = null;
   private walls: Uint8Array | null = null;
@@ -133,6 +152,8 @@ export class NativeSolver {
       this.detailed = new Uint8Array(mem.buffer, exp.solver_detailed(), this.bodyCap);
       this.pairA = new Int32Array(mem.buffer, exp.solver_pair_a(), this.pairCap);
       this.pairB = new Int32Array(mem.buffer, exp.solver_pair_b(), this.pairCap);
+      this.hitCap = exp.solver_hit_cap();
+      this.hits = new Float32Array(mem.buffer, exp.solver_hits(), this.hitCap * HIT_STRIDE);
       this.scent = new Float32Array(mem.buffer, exp.solver_scent(), this.scentCap);
       this.walls = new Uint8Array(mem.buffer, exp.solver_walls(), this.wallCap);
       this.exp = exp;
@@ -192,8 +213,37 @@ export class NativeSolver {
     this.exp?.solver_near_finalize(n, nWires, h, ropeKeep, held, grabMax);
   }
 
+  nearContacts(n: number, h: number): number {
+    return this.exp?.solver_near_contacts(n, h) ?? 0;
+  }
+
+  /**
+   * Eight-substep NEAR pass in WASM: integrate, XPBD, grab, SAT (detailed)
+   * / disc (FAR-FAR), finalize. Pack state before, unpack after.
+   */
+  stepNear(
+    n: number,
+    nWires: number,
+    dt: number,
+    substeps: number,
+    ropeKeep: number,
+    held: number,
+    grabMax: number,
+    gx: number,
+    gy: number,
+  ): boolean {
+    const exp = this.exp;
+    if (!this.ready || !exp || n <= 0 || dt <= 0) return false;
+    exp.solver_step_near(n, nWires, dt, substeps, ropeKeep, held, grabMax, gx, gy);
+    return true;
+  }
+
   pairCount(): number {
     return this.exp?.solver_pair_count() ?? 0;
+  }
+
+  hitCount(): number {
+    return this.exp?.solver_hit_count() ?? 0;
   }
 
   scentDiffuse(fields: Fields, mix: number): boolean {

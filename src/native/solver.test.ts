@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { createAgent, momentOfInertia, type Agent } from '../agents.ts';
-import { solveWire, solveWireSpan, type ChainNode } from '../chain.ts';
+import { createAgent, momentOfInertia, boundRadius, type Agent } from '../agents.ts';
+import { solveContact, solveWire, solveWireSpan, type ChainNode } from '../chain.ts';
+import { queryHit, SLOP } from '../collide.ts';
 import { Fields } from '../fields.ts';
 import { FAR, FAR_STRIDE, FAR_SUBSTEPS, stepFarKernel } from '../gpu/far-kernel.ts';
 import { defaultParams } from '../params.ts';
@@ -53,7 +54,7 @@ function packAgent(native: NativeSolver, i: number, a: Agent, detailed: boolean)
   bodies[o + FAR.heading] = a.heading;
   bodies[o + FAR.omega] = a.omega;
   bodies[o + FAR.invMass] = a.locked ? 0 : 1 / Math.max(0.08, a.mass);
-  bodies[o + FAR.radius] = 8;
+  bodies[o + FAR.radius] = boundRadius(a);
   bodies[o + FAR.locked] = a.locked ? 1 : 0;
   bodies[o + FAR.prevX] = a.prevX;
   bodies[o + FAR.prevY] = a.prevY;
@@ -245,5 +246,54 @@ describe('native WASM solver', () => {
     // FAR 2-3 overlap should separate.
     expect(data[2 * FAR_STRIDE + FAR.x]).toBeLessThan(100);
     expect(data[3 * FAR_STRIDE + FAR.x]).toBeGreaterThan(102);
+  });
+
+  it('matches one JS SAT contact on overlapping triangles', async () => {
+    const native = new NativeSolver();
+    expect(await native.init(), native.lastError).toBe(true);
+    const params = defaultParams();
+    const a = createAgent(1, 'con', 0, 0, 0, params);
+    const b = createAgent(2, 'con', 2, 0, Math.PI, params);
+    packAgent(native, 0, a, true);
+    packAgent(native, 1, b, true);
+    a.heading = native.bodies![FAR.heading];
+    b.heading = native.bodies![FAR_STRIDE + FAR.heading];
+    const hit = queryHit(a, b, 240, 160);
+    expect(hit).not.toBeNull();
+    const aTs = cloneAgent(a);
+    const bTs = cloneAgent(b);
+    const h = 1 / 60 / 8;
+    solveContact(aTs, bTs, hit!, SLOP, h);
+
+    const np = native.nearContacts(2, h);
+    unpackAgent(native, 0, a);
+    unpackAgent(native, 1, b);
+    expect(np).toBeGreaterThan(0);
+    expect(native.hitCount()).toBeGreaterThan(0);
+    const H = native.hits!;
+    expect(Math.abs(H[2] - hit!.nx)).toBeLessThan(2e-3);
+    expect(Math.abs(H[3] - hit!.ny)).toBeLessThan(2e-3);
+    expect(Math.abs(H[4] - hit!.overlap)).toBeLessThan(2e-3);
+    expect(Math.abs(H[5] - hit!.px)).toBeLessThan(0.05);
+    expect(Math.abs(H[6] - hit!.py)).toBeLessThan(0.05);
+    expect(Math.abs(a.x - aTs.x)).toBeLessThan(1e-3);
+    expect(Math.abs(a.y - aTs.y)).toBeLessThan(1e-3);
+    expect(Math.abs(b.x - bTs.x)).toBeLessThan(1e-3);
+    expect(Math.abs(wrapAngle(a.heading - aTs.heading))).toBeLessThan(1e-3);
+    expect(Math.abs(wrapAngle(b.heading - bTs.heading))).toBeLessThan(1e-3);
+  });
+
+  it('SAT-separates overlapping eras in one full NEAR step', async () => {
+    const native = new NativeSolver();
+    expect(await native.init(), native.lastError).toBe(true);
+    const params = defaultParams();
+    const a = createAgent(1, 'era', 0, 0, 0, params);
+    const b = createAgent(2, 'era', 2, 0, Math.PI, params);
+    packAgent(native, 0, a, true);
+    packAgent(native, 1, b, true);
+    expect(native.stepNear(2, 0, 1 / 60, 8, 1, -1, 160, 0, 0)).toBe(true);
+    unpackAgent(native, 0, a);
+    unpackAgent(native, 1, b);
+    expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeGreaterThan(12);
   });
 });
