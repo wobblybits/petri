@@ -85,6 +85,21 @@ type Exp = {
   solver_hit_count(): number;
   solver_hit_stride(): number;
   solver_hit_cap(): number;
+  solver_adj_off(): number;
+  solver_adj_nei(): number;
+  solver_flock_id(): number;
+  solver_flock_mass(): number;
+  solver_swim(): number;
+  solver_adj_cap(): number;
+  solver_flock(
+    n: number,
+    align: number,
+    sep: number,
+    dt: number,
+    turnRate: number,
+    desired: number,
+    maxHops: number,
+  ): void;
   solver_scent(): number;
   solver_scent_tmp(): number;
   solver_walls(): number;
@@ -118,6 +133,12 @@ export class NativeSolver {
   pairB: Int32Array | null = null;
   hits: Float32Array | null = null;
   hitCap = 0;
+  adjOff: Int32Array | null = null;
+  adjNei: Int32Array | null = null;
+  flockId: Int32Array | null = null;
+  flockMass: Float32Array | null = null;
+  swim: Uint8Array | null = null;
+  adjCap = 0;
   private exp: Exp | null = null;
   private scent: Float32Array | null = null;
   private walls: Uint8Array | null = null;
@@ -154,6 +175,12 @@ export class NativeSolver {
       this.pairB = new Int32Array(mem.buffer, exp.solver_pair_b(), this.pairCap);
       this.hitCap = exp.solver_hit_cap();
       this.hits = new Float32Array(mem.buffer, exp.solver_hits(), this.hitCap * HIT_STRIDE);
+      this.adjCap = exp.solver_adj_cap();
+      this.adjOff = new Int32Array(mem.buffer, exp.solver_adj_off(), this.bodyCap + 1);
+      this.adjNei = new Int32Array(mem.buffer, exp.solver_adj_nei(), this.adjCap);
+      this.flockId = new Int32Array(mem.buffer, exp.solver_flock_id(), this.bodyCap);
+      this.flockMass = new Float32Array(mem.buffer, exp.solver_flock_mass(), this.bodyCap);
+      this.swim = new Uint8Array(mem.buffer, exp.solver_swim(), this.bodyCap);
       this.scent = new Float32Array(mem.buffer, exp.solver_scent(), this.scentCap);
       this.walls = new Uint8Array(mem.buffer, exp.solver_walls(), this.wallCap);
       this.exp = exp;
@@ -244,6 +271,25 @@ export class NativeSolver {
 
   hitCount(): number {
     return this.exp?.solver_hit_count() ?? 0;
+  }
+
+  canFlock(n: number, nAdj: number): boolean {
+    return this.ready && n <= this.bodyCap && nAdj <= this.adjCap;
+  }
+
+  flock(
+    n: number,
+    align: number,
+    sep: number,
+    dt: number,
+    turnRate: number,
+    desired: number,
+    maxHops: number,
+  ): boolean {
+    const exp = this.exp;
+    if (!this.ready || !exp || n <= 0 || dt <= 0) return false;
+    exp.solver_flock(n, align, sep, dt, turnRate, desired, maxHops);
+    return true;
   }
 
   scentDiffuse(fields: Fields, mix: number): boolean {

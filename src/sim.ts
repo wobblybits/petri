@@ -1914,6 +1914,59 @@ export class Sim {
     else this.netPull(agent, wishX, wishY, turnK);
   }
 
+  private flockNative(
+    list: Agent[],
+    adj: number[][],
+    swim: Uint8Array,
+    n: number,
+    align: number,
+    sep: number,
+    dt: number,
+    turnRate: number,
+    desired: number,
+    maxHops: number,
+  ): boolean {
+    const bodies = nativeSolver.bodies;
+    const adjOff = nativeSolver.adjOff;
+    const adjNei = nativeSolver.adjNei;
+    const ids = nativeSolver.flockId;
+    const mass = nativeSolver.flockMass;
+    const sw = nativeSolver.swim;
+    if (!bodies || !adjOff || !adjNei || !ids || !mass || !sw) return false;
+    let nAdj = 0;
+    for (let i = 0; i < n; i++) nAdj += adj[i].length;
+    if (!nativeSolver.canFlock(n, nAdj)) return false;
+    adjOff[0] = 0;
+    let at = 0;
+    for (let i = 0; i < n; i++) {
+      const a = list[i];
+      const o = i * FAR_STRIDE;
+      bodies[o + FAR.x] = a.x;
+      bodies[o + FAR.y] = a.y;
+      bodies[o + FAR.vx] = a.vx;
+      bodies[o + FAR.vy] = a.vy;
+      bodies[o + FAR.heading] = a.heading;
+      bodies[o + FAR.omega] = a.omega;
+      bodies[o + FAR.locked] = a.locked ? 1 : 0;
+      ids[i] = a.id;
+      mass[i] = a.mass;
+      sw[i] = swim[i];
+      const nei = adj[i];
+      for (let k = 0; k < nei.length; k++) adjNei[at++] = nei[k];
+      adjOff[i + 1] = at;
+    }
+    if (!nativeSolver.flock(n, align, sep, dt, turnRate, desired, maxHops)) return false;
+    for (let i = 0; i < n; i++) {
+      const a = list[i];
+      if (a.locked) continue;
+      const o = i * FAR_STRIDE;
+      a.vx = bodies[o + FAR.vx];
+      a.vy = bodies[o + FAR.vy];
+      a.omega = bodies[o + FAR.omega];
+    }
+    return true;
+  }
+
   /**
    * Boids on the net. Weight is 1/hops out to FLOCK_HOPS; farther and
    * disconnected pairs are ignored. Meridians align nematically (parallel,
@@ -1962,8 +2015,10 @@ export class Sim {
 
     const maxHops = Sim.FLOCK_HOPS;
     const desired = Math.max(18, params.wireMinRest * 0.9);
-    const seen = this.flockSeen;
     const turnRate = params.turnRate;
+    if (this.flockNative(list, adj, swim, n, align, sep, dt, turnRate, desired, maxHops)) return;
+
+    const seen = this.flockSeen;
 
     for (let start = 0; start < n; start++) {
       const A = list[start];

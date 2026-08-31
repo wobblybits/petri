@@ -105,6 +105,14 @@ static int32_t pair_a[MAX_PAIRS];
 static int32_t pair_b[MAX_PAIRS];
 static float hits[MAX_HITS * HIT_STRIDE];
 static int g_hits = 0;
+static int32_t adj_off[MAX_BODIES + 1];
+static int32_t adj_nei[MAX_WIRES * 2];
+static int32_t flock_id[MAX_BODIES];
+static int32_t flock_dist[MAX_BODIES];
+static int32_t flock_q[MAX_BODIES];
+static int32_t flock_seen[MAX_BODIES];
+static float flock_mass[MAX_BODIES];
+static uint8_t swim[MAX_BODIES];
 
 static float wrap_angle(float a) {
   if (a >= -PI && a < PI) return a;
@@ -809,6 +817,100 @@ static void grab_cap(int n, int held, float grab_max) {
   }
 }
 
+static void flock_locomote(int i, float wish_x, float wish_y, float turn_k) {
+  if (!swim[i]) return;
+  float *p = bodies + i * STRIDE;
+  float a = p[FAR_HEADING];
+  float hx = cosf(a), hy = sinf(a);
+  float ahead = wish_x * hx + wish_y * hy;
+  if (ahead > 0.f) {
+    p[FAR_VX] += ahead * hx;
+    p[FAR_VY] += ahead * hy;
+  }
+  float mag = sqrtf(wish_x * wish_x + wish_y * wish_y);
+  if (mag > 1e-8f && turn_k != 0.f) {
+    p[FAR_OMEGA] += turn_k * wrap_angle(atan2f(wish_y, wish_x) - a);
+  }
+}
+
+static void flock_pull(int i, float wish_x, float wish_y) {
+  float *p = bodies + i * STRIDE;
+  if (p[FAR_LOCKED] >= 0.5f) return;
+  p[FAR_VX] += wish_x;
+  p[FAR_VY] += wish_y;
+}
+
+static void flock_force(int i, float wish_x, float wish_y, float turn_k) {
+  if (swim[i]) flock_locomote(i, wish_x, wish_y, turn_k);
+  else flock_pull(i, wish_x, wish_y);
+}
+
+void solver_flock(int n, float align, float sep, float dt, float turn_rate, float desired, int max_hops) {
+  if (n <= 0 || dt <= 0.f) return;
+  if (n > MAX_BODIES) n = MAX_BODIES;
+  if (max_hops < 0) max_hops = 0;
+  if (max_hops > 16) max_hops = 16;
+  for (int i = 0; i < n; i++) flock_dist[i] = -1;
+  for (int start = 0; start < n; start++) {
+    if (bodies[start * STRIDE + FAR_LOCKED] >= 0.5f) continue;
+    int seen_n = 0;
+    flock_dist[start] = 0;
+    flock_seen[seen_n++] = start;
+    int qh = 0, qt = 0;
+    flock_q[qt++] = start;
+    while (qh < qt) {
+      int u = flock_q[qh++];
+      int du = flock_dist[u];
+      if (du >= max_hops) continue;
+      int a0 = adj_off[u], a1 = adj_off[u + 1];
+      if (a0 < 0) a0 = 0;
+      if (a1 > MAX_WIRES * 2) a1 = MAX_WIRES * 2;
+      if (a0 > a1) continue;
+      for (int k = a0; k < a1; k++) {
+        int v = adj_nei[k];
+        if (v < 0 || v >= n || flock_dist[v] >= 0) continue;
+        int d = du + 1;
+        flock_dist[v] = d;
+        flock_seen[seen_n++] = v;
+        flock_q[qt++] = v;
+        if (bodies[v * STRIDE + FAR_LOCKED] >= 0.5f || flock_id[v] <= flock_id[start]) continue;
+        float w = 1.f / (float)d;
+        float mA = flock_mass[start];
+        float mB = flock_mass[v];
+        if (mA < 0.08f) mA = 0.08f;
+        if (mB < 0.08f) mB = 0.08f;
+        float mSum = mA + mB;
+        float *A = bodies + start * STRIDE;
+        float *B = bodies + v * STRIDE;
+        float dx = B[FAR_X] - A[FAR_X];
+        float dy = B[FAR_Y] - A[FAR_Y];
+        float gap = sqrtf(dx * dx + dy * dy);
+        if (gap < 1e-6f) gap = 1e-6f;
+        float nx = dx / gap, ny = dy / gap;
+        if (align > 0.f) {
+          float kAlign = align * w * dt;
+          float dvx = B[FAR_VX] - A[FAR_VX];
+          float dvy = B[FAR_VY] - A[FAR_VY];
+          flock_force(start, dvx * kAlign * (mB / mSum), dvy * kAlign * (mB / mSum), 0.f);
+          flock_force(v, -dvx * kAlign * (mA / mSum), -dvy * kAlign * (mA / mSum), 0.f);
+        }
+        if (sep > 0.f && d > 1) {
+          float want = 22.f + (float)(d - 1) * desired;
+          if (gap < want) {
+            float mag = sep * w * (want - gap);
+            float ax = nx * mag * dt;
+            float ay = ny * mag * dt;
+            float turn = turn_rate * w * 0.25f;
+            flock_force(start, -ax * (mB / mSum), -ay * (mB / mSum), swim[start] ? 0.f : turn);
+            flock_force(v, ax * (mA / mSum), ay * (mA / mSum), swim[v] ? 0.f : turn);
+          }
+        }
+      }
+    }
+    for (int i = 0; i < seen_n; i++) flock_dist[flock_seen[i]] = -1;
+  }
+}
+
 static int near_contacts(int n, float h, int reset_hits) {
   if (reset_hits) g_hits = 0;
   g_pairs = 0;
@@ -877,6 +979,12 @@ float *solver_hits(void) { return hits; }
 int solver_hit_count(void) { return g_hits; }
 int solver_hit_stride(void) { return HIT_STRIDE; }
 int solver_hit_cap(void) { return MAX_HITS; }
+int32_t *solver_adj_off(void) { return adj_off; }
+int32_t *solver_adj_nei(void) { return adj_nei; }
+int32_t *solver_flock_id(void) { return flock_id; }
+float *solver_flock_mass(void) { return flock_mass; }
+uint8_t *solver_swim(void) { return swim; }
+int solver_adj_cap(void) { return MAX_WIRES * 2; }
 
 void solver_step_far(int n, int n_wires, float dt, int substeps) {
   if (n <= 0 || dt <= 0.f || substeps <= 0) return;
