@@ -431,6 +431,34 @@ describe('conservative mechanics', () => {
     expect(com1.y).toBeCloseTo(com0.y, 3);
   });
 
+  it('homing does not crumple a net toward its own centre', () => {
+    const sim = new Sim(480, 240);
+    const params = passiveParams();
+    params.homing = 2;
+    params.homeComp = 2;
+    params.wireShrink = 30;
+    const nodes = [80, 160, 240, 320].map((x) => sim.spawn('con', x, 120, 0, params, true)!);
+    for (let i = 0; i < 3; i++) sim.wire(nodes[i].id, 'r', nodes[i + 1].id, 'l', params);
+    const width0 = nodes[3].x - nodes[0].x;
+    step(sim, params, 90);
+    expect(nodes[3].x - nodes[0].x).toBeGreaterThan(width0 * 0.85);
+  });
+
+  it('a scentless stray walks toward the nearest free port, not the origin', () => {
+    const sim = new Sim(480, 240);
+    const params = passiveParams();
+    params.homing = 2;
+    params.drag = 0.4;
+    const stray = sim.spawn('era', 80, 200, 0, params, true)!;
+    const host = sim.spawn('con', 360, 80, 0, params, true)!;
+    host.locked = true;
+    step(sim, params, 50);
+    const d1 = Math.hypot(stray.x - host.x, stray.y - host.y);
+    expect(d1).toBeLessThan(Math.hypot(80 - 360, 200 - 80) - 12);
+    expect(stray.x).toBeGreaterThan(80);
+    expect(host.x).toBeLessThan(360 + 8);
+  });
+
   it('does not latch through an intervening wire', () => {
     const sim = new Sim(400, 240);
     const params = passiveParams();

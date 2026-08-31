@@ -346,7 +346,7 @@ describe('crowding and tangling', () => {
 
   it('keeps other nets out of a saturated agent\'s space', () => {
     // Flocking separation is scoped to one net, so nothing but this constraint
-    // pushes separate nets apart — while homing pulls them together.
+    // pushes separate nets apart. Homing no longer hauls machines together.
     let saturated = 0;
     let invaded = 0;
     for (const sd of [999, 12345, 5150]) {

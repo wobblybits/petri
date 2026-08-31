@@ -121,8 +121,8 @@ export class Sim {
    */
   private static readonly GRAB_MAX_SPEED = 160;
 
-  /** Share of the homing pull that still applies to a wired agent. */
-  private static readonly HOME_WIRED = 0.2;
+  /** Scratch: connected-component size per root, rebuilt in `gravitate`. */
+  private compSize = new Map<number, number>();
 
   w: number;
   h: number;
@@ -1021,7 +1021,8 @@ export class Sim {
    * pure crowding, and crowding is what tangles nets. Nothing else does this —
    * flocking separation only walks same-net neighbours (and then only a few
    * hops out), so those pairs are skipped entirely and separate nets have never
-   * repelled at all. Meanwhile homing actively pulls them together.
+   * repelled at all. Homing used to haul every net toward the flock centre,
+   * which made this the only thing standing between two machines.
    *
    * Inverse-square rather than linear, which matters: at a wire's length the
    * push is gentle enough to be ignored, but it climbs steeply as the gap
@@ -2102,41 +2103,81 @@ export class Sim {
   }
 
   /**
-   * Cohesion toward the flock's centre — which is the centre of the map as
-   * seen, since the camera and the scent field are both built around it.
+   * Early-phase mixing without a well at the origin.
    *
-   * The homing share is scaled by how little an agent can smell. A swimmer on a
-   * trail is left alone to follow it; one that has lost the scent completely
-   * turns for home instead of wandering off. Measured over a minute of soup,
-   * agents within 200 px of the flock sit around 0.2 scent while everything
-   * past 600 px reads exactly zero, so the two cases separate cleanly.
+   * Gravity and homing only touch components of size `homeComp` or smaller, so
+   * a finished net keeps the shape the wires gave it. A stray that has lost
+   * the scent walks toward the nearest agent that still has a free port —
+   * another loner, or an open aux on a neighbouring machine — instead of
+   * toward the flock centroid. That is what used to fold large nets into a
+   * ball: every body still felt a share of the pull home, and for a lone
+   * machine "home" is its own centre of mass.
    */
   private gravitate(params: Params, dt: number): void {
     const base = params.gravity;
     const home = params.homing;
     if ((base <= 0 && home <= 0) || dt <= 0) return;
-    const com = this.home ?? this.centerOfMass();
-    if (!com) return;
+    const cap = Math.max(1, params.homeComp | 0);
+    const sizes = this.compSize;
+    sizes.clear();
+    for (const root of this.components.values()) {
+      sizes.set(root, (sizes.get(root) ?? 0) + 1);
+    }
+    const com = base > 0 ? (this.home ?? this.centerOfMass()) : null;
     for (const agent of this.agents.values()) {
       if (agent.locked) continue;
-      const dx = com.x - agent.x;
-      const dy = com.y - agent.y;
+      const root = this.components.get(agent.id) ?? agent.id;
+      if ((sizes.get(root) ?? 1) > cap) continue;
+      let tx = 0;
+      let ty = 0;
+      let k = 0;
+      if (home > 0) {
+        const scentK = home / (1 + agent.trail / Sim.HOME_SCENT);
+        if (scentK > 1e-6) {
+          const t = this.nearestOpenPort(agent);
+          if (t) {
+            tx = t.x;
+            ty = t.y;
+            k += scentK;
+          }
+        }
+      }
+      if (base > 0 && com) {
+        if (k <= 0) {
+          tx = com.x;
+          ty = com.y;
+        }
+        k += base;
+      }
+      if (k <= 0) continue;
+      const dx = tx - agent.x;
+      const dy = ty - agent.y;
       const dist = Math.hypot(dx, dy);
       if (dist < 1e-6) continue;
-      let k = base;
-      if (home > 0) {
-        // Mostly for loose foragers. A wired agent is already held in place by
-        // its net, and hauling whole nets inward just crowds the flock, which
-        // is what pushes aux wires across each other.
-        const anchored = this.graph.isWired(agent) ? Sim.HOME_WIRED : 1;
-        k += (home * anchored) / (1 + agent.trail / Sim.HOME_SCENT);
-      }
-      // Saturating: a spring close in, a steady walk home from far out, so a
-      // stray is not slingshot back through the flock.
+      // Saturating: a spring close in, a steady walk from far out, so a stray
+      // is not slingshot through whoever it is meeting.
       const pull = (k * Math.min(dist, Sim.HOME_REACH)) / dist;
       agent.vx += dx * pull * dt;
       agent.vy += dy * pull * dt;
     }
+  }
+
+  /** Closest agent in another component that still has a free port. */
+  private nearestOpenPort(agent: Agent): Agent | null {
+    const mine = this.components.get(agent.id);
+    let best: Agent | null = null;
+    let bestD = Infinity;
+    for (const other of this.agents.values()) {
+      if (other.id === agent.id) continue;
+      if (this.components.get(other.id) === mine) continue;
+      if (this.graph.portsFilled(other)) continue;
+      const d = Math.hypot(other.x - agent.x, other.y - agent.y);
+      if (d < bestD && d > 1e-6) {
+        bestD = d;
+        best = other;
+      }
+    }
+    return best;
   }
 
   momentum(): { px: number; py: number; L: number } {
