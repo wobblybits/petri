@@ -1711,21 +1711,12 @@ export class Sim {
       const n = this.wireDetailed(wire) ? wire.nodes.length : 0;
       const need = n + 2;
       while (pts.length < need) pts.push({ x: 0, y: 0 });
-      const sA = stemWorld(A, wire.a.slot, this.w, this.h);
-      const sB = stemWorld(B, wire.b.slot, this.w, this.h);
-      pts[0].x = sA.x;
-      pts[0].y = sA.y;
+      stemWorldInto(A, wire.a.slot, this.w, this.h, pts[0]);
       for (let i = 0; i < n; i++) {
         pts[i + 1].x = wire.nodes[i].x;
         pts[i + 1].y = wire.nodes[i].y;
       }
-      pts[n + 1].x = sB.x;
-      pts[n + 1].y = sB.y;
-      for (let i = 1; i < need; i++) {
-        const d = wrapDeltaVec(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y, this.w, this.h);
-        pts[i].x = pts[i - 1].x + d.x;
-        pts[i].y = pts[i - 1].y + d.y;
-      }
+      stemWorldInto(B, wire.b.slot, this.w, this.h, pts[n + 1]);
       for (let i = 0; i < need - 1; i++) {
         this.fields.markSegment(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y);
       }

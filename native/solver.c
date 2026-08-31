@@ -113,6 +113,8 @@ static int32_t flock_q[MAX_BODIES];
 static int32_t flock_seen[MAX_BODIES];
 static float flock_mass[MAX_BODIES];
 static uint8_t swim[MAX_BODIES];
+static float port_rx[MAX_BODIES * 3];
+static float port_ry[MAX_BODIES * 3];
 
 static float wrap_angle(float a) {
   if (a >= -PI && a < PI) return a;
@@ -328,13 +330,27 @@ static void stem_local(uint8_t k, int slot, float sc, float *lx, float *ly) {
   *ly = (slot == 1 ? -1.f : 1.f) * s * 0.82f * 0.7f;
 }
 
-static void attach(int i, int slot, float *rx, float *ry) {
-  float lx, ly;
-  stem_local(kind[i], slot, scale[i], &lx, &ly);
+static void refresh_pose(int i) {
   float a = bodies[i * STRIDE + FAR_HEADING];
   float c = cosf(a), s = sinf(a);
-  *rx = lx * c - ly * s;
-  *ry = lx * s + ly * c;
+  for (int slot = 0; slot < 3; slot++) {
+    float lx, ly;
+    stem_local(kind[i], slot, scale[i], &lx, &ly);
+    port_rx[i * 3 + slot] = lx * c - ly * s;
+    port_ry[i * 3 + slot] = lx * s + ly * c;
+  }
+}
+
+static void refresh_poses(int n) {
+  for (int i = 0; i < n; i++) refresh_pose(i);
+}
+
+static void attach(int i, int slot, float *rx, float *ry) {
+  if (slot < 0) slot = 0;
+  if (slot > 2) slot = 2;
+  int k = i * 3 + slot;
+  *rx = port_rx[k];
+  *ry = port_ry[k];
 }
 
 static float gen_inv(int i, float rx, float ry, float nx, float ny) {
@@ -349,6 +365,7 @@ static void apply_imp(int i, float rx, float ry, float nx, float ny, float lambd
   p[FAR_X] += im * lambda * nx;
   p[FAR_Y] += im * lambda * ny;
   p[FAR_HEADING] = wrap_angle(p[FAR_HEADING] + inv_inertia[i] * (rx * ny - ry * nx) * lambda);
+  refresh_pose(i);
 }
 
 static void solve_span(int i, int si, int j, int sj, float rest, float alpha) {
@@ -927,19 +944,21 @@ void solver_flock(int n, float align, float sep, float dt, float turn_rate, floa
   }
 }
 
-static int near_contacts(int n, float h, int reset_hits) {
+static int near_contacts(int n, float h, int reset_hits, int rebuild_pairs) {
   if (reset_hits) g_hits = 0;
-  g_pairs = 0;
   if (n <= 0 || h <= 0.f) return 0;
   if (n > MAX_BODIES) n = MAX_BODIES;
   memset(delta, 0, (size_t)n * 2 * sizeof(float));
-  float maxr = 0.f;
-  for (int i = 0; i < n; i++) {
-    float r = bodies[i * STRIDE + FAR_RADIUS];
-    if (r > maxr) maxr = r;
+  int np = g_pairs;
+  if (rebuild_pairs || np <= 0) {
+    float maxr = 0.f;
+    for (int i = 0; i < n; i++) {
+      float r = bodies[i * STRIDE + FAR_RADIUS];
+      if (r > maxr) maxr = r;
+    }
+    np = collect_pairs(n, maxr * 2.f + SLOP + 4.f);
+    g_pairs = np;
   }
-  int np = collect_pairs(n, maxr * 2.f + SLOP + 4.f);
-  g_pairs = np;
   float alpha = CONTACT_COMP / fmaxf(1e-12f, h * h);
   for (int p = 0; p < np; p++) {
     int i = pair_a[p], j = pair_b[p];
@@ -1033,6 +1052,7 @@ void solver_near_wires(int n, int n_wires, float h) {
   if (n <= 0 || h <= 0.f || n_wires <= 0) return;
   if (n > MAX_BODIES) n = MAX_BODIES;
   if (n_wires > MAX_WIRES) n_wires = MAX_WIRES;
+  refresh_poses(n);
   for (int w = 0; w < n_wires; w++) solve_one_wire(n, wires + w * WIRE_NEAR, h);
 }
 
@@ -1091,7 +1111,7 @@ void solver_near_finalize(int n, int n_wires, float h, float rope_keep, int held
 }
 
 int solver_near_contacts(int n, float h) {
-  return near_contacts(n, h, 1);
+  return near_contacts(n, h, 1, 1);
 }
 
 void solver_step_near(int n, int n_wires, float dt, int substeps,
@@ -1103,12 +1123,15 @@ void solver_step_near(int n, int n_wires, float dt, int substeps,
   if (n_wires < 0) n_wires = 0;
   float h = dt / (float)substeps;
   g_hits = 0;
+  int have_pairs = 0;
   for (int s = 0; s < substeps; s++) {
     integrate(n, h);
     integrate_nodes(n_wires, h);
+    refresh_poses(n);
     for (int w = 0; w < n_wires; w++) solve_one_wire(n, wires + w * WIRE_NEAR, h);
     solve_grab(held, gx, gy, h);
-    near_contacts(n, h, 0);
+    near_contacts(n, h, 0, !have_pairs);
+    have_pairs = 1;
     finalize(n, h);
     grab_cap(n, held, grab_max);
     finalize_nodes(n_wires, h, rope_keep);
