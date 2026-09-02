@@ -457,8 +457,10 @@ export class Sim {
       this.kill(id);
     }
     this.components = this.graph.componentIds(this.agents);
-    this.deposit(params);
-    this.paintScentWalls();
+    if (!this.scentWriteNative(params)) {
+      this.deposit(params);
+      this.paintScentWalls();
+    }
     this.fields.diffuse(params.diffuse);
     this.fields.diffuse(params.diffuse * 0.65);
     this.fields.decay(params.decay);
@@ -2035,6 +2037,79 @@ export class Sim {
         params,
       );
     }
+  }
+
+  /**
+   * Laying scent and stamping the wire walls, both in the solver.
+   *
+   * They go together because they share the copy: the field goes across once,
+   * both passes write it in place, and it comes back once. Separately they
+   * were the two most expensive things left in a settled frame — 4.5 ms of
+   * wall marking and 2.5 ms of deposit at 9600 bodies — and both are
+   * arithmetic over a grid the solver already holds a mirror of.
+   */
+  private scentWriteNative(params: Params): boolean {
+    if (!Sim.nativeForces || !nativeSolver.ready) return false;
+    const free = nativeSolver.portFree;
+    const pts = nativeSolver.wallPts;
+    const runs = nativeSolver.wallRuns;
+    const kinds = nativeSolver.kind;
+    const sc = nativeSolver.scale;
+    if (!free || !pts || !runs || !kinds || !sc) return false;
+
+    const list = this.forceList();
+    const n = list.length;
+    if (!nativeSolver.canNear(n, 0, 0)) return false;
+    if (!nativeSolver.loadScent(this.fields)) return false;
+
+    for (let i = 0; i < n; i++) {
+      const a = list[i];
+      const o = i * FAR_STRIDE;
+      nativeSolver.bodies![o + FAR.x] = a.x;
+      nativeSolver.bodies![o + FAR.y] = a.y;
+      nativeSolver.bodies![o + FAR.heading] = a.heading;
+      nativeSolver.bodies![o + FAR.locked] = a.locked ? 1 : 0;
+      kinds[i] = this.kindCode(a.kind);
+      sc[i] = a.scale;
+      let mask = 0;
+      for (const slot of slotsFor(a.kind)) {
+        if (this.graph.isFree({ id: a.id, slot })) mask |= 1 << this.slotCode(slot);
+      }
+      free[i] = mask;
+    }
+    nativeSolver.deposit(n, params.deposit);
+
+    // Polylines for the wall mask. The host packs them because it owns the
+    // rope nodes; the marking walk is what costs.
+    let at = 0;
+    let nRuns = 0;
+    const cap = nativeSolver.wallPtCap;
+    for (const wire of this.graph.wires.values()) {
+      const A = this.agents.get(wire.a.id);
+      const B = this.agents.get(wire.b.id);
+      if (!A || !B) continue;
+      const mid = this.wireSimulatesRope(wire) ? wire.nodes.length : 0;
+      if (at + mid + 2 > cap || nRuns >= runs.length) break;
+      const sa = stemWorldInto(A, wire.a.slot, this.w, this.h, this.tmpStemA);
+      pts[at * 2] = sa.x;
+      pts[at * 2 + 1] = sa.y;
+      at++;
+      for (let i = 0; i < mid; i++) {
+        pts[at * 2] = wire.nodes[i].x;
+        pts[at * 2 + 1] = wire.nodes[i].y;
+        at++;
+      }
+      const sb = stemWorldInto(B, wire.b.slot, this.w, this.h, this.tmpStemB);
+      pts[at * 2] = sb.x;
+      pts[at * 2 + 1] = sb.y;
+      at++;
+      runs[nRuns++] = mid + 2;
+    }
+    nativeSolver.paintWalls(nRuns);
+
+    nativeSolver.storeScent(this.fields);
+    nativeSolver.storeWalls(this.fields);
+    return true;
   }
 
   private deposit(params: Params): void {

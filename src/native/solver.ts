@@ -91,6 +91,12 @@ type Exp = {
   solver_body_drive(): number;
   solver_body_trail(): number;
   solver_scent_frame(cols: number, rows: number, ox: number, oy: number, ww: number, wh: number): void;
+  solver_deposit(n: number, amount: number): void;
+  solver_paint_walls(nRuns: number): void;
+  solver_port_free(): number;
+  solver_wall_pts(): number;
+  solver_wall_runs(): number;
+  solver_wall_pt_cap(): number;
   solver_declutter(n: number, reach: number, atReach: number, cutoff: number, floorFrac: number, dt: number): void;
   solver_gravitate(n: number, cx: number, cy: number, base: number, reach: number, maxComp: number, dt: number): void;
   solver_decl_comp(): number;
@@ -164,6 +170,10 @@ export class NativeSolver {
   flockId: Int32Array | null = null;
   declComp: Int32Array | null = null;
   steerParams: Float32Array | null = null;
+  portFree: Uint8Array | null = null;
+  wallPts: Float32Array | null = null;
+  wallRuns: Int32Array | null = null;
+  wallPtCap = 0;
   steerFlags: Uint8Array | null = null;
   steerPwire: Int32Array | null = null;
   steerNoise: Float32Array | null = null;
@@ -216,6 +226,10 @@ export class NativeSolver {
       this.flockId = new Int32Array(mem.buffer, exp.solver_flock_id(), this.bodyCap);
       this.declComp = new Int32Array(mem.buffer, exp.solver_decl_comp(), this.bodyCap);
       this.steerParams = new Float32Array(mem.buffer, exp.solver_steer_params(), 32);
+      this.portFree = new Uint8Array(mem.buffer, exp.solver_port_free(), this.bodyCap);
+      this.wallPtCap = exp.solver_wall_pt_cap();
+      this.wallPts = new Float32Array(mem.buffer, exp.solver_wall_pts(), this.wallPtCap * 2);
+      this.wallRuns = new Int32Array(mem.buffer, exp.solver_wall_runs(), this.wireCap);
       this.steerFlags = new Uint8Array(mem.buffer, exp.solver_steer_flags(), this.bodyCap);
       this.steerPwire = new Int32Array(mem.buffer, exp.solver_steer_pwire(), this.bodyCap * 2);
       this.steerNoise = new Float32Array(mem.buffer, exp.solver_steer_noise(), this.bodyCap * 3);
@@ -327,6 +341,28 @@ export class NativeSolver {
 
   steer(n: number, dt: number): void {
     this.exp?.solver_steer(n, dt);
+  }
+
+  /** Copy the solver's scent window back out to the host field. */
+  storeScent(fields: Fields): void {
+    if (!this.scent) return;
+    const n = fields.cols * fields.rows * 4;
+    fields.data.set(this.scent.subarray(0, n));
+  }
+
+  /** Copy the solver's wall mask back out. */
+  storeWalls(fields: Fields): void {
+    if (!this.walls) return;
+    const n = fields.cols * fields.rows;
+    fields.walls.set(this.walls.subarray(0, n));
+  }
+
+  deposit(n: number, amount: number): void {
+    this.exp?.solver_deposit(n, amount);
+  }
+
+  paintWalls(nRuns: number): void {
+    this.exp?.solver_paint_walls(nRuns);
   }
 
   declutter(n: number, reach: number, atReach: number, cutoff: number, floorFrac: number, dt: number): void {

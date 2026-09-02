@@ -751,3 +751,76 @@ describe('steering: WASM against the JS reference', () => {
     }
   });
 });
+
+describe('scent writing: WASM against the JS reference', () => {
+  /** A wired net that lays scent from free ports and walls from its ropes. */
+  function pond(): { sim: Sim; params: Params } {
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.rewriteDuration = 0;
+    params.upkeep = 0;
+    params.uncross = 0;
+    const sim = new Sim(600, 400);
+    sim.setFieldCover(600, 400);
+    for (let i = 0; i < 12; i++) {
+      const kind = i % 3 === 0 ? 'era' : i % 3 === 1 ? 'con' : 'dup';
+      sim.spawn(kind, 120 + (i * 61) % 360, 110 + (i * 97) % 200, i * 0.83, params, true);
+    }
+    const ids = [...sim.agents.keys()];
+    sim.wire(ids[1], 'p', ids[2], 'p', params);
+    sim.wire(ids[4], 'l', ids[5], 'r', params);
+    return { sim, params };
+  }
+
+  it('lays the same scent and stamps the same walls', async () => {
+    expect(await sharedSolver.init(), sharedSolver.lastError).toBe(true);
+    // The two passes are run on one settled sim from the same field, rather
+    // than comparing two sims after a shared history. Anything that steps the
+    // whole frame moves the bodies differently on each path, and then this is
+    // measuring how fast a chaotic sim separates instead of whether the port
+    // is right — the fields read 47% apart that way with nothing wrong.
+    const { sim, params } = pond();
+    Sim.nativeForces = false;
+    for (let f = 0; f < 60; f++) sim.step(1 / 60, params);
+
+    const inner = sim as never as {
+      deposit(p: Params): void;
+      paintScentWalls(): void;
+      scentWriteNative(p: Params): boolean;
+    };
+    const startData = Float32Array.from(sim.fields.data);
+    const startWalls = Uint8Array.from(sim.fields.walls);
+
+    inner.deposit(params);
+    inner.paintScentWalls();
+    const jsData = Float32Array.from(sim.fields.data);
+    const jsWalls = Uint8Array.from(sim.fields.walls);
+
+    sim.fields.data.set(startData);
+    sim.fields.walls.set(startWalls);
+    Sim.nativeForces = true;
+    expect(inner.scentWriteNative(params), 'the native path has to have run').toBe(true);
+
+    const cells = sim.fields.cols * sim.fields.rows;
+    let peak = 0;
+    let worst = 0;
+    for (let i = 0; i < cells * 4; i++) {
+      peak = Math.max(peak, Math.abs(jsData[i]));
+      worst = Math.max(worst, Math.abs(jsData[i] - sim.fields.data[i]));
+    }
+    expect(peak, 'there is scent to compare').toBeGreaterThan(0.01);
+    expect(worst / peak, `worst scent cell off by ${((worst / peak) * 100).toFixed(3)}% of peak`)
+      .toBeLessThan(0.002);
+
+    // The wall mask is a binary stamp, so a cell can only differ where a
+    // segment passes near a boundary and f32 rounds the other way.
+    let wallDiff = 0;
+    let wallSet = 0;
+    for (let i = 0; i < cells; i++) {
+      if (jsWalls[i]) wallSet++;
+      if (jsWalls[i] !== sim.fields.walls[i]) wallDiff++;
+    }
+    expect(wallSet, 'there are walls to compare').toBeGreaterThan(10);
+    expect(wallDiff / wallSet, `${wallDiff} of ${wallSet} wall cells differ`).toBeLessThan(0.02);
+  });
+});

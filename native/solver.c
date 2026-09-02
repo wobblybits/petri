@@ -131,6 +131,10 @@ static int32_t disc_nei[MAX_BODIES * 3];
 static uint8_t disc_nfill[MAX_BODIES];
 static int32_t decl_comp[MAX_BODIES];
 static uint8_t steer_flags[MAX_BODIES];
+static uint8_t port_free[MAX_BODIES];
+#define MAX_WALL_PTS 262144
+static float wall_pts[MAX_WALL_PTS * 2];
+static int32_t wall_runs[MAX_WIRES];
 static int32_t steer_pwire[MAX_BODIES * 2];
 static float steer_noise[MAX_BODIES * 3];
 static float body_drive[MAX_BODIES];
@@ -1390,6 +1394,112 @@ static void port_world(int i, int slot, float *px, float *py) {
  * from the host rather than generated here, so the pond stays reproducible
  * from a seeded Math.random and the determinism harness keeps working.
  */
+uint8_t *solver_port_free(void) { return port_free; }
+float *solver_wall_pts(void) { return wall_pts; }
+int32_t *solver_wall_runs(void) { return wall_runs; }
+int solver_wall_pt_cap(void) { return MAX_WALL_PTS; }
+
+/** Bilinear splat into one channel. Mirrors Fields.deposit. */
+static void scent_add(int ch, float x, float y, float amount) {
+  if (scent_cols <= 0 || scent_rows <= 0) return;
+  float gx = ((x - scent_ox) / scent_ww) * (float)scent_cols;
+  float gy = ((y - scent_oy) / scent_wh) * (float)scent_rows;
+  int i0 = (int)floorf(gx), j0 = (int)floorf(gy);
+  float tx = gx - (float)i0, ty = gy - (float)j0;
+  for (int dj = 0; dj < 2; dj++) {
+    for (int di = 0; di < 2; di++) {
+      int i = i0 + di, j = j0 + dj;
+      if (i < 0 || j < 0 || i >= scent_cols || j >= scent_rows) continue;
+      float wx = di ? tx : 1.f - tx;
+      float wy = dj ? ty : 1.f - ty;
+      scent[(j * scent_cols + i) * CHANNELS + ch] += amount * wx * wy;
+    }
+  }
+}
+
+/**
+ * Every free port lays its kind's scent. Mirrors Sim.deposit.
+ *
+ * `port_free` is a bit per slot, so the host resolves port occupancy once and
+ * this walks bodies rather than the wire graph.
+ */
+void solver_deposit(int n, float amount) {
+  if (n <= 0 || scent_cols <= 0) return;
+  if (n > MAX_BODIES) n = MAX_BODIES;
+  refresh_poses(n);
+  for (int i = 0; i < n; i++) {
+    if (bodies[i * STRIDE + FAR_LOCKED] >= 0.5f) continue;
+    uint8_t free_mask = port_free[i];
+    if (!free_mask) continue;
+    int slots = kind[i] == 0 ? 1 : 3;
+    for (int slot = 0; slot < slots; slot++) {
+      if (!(free_mask & (1 << slot))) continue;
+      float px, py;
+      port_world(i, slot, &px, &py);
+      /* Channels: 0 con-p, 1 dup-p, 2 era-p, 3 aux. Kind codes are
+       * 0 era, 1 dup, 2 con. */
+      int ch = slot == 0 ? (kind[i] == 2 ? 0 : kind[i] == 1 ? 1 : 2) : 3;
+      scent_add(ch, px, py, slot == 0 ? amount : amount * 0.7f);
+    }
+  }
+}
+
+static void mark_cell(int i, int j) {
+  if (i < 0 || j < 0 || i >= scent_cols || j >= scent_rows) return;
+  walls[j * scent_cols + i] = 1;
+}
+
+/**
+ * Stamp the wire polylines onto the wall mask, so scent will not diffuse
+ * through a wire. Mirrors Fields.markSegment over Sim.paintScentWalls.
+ *
+ * The host packs the points because it owns the rope nodes; the walk itself
+ * is what costs — a few cells marked per step along every segment of every
+ * wire, which was the most expensive thing left in a settled frame.
+ */
+void solver_paint_walls(int n_runs) {
+  if (scent_cols <= 0 || scent_rows <= 0) return;
+  memset(walls, 0, (size_t)(scent_cols * scent_rows));
+  if (n_runs <= 0) return;
+  float cellW = scent_ww / (float)scent_cols;
+  float cellH = scent_wh / (float)scent_rows;
+  float minCell = cellW < cellH ? cellW : cellH;
+  float step = 0.35f * minCell;
+  if (step < 0.5f) step = 0.5f;
+  int cap = (scent_cols + scent_rows) * 4;
+  int at = 0;
+  for (int r = 0; r < n_runs; r++) {
+    int count = wall_runs[r];
+    if (count < 2) {
+      at += count > 0 ? count : 0;
+      continue;
+    }
+    for (int e = 0; e + 1 < count; e++) {
+      float x0 = wall_pts[(at + e) * 2], y0 = wall_pts[(at + e) * 2 + 1];
+      float x1 = wall_pts[(at + e + 1) * 2], y1 = wall_pts[(at + e + 1) * 2 + 1];
+      if (!isfinite(x0) || !isfinite(y0) || !isfinite(x1) || !isfinite(y1)) continue;
+      float dx = x1 - x0, dy = y1 - y0;
+      float len = sqrtf(dx * dx + dy * dy);
+      if (!isfinite(len)) continue;
+      int steps = (int)ceilf(len / step);
+      if (steps < 1) steps = 1;
+      if (steps > cap) steps = cap;
+      for (int k = 0; k <= steps; k++) {
+        float t = (float)k / (float)steps;
+        float gx = (((x0 + dx * t) - scent_ox) / scent_ww) * (float)scent_cols;
+        float gy = (((y0 + dy * t) - scent_oy) / scent_wh) * (float)scent_rows;
+        int i = (int)floorf(gx), j = (int)floorf(gy);
+        mark_cell(i, j);
+        mark_cell(i - 1, j);
+        mark_cell(i + 1, j);
+        mark_cell(i, j - 1);
+        mark_cell(i, j + 1);
+      }
+    }
+    at += count;
+  }
+}
+
 void solver_steer(int n, float dt) {
   if (n <= 0 || dt <= 0.f) return;
   if (n > MAX_BODIES) n = MAX_BODIES;
