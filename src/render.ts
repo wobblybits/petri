@@ -582,7 +582,7 @@ function drawPortStems(
   ctx.beginPath();
   let any = false;
   for (const slot of slotsFor(agent.kind)) {
-    if (graph && !graph.isFree({ id: agent.id, slot })) continue;
+    if (graph && !graph.isFreeAt(agent.id, slot)) continue;
     const inner = stemRoot(agent.kind, slot);
     const outer = portLocal(agent.kind, slot);
     ctx.moveTo(inner.x, inner.y);

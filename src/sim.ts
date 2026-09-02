@@ -2073,7 +2073,7 @@ export class Sim {
       sc[i] = a.scale;
       let mask = 0;
       for (const slot of slotsFor(a.kind)) {
-        if (this.graph.isFree({ id: a.id, slot })) mask |= 1 << this.slotCode(slot);
+        if (this.graph.isFreeAt(a.id, slot)) mask |= 1 << this.slotCode(slot);
       }
       free[i] = mask;
     }
@@ -2116,7 +2116,7 @@ export class Sim {
     for (const agent of this.agents.values()) {
       if (agent.locked) continue;
       for (const slot of slotsFor(agent.kind)) {
-        if (!this.graph.isFree({ id: agent.id, slot })) continue;
+        if (!this.graph.isFreeAt(agent.id, slot)) continue;
         const p = portWorld(agent, slot, this.w, this.h);
         const ch =
           slot === 'p'
@@ -2171,7 +2171,7 @@ export class Sim {
     }
     for (let i = 0; i < n; i++) {
       const a = list[i];
-      const pFree = this.graph.isFree({ id: a.id, slot: 'p' });
+      const pFree = this.graph.isFreeAt(a.id, 'p');
       flags[i] = (pFree ? 1 : 0) | (a.stun > 0 ? 4 : 0);
       if (!this.forceBlock) {
         kinds[i] = this.kindCode(a.kind);
@@ -2244,11 +2244,11 @@ export class Sim {
         }
       }
 
-      if (agent.stun <= 0 && this.graph.isFree({ id: agent.id, slot: 'p' })) {
+      if (agent.stun <= 0 && this.graph.isFreeAt(agent.id, 'p')) {
         this.bodyGrid.forEachNear(agent.x, agent.y, near, (idx) => {
           const other = list[idx];
           if (other.id === agent.id || other.locked || other.stun > 0) return;
-          if (!this.graph.isFree({ id: other.id, slot: 'p' })) return;
+          if (!this.graph.isFreeAt(other.id, 'p')) return;
           const d = wrapDeltaVec(agent.x, agent.y, other.x, other.y, w, h);
           const dist = Math.hypot(d.x, d.y);
           if (dist < 1e-4 || dist > params.faceRadius) return;
@@ -2300,7 +2300,7 @@ export class Sim {
       const turnBoost = scentTurnBoost(trail);
       const kp = params.turnRate * 6 * turnBoost;
       const kd = (params.turnRate * 2) / Math.sqrt(turnBoost);
-      const principalFree = this.graph.isFree({ id: agent.id, slot: 'p' });
+      const principalFree = this.graph.isFreeAt(agent.id, 'p');
       if (principalFree) {
         agent.omega += (kp * err - kd * agent.omega) * dt;
       }
@@ -2332,7 +2332,7 @@ export class Sim {
    * Latched principals don't swim; they just follow the pull.
    */
   private locomote(agent: Agent, wishX: number, wishY: number, turnK: number): void {
-    if (!this.graph.isFree({ id: agent.id, slot: 'p' })) return;
+    if (!this.graph.isFreeAt(agent.id, 'p')) return;
     const hx = Math.cos(agent.heading);
     const hy = Math.sin(agent.heading);
     const ahead = wishX * hx + wishY * hy;
@@ -2354,7 +2354,7 @@ export class Sim {
   }
 
   private netForce(agent: Agent, wishX: number, wishY: number, turnK: number): void {
-    if (this.graph.isFree({ id: agent.id, slot: 'p' })) this.locomote(agent, wishX, wishY, turnK);
+    if (this.graph.isFreeAt(agent.id, 'p')) this.locomote(agent, wishX, wishY, turnK);
     else this.netPull(agent, wishX, wishY, turnK);
   }
 
@@ -2454,7 +2454,7 @@ export class Sim {
     const swim = this.flockSwim;
     dist.fill(-1, 0, n);
     for (let i = 0; i < n; i++) {
-      swim[i] = this.graph.isFree({ id: list[i].id, slot: 'p' }) ? 1 : 0;
+      swim[i] = this.graph.isFreeAt(list[i].id, 'p') ? 1 : 0;
     }
 
     const maxHops = Sim.FLOCK_HOPS;

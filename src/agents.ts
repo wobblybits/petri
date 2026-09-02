@@ -44,8 +44,25 @@ export interface Agent {
   request: number;
 }
 
-export function portKey(p: PortRef): string {
-  return `${p.id}:${p.slot}`;
+/** Slot as a small integer: principal 0, left 1, right 2. */
+export function slotIndex(slot: PortSlot): number {
+  return slot === 'p' ? 0 : slot === 'l' ? 1 : 2;
+}
+
+/**
+ * A port's identity as a number.
+ *
+ * This was a template string, and it is looked up constantly — every free-port
+ * test in steering, deposit, flocking and snapping goes through it, some sixty
+ * thousand times a frame on a grown pond. That was sixty thousand strings a
+ * frame built only to be hashed and thrown away.
+ */
+export function portKeyAt(id: number, slot: PortSlot): number {
+  return id * 3 + slotIndex(slot);
+}
+
+export function portKey(p: PortRef): number {
+  return portKeyAt(p.id, p.slot);
 }
 
 export function slotsFor(kind: AgentKind): PortSlot[] {

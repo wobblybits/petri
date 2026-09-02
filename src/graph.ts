@@ -1,6 +1,7 @@
 import {
   inSnapArc,
   portKey,
+  portKeyAt,
   portWorld,
   slotsFor,
   stemWorldInto,
@@ -131,7 +132,7 @@ export class Graph {
    * interface — the handle on its result — and leaving that free would let it
    * grab the first passing agent and corrupt the term.
    */
-  sealed = new Set<string>();
+  sealed = new Set<number>();
 
   /** Broad phase for latching: ports only ever pair up within snapRadius. */
   private portGrid = new PairGrid();
@@ -142,7 +143,7 @@ export class Graph {
   static BIRTH_FLOOR = 0.2;
 
   wires = new Map<number, Wire>();
-  portWire = new Map<string, number>();
+  portWire = new Map<number, number>();
   nextWireId = 1;
   onLatch: ((ev: LatchEvent) => void) | null = null;
   /** Bumps whenever a wire is added or removed. Hop caches key off this. */
@@ -170,6 +171,11 @@ export class Graph {
 
   isFree(port: PortRef): boolean {
     return !this.portWire.has(portKey(port));
+  }
+
+  /** `isFree` without building a PortRef for it. */
+  isFreeAt(id: number, slot: PortSlot): boolean {
+    return !this.portWire.has(portKeyAt(id, slot));
   }
 
   /** True when `a` and `b` already share a wire. FAR discs skip those pairs. */
@@ -380,14 +386,14 @@ export class Graph {
   /** Cheap degree test: a few port lookups rather than a scan of every wire. */
   isWired(agent: Agent): boolean {
     for (const slot of slotsFor(agent.kind)) {
-      if (!this.isFree({ id: agent.id, slot })) return true;
+      if (!this.isFreeAt(agent.id, slot)) return true;
     }
     return false;
   }
 
   portsFilled(agent: Agent): boolean {
     for (const slot of slotsFor(agent.kind)) {
-      if (this.isFree({ id: agent.id, slot })) return false;
+      if (this.isFreeAt(agent.id, slot)) return false;
     }
     return true;
   }
@@ -536,7 +542,7 @@ export class Graph {
         a.pb.id - b.pb.id ||
         slotOrder(a.pb.slot) - slotOrder(b.pb.slot),
     );
-    const taken = new Set<string>();
+    const taken = new Set<number>();
     for (const c of cands) {
       const ka = portKey(c.pa);
       const kb = portKey(c.pb);

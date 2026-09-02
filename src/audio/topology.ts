@@ -174,7 +174,7 @@ function agentTopo(
   compN: number,
 ): AgentTopo {
   const slots = slotsFor(agent.kind);
-  const open = slots.filter((slot) => graph.isFree({ id: agent.id, slot }));
+  const open = slots.filter((slot) => graph.isFreeAt(agent.id, slot));
   const z =
     slots.reduce((sum, slot) => sum + portImpedance(agent.kind, slot), 0) / Math.max(1, slots.length);
   const tone = bodyTone(agent);
@@ -273,7 +273,7 @@ export function buildTopology(
           if (!a) return 0;
           let n = 0;
           for (const slot of slotsFor(a.kind)) {
-            if (graph.isFree({ id, slot })) n++;
+            if (graph.isFreeAt(id, slot)) n++;
           }
           return n;
         },

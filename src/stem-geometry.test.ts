@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { stemRoot, portLocal, stemOffset, createAgent } from './agents.ts';
+import { portKeyAt, slotIndex, stemRoot, portLocal, stemOffset, createAgent } from './agents.ts';
+import type { PortSlot } from './agents.ts';
 import { defaultParams } from './params.ts';
 
 /**
@@ -54,5 +55,30 @@ describe('stem geometry', () => {
     expect(portLocal('era', 'p')).toEqual({ x: 16, y: 0 });
     expect(portLocal('con', 'p')).toEqual({ x: 16 * 1.05 + 8, y: 0 });
     expect(portLocal('con', 'l').x).toBe(-16 * 0.55 - 8);
+  });
+});
+
+describe('port keys', () => {
+  it('never gives two ports the same number', () => {
+    // The key is id * 3 + slot, used as a Map key for every free-port test in
+    // the sim. A collision would read as a port being occupied by a wire
+    // belonging to someone else, silently.
+    const slots: PortSlot[] = ['p', 'l', 'r'];
+    const seen = new Map<number, string>();
+    for (let id = 1; id <= 5000; id++) {
+      for (const slot of slots) {
+        const k = portKeyAt(id, slot);
+        const where = `${id}.${slot}`;
+        expect(seen.has(k), `${where} collides with ${seen.get(k)}`).toBe(false);
+        seen.set(k, where);
+      }
+    }
+    expect(seen.size).toBe(15000);
+  });
+
+  it('numbers the slots the way the solver does', () => {
+    expect(slotIndex('p')).toBe(0);
+    expect(slotIndex('l')).toBe(1);
+    expect(slotIndex('r')).toBe(2);
   });
 });
