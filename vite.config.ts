@@ -159,6 +159,9 @@ export default defineConfig({
   },
   test: {
     testTimeout: 60_000,
+    // Applied to both projects: seeds Math.random and resets the Sim statics
+    // per test, so a file's result does not depend on which file ran before it.
+    setupFiles: ['./src/test-setup.ts'],
     // Two projects, because they need opposite things from the runner.
     //
     // `suite` is correctness and runs its files in parallel. `bench` asserts
