@@ -193,6 +193,36 @@ export class Sim {
   rosterVersion = 0;
   /** Identifies this Sim to the shared wasm solver's flocking cache. */
   private readonly simId = nextSimId++;
+
+  /**
+   * Per-phase frame timings, off by default.
+   *
+   * Set to a Map to collect; phases accumulate into it until it is cleared.
+   * Off, `phase()` is a single null check and allocates nothing — which is the
+   * point of taking the timestamp inside the helper rather than wrapping calls
+   * in closures at each site.
+   *
+   * This exists because two rounds of guessing where the frame went were both
+   * wrong, and because the alternative — measuring a pass by turning it off
+   * and differencing whole frames — cannot resolve anything smaller than the
+   * machine's own drift, several milliseconds on a frame this size.
+   */
+  static profile: Map<string, number> | null = null;
+  private static profileMark = 0;
+
+  /** Charge everything since the last call to `name`. */
+  private static phase(name: string): void {
+    const p = Sim.profile;
+    if (!p) return;
+    const now = performance.now();
+    p.set(name, (p.get(name) ?? 0) + (now - Sim.profileMark));
+    Sim.profileMark = now;
+  }
+
+  /** Start the clock. Call at the top of a frame, before the first phase. */
+  private static phaseStart(): void {
+    if (Sim.profile) Sim.profileMark = performance.now();
+  }
   spawnAcc = 0;
   agents = new Map<number, Agent>();
   graph = new Graph();
@@ -377,14 +407,21 @@ export class Sim {
   }
 
   step(dt: number, params: Params, view?: PanView | null): void {
+    Sim.phaseStart();
     const t = this.beginFrame(dt, params);
     this.collectRewriteFrozen();
+    Sim.phase('collectRewriteFrozen');
     this.assignPhysicsLod(view);
+    Sim.phase('assignPhysicsLod');
     this.graph.syncRest(this.time, params, this.wireDetailed);
+    Sim.phase('syncRest');
     this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
+    Sim.phase('applyRopePaths');
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
+    Sim.phase('syncRopeShape');
     if (this.solveFarNative(params, t)) this.finishIntegrate(t);
     else this.solve(params, t);
+    Sim.phase('solve');
     this.endFrame(params, t);
   }
 
@@ -422,6 +459,7 @@ export class Sim {
     this.contactAudioNow.clear();
     this.contacts.clear();
     this.radiated.clear();
+    Sim.phase('beginFrame:setup');
 
     // The whole force phase now lives in WASM, so it shares one copy of the
     // bodies instead of each pass making its own — which was the entire cost
@@ -429,12 +467,19 @@ export class Sim {
     // 13 ms to 1.6 ms of compute still cost 7 ms because it packed 6 ms of
     // bodies to get there.
     const block = this.openForceBlock(params);
+    Sim.phase('openForceBlock');
     this.steer(params, t);
+    Sim.phase('steer');
     this.portTorques(params, t);
+    Sim.phase('portTorques');
     this.declutter(params, t);
+    Sim.phase('declutter');
     this.uncrossPrincipals(params, t);
+    Sim.phase('uncrossPrincipals');
     this.flock(params, t);
+    Sim.phase('flock');
     this.gravitate(params, t);
+    Sim.phase('gravitate');
     // Left open on purpose. Nothing between here and the solver moves a body —
     // the LOD pass and the rope passes read positions and write wires — so the
     // solver can inherit the packed bodies instead of copying them in again.
@@ -447,10 +492,13 @@ export class Sim {
     // Backstop: every path that did not end in a native solve still owes the
     // agents their velocities.
     this.syncForces();
+    Sim.phase('syncForces');
     this.applyRadiationLoss();
     this.dampVelocities(params, t);
+    Sim.phase('damp');
 
     this.graph.refreshLengths(this.agents, this.w, this.h, this.rewriteFrozen, this.wireDetailed);
+    Sim.phase('refreshLengths');
     // Earn, distribute, spend, then pay rent. Energy that arrives to complete
     // a redex is spent in the same frame it lands, and a body that has just
     // paid its share is not billed into debt on top of it.
@@ -464,23 +512,31 @@ export class Sim {
     // leaves every body a hair in debt the moment it commutes.
     this.energy.configure(params.energyCell, params.ambientEnergy);
     harvestSlots(this.agents.values(), this.energy);
+    Sim.phase('harvestSlots');
     this.graph.snap(this.agents, this.w, this.h, params, this.time);
+    Sim.phase('snap');
     this.components = this.graph.componentIds(this.agents);
     this.pulseRequests(params);
+    Sim.phase('pulseRequests');
     this.startRewrites(params);
     this.tickRewrites(params, t);
+    Sim.phase('rewrites');
     for (const id of tickUpkeep(this.agents.values(), t, params.upkeep)) {
       this.kill(id);
     }
     this.components = this.graph.componentIds(this.agents);
+    Sim.phase('upkeep');
     if (!this.scentWriteNative(params)) {
       this.deposit(params);
       this.paintScentWalls();
     }
+    Sim.phase('scentWrite');
     this.fields.diffuse(params.diffuse);
     this.fields.diffuse(params.diffuse * 0.65);
     this.fields.decay(params.decay);
+    Sim.phase('fields');
     this.autoSpawn(params, t);
+    Sim.phase('autoSpawn');
 
     const prev = this.contactAudioPrev;
     this.contactAudioPrev = this.contactAudioNow;
