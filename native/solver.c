@@ -29,11 +29,32 @@ typedef v128_t v128;
 #define HAVE_SIMD 0
 #endif
 
-#define MAX_BODIES 16384
-#define MAX_WIRES 16384
-#define MAX_NODES 131072
+/*
+ * Population caps. Everything below is a static array, so these fix the
+ * module's whole footprint at instantiation — there is no allocator to grow
+ * into, and INITIAL_MEMORY in native/build.sh has to cover the sum. Exceeding
+ * a cap is not a crash: the bindings in src/native/solver.ts refuse the pack
+ * and the sim falls back to the TS twin, which is correct but ~30% slower.
+ *
+ * The three derived caps are ratios rather than literals because they are not
+ * free parameters:
+ *
+ *   WIRES  every body has 3 ports and every wire consumes 2, so a fully wired
+ *          pond has 1.5 wires per body. Anything less is reachable in normal
+ *          play. (This was 1.0 before, i.e. silently below the structural
+ *          bound: 16k fully wired bodies wanted 24k wires and got a fallback.)
+ *   NODES  NEAR-tier rope nodes, 8 per body at the finest subdivision.
+ *   PAIRS  broadphase candidates. 16 per body is roughly 4x the worst
+ *          steady-state occupancy measured at pond scale.
+ *
+ * Raising MAX_BODIES therefore means re-running the arithmetic in
+ * native/caps.test.ts, which fails if the statics no longer fit the heap.
+ */
+#define MAX_BODIES 32768
+#define MAX_WIRES (MAX_BODIES * 3 / 2)
+#define MAX_NODES (MAX_BODIES * 8)
 #define MAX_CELLS 65536
-#define MAX_PAIRS 262144
+#define MAX_PAIRS (MAX_BODIES * 16)
 #define STRIDE 12
 #define WIRE_FAR 8
 #define WIRE_NEAR 12
@@ -1861,6 +1882,16 @@ uint8_t *solver_kind(void) { return kind; }
 uint8_t *solver_detailed(void) { return detailed; }
 int32_t *solver_pair_a(void) { return pair_a; }
 int32_t *solver_pair_b(void) { return pair_b; }
+/*
+ * End of the static data + stack, i.e. the first byte the module does not
+ * already own. Every array here is static, so this is the module's entire
+ * footprint and it must fit inside INITIAL_MEMORY (native/build.sh). Exported
+ * so native/caps.test.ts can assert that rather than recomputing the
+ * arithmetic by hand and drifting from it.
+ */
+extern unsigned char __heap_base;
+int solver_static_bytes(void) { return (int)(intptr_t)&__heap_base; }
+
 int solver_cap(void) { return MAX_BODIES; }
 int solver_wire_cap(void) { return MAX_WIRES; }
 int solver_node_cap(void) { return MAX_NODES; }

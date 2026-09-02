@@ -62,6 +62,7 @@ type Exp = {
   solver_detailed(): number;
   solver_pair_a(): number;
   solver_pair_b(): number;
+  solver_static_bytes(): number;
   solver_cap(): number;
   solver_wire_cap(): number;
   solver_node_cap(): number;
@@ -149,6 +150,10 @@ type Exp = {
 export class NativeSolver {
   ready = false;
   lastError = '';
+  /** Bytes of wasm memory the module's statics and stack occupy. */
+  staticBytes = 0;
+  /** Total wasm memory, from INITIAL_MEMORY in native/build.sh. */
+  heapBytes = 0;
   bodyCap = 0;
   wireCap = 0;
   nodeCap = 0;
@@ -202,6 +207,8 @@ export class NativeSolver {
       const exp = instance.exports as unknown as Exp;
       exp._initialize?.();
       const mem = exp.memory;
+      this.staticBytes = exp.solver_static_bytes();
+      this.heapBytes = mem.buffer.byteLength;
       this.bodyCap = exp.solver_cap();
       this.wireCap = exp.solver_wire_cap();
       this.nodeCap = exp.solver_node_cap();

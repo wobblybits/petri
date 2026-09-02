@@ -110,4 +110,52 @@ describe('force passes at pond scale', () => {
     expect(checked).toBe(2);
     console.log(`\nlarge-net frame cost\n${rows.join('\n')}\n`);
   }, 900_000);
+
+  /**
+   * The ceiling, exercised rather than asserted from the constants.
+   *
+   * Overrunning a solver cap is not an error anywhere — `packForces` refuses
+   * and the sim runs the TS twin instead, correct but slower and completely
+   * silent. So the only honest check that the caps are high enough is to build
+   * a pond of the target size and confirm the native path still takes it.
+   */
+  it('keeps a 20k pond on the native path', async () => {
+    expect(await nativeSolver.init(), nativeSolver.lastError).toBe(true);
+    const params = defaultParams();
+    params.maxAgents = 100_000;
+    params.spawnInterval = 0;
+    params.rewriteDuration = 0;
+    params.snapRadius = 0;
+    const sim = new Sim(60_000, 60_000);
+    bigNets(sim, params, [2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500]);
+
+    const n = sim.agents.size;
+    const wires = sim.graph.wires.size;
+    expect(n, `built ${n} agents, wanted ~20000`).toBeGreaterThan(19_000);
+    expect(n, `${n} agents exceeds bodyCap ${nativeSolver.bodyCap}`)
+      .toBeLessThanOrEqual(nativeSolver.bodyCap);
+    expect(wires, `${wires} wires exceeds wireCap ${nativeSolver.wireCap}`)
+      .toBeLessThanOrEqual(nativeSolver.wireCap);
+
+    const view = { x: 6000, y: 3000, zoom: 0.05, viewW: 1600, viewH: 900 };
+    for (let f = 0; f < 20; f++) sim.step(1 / 60, params, view);
+    const ts: number[] = [];
+    for (let f = 0; f < 20; f++) {
+      const t0 = performance.now();
+      sim.step(1 / 60, params, view);
+      ts.push(performance.now() - t0);
+    }
+    const p50 = median(ts);
+    console.log(
+      `\n20k ceiling\n` +
+        `  ${n} agents, ${wires} wires` +
+        `  (caps ${nativeSolver.bodyCap} / ${nativeSolver.wireCap})\n` +
+        `  p50 ${p50.toFixed(1)}ms  min ${Math.min(...ts).toFixed(1)}ms` +
+        `  max ${Math.max(...ts).toFixed(1)}ms\n` +
+        `  ${((p50 / n) * 1000).toFixed(2)}us per agent per frame\n`,
+    );
+    // Not a frame-rate target — 20k is well past interactive on this path.
+    // The point is that it runs at all and stays roughly linear per agent.
+    expect(p50, `20k p50 ${p50.toFixed(1)}ms`).toBeLessThan(1000);
+  }, 900_000);
 });
