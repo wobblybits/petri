@@ -480,50 +480,6 @@ describe('sim latch integration', () => {
     expect(strikes).toBeLessThan(16);
   });
 
-  it('plucks a wire when a visitor leaves the bowed rope', () => {
-    audio.armWithoutAudio();
-    const posted: { type: string; samples?: number[] }[] = [];
-    audio.onPost = (m) => posted.push(m);
-
-    const sim = new Sim(320, 200);
-    const params = defaultParams();
-    params.snapRadius = 0;
-    params.stepSpeed = 0;
-    params.gravity = 0;
-    params.flockAlign = 0;
-    params.flockSep = 0;
-    params.declutter = 0;
-    params.rewriteDuration = 20;
-    params.spawnInterval = 0;
-    const a = sim.spawn('era', 60, 100, 0, params, true)!;
-    const b = sim.spawn('era', 260, 100, Math.PI, params, true)!;
-    sim.wire(a.id, 'p', b.id, 'p', params);
-    const wire = [...sim.graph.wires.values()][0];
-    const mid = wire.nodes[Math.floor(wire.nodes.length / 2)];
-    const visitor = sim.spawn('con', mid.x, mid.y, 0, params, true)!;
-
-    for (let i = 0; i < 20; i++) {
-      sim.step(1 / 60, params);
-      audio.frame(sim.graph, sim.agents, 1 / 60);
-    }
-    posted.length = 0;
-    visitor.x = 160;
-    visitor.y = 20;
-    visitor.vx = 0;
-    visitor.vy = 0;
-    for (let i = 0; i < 12; i++) {
-      sim.step(1 / 60, params);
-      audio.frame(sim.graph, sim.agents, 1 / 60);
-    }
-
-    audio.onPost = null;
-    const plucks = posted.filter((m) => m.type === 'pluck');
-    expect(plucks.length).toBeGreaterThan(0);
-    expect(plucks[0].samples?.length).toBeGreaterThan(4);
-    const peak = Math.max(...(plucks[0].samples ?? []).map((s) => Math.abs(s)));
-    expect(peak).toBeGreaterThan(0.05);
-  });
-
   it('indexes a traveling-wave snapshot by wire id', () => {
     const net = new WaveguideNet();
     net.handle({ type: 'latch', topo: {

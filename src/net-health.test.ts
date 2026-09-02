@@ -34,6 +34,7 @@ function liveParams(): Params {
   p.rewriteDuration = 0;
   p.spawnInterval = 0;
   p.gravity = 0.12;
+  p.upkeep = 0;
   return p;
 }
 
@@ -118,7 +119,17 @@ function maxSpin(sim: Sim): number {
  * This is what makes a drawing read as a Lafont figure: the wire departs along
  * the port, then curves freely. Measured against the wire's first rope node.
  */
-function portExitError(sim: Sim): number {
+/**
+ * Worst departure from the angle the port torque is actually aiming for.
+ *
+ * Not the bare port axis: an aux port is deliberately aimed `auxSpread * 0.35`
+ * off its own axis, toward its own side of the body, so that the uncrossed
+ * pose is the stable one. Measuring against the axis therefore reads a
+ * correctly splayed net as 34 degrees of error at the default spread, which
+ * is the setpoint, not a miss.
+ */
+function portExitError(sim: Sim, params: Params): number {
+  const splay = params.auxSpread * 0.35;
   let worst = 0;
   for (const wire of sim.graph.wires.values()) {
     const A = sim.agents.get(wire.a.id);
@@ -135,7 +146,9 @@ function portExitError(sim: Sim): number {
       if (Math.hypot(dx, dy) < 1e-6) continue;
       const ax = portAxis(agent, slot);
       const cos = (ax.x * dx + ax.y * dy) / Math.hypot(dx, dy);
-      worst = Math.max(worst, Math.acos(Math.max(-1, Math.min(1, cos))));
+      const off = Math.acos(Math.max(-1, Math.min(1, cos)));
+      const want = slot === 'p' ? 0 : splay;
+      worst = Math.max(worst, Math.abs(off - want));
     }
   }
   return worst;
@@ -184,15 +197,15 @@ describe('settled net geometry', () => {
     expect(pen, `worst penetration = ${pen.toFixed(2)} px`).toBeLessThan(1.5);
   });
 
-  it('lets a wire leave along its port axis when the ports allow it', () => {
+  it('lets a wire leave a port at the angle the torque is aiming for', () => {
     const sim = new Sim(480, 280);
     const params = passiveParams();
     const con = sim.spawn('con', 240, 140, 0, params, true)!;
     const era = sim.spawn('era', 200, 190, 0, params, true)!;
     sim.wire(con.id, 'l', era.id, 'p', params);
     run(sim, params, 600);
-    const err = (portExitError(sim) * 180) / Math.PI;
-    expect(err, `worst port exit error = ${err.toFixed(0)}°`).toBeLessThan(20);
+    const err = (portExitError(sim, params) * 180) / Math.PI;
+    expect(err, `worst port exit error = ${err.toFixed(0)}°`).toBeLessThan(10);
   });
 
   it('finds a compromise when a junction cannot satisfy every port', () => {
@@ -202,7 +215,7 @@ describe('settled net geometry', () => {
     // this glyph, not a solver failure. Splaying the aux axes would remove it.
     const { sim, params } = commuteNet();
     run(sim, params, 600);
-    const err = (portExitError(sim) * 180) / Math.PI;
+    const err = (portExitError(sim, params) * 180) / Math.PI;
     expect(err, `worst port exit error = ${err.toFixed(0)}°`).toBeLessThan(55);
   });
 });
@@ -297,6 +310,11 @@ describe('aux wires keep to their own side', () => {
       seed(sd);
       const sim = new Sim(900, 600);
       const params = defaultParams();
+      params.upkeep = 0;
+      // Pinned, not inherited: the bound below is calibrated against this
+      // density, so tuning the product's default soup must not quietly change
+      // what this test means (or triple how long it takes).
+      params.soupCount = 28;
       loadPreset(sim, 'soup', params);
       for (let f = 1; f <= 3600; f++) {
         sim.step(1 / 60, params);
@@ -352,6 +370,11 @@ describe('crowding and tangling', () => {
       seed(sd);
       const sim = new Sim(900, 600);
       const params = defaultParams();
+      params.upkeep = 0;
+      // Pinned, not inherited: the bound below is calibrated against this
+      // density, so tuning the product's default soup must not quietly change
+      // what this test means (or triple how long it takes).
+      params.soupCount = 28;
       loadPreset(sim, 'soup', params);
       for (let f = 1; f <= 3600; f++) {
         sim.step(1 / 60, params);
@@ -384,6 +407,11 @@ describe('crowding and tangling', () => {
       seed(sd);
       const sim = new Sim(900, 600);
       const params = defaultParams();
+      params.upkeep = 0;
+      // Pinned, not inherited: the bound below is calibrated against this
+      // density, so tuning the product's default soup must not quietly change
+      // what this test means (or triple how long it takes).
+      params.soupCount = 28;
       loadPreset(sim, 'soup', params);
       for (let f = 1; f <= 3600; f++) {
         sim.step(1 / 60, params);
@@ -413,6 +441,11 @@ describe('crowding and tangling', () => {
       seed(sd);
       const sim = new Sim(900, 600);
       const params = defaultParams();
+      params.upkeep = 0;
+      // Pinned, not inherited: the bound below is calibrated against this
+      // density, so tuning the product's default soup must not quietly change
+      // what this test means (or triple how long it takes).
+      params.soupCount = 28;
       loadPreset(sim, 'soup', params);
       for (let f = 1; f <= 3600; f++) {
         sim.step(1 / 60, params);
@@ -439,11 +472,52 @@ describe('crowding and tangling', () => {
       }
     }
     const rate = crossings / Math.max(1, samples);
-    // 4.07 per frame once ropes scrape instead of shoving. The old 2.1 bound
-    // was the uncross-by-force regime. A collapse toward zero would mean they
-    // stopped meeting; a scribble well past this is a different tangle.
-    expect(rate, `${rate.toFixed(2)} wire crossings per frame`).toBeGreaterThan(1);
+    // The anti-tangle half. There used to be a lower bound here as well,
+    // standing in for "the sim does not spend the frame uncrossing things",
+    // but it read a soup that has since thinned out: 27 short chords spread
+    // across a wrapping world cross zero times for reasons that have nothing
+    // to do with the uncrossing force. That property is asserted directly by
+    // the test below instead.
     expect(rate, `${rate.toFixed(2)} wire crossings per frame`).toBeLessThan(8);
+  });
+
+  it('never applies the uncross force to a pair of aux wires', () => {
+    // uncrossPrincipals skips a pair where neither wire is principal, on
+    // purpose: an aux tangle is the net's own shape, not a fault to correct.
+    //
+    // Tested by running the same net with the force off and at full strength
+    // and requiring the two to be identical. An earlier version of this test
+    // laid two aux wires in an X and asserted they were still crossed later,
+    // which also depended on the port torques not having rotated the bodies
+    // out of it — a different mechanism, and one that legitimately can.
+    const build = (uncross: number) => {
+      const sim = new Sim(480, 280);
+      const params = passiveParams();
+      params.snapRadius = 0;
+      params.spawnInterval = 0;
+      params.upkeep = 0;
+      params.uncross = uncross;
+      const a = sim.spawn('con', 200, 110, 0, params, true)!;
+      const b = sim.spawn('con', 280, 190, 0, params, true)!;
+      const c = sim.spawn('con', 200, 190, 0, params, true)!;
+      const d = sim.spawn('con', 280, 110, 0, params, true)!;
+      sim.wire(a.id, 'l', b.id, 'r', params);
+      sim.wire(c.id, 'l', d.id, 'r', params);
+      run(sim, params, 240);
+      return [...sim.agents.values()]
+        .sort((p, q) => p.id - q.id)
+        .map((ag) => ({ x: ag.x, y: ag.y, h: ag.heading }));
+    };
+    const off = build(0);
+    const on = build(4);
+    expect(on.length).toBe(off.length);
+    for (let i = 0; i < off.length; i++) {
+      expect(on[i].x, `agent ${i} x`).toBeCloseTo(off[i].x, 9);
+      expect(on[i].y, `agent ${i} y`).toBeCloseTo(off[i].y, 9);
+      expect(on[i].h, `agent ${i} heading`).toBeCloseTo(off[i].h, 9);
+    }
+    // And the wires are still there to have been left alone.
+    expect(off.length).toBe(4);
   });
 });
 
@@ -476,6 +550,11 @@ describe('the net actually rewrites', () => {
       seed(s);
       const sim = new Sim(900, 600);
       const params = defaultParams();
+      params.upkeep = 0;
+      // Pinned, not inherited: the bound below is calibrated against this
+      // density, so tuning the product's default soup must not quietly change
+      // what this test means (or triple how long it takes).
+      params.soupCount = 28;
       loadPreset(sim, 'soup', params);
       let started = 0;
       const inner = (sim as unknown as { startRewrites(p: Params): void }).startRewrites.bind(sim);

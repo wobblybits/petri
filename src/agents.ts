@@ -34,6 +34,14 @@ export interface Agent {
   integVx: number;
   integVy: number;
   integOmega: number;
+  /**
+   * Energy on top of existence, in [−1, 1]. Positive is stock it can spend or
+   * pass on, negative is debt it must settle before it can do either, and −1
+   * is death. Upkeep decrements this directly.
+   */
+  extra: number;
+  /** Request gradient toward a hungry redex. 0 = quiet. */
+  request: number;
 }
 
 export function portKey(p: PortRef): string {
@@ -71,9 +79,31 @@ export function triangleWorld(agent: Agent, ox: number, oy: number): Vec2[] {
   });
 }
 
+/** Conservative bound that encloses the glyph. Broad phase and LOD size. */
 export function boundRadius(agent: Agent): number {
   if (agent.kind === 'era') return (ERA_RADIUS + 1.2) * agent.scale;
   return agentSize(agent.kind) * 1.12 * agent.scale;
+}
+
+/**
+ * Radius of the disc with the same area as the Con/Dup triangle, as a
+ * multiple of `agentSize`. The glyph is 1.312 s^2 for s = 16 * scale, so the
+ * equal-area radius is s * sqrt(1.312 / PI).
+ */
+export const TRI_DISC_RATIO = Math.sqrt(1.312 / Math.PI);
+
+/**
+ * Contact radius for the tiers that collide discs instead of SAT polygons.
+ *
+ * `boundRadius` is the circumscribed bound, which for a triangle is ~1.7x too
+ * fat to use as a contact radius: a net that settles at ~22 px under SAT is
+ * held ~36 px apart by bound discs, so it visibly inflates the moment the
+ * camera crosses the LOD line. Equal area is the closest single radius to
+ * where SAT actually settles, which is what keeps the tiers agreeing.
+ */
+export function discRadius(agent: Agent): number {
+  if (agent.kind === 'era') return ERA_RADIUS * agent.scale;
+  return agentSize(agent.kind) * TRI_DISC_RATIO * agent.scale;
 }
 
 export function momentOfInertia(agent: Agent): number {
@@ -92,15 +122,27 @@ const HANDLE_SCALE = 3;
 
 /** Where a port stem meets the body. */
 export function stemRoot(kind: AgentKind, slot: PortSlot): Vec2 {
+  return stemRootInto(kind, slot, { x: 0, y: 0 });
+}
+
+/** `stemRoot` without the allocation. The single source of the geometry. */
+export function stemRootInto(kind: AgentKind, slot: PortSlot, out: Vec2): Vec2 {
   if (kind === 'era') {
-    return slot === 'p' ? { x: 8, y: 0 } : { x: 0, y: 0 };
+    out.x = slot === 'p' ? 8 : 0;
+    out.y = 0;
+    return out;
   }
   const s = agentSize(kind);
-  if (slot === 'p') return { x: s * 1.05, y: 0 };
-  const baseX = -s * 0.55;
+  if (slot === 'p') {
+    out.x = s * 1.05;
+    out.y = 0;
+    return out;
+  }
   const halfBase = s * 0.82;
   const legY = halfBase * 0.7;
-  return { x: baseX, y: slot === 'l' ? -legY : legY };
+  out.x = -s * 0.55;
+  out.y = slot === 'l' ? -legY : legY;
+  return out;
 }
 
 /** Port tip (snap / wire endpoint). Principal from the apex; aux legs go backward, parallel. */
@@ -142,6 +184,8 @@ export function createAgent(
     integVx: 0,
     integVy: 0,
     integOmega: 0,
+    extra: 0,
+    request: 0,
   };
 }
 
@@ -279,6 +323,27 @@ export function portWorld(agent: Agent, slot: PortSlot, w: number, h: number): V
 export function stemOffset(agent: Agent, slot: PortSlot): Vec2 {
   return stemOffsetAt(agent.heading, agent, slot);
 }
+
+const stemRootScratch: Vec2 = { x: 0, y: 0 };
+
+/**
+ * `stemOffset` writing into `out`.
+ *
+ * The allocating form costs three objects a call — a stem root, a rotation,
+ * and the result — and the FAR pack calls it twice per wire, which on a pond
+ * of 14000 wires is most of a hundred thousand short-lived objects a frame.
+ */
+export function stemOffsetInto(agent: Agent, slot: PortSlot, out: Vec2): Vec2 {
+  const loc = stemRootInto(agent.kind, slot, stemRootScratch);
+  const lx = loc.x * agent.scale;
+  const ly = loc.y * agent.scale;
+  const c = Math.cos(agent.heading);
+  const sn = Math.sin(agent.heading);
+  out.x = lx * c - ly * sn;
+  out.y = lx * sn + ly * c;
+  return out;
+}
+
 
 /** Stem root offset from body center at a given heading. */
 export function stemOffsetAt(heading: number, agent: Agent, slot: PortSlot): Vec2 {

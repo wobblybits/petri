@@ -10,6 +10,7 @@ function liveLatchParams() {
   params.gravity = 0.12;
   params.flockAlign = 5.5;
   params.flockSep = 36;
+  params.wireShrink = 0.9;
   return params;
 }
 

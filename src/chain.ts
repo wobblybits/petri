@@ -237,7 +237,7 @@ function solveSpan(
   const dx = B.x + rB.x - (A.x + rA.x);
   const dy = B.y + rB.y - (A.y + rA.y);
   const dist = Math.hypot(dx, dy);
-  if (dist < 1e-9) return;
+  if (dist < 1e-9 || !Number.isFinite(dist) || !Number.isFinite(rest)) return;
   const nx = dx / dist;
   const ny = dy / dist;
   const C = dist - rest;
@@ -314,6 +314,7 @@ export function solveWire(
   const aShape = COMPLIANCE.shape * soft * invH2;
   const aSpan = COMPLIANCE.span * soft * invH2;
 
+  if (!Number.isFinite(rest) || rest < 0) return;
   solveSpan(A, aSlot, B, bSlot, rest, aSpan);
   const linkRest = ropeLen / (n + 1);
 
@@ -346,6 +347,7 @@ export function solveWireSpan(
   stiff: WireStiffness,
   h: number,
 ): void {
+  if (!Number.isFinite(rest) || rest < 0) return;
   const invH2 = 1 / Math.max(1e-12, h * h);
   solveSpan(A, aSlot, B, bSlot, rest, COMPLIANCE.span * stiff.scale * stiff.slack * invH2);
 }

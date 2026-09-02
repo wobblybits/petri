@@ -1,5 +1,7 @@
-// FAR body step: integrate, translation-only disc XPBD, chord span.
+// FAR body step: integrate, translation-only disc XPBD, stem span.
 // Matches src/gpu/far-kernel.ts. No SAT, no rope nodes, no torque.
+// The packed radius is the glyph-area disc, not the SAT bound, and span
+// compliance is per wire, so this tier settles where NEAR settles.
 
 struct SimParams {
   n: u32,
@@ -28,10 +30,15 @@ struct Particle {
 }
 
 struct Wire {
-  a: u32,
-  b: u32,
+  a: f32,
+  b: f32,
   rest: f32,
-  pad: f32,
+  // Per-wire softness: params.springK scale times the birth-slack ramp.
+  soft: f32,
+  oax: f32,
+  oay: f32,
+  obx: f32,
+  oby: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: SimParams;
@@ -43,6 +50,7 @@ const PI: f32 = 3.14159265;
 const TAU: f32 = 6.2831853;
 
 fn wrapAngle(a: f32) -> f32 {
+  if (a != a) { return 0.0; }
   if (a >= -PI && a < PI) { return a; }
   var r = a % TAU;
   if (r >= PI) { r -= TAU; }
@@ -75,13 +83,39 @@ fn disc(@builtin(global_invocation_id) gid: vec3u) {
   if (pi.locked >= 0.5 || pi.invMass <= 0.0) { return; }
   var push = vec2f(0.0, 0.0);
   let alpha = params.contactComp / max(1e-12, params.h * params.h);
+  // Span owns wired gaps. Bound discs are fatter than SAT, so colliding a
+  // neighbour the chord is holding fights the rest length.
+  var n0: u32 = 0xffffffffu;
+  var n1: u32 = 0xffffffffu;
+  var n2: u32 = 0xffffffffu;
+  var k: u32 = 0u;
+  for (var w = 0u; w < params.nWires; w++) {
+    let wire = wires[w];
+    let ia = u32(wire.a);
+    let ib = u32(wire.b);
+    var other: u32 = 0xffffffffu;
+    if (ia == i) { other = ib; }
+    else if (ib == i) { other = ia; }
+    else { continue; }
+    if (k == 0u) { n0 = other; }
+    else if (k == 1u) { n1 = other; }
+    else { n2 = other; }
+    k = k + 1u;
+  }
   for (var j = 0u; j < params.n; j++) {
     if (j == i) { continue; }
     let pj = parts[j];
-    let d = vec2f(pj.x - pi.x, pj.y - pi.y);
-    let dist = length(d);
+    var d = vec2f(pj.x - pi.x, pj.y - pi.y);
+    var dist = length(d);
     let keep = pi.radius + pj.radius;
-    if (dist >= keep || dist < 1e-6) { continue; }
+    if (dist >= keep) { continue; }
+    let wired = j == n0 || j == n1 || j == n2;
+    if (dist < 1e-6) {
+      d = vec2f(select(-1.0, 1.0, i < j), 0.0);
+      dist = 1.0;
+    } else if (wired) {
+      continue;
+    }
     let depth = keep - dist - params.slop;
     if (depth <= 0.0) { continue; }
     let nrm = d / dist;
@@ -100,19 +134,37 @@ fn span(@builtin(global_invocation_id) gid: vec3u) {
   let pi = parts[i];
   if (pi.locked >= 0.5 || pi.invMass <= 0.0) { return; }
   var push = vec2f(0.0, 0.0);
-  let alpha = params.spanComp / max(1e-12, params.h * params.h);
   for (var w = 0u; w < params.nWires; w++) {
     let wire = wires[w];
+    let ia = u32(wire.a);
+    let ib = u32(wire.b);
     var j: u32;
-    if (wire.a == i) { j = wire.b; }
-    else if (wire.b == i) { j = wire.a; }
-    else { continue; }
+    var oix: f32;
+    var oiy: f32;
+    var ojx: f32;
+    var ojy: f32;
+    if (ia == i) {
+      j = ib;
+      oix = wire.oax; oiy = wire.oay;
+      ojx = wire.obx; ojy = wire.oby;
+    } else if (ib == i) {
+      j = ia;
+      oix = wire.obx; oiy = wire.oby;
+      ojx = wire.oax; ojy = wire.oay;
+    } else { continue; }
     let pj = parts[j];
-    let d = vec2f(pj.x - pi.x, pj.y - pi.y);
-    let dist = length(d);
-    if (dist < 1e-9) { continue; }
+    var d = vec2f(pj.x + ojx - (pi.x + oix), pj.y + ojy - (pi.y + oiy));
+    var dist = length(d);
+    if (dist != dist) { continue; }
+    if (dist < 1e-6) {
+      d = vec2f(select(-1.0, 1.0, i < j), 0.0);
+      dist = 1.0;
+    }
     let nrm = d / dist;
     let C = dist - wire.rest;
+    var soft = wire.soft;
+    if (!(soft > 0.0)) { soft = 1.0; }
+    let alpha = params.spanComp * soft / max(1e-12, params.h * params.h);
     let denom = pi.invMass + pj.invMass + alpha;
     if (denom < 1e-12) { continue; }
     let lam = -C / denom;

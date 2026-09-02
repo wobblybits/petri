@@ -15,6 +15,7 @@ describe('sim to sound', () => {
   it('a running soup makes sound, stays in range, and never runs away', () => {
     const sim = new Sim(360, 260);
     const params = defaultParams();
+    params.spawnInterval = 0;
     const engine = new AudioEngine();
     engine.armWithoutAudio();
     const posted: WorkletInMessage[] = [];
@@ -60,6 +61,7 @@ describe('sim to sound', () => {
   it('goes silent after the sim stops feeding it', () => {
     const sim = new Sim(360, 260);
     const params = defaultParams();
+    params.spawnInterval = 0;
     const engine = new AudioEngine();
     engine.armWithoutAudio();
     const posted: WorkletInMessage[] = [];
@@ -93,6 +95,7 @@ describe('sim to sound', () => {
   it('a visible knock still sounds when the frame is full of latches', () => {
     const sim = new Sim(200, 200);
     const params = defaultParams();
+    params.spawnInterval = 0;
     const engine = new AudioEngine();
     engine.armWithoutAudio();
     const posted: WorkletInMessage[] = [];
@@ -156,6 +159,7 @@ describe('sim to sound', () => {
   it('distinct knocks in one frame all sound', () => {
     const sim = new Sim(400, 200);
     const params = defaultParams();
+    params.spawnInterval = 0;
     const engine = new AudioEngine();
     engine.armWithoutAudio();
     const posted: WorkletInMessage[] = [];
@@ -197,6 +201,7 @@ describe('sim to sound', () => {
     const { posted } = (() => {
       const sim = new Sim(200, 200);
       const params = defaultParams();
+      params.spawnInterval = 0;
       const engine = new AudioEngine();
       engine.armWithoutAudio();
       const posted: WorkletInMessage[] = [];
@@ -226,6 +231,16 @@ describe('sim to sound', () => {
 
 describe('sustained level', () => {
   it('a full soup does not fade out as it runs', () => {
+    // Seeded: the soup auto-spawns and rewrites off Math.random, so an
+    // unseeded run moved the measured RMS around the threshold and this
+    // failed perhaps one time in two for no reason anyone could act on.
+    const realRandom = Math.random;
+    let rs = 20260831 >>> 0;
+    Math.random = () => {
+      rs = (rs * 1664525 + 1013904223) >>> 0;
+      return rs / 4294967296;
+    };
+    try {
     // Regression for a real cutout: with enough agents the awake count sits at
     // the voice cap, and the old steal threshold ratcheted away until it was
     // silencing every body. The net went ~20x quieter a few seconds in and
@@ -233,6 +248,13 @@ describe('sustained level', () => {
     // asked whether voices come *down* — never whether any survive.
     const sim = new Sim(700, 500);
     const params = defaultParams();
+    params.spawnInterval = 0;
+    // Upkeep off. This is a test of the voice manager — the fault it guards is
+    // voices ratcheting themselves to silence — and the relative bound below
+    // assumes a stable cast. With upkeep on, the soup starves down over the
+    // nine seconds and gets quieter for reasons that have nothing to do with
+    // the audio path.
+    params.upkeep = 0;
     const engine = new AudioEngine();
     engine.armWithoutAudio();
     const posted: WorkletInMessage[] = [];
@@ -272,9 +294,17 @@ describe('sustained level', () => {
     // second while the net is still latching itself together.
     const early = Math.max(secRms[1], secRms[2], secRms[3]);
     const late = Math.max(secRms[6], secRms[7], secRms[8]);
-    expect(early).toBeGreaterThan(0.01);
-    expect(late).toBeGreaterThan(0.01);
-    // It may settle somewhat as the net stops rewiring, but not collapse.
-    expect(late).toBeGreaterThan(early * 0.15);
+    // A floor that means "sounding", not "as loud as it was on the day this
+    // was written". The absolute number used to sit within 6% of the measured
+    // level, so any change to the mix — the wire-friction bed coming out, for
+    // one — failed it without the guarded fault having recurred.
+    expect(early, `early RMS ${early.toFixed(4)}`).toBeGreaterThan(0.002);
+    expect(late, `late RMS ${late.toFixed(4)}`).toBeGreaterThan(0.002);
+    // The actual regression: it may settle as the net stops rewiring, but the
+    // fault was a 20x collapse it never came back from.
+    expect(late, `${early.toFixed(4)} -> ${late.toFixed(4)}`).toBeGreaterThan(early * 0.15);
+    } finally {
+      Math.random = realRandom;
+    }
   });
 });

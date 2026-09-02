@@ -158,7 +158,32 @@ export default defineConfig({
     assetsInlineLimit: 0,
   },
   test: {
-    include: ['src/**/*.test.ts'],
     testTimeout: 60_000,
+    // Two projects, because they need opposite things from the runner.
+    //
+    // `suite` is correctness and runs its files in parallel. `bench` asserts
+    // against a frame budget, so it cannot share the machine with three other
+    // worker processes — measured 25 ms/frame contended against 13 ms alone,
+    // which made the suite fail at random. Random failure is worse than no
+    // assertion, so the budget moved to `npm run bench`, on its own.
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'suite',
+          include: ['src/**/*.test.ts'],
+          exclude: ['**/node_modules/**', '**/dist/**', 'src/**/*.perf.test.ts'],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'bench',
+          include: ['src/**/*.perf.test.ts'],
+          fileParallelism: false,
+          testTimeout: 300_000,
+        },
+      },
+    ],
   },
 });

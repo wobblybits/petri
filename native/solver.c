@@ -3,9 +3,11 @@
  * buffers.
  *
  * Body layout matches src/gpu/far-kernel.ts (12 floats / body).
- * FAR wires are 4 floats. NEAR wires are 12 floats in the same buffer.
- * Discs use a spatial hash, not N². FAR chord span is one Jacobi impulse.
- * NEAR wires are Gauss-Seidel XPBD (span + links + bend + shape) matching
+ * FAR wires are 8 floats (a, b, rest, pad, oax, oay, obx, oby). NEAR wires
+ * are 12 floats in the same buffer.
+ * Discs use a spatial hash, not N². FAR stem-span is one Jacobi impulse
+ * on the packed stem offsets, not a center-to-center stand-in.
+ * Disc contacts skip wired pairs (span owns that gap). NEAR wires are Gauss-Seidel XPBD (span + links + bend + shape) matching
  * src/chain.ts. Detailed pairs use SAT + angular contact matching
  * src/collide.ts and src/chain.ts solveContact. FAR-FAR stays disc.
  *
@@ -33,7 +35,7 @@ typedef v128_t v128;
 #define MAX_CELLS 65536
 #define MAX_PAIRS 262144
 #define STRIDE 12
-#define WIRE_FAR 4
+#define WIRE_FAR 8
 #define WIRE_NEAR 12
 #define NODE_STRIDE 8
 #define MAX_COLS 160
@@ -83,6 +85,12 @@ typedef v128_t v128;
 #define SLOP 0.35f
 #define SKIN 0.85f
 #define ERA_R 8.0f
+/* Radius of the disc with the same area as a Con/Dup glyph: the triangle is
+ * 1.312 * s^2 for s = 16 * scale, so r = s * sqrt(1.312 / PI). The
+ * circumscribed bound the SAT broad phase needs is ~1.73x that, and using it
+ * as a contact radius makes a net visibly inflate the moment the camera
+ * crosses the LOD line into disc-only contacts. */
+#define TRI_DISC_R 10.3395f
 #define CONTACT_COMP 4.0e-6f
 #define SPAN_COMP 3.0e-6f
 #define LINK_COMP 2.0e-6f
@@ -119,6 +127,19 @@ static float hits[MAX_HITS * HIT_STRIDE];
 static int g_hits = 0;
 static int32_t adj_off[MAX_BODIES + 1];
 static int32_t adj_nei[MAX_WIRES * 2];
+static int32_t disc_nei[MAX_BODIES * 3];
+static uint8_t disc_nfill[MAX_BODIES];
+static int32_t decl_comp[MAX_BODIES];
+static uint8_t steer_flags[MAX_BODIES];
+static int32_t steer_pwire[MAX_BODIES * 2];
+static float steer_noise[MAX_BODIES * 3];
+static float body_drive[MAX_BODIES];
+static float body_trail[MAX_BODIES];
+static float sparams[32];
+static int scent_cols = 0, scent_rows = 0;
+static float scent_ox = 0.f, scent_oy = 0.f, scent_ww = 1.f, scent_wh = 1.f;
+static uint8_t decl_sat[MAX_BODIES];
+static float body_mass[MAX_BODIES];
 static int32_t flock_id[MAX_BODIES];
 static int32_t flock_dist[MAX_BODIES];
 static int32_t flock_q[MAX_BODIES];
@@ -132,12 +153,12 @@ static float cs_s[MAX_BODIES];
 static float cs_a[MAX_BODIES];
 static uint8_t cs_ok[MAX_BODIES];
 static uint8_t pose_ok[MAX_BODIES];
-static uint8_t wdone[MAX_WIRES];
 static double tri_x[MAX_BODIES * 3];
 static double tri_y[MAX_BODIES * 3];
 static uint8_t tri_ok[MAX_BODIES];
 
 static float wrap_angle(float a) {
+  if (!isfinite(a)) return 0.f;
   if (a >= -PI && a < PI) return a;
   float r = fmodf(a, TAU);
   if (r >= PI) r -= TAU;
@@ -165,11 +186,18 @@ static void invalidate_pose(int i) {
 
 static int collect_pairs(int n, float cell_size) {
   if (n <= 0) return 0;
-  float minx = bodies[FAR_X], maxx = minx;
-  float miny = bodies[FAR_Y], maxy = miny;
-  for (int i = 1; i < n; i++) {
+  float minx = 0.f, maxx = 0.f, miny = 0.f, maxy = 0.f;
+  int any = 0;
+  for (int i = 0; i < n; i++) {
     float x = bodies[i * STRIDE + FAR_X];
     float y = bodies[i * STRIDE + FAR_Y];
+    if (!isfinite(x) || !isfinite(y)) continue;
+    if (!any) {
+      minx = maxx = x;
+      miny = maxy = y;
+      any = 1;
+      continue;
+    }
     if (x < minx) minx = x;
     if (x > maxx) maxx = x;
     if (y < miny) miny = y;
@@ -181,8 +209,14 @@ static int collect_pairs(int n, float cell_size) {
   int rows = (int)((maxy - miny) / cell) + 1;
   if (cols < 1) cols = 1;
   if (rows < 1) rows = 1;
-  while ((int64_t)cols * rows > max_cells) {
+  int guard = 0;
+  while ((int64_t)cols * rows > max_cells && guard++ < 64) {
     cell *= 2.f;
+    if (!isfinite(cell) || cell <= 0.f) {
+      cols = 1;
+      rows = 1;
+      break;
+    }
     cols = (int)((maxx - minx) / cell) + 1;
     rows = (int)((maxy - miny) / cell) + 1;
     if (cols < 1) cols = 1;
@@ -257,8 +291,43 @@ static void integrate(int n, float h) {
   }
 }
 
-static void disc(int n, float h) {
+static void fill_disc_nei(int n, int n_wires, int stride) {
+  memset(disc_nfill, 0, (size_t)n);
+  for (int i = 0; i < n; i++) {
+    disc_nei[i * 3] = -1;
+    disc_nei[i * 3 + 1] = -1;
+    disc_nei[i * 3 + 2] = -1;
+  }
+  if (n_wires <= 0 || stride <= 0) return;
+  for (int w = 0; w < n_wires; w++) {
+    int a = (int)wires[w * stride];
+    int b = (int)wires[w * stride + 1];
+    if (a < 0 || b < 0 || a >= n || b >= n || a == b) continue;
+    if (disc_nfill[a] < 3) {
+      disc_nei[a * 3 + disc_nfill[a]] = b;
+      disc_nfill[a]++;
+    }
+    if (disc_nfill[b] < 3) {
+      disc_nei[b * 3 + disc_nfill[b]] = a;
+      disc_nfill[b]++;
+    }
+  }
+}
+
+/* Cheap tiers collide discs where NEAR collides SAT polygons. Equal area is
+ * the closest single radius to where SAT actually settles. */
+static float disc_radius(int i) {
+  return kind[i] == 0 ? ERA_R * scale[i] : TRI_DISC_R * scale[i];
+}
+
+static int disc_wired(int i, int j) {
+  int o = i * 3;
+  return disc_nei[o] == j || disc_nei[o + 1] == j || disc_nei[o + 2] == j;
+}
+
+static void disc(int n, int n_wires, float h) {
   memset(delta, 0, (size_t)n * 2 * sizeof(float));
+  fill_disc_nei(n, n_wires, WIRE_FAR);
   float maxr = 0.f;
   for (int i = 0; i < n; i++) {
     float r = bodies[i * STRIDE + FAR_RADIUS];
@@ -275,7 +344,14 @@ static void disc(int n, float h) {
     float dy = pj[FAR_Y] - pi[FAR_Y];
     float dist = sqrtf(dx * dx + dy * dy);
     float keep = pi[FAR_RADIUS] + pj[FAR_RADIUS];
-    if (dist >= keep || dist < 1e-6f) continue;
+    if (dist >= keep) continue;
+    if (dist < 1e-6f) {
+      dx = 1.f;
+      dy = 0.f;
+      dist = 1.f;
+    } else if (disc_wired(i, j)) {
+      continue;
+    }
     float depth = keep - dist - SLOP;
     if (depth <= 0.f) continue;
     float wA = pi[FAR_INVMASS], wB = pj[FAR_INVMASS];
@@ -295,19 +371,32 @@ static void disc(int n, float h) {
 }
 
 static void span(int n, int n_wires, float h) {
-  memset(delta, 0, (size_t)n * 2 * sizeof(float));
-  float alpha = SPAN_COMP / fmaxf(1e-12f, h * h);
+  float invH2 = 1.f / fmaxf(1e-12f, h * h);
   for (int w = 0; w < n_wires; w++) {
-    int i = (int)wires[w * 4];
-    int j = (int)wires[w * 4 + 1];
-    float rest = wires[w * 4 + 2];
+    int o = w * WIRE_FAR;
+    int i = (int)wires[o];
+    int j = (int)wires[o + 1];
+    float rest = wires[o + 2];
+    /* Same per-wire softness NEAR uses (params.springK x the birth-slack
+     * ramp), so crossing the LOD line does not change the spring. */
+    float soft = wires[o + 3];
+    if (!isfinite(soft) || soft <= 0.f) soft = 1.f;
+    float alpha = SPAN_COMP * soft * invH2;
+    float oax = wires[o + 4], oay = wires[o + 5];
+    float obx = wires[o + 6], oby = wires[o + 7];
     if (i < 0 || j < 0 || i >= n || j >= n || i == j) continue;
+    if (!isfinite(rest) || rest < 0.f) continue;
     float *pi = bodies + i * STRIDE;
     float *pj = bodies + j * STRIDE;
-    float dx = pj[FAR_X] - pi[FAR_X];
-    float dy = pj[FAR_Y] - pi[FAR_Y];
+    float dx = (pj[FAR_X] + obx) - (pi[FAR_X] + oax);
+    float dy = (pj[FAR_Y] + oby) - (pi[FAR_Y] + oay);
     float dist = sqrtf(dx * dx + dy * dy);
-    if (dist < 1e-9f) continue;
+    if (!isfinite(dist)) continue;
+    if (dist < 1e-6f) {
+      dx = i < j ? 1.f : -1.f;
+      dy = 0.f;
+      dist = 1.f;
+    }
     float C = dist - rest;
     float wA = pi[FAR_INVMASS], wB = pj[FAR_INVMASS];
     float denom = wA + wB + alpha;
@@ -315,12 +404,12 @@ static void span(int n, int n_wires, float h) {
     float lam = -C / denom;
     float s = lam / dist;
     if (pi[FAR_LOCKED] < 0.5f && wA > 0.f) {
-      delta[i * 2] -= dx * s * wA;
-      delta[i * 2 + 1] -= dy * s * wA;
+      pi[FAR_X] -= dx * s * wA;
+      pi[FAR_Y] -= dy * s * wA;
     }
     if (pj[FAR_LOCKED] < 0.5f && wB > 0.f) {
-      delta[j * 2] += dx * s * wB;
-      delta[j * 2 + 1] += dy * s * wB;
+      pj[FAR_X] += dx * s * wB;
+      pj[FAR_Y] += dy * s * wB;
     }
   }
 }
@@ -740,69 +829,39 @@ static int wires_share(int u, int v) {
 }
 
 static void solve_wires_batched(int n, int n_wires, float h) {
-  memset(wdone, 0, (size_t)n_wires);
-  int cursor = 0;
-  while (cursor < n_wires) {
-    while (cursor < n_wires && wdone[cursor]) cursor++;
-    if (cursor >= n_wires) break;
-    if ((int)wires[cursor * WIRE_NEAR + WN_FLAGS] & WF_SKIP) {
-      wdone[cursor] = 1;
-      continue;
-    }
-    int batch[4];
-    int nb = 0;
-    for (int w = cursor; w < n_wires && nb < 4; w++) {
-      if (wdone[w]) continue;
-      if ((int)wires[w * WIRE_NEAR + WN_FLAGS] & WF_SKIP) {
-        wdone[w] = 1;
-        continue;
+  /* Consecutive independent full ropes only. Skip-ahead gathering scanned the
+   * rest of the mesh for every wire, so a 3-regular brick paid O(n^2)
+   * share-checks per substep and ran slower than scalar Gauss-Seidel. */
+  int w = 0;
+  while (w < n_wires) {
+#if HAVE_SIMD
+    if (w + 3 < n_wires) {
+      int nn0 = (int)wires[w * WIRE_NEAR + WN_NNODES];
+      int ok = nn0 >= 2;
+      for (int a = 0; a < 4 && ok; a++) {
+        float *W = wires + (w + a) * WIRE_NEAR;
+        int flags = (int)W[WN_FLAGS];
+        int nn = (int)W[WN_NNODES];
+        if ((flags & WF_SKIP) || !(flags & WF_FULL) || nn != nn0) ok = 0;
       }
-      int conflict = 0;
-      for (int k = cursor; k < w; k++) {
-        if (wdone[k]) continue;
-        int inb = 0;
-        for (int b = 0; b < nb; b++) {
-          if (batch[b] == k) {
-            inb = 1;
+      for (int a = 0; a < 4 && ok; a++) {
+        for (int b = a + 1; b < 4; b++) {
+          if (wires_share(w + a, w + b)) {
+            ok = 0;
             break;
           }
         }
-        if (inb) continue;
-        if (wires_share(k, w)) {
-          conflict = 1;
-          break;
-        }
-      }
-      if (conflict) continue;
-      for (int b = 0; b < nb; b++) {
-        if (wires_share(batch[b], w)) {
-          conflict = 1;
-          break;
-        }
-      }
-      if (conflict) continue;
-      batch[nb++] = w;
-    }
-#if HAVE_SIMD
-    if (nb == 4) {
-      int nn0 = (int)wires[batch[0] * WIRE_NEAR + WN_NNODES];
-      int ok = ((int)wires[batch[0] * WIRE_NEAR + WN_FLAGS] & WF_FULL) && nn0 >= 2;
-      for (int b = 1; b < 4 && ok; b++) {
-        int f = (int)wires[batch[b] * WIRE_NEAR + WN_FLAGS];
-        int nn = (int)wires[batch[b] * WIRE_NEAR + WN_NNODES];
-        if (!(f & WF_FULL) || nn != nn0) ok = 0;
       }
       if (ok) {
+        int batch[4] = {w, w + 1, w + 2, w + 3};
         solve_four_full(n, batch, h);
-        for (int b = 0; b < 4; b++) wdone[batch[b]] = 1;
+        w += 4;
         continue;
       }
     }
 #endif
-    for (int b = 0; b < nb; b++) {
-      solve_one_wire(n, wires + batch[b] * WIRE_NEAR, h);
-      wdone[batch[b]] = 1;
-    }
+    solve_one_wire(n, wires + w * WIRE_NEAR, h);
+    w++;
   }
 }
 
@@ -1189,6 +1248,381 @@ static void flock_force(int i, float wish_x, float wish_y, float turn_k) {
   else flock_pull(i, wish_x, wish_y);
 }
 
+/* ---------------------------------------------------------------- forces
+ *
+ * Per-body force passes lifted out of JS. They are the bulk of a large
+ * frame — measured at 9600 agents, port torques and steering alone were
+ * 25 ms of 74 ms — and they are pure arithmetic over data the solver
+ * already has packed, so there is nothing to gain from doing them in a
+ * Map of objects.
+ *
+ * These run before the constraint solve, on the same body array, and only
+ * touch velocity and angular velocity. Positions are left to the solver.
+ */
+
+/** Unit vector a port points along. Principal and Era stems point forward. */
+static void port_axis(int i, int slot, float *ux, float *uy) {
+  ensure_cs(i);
+  float sign = (kind[i] == 0 || slot == 0) ? 1.f : -1.f;
+  *ux = sign * cs_c[i];
+  *uy = sign * cs_s[i];
+}
+
+/**
+ * Signed angle from a port's axis to the direction its wire actually leaves
+ * in. Matches portExitAngle in src/chain.ts.
+ */
+static float port_exit_angle(int i, int slot, float tx, float ty) {
+  float ux, uy;
+  port_axis(i, slot, &ux, &uy);
+  float rx, ry;
+  attach(i, slot, &rx, &ry);
+  float dx = tx - (bodies[i * STRIDE + FAR_X] + rx);
+  float dy = ty - (bodies[i * STRIDE + FAR_Y] + ry);
+  if (sqrtf(dx * dx + dy * dy) < 1e-6f) return 0.f;
+  return atan2f(ux * dy - uy * dx, ux * dx + uy * dy);
+}
+
+/**
+ * Each wired port pulls its body toward pointing along its own wire.
+ * Mirrors Sim.portTorques: critically damped, and aux ports aim `splay` off
+ * their own axis so the uncrossed pose is the stable one.
+ */
+/* Steering parameters, packed rather than passed: the JS pass reads a dozen
+ * of them and a dozen-argument export is its own kind of bug. */
+#define SP_FACE_RADIUS 0
+#define SP_SNAP_RADIUS 1
+#define SP_SNAP_ARC 2
+#define SP_FACE_ATTRACT 3
+#define SP_SNAP_WELL 4
+#define SP_SENSOR_ANGLE 5
+#define SP_SENSOR_DIST 6
+#define SP_SENSE 7
+#define SP_TURN_RATE 8
+#define SP_STEP_SPEED 9
+#define SP_SWIM_TAU 10
+#define SP_SWIM_NOISE 11
+#define SP_ATTRACT_STRONG 12
+#define SP_ATTRACT_MEDIUM 13
+
+#define SF_P_FREE 1
+#define SF_STARVING 2
+#define SF_STUNNED 4
+
+float *solver_steer_params(void) { return sparams; }
+uint8_t *solver_steer_flags(void) { return steer_flags; }
+int32_t *solver_steer_pwire(void) { return steer_pwire; }
+float *solver_steer_noise(void) { return steer_noise; }
+float *solver_body_drive(void) { return body_drive; }
+float *solver_body_trail(void) { return body_trail; }
+
+void solver_scent_frame(int cols, int rows, float ox, float oy, float ww, float wh) {
+  scent_cols = cols;
+  scent_rows = rows;
+  scent_ox = ox;
+  scent_oy = oy;
+  scent_ww = ww <= 0.f ? 1.f : ww;
+  scent_wh = wh <= 0.f ? 1.f : wh;
+}
+
+/** One channel, bilinear, zero outside the window. Mirrors Fields.sample. */
+static float scent_sample(int ch, float x, float y) {
+  if (scent_cols <= 0 || scent_rows <= 0) return 0.f;
+  float gx = ((x - scent_ox) / scent_ww) * (float)scent_cols;
+  float gy = ((y - scent_oy) / scent_wh) * (float)scent_rows;
+  int i0 = (int)floorf(gx), j0 = (int)floorf(gy);
+  float tx = gx - (float)i0, ty = gy - (float)j0;
+  float acc = 0.f;
+  for (int dj = 0; dj < 2; dj++) {
+    for (int di = 0; di < 2; di++) {
+      int i = i0 + di, j = j0 + dj;
+      float v = 0.f;
+      if (i >= 0 && j >= 0 && i < scent_cols && j < scent_rows) {
+        v = scent[(j * scent_cols + i) * CHANNELS + ch];
+      }
+      float wx = di ? tx : 1.f - tx;
+      float wy = dj ? ty : 1.f - ty;
+      acc += v * wx * wy;
+    }
+  }
+  return acc;
+}
+
+/** Kind-weighted blend of the channels an agent can smell. Mirrors mixScent. */
+static float mix_scent(int i, float x, float y) {
+  float S = sparams[SP_ATTRACT_STRONG], M = sparams[SP_ATTRACT_MEDIUM];
+  float con = scent_sample(0, x, y);
+  float dup = scent_sample(1, x, y);
+  float aux = scent_sample(3, x, y);
+  if (kind[i] == 0) return S * (con + dup) + M * aux;
+  if (kind[i] == 1) return M * (con + aux);
+  return M * (dup + aux);
+}
+
+static float slow_factor(float trail) { return 1.f / (1.f + trail / 28.f); }
+
+static float turn_boost(float trail) {
+  float slow = slow_factor(trail);
+  float linear = slow * slow;
+  float spin = 1.f - linear;
+  float v = 1.f + spin / fmaxf(0.1f, linear);
+  return v < 1.f ? 1.f : (v > 8.f ? 8.f : v);
+}
+
+/** Port tip, the snap and wire endpoint. Mirrors portWorld. */
+static void port_world(int i, int slot, float *px, float *py) {
+  ensure_cs(i);
+  float lx, ly;
+  stem_local(kind[i], slot, scale[i], &lx, &ly);
+  float ex = (kind[i] == 0 || slot == 0) ? 8.f : -8.f;
+  float tipx = (lx + ex * scale[i]);
+  float tipy = ly;
+  float c = cs_c[i], sn = cs_s[i];
+  *px = bodies[i * STRIDE + FAR_X] + tipx * c - tipy * sn;
+  *py = bodies[i * STRIDE + FAR_Y] + tipx * sn + tipy * c;
+}
+
+/**
+ * Foraging, face attraction, the snap well and active locomotion, in one
+ * pass. Mirrors Sim.steer.
+ *
+ * The noise that drives the Ornstein-Uhlenbeck swimming term is handed in
+ * from the host rather than generated here, so the pond stays reproducible
+ * from a seeded Math.random and the determinism harness keeps working.
+ */
+void solver_steer(int n, float dt) {
+  if (n <= 0 || dt <= 0.f) return;
+  if (n > MAX_BODIES) n = MAX_BODIES;
+  float faceR = sparams[SP_FACE_RADIUS];
+  float snapR = sparams[SP_SNAP_RADIUS];
+  float near = faceR > snapR ? faceR : snapR;
+  if (near < 1.f) near = 1.f;
+  int np = collect_pairs(n, near);
+  float arcCos = cosf(fminf(sparams[SP_SNAP_ARC], PI * 0.49f));
+
+  /* Bias first, for every body, then steer. The JS pass interleaves the two
+   * but bias reads only positions and headings, which no part of it moves. */
+  for (int i = 0; i < n; i++) {
+    delta[i * 2] = 0.f;
+    delta[i * 2 + 1] = 0.f;
+  }
+  for (int i = 0; i < n; i++) {
+    if (bodies[i * STRIDE + FAR_LOCKED] >= 0.5f) continue;
+    int pj = steer_pwire[i * 2];
+    if (pj < 0 || pj >= n) continue;
+    float tx, ty, ox, oy;
+    port_world(i, 0, &tx, &ty);
+    port_world(pj, steer_pwire[i * 2 + 1], &ox, &oy);
+    delta[i * 2] += ox - tx;
+    delta[i * 2 + 1] += oy - ty;
+  }
+  for (int k = 0; k < np; k++) {
+    int a = pair_a[k], b = pair_b[k];
+    for (int turn = 0; turn < 2; turn++) {
+      int i = turn ? b : a;
+      int j = turn ? a : b;
+      float *pi = bodies + i * STRIDE;
+      float *pj2 = bodies + j * STRIDE;
+      if (pi[FAR_LOCKED] >= 0.5f || pj2[FAR_LOCKED] >= 0.5f) continue;
+      if (!(steer_flags[i] & SF_P_FREE) || !(steer_flags[j] & SF_P_FREE)) continue;
+      if (steer_flags[i] & SF_STUNNED) continue;
+      if (steer_flags[j] & SF_STUNNED) continue;
+      float dx = pj2[FAR_X] - pi[FAR_X];
+      float dy = pj2[FAR_Y] - pi[FAR_Y];
+      float dist = sqrtf(dx * dx + dy * dy);
+      if (dist < 1e-4f || dist > faceR) continue;
+      float nx = dx / dist, ny = dy / dist;
+      ensure_cs(i);
+      float aFace = cs_c[i] * nx + cs_s[i] * ny;
+      ensure_cs(j);
+      float bFace = cs_c[j] * -nx + cs_s[j] * -ny;
+      if (aFace > 0.35f && bFace > 0.35f) {
+        float g = sparams[SP_FACE_ATTRACT] * aFace * bFace;
+        delta[i * 2] += nx * g;
+        delta[i * 2 + 1] += ny * g;
+      }
+      /* Snap well: the other body's principal tip inside this port's arc. */
+      float opx, opy, tipx, tipy;
+      port_world(j, 0, &opx, &opy);
+      port_world(i, 0, &tipx, &tipy);
+      float sdx = opx - tipx, sdy = opy - tipy;
+      float sdist = sqrtf(sdx * sdx + sdy * sdy);
+      if (sdist > snapR || sdist < 1e-6f) continue;
+      float ux, uy;
+      port_axis(i, 0, &ux, &uy);
+      if ((sdx * ux + sdy * uy) / sdist < arcCos) continue;
+      float well = (1.f - sdist / snapR) * sparams[SP_SNAP_WELL];
+      delta[i * 2] += (sdx / sdist) * well;
+      delta[i * 2 + 1] += (sdy / sdist) * well;
+    }
+  }
+
+  float arc = sparams[SP_SENSOR_ANGLE];
+  float sdist = sparams[SP_SENSOR_DIST];
+  float gain = 0.35f + sparams[SP_SENSE] / 500.f;
+  float turnRate = sparams[SP_TURN_RATE];
+  float stepSpeed = sparams[SP_STEP_SPEED];
+  float tau = fmaxf(0.05f, sparams[SP_SWIM_TAU]);
+  for (int i = 0; i < n; i++) {
+    float *p = bodies + i * STRIDE;
+    if (p[FAR_LOCKED] >= 0.5f) continue;
+    float bx = delta[i * 2], by = delta[i * 2 + 1];
+    float bm = sqrtf(bx * bx + by * by);
+    float head = p[FAR_HEADING];
+    float leftA = head - arc, rightA = head + arc;
+    float score[2];
+    for (int e = 0; e < 2; e++) {
+      float a = e ? rightA : leftA;
+      float ca = cosf(a), sa = sinf(a);
+      float v = mix_scent(i, p[FAR_X] + ca * sdist, p[FAR_Y] + sa * sdist) * gain;
+      if (bm > 1e-6f) v += (1.6f * (bx * ca + by * sa)) / bm;
+      score[e] = v;
+    }
+    float left = score[0], right = score[1];
+    float dead = 0.05f * (fabsf(left) + fabsf(right)) + 0.03f;
+    float best = head;
+    if (left > right + dead) best = leftA;
+    else if (right > left + dead) best = rightA;
+    float err = wrap_angle(best - head);
+    float trail = mix_scent(i, p[FAR_X], p[FAR_Y]);
+    body_trail[i] = trail;
+    float slow = slow_factor(trail);
+    float boost = turn_boost(trail);
+    float kp = turnRate * 6.f * boost;
+    float kd = (turnRate * 2.f) / sqrtf(boost);
+    if (!(steer_flags[i] & SF_P_FREE)) continue;
+    p[FAR_OMEGA] += (kp * err - kd * p[FAR_OMEGA]) * dt;
+    if (stepSpeed <= 0.f) continue;
+    float cruise = stepSpeed * slow;
+    float r = steer_noise[i * 3] + steer_noise[i * 3 + 1] + steer_noise[i * 3 + 2] - 1.5f;
+    float kick = sparams[SP_SWIM_NOISE] * cruise * sqrtf(dt / tau) * r * 2.f;
+    float drive = body_drive[i] + ((cruise - body_drive[i]) / tau) * dt + kick;
+    float lo = -cruise * 0.4f, hi = cruise * 2.2f;
+    body_drive[i] = drive < lo ? lo : (drive > hi ? hi : drive);
+    ensure_cs(i);
+    float hx = cs_c[i], hy = cs_s[i];
+    float along = p[FAR_VX] * hx + p[FAR_VY] * hy;
+    float blend = 1.f - expf(-6.f * dt);
+    float dAlong = (body_drive[i] - along) * blend;
+    p[FAR_VX] += dAlong * hx;
+    p[FAR_VY] += dAlong * hy;
+  }
+}
+
+/**
+ * Personal space around a fully wired body: a soft inverse-square push
+ * against bodies from *other* nets. Mirrors Sim.declutter.
+ *
+ * `decl_sat` is whether the body has every port filled, `decl_comp` its
+ * connected-component root; same-net crowding is left to flocking. Pair
+ * enumeration comes from the spatial hash rather than the JS PairGrid, so
+ * pairs arrive in a different order and the accumulated velocity differs in
+ * the last bits — that is the f32 tolerance the ports are held to, not a
+ * difference in what the force is.
+ */
+void solver_declutter(int n, float reach, float at_reach, float cutoff,
+                      float floor_frac, float dt) {
+  if (n <= 1 || dt <= 0.f || cutoff <= 0.f) return;
+  if (n > MAX_BODIES) n = MAX_BODIES;
+  int np = collect_pairs(n, cutoff);
+  float floor_d = reach * floor_frac;
+  for (int k = 0; k < np; k++) {
+    int i = pair_a[k], j = pair_b[k];
+    if (!decl_sat[i] && !decl_sat[j]) continue;
+    if (decl_comp[i] == decl_comp[j]) continue;
+    float *pi = bodies + i * STRIDE;
+    float *pj = bodies + j * STRIDE;
+    float dx = pj[FAR_X] - pi[FAR_X];
+    float dy = pj[FAR_Y] - pi[FAR_Y];
+    float dist = sqrtf(dx * dx + dy * dy);
+    if (dist > cutoff || dist < 1e-6f) continue;
+    float d = dist < floor_d ? floor_d : dist;
+    float ratio = reach / d;
+    float force = at_reach * ratio * ratio;
+    float nx = dx / dist, ny = dy / dist;
+    if (pi[FAR_LOCKED] < 0.5f) {
+      float invM = 1.f / fmaxf(0.08f, body_mass[i]);
+      pi[FAR_VX] -= nx * force * invM * dt;
+      pi[FAR_VY] -= ny * force * invM * dt;
+    }
+    if (pj[FAR_LOCKED] < 0.5f) {
+      float invM = 1.f / fmaxf(0.08f, body_mass[j]);
+      pj[FAR_VX] += nx * force * invM * dt;
+      pj[FAR_VY] += ny * force * invM * dt;
+    }
+  }
+}
+
+/**
+ * Pull toward the flock's eased centre of mass, for small components only.
+ * Mirrors Sim.gravitate: `decl_comp` carries the component root and
+ * `comp_size` how many bodies share it, so a large net is left alone.
+ */
+void solver_gravitate(int n, float cx, float cy, float base, float reach,
+                      int max_comp, float dt) {
+  if (n <= 0 || base <= 0.f || dt <= 0.f) return;
+  if (n > MAX_BODIES) n = MAX_BODIES;
+  for (int i = 0; i < n; i++) {
+    float *p = bodies + i * STRIDE;
+    if (p[FAR_LOCKED] >= 0.5f) continue;
+    /* decl_sat doubles as the "component is small enough" flag here; the host
+     * knows the sizes already and packing a byte beats rebuilding them. */
+    if (!decl_sat[i]) continue;
+    (void)max_comp;
+    float dx = cx - p[FAR_X];
+    float dy = cy - p[FAR_Y];
+    float dist = sqrtf(dx * dx + dy * dy);
+    if (dist < 1e-6f) continue;
+    float pull = (base * (dist < reach ? dist : reach)) / dist;
+    p[FAR_VX] += dx * pull * dt;
+    p[FAR_VY] += dy * pull * dt;
+  }
+}
+
+int32_t *solver_decl_comp(void) { return decl_comp; }
+uint8_t *solver_decl_sat(void) { return decl_sat; }
+float *solver_body_mass(void) { return body_mass; }
+
+void solver_port_torques(int n, int n_wires, float gain, float splay, float dt) {
+  if (n <= 0 || n_wires <= 0 || gain <= 0.f || dt <= 0.f) return;
+  if (n > MAX_BODIES) n = MAX_BODIES;
+  refresh_poses(n);
+  for (int w = 0; w < n_wires; w++) {
+    float *W = wires + w * WIRE_NEAR;
+    int i = (int)W[WN_A];
+    int j = (int)W[WN_B];
+    if (i < 0 || j < 0 || i >= n || j >= n) continue;
+    int si = (int)W[WN_ASLOT];
+    int sj = (int)W[WN_BSLOT];
+    float rix, riy, rjx, rjy;
+    attach(i, si, &rix, &riy);
+    attach(j, sj, &rjx, &rjy);
+    /* Both targets read from the poses as they were at the top of the wire,
+     * the way the JS pass reads stemWorld for both ends before either moves. */
+    float tix = bodies[j * STRIDE + FAR_X] + rjx;
+    float tiy = bodies[j * STRIDE + FAR_Y] + rjy;
+    float tjx = bodies[i * STRIDE + FAR_X] + rix;
+    float tjy = bodies[i * STRIDE + FAR_Y] + riy;
+    for (int e = 0; e < 2; e++) {
+      int b = e == 0 ? i : j;
+      int slot = e == 0 ? si : sj;
+      float tx = e == 0 ? tix : tjx;
+      float ty = e == 0 ? tiy : tjy;
+      float *p = bodies + b * STRIDE;
+      if (p[FAR_LOCKED] >= 0.5f) continue;
+      float invI = inv_inertia[b];
+      if (invI <= 0.f) continue;
+      float I = 1.f / invI;
+      float damp = 1.8f * sqrtf(gain * I);
+      float lx, ly;
+      stem_local(kind[b], slot, scale[b], &lx, &ly);
+      float want = slot == 0 ? 0.f : (ly < 0.f ? 1.f : -1.f) * splay;
+      float err = wrap_angle(port_exit_angle(b, slot, tx, ty) - want);
+      p[FAR_OMEGA] += (gain * err - damp * p[FAR_OMEGA]) * dt * invI;
+    }
+  }
+}
+
 void solver_flock(int n, float align, float sep, float dt, float turn_rate, float desired, int max_hops) {
   if (n <= 0 || dt <= 0.f) return;
   if (n > MAX_BODIES) n = MAX_BODIES;
@@ -1255,12 +1689,13 @@ void solver_flock(int n, float align, float sep, float dt, float turn_rate, floa
   }
 }
 
-static int near_contacts(int n, float h, int reset_hits, int rebuild_pairs) {
+static int near_contacts(int n, int n_wires, float h, int reset_hits, int rebuild_pairs) {
   if (reset_hits) g_hits = 0;
   if (n <= 0 || h <= 0.f) return 0;
   if (n > MAX_BODIES) n = MAX_BODIES;
   memset(delta, 0, (size_t)n * 2 * sizeof(float));
   memset(tri_ok, 0, (size_t)n);
+  fill_disc_nei(n, n_wires, WIRE_NEAR);
   int np = g_pairs;
   if (rebuild_pairs || np <= 0) {
     float maxr = 0.f;
@@ -1281,10 +1716,11 @@ static int near_contacts(int n, float h, int reset_hits, int rebuild_pairs) {
       solve_sat_contact(i, j, h);
       continue;
     }
+    if (disc_wired(i, j)) continue;
     float dx = pj[FAR_X] - pi[FAR_X];
     float dy = pj[FAR_Y] - pi[FAR_Y];
     float dist = sqrtf(dx * dx + dy * dy);
-    float keep = pi[FAR_RADIUS] + pj[FAR_RADIUS];
+    float keep = disc_radius(i) + disc_radius(j);
     if (dist >= keep || dist < 1e-6f) continue;
     float depth = keep - dist - SLOP;
     if (depth <= 0.f) continue;
@@ -1341,12 +1777,9 @@ void solver_step_far(int n, int n_wires, float dt, int substeps) {
   float h = dt / (float)substeps;
   for (int s = 0; s < substeps; s++) {
     integrate(n, h);
-    disc(n, h);
+    disc(n, n_wires, h);
     apply(n);
-    if (n_wires > 0) {
-      span(n, n_wires, h);
-      apply(n);
-    }
+    if (n_wires > 0) span(n, n_wires, h);
     finalize(n, h);
   }
 }
@@ -1422,8 +1855,8 @@ void solver_near_finalize(int n, int n_wires, float h, float rope_keep, int held
   finalize_nodes(n_wires, h, rope_keep);
 }
 
-int solver_near_contacts(int n, float h) {
-  return near_contacts(n, h, 1, 1);
+int solver_near_contacts(int n, int n_wires, float h) {
+  return near_contacts(n, n_wires, h, 1, 1);
 }
 
 void solver_step_near(int n, int n_wires, float dt, int substeps,
@@ -1442,7 +1875,7 @@ void solver_step_near(int n, int n_wires, float dt, int substeps,
     refresh_poses(n);
     solve_wires_batched(n, n_wires, h);
     solve_grab(held, gx, gy, h);
-    near_contacts(n, h, 0, !have_pairs);
+    near_contacts(n, n_wires, h, 0, !have_pairs);
     have_pairs = 1;
     finalize(n, h);
     grab_cap(n, held, grab_max);

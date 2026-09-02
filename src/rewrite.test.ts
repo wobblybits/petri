@@ -1,4 +1,22 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+// Seeded. The oscillator swims, and swimming draws coloured noise from
+// Math.random, so an unseeded run is a different trajectory every time — and
+// worse, vitest reuses a worker across files, so whichever file ran before
+// this one decided the stream. Two of these tests measure rope geometry
+// during a commute to within a few pixels, which is not a question an
+// arbitrary random walk can answer repeatably.
+const realRandom = Math.random;
+beforeEach(() => {
+  let s = 20260902 >>> 0;
+  Math.random = () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+});
+afterEach(() => {
+  Math.random = realRandom;
+});
 import { bezierLength } from './curve.ts';
 import { portLocal, stemRoot, stemWorld } from './agents.ts';
 import { segmentsIntersect } from './geom.ts';
@@ -543,7 +561,7 @@ describe('rewrite leftover ropes', () => {
     params.spawnInterval = 0;
     loadPreset(sim, 'oscillator', params);
     let rewrites = 0;
-    let worstExtra = 0;
+    let worstRatio = 0;
     for (let f = 0; f < 400; f++) {
       const nRw = sim.rewrites.length;
       sim.step(1 / 60, params);
@@ -554,13 +572,19 @@ describe('rewrite leftover ropes', () => {
           const span = handoff
             ? Math.hypot(handoff.bx - handoff.ax, handoff.by - handoff.ay)
             : chordSpan(sim, wire);
-          worstExtra = Math.max(worstExtra, wire.lastLen - span);
+          if (span > 1) worstRatio = Math.max(worstRatio, wire.lastLen / span);
         }
       }
       if (rewrites >= 2 && sim.rewrites.length === 0) break;
     }
     expect(rewrites).toBeGreaterThanOrEqual(1);
-    expect(worstExtra, `leftover rope ${worstExtra.toFixed(1)} px longer than its chord`).toBeLessThan(24);
+    // A ratio, not a pixel count. How much rope a leftover carries scales with
+    // the wire it came from, and energy changed *when* a commute can fire —
+    // this net now reaches its second one around frame 115 with a 30 px chord
+    // rather than frame 20 with a 7 px one. The bow is the same shape either
+    // way: measured 2.67x the chord with the energy economy on and 2.67x with
+    // it switched off entirely. A whip is an order of magnitude, not a third.
+    expect(worstRatio, `leftover rope ${worstRatio.toFixed(2)}x its chord`).toBeLessThan(4);
   });
 
   it('does not haul leftover eras into the collapsing pair', () => {
@@ -568,21 +592,43 @@ describe('rewrite leftover ropes', () => {
     const params = defaultParams();
     params.spawnInterval = 0;
     loadPreset(sim, 'oscillator', params);
-    const era0 = [...sim.agents.values()]
-      .filter((a) => a.kind === 'era')
-      .map((a) => ({ id: a.id, x: a.x, y: a.y }));
+    // Measured across the rewrite, not from the start of the run. The eras
+    // swim on their own the whole time, and energy moved the first commute
+    // from about frame 20 to about frame 115, so drift from t=0 would be
+    // mostly ninety frames of ordinary foraging. What this test is about is
+    // whether the collapsing pair *hauls* them, which is a question about the
+    // window the rewrite is open.
+    let era0: { id: number; x: number; y: number; toPair: number }[] = [];
+    let mid = { x: 0, y: 0 };
     for (let f = 0; f < 300; f++) {
       const nRw = sim.rewrites.length;
       sim.step(1 / 60, params);
+      if (nRw === 0 && sim.rewrites.length > 0) {
+        const rw = sim.rewrites[0];
+        mid = { x: rw.midX, y: rw.midY };
+        era0 = [...sim.agents.values()]
+          .filter((a) => a.kind === 'era')
+          .map((a) => ({
+            id: a.id,
+            x: a.x,
+            y: a.y,
+            toPair: Math.hypot(a.x - mid.x, a.y - mid.y),
+          }));
+      }
       if (nRw > 0 && sim.rewrites.length === 0) break;
     }
-    let drift = 0;
+    expect(era0.length, 'a rewrite has to have started').toBeGreaterThan(0);
+    // How much *closer to the pair* they got, not how far they moved. The eras
+    // forage the whole time the rewrite is open, and that motion is isotropic;
+    // hauling is the directed part. Measuring total displacement counted a
+    // swim away from the pair as if it were a pull toward it.
+    let pulled = 0;
     for (const e of era0) {
       const a = sim.agents.get(e.id);
       if (!a) continue;
-      drift = Math.max(drift, Math.hypot(a.x - e.x, a.y - e.y));
+      pulled = Math.max(pulled, e.toPair - Math.hypot(a.x - mid.x, a.y - mid.y));
     }
-    expect(drift).toBeLessThan(20);
+    expect(pulled, `worst era pulled ${pulled.toFixed(1)} px toward the pair`).toBeLessThan(20);
   });
 
   it('hands leftover chords to the birth poses instead of jumping at commit', () => {

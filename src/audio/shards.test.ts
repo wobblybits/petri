@@ -10,7 +10,6 @@ import {
   isSoupSlot,
   partitionPairs,
   splitTopology,
-  wireSlots,
 } from './shards.ts';
 import type { NetTopology } from './types.ts';
 
@@ -265,12 +264,4 @@ describe('splitTopology', () => {
     expect(parts[0]).toEqual([{ agentA: 3, agentB: 4, load: 1 }]);
   });
 
-  it('maps a wire to the slot of its bodies', () => {
-    const shardOf = new Map([
-      [1, 2],
-      [2, 2],
-    ]);
-    const t = topo([1, 2], [[9, 1, 2]]);
-    expect(wireSlots(t, shardOf).get(9)).toBe(2);
-  });
 });

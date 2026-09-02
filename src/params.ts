@@ -75,6 +75,26 @@ export interface Params {
   soupCount: number;
   /** Seconds between automatic free-agent spawns (0 = off). */
   spawnInterval: number;
+  /** World-space size of one energy cell. */
+  energyCell: number;
+  /**
+   * Free energy in an unvisited cell. A cell holds a whole extra, so an agent
+   * arriving on untouched ground fills in one step and the grid, not the
+   * charging rate, is what the net is competing over.
+   */
+  ambientEnergy: number;
+  /** Extra drained per second. 0 = off. Hitting −1 kills the agent. */
+  upkeep: number;
+  /**
+   * Momentum a body recoils with per unit of energy it pumps to a neighbour,
+   * equal and opposite. 0 = off.
+   *
+   * Stable well past the slider's range — a seeded soup is still calm at 800
+   * and only comes apart near 3000. The ceiling is low because the visible
+   * events are one-off transfers of most of a unit, and 20 makes one of those
+   * a ~56 px/s nudge on an Era against settled speeds around 50.
+   */
+  transportRecoil: number;
 }
 
 export function defaultParams(): Params {
@@ -103,7 +123,7 @@ export function defaultParams(): Params {
     wireSpanAge: 10,
     wireTaut: 1.08,
     wireMinRest: 40,
-    wireShrink: 0.9,
+    wireShrink: 0.2,
     eraMass: 0.45,
     nodeMass: 1,
     turnRate: 1.6,
@@ -117,9 +137,13 @@ export function defaultParams(): Params {
     gravity: 0,
     flockAlign: 5.5,
     flockSep: 36,
-    maxAgents: 1000,
-    soupCount: 28,
-    spawnInterval: 1,
+    maxAgents: 3000,
+    soupCount: 1500,
+    spawnInterval: 0.5,
+    energyCell: 48,
+    ambientEnergy: 1,
+    upkeep: 0.025,
+    transportRecoil: 20,
   };
 }
 
@@ -164,6 +188,10 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'wireTaut', label: 'Taut ratio', min: 1, max: 1.5, step: 0.01 },
   { key: 'eraMass', label: 'Era mass', min: 0.15, max: 2, step: 0.05 },
   { key: 'nodeMass', label: 'Con/Dup mass', min: 0.3, max: 4, step: 0.05 },
-  { key: 'maxAgents', label: 'Max agents', min: 8, max: 1000, step: 1 },
+  { key: 'maxAgents', label: 'Max agents', min: 8, max: 8000, step: 1 },
   { key: 'spawnInterval', label: 'Auto spawn (s)', min: 0, max: 30, step: 0.5 },
+  { key: 'energyCell', label: 'Energy cell', min: 16, max: 160, step: 1 },
+  { key: 'ambientEnergy', label: 'Ambient energy', min: 0, max: 2, step: 0.05 },
+  { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
+  { key: 'transportRecoil', label: 'Pump recoil', min: 0, max: 200, step: 5 },
 ];

@@ -45,6 +45,8 @@ export function loadPreset(sim: Sim, name: PresetName, params: Params): void {
     const d = sim.spawn('dup', cx + 34, cy, Math.PI, params, true);
     if (!c || !d) return;
     sim.wire(c.id, 'p', d.id, 'p', params);
+    c.extra = 1;
+    d.extra = 1;
     plugAux(sim, c, 'l', params);
     plugAux(sim, c, 'r', params);
     plugAux(sim, d, 'l', params);
@@ -73,4 +75,6 @@ export function loadPreset(sim: Sim, name: PresetName, params: Params): void {
   sim.wire(dup.id, 'l', era1.id, 'p', params);
   sim.wire(con.id, 'r', era2.id, 'p', params);
   sim.wire(dup.id, 'r', con.id, 'l', params);
+  dup.extra = 1;
+  con.extra = 1;
 }

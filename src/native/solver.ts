@@ -1,5 +1,5 @@
 import { SOLVER_WASM_B64 } from './solver.b64.ts';
-import { FAR_STRIDE, FAR_SUBSTEPS, stepFarKernel } from '../gpu/far-kernel.ts';
+import { FAR_STRIDE, FAR_SUBSTEPS, FAR_WIRE_STRIDE, stepFarKernel } from '../gpu/far-kernel.ts';
 import type { Fields } from '../fields.ts';
 
 export const WIRE_NEAR_STRIDE = 12;
@@ -81,7 +81,21 @@ type Exp = {
     held: number,
     grabMax: number,
   ): void;
-  solver_near_contacts(n: number, h: number): number;
+  solver_near_contacts(n: number, nWires: number, h: number): number;
+  solver_port_torques(n: number, nWires: number, gain: number, splay: number, dt: number): void;
+  solver_steer(n: number, dt: number): void;
+  solver_steer_params(): number;
+  solver_steer_flags(): number;
+  solver_steer_pwire(): number;
+  solver_steer_noise(): number;
+  solver_body_drive(): number;
+  solver_body_trail(): number;
+  solver_scent_frame(cols: number, rows: number, ox: number, oy: number, ww: number, wh: number): void;
+  solver_declutter(n: number, reach: number, atReach: number, cutoff: number, floorFrac: number, dt: number): void;
+  solver_gravitate(n: number, cx: number, cy: number, base: number, reach: number, maxComp: number, dt: number): void;
+  solver_decl_comp(): number;
+  solver_decl_sat(): number;
+  solver_body_mass(): number;
   solver_step_near(
     n: number,
     nWires: number,
@@ -148,6 +162,15 @@ export class NativeSolver {
   adjOff: Int32Array | null = null;
   adjNei: Int32Array | null = null;
   flockId: Int32Array | null = null;
+  declComp: Int32Array | null = null;
+  steerParams: Float32Array | null = null;
+  steerFlags: Uint8Array | null = null;
+  steerPwire: Int32Array | null = null;
+  steerNoise: Float32Array | null = null;
+  bodyDrive: Float32Array | null = null;
+  bodyTrail: Float32Array | null = null;
+  declSat: Uint8Array | null = null;
+  bodyMass: Float32Array | null = null;
   flockMass: Float32Array | null = null;
   swim: Uint8Array | null = null;
   adjCap = 0;
@@ -176,7 +199,7 @@ export class NativeSolver {
       this.scentCap = exp.solver_scent_cap();
       this.wallCap = exp.solver_wall_cap();
       this.bodies = new Float32Array(mem.buffer, exp.solver_bodies(), this.bodyCap * FAR_STRIDE);
-      this.wires = new Float32Array(mem.buffer, exp.solver_wires(), this.wireCap * 4);
+      this.wires = new Float32Array(mem.buffer, exp.solver_wires(), this.wireCap * FAR_WIRE_STRIDE);
       this.wiresNear = new Float32Array(mem.buffer, exp.solver_wires(), this.wireCap * WIRE_NEAR_STRIDE);
       this.nodes = new Float32Array(mem.buffer, exp.solver_nodes(), this.nodeCap * NODE_STRIDE);
       this.invInertia = new Float32Array(mem.buffer, exp.solver_inv_inertia(), this.bodyCap);
@@ -191,6 +214,15 @@ export class NativeSolver {
       this.adjOff = new Int32Array(mem.buffer, exp.solver_adj_off(), this.bodyCap + 1);
       this.adjNei = new Int32Array(mem.buffer, exp.solver_adj_nei(), this.adjCap);
       this.flockId = new Int32Array(mem.buffer, exp.solver_flock_id(), this.bodyCap);
+      this.declComp = new Int32Array(mem.buffer, exp.solver_decl_comp(), this.bodyCap);
+      this.steerParams = new Float32Array(mem.buffer, exp.solver_steer_params(), 32);
+      this.steerFlags = new Uint8Array(mem.buffer, exp.solver_steer_flags(), this.bodyCap);
+      this.steerPwire = new Int32Array(mem.buffer, exp.solver_steer_pwire(), this.bodyCap * 2);
+      this.steerNoise = new Float32Array(mem.buffer, exp.solver_steer_noise(), this.bodyCap * 3);
+      this.bodyDrive = new Float32Array(mem.buffer, exp.solver_body_drive(), this.bodyCap);
+      this.bodyTrail = new Float32Array(mem.buffer, exp.solver_body_trail(), this.bodyCap);
+      this.declSat = new Uint8Array(mem.buffer, exp.solver_decl_sat(), this.bodyCap);
+      this.bodyMass = new Float32Array(mem.buffer, exp.solver_body_mass(), this.bodyCap);
       this.flockMass = new Float32Array(mem.buffer, exp.solver_flock_mass(), this.bodyCap);
       this.swim = new Uint8Array(mem.buffer, exp.solver_swim(), this.bodyCap);
       this.scent = new Float32Array(mem.buffer, exp.solver_scent(), this.scentCap);
@@ -230,9 +262,22 @@ export class NativeSolver {
       return false;
     }
     this.bodies.set(data.subarray(0, n * FAR_STRIDE));
-    if (nWires > 0) this.wires.set(wires.subarray(0, nWires * 4));
+    if (nWires > 0) this.wires.set(wires.subarray(0, nWires * FAR_WIRE_STRIDE));
     exp.solver_step_far(n, nWires, dt, substeps);
     data.set(this.bodies.subarray(0, n * FAR_STRIDE));
+    return true;
+  }
+
+  /**
+   * The same FAR step against bodies the caller has already written into
+   * `bodies` and `wires`. Saves a copy of the whole scene in and another out;
+   * `stepFar` above stays for the GPU path, which packs into its own array.
+   */
+  stepFarInPlace(n: number, nWires: number, dt: number, substeps = FAR_SUBSTEPS): boolean {
+    const exp = this.exp;
+    if (!this.ready || !exp || !this.bodies || !this.wires) return false;
+    if (n > this.bodyCap || nWires > this.wireCap) return false;
+    exp.solver_step_far(n, nWires, dt, substeps);
     return true;
   }
 
@@ -252,8 +297,50 @@ export class NativeSolver {
     this.exp?.solver_near_finalize(n, nWires, h, ropeKeep, held, grabMax);
   }
 
-  nearContacts(n: number, h: number): number {
-    return this.exp?.solver_near_contacts(n, h) ?? 0;
+  /**
+   * Per-wire port torques, in place on the packed bodies. Only `omega` moves,
+   * so the caller can unpack that alone.
+   */
+  portTorques(n: number, nWires: number, gain: number, splay: number, dt: number): void {
+    this.exp?.solver_port_torques(n, nWires, gain, splay, dt);
+  }
+
+  /**
+   * Copy the live scent window in and tell the solver where it sits in the
+   * world, so steering can sample it. Returns false when it will not fit.
+   */
+  loadScent(fields: Fields): boolean {
+    if (!this.ready || !this.exp || !this.scent) return false;
+    const n = fields.cols * fields.rows;
+    if (n * 4 > this.scentCap) return false;
+    this.scent.set(fields.data.subarray(0, n * 4));
+    this.exp.solver_scent_frame(
+      fields.cols,
+      fields.rows,
+      fields.originX,
+      fields.originY,
+      fields.worldW,
+      fields.worldH,
+    );
+    return true;
+  }
+
+  steer(n: number, dt: number): void {
+    this.exp?.solver_steer(n, dt);
+  }
+
+  declutter(n: number, reach: number, atReach: number, cutoff: number, floorFrac: number, dt: number): void {
+    this.exp?.solver_declutter(n, reach, atReach, cutoff, floorFrac, dt);
+  }
+
+  gravitate(n: number, cx: number, cy: number, base: number, reach: number, maxComp: number, dt: number): void {
+    this.exp?.solver_gravitate(n, cx, cy, base, reach, maxComp, dt);
+  }
+
+  /** Standalone contact pass. `nWires` lets it skip wired pairs the way
+   *  `stepNear` does; pass 0 for a scene with no wires packed. */
+  nearContacts(n: number, nWires: number, h: number): number {
+    return this.exp?.solver_near_contacts(n, nWires, h) ?? 0;
   }
 
   /**

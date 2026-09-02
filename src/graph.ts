@@ -72,6 +72,8 @@ export type RopePath = 'full' | 'no-shape' | 'span';
  * The taut threshold itself is `params.wireTaut`.
  */
 export const ROPE_TAUT_HYSTERESIS = 0.08;
+/** Rest lengths past this yank the FAR span joint across the view. */
+export const REST_CAP = 2500;
 
 export function ropePathOf(wire: Wire, time: number, params: Params): RopePath {
   const age = Math.max(0, time - wire.born);
@@ -168,6 +170,16 @@ export class Graph {
 
   isFree(port: PortRef): boolean {
     return !this.portWire.has(portKey(port));
+  }
+
+  /** True when `a` and `b` already share a wire. FAR discs skip those pairs. */
+  sharesWire(aId: number, bId: number): boolean {
+    if (aId === bId) return false;
+    for (const slot of ['p', 'l', 'r'] as const) {
+      const w = this.wireAt({ id: aId, slot });
+      if (w && (w.a.id === bId || w.b.id === bId)) return true;
+    }
+    return false;
   }
 
   leftover(port: PortRef, dying: Set<number>): PortRef | null {
@@ -282,7 +294,7 @@ export class Graph {
     const sby = sb.y;
     const dx = sbx - sax;
     const dy = sby - say;
-    const span = Math.max(1, Math.hypot(dx, dy));
+    const span = Math.min(REST_CAP, Math.max(1, Math.hypot(dx, dy)));
     wire.nodes = sampleChain(
       {
         p0: { x: sax, y: say },
@@ -335,7 +347,7 @@ export class Graph {
     const stemDx = sbx - sax;
     const stemDy = sby - say;
     const span = Math.hypot(stemDx, stemDy);
-    const len = Math.max(span, params.wireMinRest * Graph.BIRTH_FLOOR);
+    const len = Math.min(REST_CAP, Math.max(span, params.wireMinRest * Graph.BIRTH_FLOOR));
     const c = opts?.chord
       ? {
           p0: { x: sax, y: say },
@@ -423,7 +435,9 @@ export class Graph {
     const span = Math.max(1, params.wireMinRest);
     const dur = Math.max(0.05, params.wireShrink) * Math.max(1, travel / span);
     const u = clamp((time - wire.born) / dur, 0, 1);
-    return lerp(wire.latchLen, params.wireMinRest, easeInOut(u));
+    const rest = lerp(wire.latchLen, params.wireMinRest, easeInOut(u));
+    if (!Number.isFinite(rest)) return params.wireMinRest;
+    return Math.min(REST_CAP, rest);
   }
 
   /** 0 → 1 over the (distance-scaled) shrink window. */
@@ -636,20 +650,23 @@ export class Graph {
    * plus a slow per-wire breath so a settled net keeps moving like tissue
    * instead of freezing solid.
    */
-  syncRest(time: number, params: Params): void {
+  syncRest(time: number, params: Params, detailed?: (wire: Wire) => boolean): void {
     for (const wire of this.wires.values()) {
       const base = this.restLength(wire, time, params);
       const phase = wire.id * 2.399963;
       const rate = 0.55 + (wire.id % 7) * 0.11;
       const breathe = 1 + params.wireBreathe * Math.sin(time * rate + phase);
-      wire.rest = Math.max(4, base * breathe);
+      const raw = base * breathe;
+      wire.rest = Number.isFinite(raw) ? clamp(raw, 4, REST_CAP) : params.wireMinRest;
       wire.pitchFloor = wire.rest * 0.5;
       // Applied under the floor on purpose: a collapsing wire has to be able
       // to reach nothing, and 4 px is still a visible thread.
       if (wire.collapse > 0) {
         wire.rest = Math.max(0.5, wire.rest * (1 - wire.collapse));
       }
-      if (wire.ropePath !== 'span') reduceChain(wire.nodes, wire.rest);
+      if (wire.ropePath !== 'span' && (!detailed || detailed(wire))) {
+        reduceChain(wire.nodes, wire.rest);
+      }
     }
   }
 
@@ -689,6 +706,40 @@ export class Graph {
   }
 
   /**
+   * Drop a coarsened rope onto the live stem chord without touching rest.
+   * FAR skips XPBD, so leftover nodes otherwise freeze in world space and
+   * become a several-hundred-pixel fossil — and a whip on the way back.
+   */
+  private sitNodesOnChord(
+    wire: Wire,
+    agents: Map<number, Agent>,
+    w: number,
+    h: number,
+  ): void {
+    const n = wire.nodes.length;
+    if (n === 0) return;
+    const A = agents.get(wire.a.id);
+    const B = agents.get(wire.b.id);
+    if (!A || !B) return;
+    const sa = stemWorldInto(A, wire.a.slot, w, h, stemScratchA);
+    const ax = sa.x;
+    const ay = sa.y;
+    const sb = stemWorldInto(B, wire.b.slot, w, h, stemScratchB);
+    const dx = sb.x - ax;
+    const dy = sb.y - ay;
+    for (let i = 0; i < n; i++) {
+      const t = (i + 1) / (n + 1);
+      const node = wire.nodes[i];
+      node.x = ax + dx * t;
+      node.y = ay + dy * t;
+      node.vx = 0;
+      node.vy = 0;
+      node.prevX = node.x;
+      node.prevY = node.y;
+    }
+  }
+
+  /**
    * The wire's rest shape: the cubic that leaves both ports along their axes —
    * the same curve the renderer draws. Sampling it gives every rope node a
    * target, which is what makes a slack rope well-posed, and its arc length is
@@ -701,7 +752,12 @@ export class Graph {
     detailed?: (wire: Wire) => boolean,
   ): void {
     for (const wire of this.wires.values()) {
-      if (detailed && !detailed(wire)) continue;
+      if (detailed && !detailed(wire)) {
+        wire.shape = [];
+        wire.ropeLen = Number.isFinite(wire.rest) ? wire.rest : 40;
+        this.sitNodesOnChord(wire, agents, w, h);
+        continue;
+      }
       if (wire.ropePath === 'span') {
         wire.shape = [];
         wire.ropeLen = wire.rest;
@@ -710,8 +766,18 @@ export class Graph {
       const A = agents.get(wire.a.id);
       const B = agents.get(wire.b.id);
       if (!A || !B) continue;
+      const n0 = wire.nodes.length;
+      if (n0 === 0 || wire.ropePath === 'no-shape') {
+        wire.shape = [];
+        wire.ropeLen = wire.rest;
+        continue;
+      }
+      const bowed = this.curveLength(wire, agents, w, h);
+      if (!Number.isFinite(bowed) || bowed > Math.max(wire.rest * 8, 800)) {
+        this.rebuildRope(wire, agents, w, h);
+      }
       const n = wire.nodes.length;
-      if (n === 0 || wire.ropePath === 'no-shape') {
+      if (n === 0) {
         wire.shape = [];
         wire.ropeLen = wire.rest;
         continue;

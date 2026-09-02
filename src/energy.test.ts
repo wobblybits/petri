@@ -1,0 +1,553 @@
+import { describe, expect, it } from 'vitest';
+import {
+  agentValue,
+  atCap,
+  BODY_VALUE,
+  bodyDelta,
+  canLatch,
+  canPayShare,
+  deathYield,
+  EnergyGrid,
+  EXTRA_CAP,
+  EXTRA_FLOOR,
+  extrasOf,
+  flowCharges,
+  harvestSlots,
+  hungerNeed,
+  redexNeed,
+  REQUEST_DECAY,
+  resetRequests,
+  REWRITE_SHARE,
+  rewriteCost,
+  rewriteYield,
+  seedRequest,
+  settlePool,
+  type SlotBody,
+  spareEnergy,
+  spendExtra,
+  spreadRequests,
+  tickUpkeep,
+  wireNeighbors,
+} from './energy.ts';
+import { Sim } from './sim.ts';
+import { defaultParams } from './params.ts';
+
+/** Defaults to `con`: Era has its own upkeep rate, so kind matters here. */
+function body(
+  id: number,
+  x: number,
+  y: number,
+  extra = 0,
+  request = 0,
+  locked = false,
+  kind: SlotBody['kind'] = 'con',
+): SlotBody {
+  return { id, kind, x, y, extra, request, locked };
+}
+
+describe('rewrite energy', () => {
+  it('values every kind of body the same, at a full tank', () => {
+    expect(agentValue('era')).toBe(BODY_VALUE);
+    expect(agentValue('con')).toBe(BODY_VALUE);
+    expect(agentValue('dup')).toBe(BODY_VALUE);
+  });
+
+  it('returns a body\'s worth plus its stock when it dies', () => {
+    expect(deathYield(body(1, 0, 0, EXTRA_CAP)), 'full').toBeCloseTo(2.5, 6);
+    expect(deathYield(body(2, 0, 0, 0)), 'break-even').toBeCloseTo(BODY_VALUE, 6);
+    expect(deathYield(body(3, 0, 0, EXTRA_FLOOR)), 'starved').toBeCloseTo(0.25, 6);
+  });
+
+  it('counts bodies in and out, and prices the two directions differently', () => {
+    expect(bodyDelta('era-era')).toBe(2);
+    expect(bodyDelta('annihilate-con')).toBe(2);
+    expect(bodyDelta('annihilate-dup')).toBe(2);
+    expect(bodyDelta('erase'), 'two in, two out').toBe(0);
+    expect(bodyDelta('commute'), 'four out of two').toBe(-2);
+
+    // A commute is charged in shares, one per end, so it stays affordable.
+    expect(rewriteCost('commute')).toBe(2 * REWRITE_SHARE);
+    expect(rewriteCost('era-era')).toBe(0);
+    // A death returns a whole body's worth, which is more than built it.
+    expect(rewriteYield('annihilate-con')).toBe(2 * BODY_VALUE);
+    expect(rewriteYield('commute')).toBe(0);
+    expect(rewriteYield('erase'), 'swaps bodies, releases nothing').toBe(0);
+    expect(
+      rewriteYield('annihilate-con') - rewriteCost('commute'),
+      'and the gap is what a rewrite cycle mints',
+    ).toBeCloseTo(0.5, 6);
+  });
+});
+
+describe('EnergyGrid', () => {
+  it('reads ambient until a cell is touched, then keeps the remainder', () => {
+    const g = new EnergyGrid(10, 0.1);
+    expect(g.getAt(3, 3)).toBeCloseTo(0.1);
+    expect(g.take('0,0', 1)).toBeCloseTo(0.1);
+    expect(g.getAt(3, 3)).toBe(0);
+    expect(g.getAt(15, 3)).toBeCloseTo(0.1);
+    g.addAt(3, 3, 2);
+    expect(g.getAt(3, 3)).toBeCloseTo(2);
+  });
+});
+
+describe('harvest slots', () => {
+  it('accumulates 0.1 ambient instead of filling in one visit', () => {
+    const grid = new EnergyGrid(10, 0.1);
+    const a = body(1, 2, 2);
+    harvestSlots([a], grid);
+    expect(a.extra).toBeCloseTo(0.1);
+    expect(canPayShare(a)).toBe(false);
+    expect(canLatch(a)).toBe(true);
+    expect(canLatch({ extra: -0.5 })).toBe(true);
+    expect(grid.getAt(2, 2)).toBe(0);
+  });
+
+  it('fills a slot from a cell of 1', () => {
+    const grid = new EnergyGrid(10, 1);
+    const a = body(1, 2, 2);
+    harvestSlots([a], grid);
+    expect(a.extra).toBeCloseTo(1);
+    expect(grid.getAt(2, 2)).toBe(0);
+  });
+
+  it('gives a shared cell of 1 to the lower id only', () => {
+    const grid = new EnergyGrid(10, 1);
+    const a = body(1, 2, 2);
+    const b = body(2, 3, 2);
+    harvestSlots([a, b], grid);
+    expect(a.extra).toBeCloseTo(1);
+    expect(b.extra).toBe(0);
+    expect(grid.getAt(2, 2)).toBe(0);
+  });
+
+  it('does not fill a slot that is already at the cap', () => {
+    const grid = new EnergyGrid(10, 1);
+    const a = body(1, 2, 2, EXTRA_CAP);
+    expect(atCap(a)).toBe(true);
+    harvestSlots([a], grid);
+    expect(a.extra).toBe(EXTRA_CAP);
+    expect(grid.getAt(2, 2), 'the cell is untouched').toBe(1);
+  });
+
+  it('keeps harvesting a body that can pay a share but is not yet full', () => {
+    // The two used to be the same test. Being able to commute is not being
+    // full, and a body that stopped topping up at the share would have no
+    // headroom against the next few seconds of upkeep.
+    const grid = new EnergyGrid(10, 1);
+    const a = body(1, 2, 2, REWRITE_SHARE);
+    expect(canPayShare(a)).toBe(true);
+    expect(atCap(a)).toBe(false);
+    harvestSlots([a], grid);
+    expect(a.extra).toBeCloseTo(EXTRA_CAP, 6);
+  });
+
+  it('skips locked agents', () => {
+    const grid = new EnergyGrid(10, 1);
+    const a = body(1, 2, 2, 0, 0, true);
+    harvestSlots([a], grid);
+    expect(a.extra).toBe(0);
+    expect(grid.getAt(2, 2)).toBe(1);
+  });
+});
+
+describe('upkeep', () => {
+  it('drains extra continuously and reports death at a whole unit of debt', () => {
+    const a = body(1, 0, 0, 1);
+    expect(tickUpkeep([a], 0.5, 1)).toEqual([]);
+    expect(a.extra, 'half a second at one a second').toBeCloseTo(0.5, 6);
+    expect(tickUpkeep([a], 1, 1)).toEqual([]);
+    expect(a.extra, 'and straight on into debt').toBeCloseTo(-0.5, 6);
+    expect(tickUpkeep([a], 1, 1), 'reaching the floor is a death').toEqual([1]);
+    expect(a.extra).toBe(EXTRA_FLOOR);
+    expect(tickUpkeep([a], 1, 1), 'reported once, not every frame after').toEqual([]);
+    expect(a.extra, 'and never falls past it').toBe(EXTRA_FLOOR);
+  });
+
+  it('skips locked agents', () => {
+    const a = body(1, 0, 0, 1, 0, true);
+    expect(tickUpkeep([a], 10, 1)).toEqual([]);
+    expect(a.extra).toBe(1);
+  });
+});
+
+describe('request gradient', () => {
+  it('attenuates need by distance instead of counting hops', () => {
+    const agents = new Map([
+      [1, body(1, 0, 0)],
+      [2, body(2, 10, 0)],
+      [3, body(3, 20, 0)],
+    ]);
+    const adj = wireNeighbors([
+      { a: { id: 1 }, b: { id: 2 } },
+      { a: { id: 2 }, b: { id: 3 } },
+    ]);
+    seedRequest(agents.get(1)!, 1);
+    spreadRequests(agents, adj);
+    expect(agents.get(1)!.request).toBe(1);
+    expect(agents.get(2)!.request).toBeCloseTo(REQUEST_DECAY, 6);
+    expect(agents.get(3)!.request).toBeCloseTo(REQUEST_DECAY ** 2, 6);
+  });
+
+  it('lets a big distant need outrank a small near one', () => {
+    // Chain 1-2-3-4. A large need at 1 must beat a small need at 4 for the
+    // body at 3, even though 4 is adjacent — that is what magnitude buys.
+    const agents = new Map([
+      [1, body(1, 0, 0)],
+      [2, body(2, 10, 0)],
+      [3, body(3, 20, 0)],
+      [4, body(4, 30, 0)],
+    ]);
+    const adj = wireNeighbors([
+      { a: { id: 1 }, b: { id: 2 } },
+      { a: { id: 2 }, b: { id: 3 } },
+      { a: { id: 3 }, b: { id: 4 } },
+    ]);
+    seedRequest(agents.get(1)!, 1);
+    seedRequest(agents.get(4)!, 0.2);
+    spreadRequests(agents, adj);
+    // 1 reaches 3 at 0.8^2 = 0.64; 4 only offers 0.2 there.
+    expect(agents.get(3)!.request).toBeCloseTo(REQUEST_DECAY ** 2, 6);
+    expect(agents.get(3)!.request).toBeGreaterThan(agents.get(4)!.request);
+  });
+
+  it('walks energy up the gradient, one hop a frame', () => {
+    const agents = new Map([
+      [1, body(1, 0, 0, 0, 1)],
+      [2, body(2, 10, 0, 0, REQUEST_DECAY)],
+      [3, body(3, 20, 0, 1, REQUEST_DECAY ** 2)],
+    ]);
+    const adj = wireNeighbors([
+      { a: { id: 1 }, b: { id: 2 } },
+      { a: { id: 2 }, b: { id: 3 } },
+    ]);
+    // 3 holds the surplus and 1 is the one that needs it, two hops away. Each
+    // frame moves one wire's worth, throttled by the field at the receiving
+    // end — 0.8 here, since that is how much of 1's need is visible from 2.
+    expect(flowCharges(agents, adj)).toBeCloseTo(REQUEST_DECAY, 6);
+    expect(agents.get(3)!.extra).toBeCloseTo(1 - REQUEST_DECAY, 6);
+    expect(agents.get(2)!.extra).toBeCloseTo(REQUEST_DECAY, 6);
+    flowCharges(agents, adj);
+    expect(agents.get(1)!.extra, 'reaches the body that needs it').toBeGreaterThan(0.5);
+  });
+
+  it('delivers only as much as the recipient can hold', () => {
+    const agents = new Map([
+      [1, body(1, 0, 0, 0.7, 0.3)],
+      [2, body(2, 10, 0, 1, 0.24)],
+    ]);
+    const adj = wireNeighbors([{ a: { id: 1 }, b: { id: 2 } }]);
+    expect(flowCharges(agents, adj)).toBeCloseTo(0.3, 6);
+    expect(agents.get(1)!.extra).toBeCloseTo(1, 6);
+    expect(agents.get(2)!.extra, 'donor keeps the rest').toBeCloseTo(0.7, 6);
+  });
+
+  it('relays through a body that needs nothing itself', () => {
+    // The middle body is not hungry and is not a redex. If it could only
+    // accept what it needs, every shortage more than one wire from a surplus
+    // would be unreachable.
+    const agents = new Map([
+      [1, body(1, 0, 0, 0, 1)],
+      [2, body(2, 10, 0, 0, REQUEST_DECAY)],
+      [3, body(3, 20, 0, 1, REQUEST_DECAY ** 2)],
+    ]);
+    const adj = wireNeighbors([
+      { a: { id: 1 }, b: { id: 2 } },
+      { a: { id: 2 }, b: { id: 3 } },
+    ]);
+    flowCharges(agents, adj);
+    expect(agents.get(2)!.extra, 'held by the conduit').toBeCloseTo(REQUEST_DECAY, 6);
+  });
+
+  it('leaves a flat spot where two equal needs meet', () => {
+    // Needs of the same size at both ends of a 3-chain give the middle body
+    // the same field from either side, so nothing crosses it.
+    const agents = new Map([
+      [1, body(1, 0, 0, 0)],
+      [2, body(2, 10, 0, 1)],
+      [3, body(3, 20, 0, 0)],
+    ]);
+    const adj = wireNeighbors([
+      { a: { id: 1 }, b: { id: 2 } },
+      { a: { id: 2 }, b: { id: 3 } },
+    ]);
+    seedRequest(agents.get(1)!, 1);
+    seedRequest(agents.get(3)!, 1);
+    spreadRequests(agents, adj);
+    expect(agents.get(1)!.request).toBeCloseTo(agents.get(3)!.request, 6);
+    // The middle body is the one holding energy, and both neighbours pull on
+    // it equally hard, so it gives to exactly one of them rather than tearing.
+    const moved = flowCharges(agents, adj);
+    expect(moved).toBeGreaterThan(0);
+    const fed = [agents.get(1)!.extra, agents.get(3)!.extra];
+    expect(fed.filter((e) => e > 0.5).length, 'one of the two, not both').toBe(1);
+  });
+
+  it('does not pass energy to a body that is no needier than the donor', () => {
+    const agents = new Map([
+      [1, body(1, 0, 0, 1, 1)],
+      [2, body(2, 10, 0, 0, 1)],
+    ]);
+    const adj = wireNeighbors([{ a: { id: 1 }, b: { id: 2 } }]);
+    expect(flowCharges(agents, adj)).toBe(0);
+    expect(agents.get(1)!.extra).toBe(1);
+    expect(extrasOf(agents.get(1)!, agents.get(2)!)).toBe(1);
+  });
+
+  it('reads hunger straight off the debt', () => {
+    expect(hungerNeed(body(1, 0, 0, 1)), 'stocked').toBe(0);
+    expect(hungerNeed(body(2, 0, 0, 0)), 'break-even').toBe(0);
+    expect(hungerNeed(body(3, 0, 0, -0.1))).toBeCloseTo(0.1, 6);
+    expect(hungerNeed(body(4, 0, 0, -1)), 'at the point of death').toBe(1);
+  });
+
+  it('has nothing to pass on while it is in debt', () => {
+    expect(spareEnergy(body(1, 0, 0, 0.4))).toBeCloseTo(0.4, 6);
+    expect(spareEnergy(body(2, 0, 0, 0))).toBe(0);
+    expect(spareEnergy(body(3, 0, 0, -0.4))).toBe(0);
+  });
+
+  it('settles a body\'s own debt before anything travels further', () => {
+    // 1 is deep in debt, 2 is shallowly in debt, 3 has stock. What reaches 2
+    // pays 2 off first; only what is left over can reach 1.
+    const agents = new Map([
+      [1, body(1, 0, 0, -0.9)],
+      [2, body(2, 10, 0, -0.2)],
+      [3, body(3, 20, 0, 1)],
+    ]);
+    const adj = wireNeighbors([
+      { a: { id: 1 }, b: { id: 2 } },
+      { a: { id: 2 }, b: { id: 3 } },
+    ]);
+    for (let i = 0; i < 2; i++) {
+      resetRequests(agents.values());
+      for (const a of agents.values()) seedRequest(a, hungerNeed(a));
+      spreadRequests(agents, adj);
+      flowCharges(agents, adj);
+    }
+    expect(agents.get(2)!.extra, 'out of debt first').toBeGreaterThanOrEqual(0);
+    const total = [...agents.values()].reduce((t, a) => t + a.extra, 0);
+    expect(total, 'and nothing minted').toBeCloseTo(-0.1, 6);
+  });
+
+  it('measures a stalled redex end by what it is short of a full extra', () => {
+    expect(redexNeed(body(1, 0, 0, 0.8))).toBeCloseTo(0.2, 6);
+    expect(redexNeed(body(2, 0, 0, 1))).toBe(0);
+  });
+
+  it('clears requests', () => {
+    const a = body(1, 0, 0, 0, 4);
+    resetRequests([a]);
+    expect(a.request).toBe(0);
+  });
+});
+
+describe('settle pool', () => {
+  it('gives the neediest survivor first refusal', () => {
+    // Released energy enters the net at the body the gradient would have sent
+    // it to. `easy` has the lower id, so id order would have fed it first and
+    // left the hungry one short.
+    const grid = new EnergyGrid(10, 0);
+    const easy = body(1, 0, 0, 1, 0.1);
+    const hungry = body(2, 0, 0, -0.5, 0.9);
+    settlePool(1, [easy, hungry], grid, 5, 5);
+    expect(hungry.extra, 'all of it went to the needy one').toBeCloseTo(0.5, 6);
+    expect(easy.extra, 'which had room but no claim on it').toBe(1);
+    expect(grid.getAt(5, 5)).toBe(0);
+  });
+
+  it('drops what the survivors cannot hold onto the ground', () => {
+    // Two bodies, 2.0 of room between them, against a two-body annihilation.
+    // The per-body cap is the bandwidth limit; the rest lands where it died.
+    const grid = new EnergyGrid(10, 0);
+    const a = body(1, 0, 0, -0.5, 0.9);
+    const b = body(2, 0, 0, 1, 0.1);
+    settlePool(2 * BODY_VALUE, [a, b], grid, 5, 5);
+    expect(a.extra).toBeCloseTo(EXTRA_CAP, 6);
+    expect(b.extra).toBeCloseTo(EXTRA_CAP, 6);
+    expect(grid.getAt(5, 5), 'overflow').toBeCloseTo(2 * BODY_VALUE - 2, 6);
+  });
+
+  it('fills empty leftover slots before dumping to the grid', () => {
+    const grid = new EnergyGrid(10, 0);
+    const a = body(1, 0, 0);
+    const b = body(2, 0, 0, EXTRA_CAP);
+    settlePool(2, [a, b], grid, 5, 5);
+    expect(a.extra, 'the empty slot takes what it can hold').toBeCloseTo(EXTRA_CAP, 6);
+    expect(b.extra, 'the full one takes nothing').toBe(EXTRA_CAP);
+    expect(grid.getAt(5, 5), 'and the remainder goes to the ground')
+      .toBeCloseTo(2 - EXTRA_CAP, 6);
+  });
+});
+
+describe('sim energy', () => {
+  it('blocks commute when the pair has no extras', () => {
+    const sim = new Sim(800, 600);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.ambientEnergy = 0;
+    params.upkeep = 0;
+    params.rewriteDuration = 0.12;
+    params.wireShrink = 0.08;
+    const c = sim.spawn('con', 380, 300, 0, params, true)!;
+    const d = sim.spawn('dup', 420, 300, Math.PI, params, true)!;
+    sim.wire(c.id, 'p', d.id, 'p', params);
+    for (let f = 0; f < 240; f++) sim.step(1 / 60, params);
+    expect(sim.agents.size).toBe(2);
+    expect(sim.rewrites.length).toBe(0);
+  });
+
+  it('lets a commute fire when both agents hold an extra', () => {
+    const sim = new Sim(800, 600);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.ambientEnergy = 0;
+    params.upkeep = 0;
+    params.rewriteDuration = 0.12;
+    params.wireShrink = 0.08;
+    const c = sim.spawn('con', 380, 300, 0, params, true)!;
+    const d = sim.spawn('dup', 420, 300, Math.PI, params, true)!;
+    c.extra = 1;
+    d.extra = 1;
+    sim.wire(c.id, 'p', d.id, 'p', params);
+    for (let f = 0; f < 240; f++) sim.step(1 / 60, params);
+    expect(sim.agents.size).toBe(4);
+  });
+
+  it('returns annihilation energy to the grid when the net vanishes', () => {
+    const sim = new Sim(800, 600);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.ambientEnergy = 0;
+    params.upkeep = 0;
+    params.rewriteDuration = 0.12;
+    params.wireShrink = 0.08;
+    const a = sim.spawn('era', 380, 300, 0, params, true)!;
+    const b = sim.spawn('era', 420, 300, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    for (let f = 0; f < 240; f++) sim.step(1 / 60, params);
+    expect(sim.agents.size).toBe(0);
+    expect(sim.totalFree()).toBe(0);
+    expect(sim.energy.storedTotal()).toBeGreaterThanOrEqual(2);
+  });
+
+  it('walks a neighbour extra onto a hungry commute pair', () => {
+    const sim = new Sim(800, 600);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.ambientEnergy = 0;
+    params.upkeep = 0;
+    params.rewriteDuration = 0.12;
+    params.wireShrink = 0.08;
+    const c = sim.spawn('con', 380, 300, 0, params, true)!;
+    const d = sim.spawn('dup', 420, 300, Math.PI, params, true)!;
+    const e = sim.spawn('era', 340, 300, Math.PI, params, true)!;
+    e.extra = 1;
+    sim.wire(c.id, 'p', d.id, 'p', params);
+    sim.wire(c.id, 'l', e.id, 'p', params);
+    for (let f = 0; f < 240; f++) sim.step(1 / 60, params);
+    expect(e.extra).toBe(0);
+    expect(c.extra >= 1 || d.extra >= 1).toBe(true);
+    expect(sim.agents.size).toBe(3);
+  });
+
+  /** Two wired Cons on barren ground. Era is excluded: it never starves. */
+  function pair(aExtra: number, bExtra: number, upkeep = 1) {
+    const sim = new Sim(320, 200);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.ambientEnergy = 0;
+    params.upkeep = upkeep;
+    params.rewriteDuration = 0;
+    params.snapRadius = 0;
+    const a = sim.spawn('con', 100, 100, 0, params, true)!;
+    const b = sim.spawn('con', 180, 100, Math.PI, params, true)!;
+    a.extra = aExtra;
+    b.extra = bExtra;
+    sim.wire(a.id, 'l', b.id, 'r', params);
+    return { sim, params, a, b };
+  }
+
+  it('disconnects an agent after a full upkeep tick to −1', () => {
+    // Neither body has anything to give, so nothing can save either of them.
+    const { sim, params, a } = pair(0, 0);
+    for (let i = 0; i < 60; i++) sim.step(1 / 60, params);
+    expect(a.extra).toBe(-1);
+    expect(sim.graph.wires.size).toBe(0);
+  });
+
+  it('feeds a body from its neighbour, so a wired one outlives a lone one', () => {
+    // The point of the field: a body sliding into debt is fed by whoever in
+    // the net has stock. Measured against the same body with nobody to ask.
+    const wired = pair(0, 1, 0.2);
+    for (let i = 0; i < 60; i++) wired.sim.step(1 / 60, wired.params, null);
+
+    const alone = pair(0, 1, 0.2);
+    alone.sim.graph.detachAgent(alone.b.id);
+    for (let i = 0; i < 60; i++) alone.sim.step(1 / 60, alone.params, null);
+
+    expect(wired.a.extra, 'better off wired').toBeGreaterThan(alone.a.extra);
+    expect(wired.b.extra, "out of its neighbour's pocket").toBeLessThan(alone.b.extra);
+    expect(wired.sim.graph.wires.size, 'and still wired').toBe(1);
+  });
+
+  it('charges an Era instead of billing it, and never starves one', () => {
+    const era = body(1, 0, 0, 0, 0, false, 'era');
+    const con = body(2, 0, 0, 0, 0, false, 'con');
+    // Long enough that a Con has been billed several times over.
+    for (let i = 0; i < 600; i++) tickUpkeep([era, con], 1, 0.025);
+    expect(con.extra, 'a Con burns down to the floor').toBe(EXTRA_FLOOR);
+    expect(era.extra, 'an Era fills instead').toBe(EXTRA_CAP);
+    expect(tickUpkeep([era], 1000, 0.025), 'and is never reported starved').toEqual([]);
+  });
+
+  it('caps an Era at full however long it produces for', () => {
+    const era = body(1, 0, 0, 0, 0, false, 'era');
+    for (let i = 0; i < 5000; i++) tickUpkeep([era], 1, 0.025);
+    expect(era.extra, 'no banking past the cap').toBe(EXTRA_CAP);
+    // And the next share has to be earned at the same rate as the first.
+    spendExtra(era);
+    expect(era.extra, 'a share out of a full tank leaves the headroom')
+      .toBeCloseTo(EXTRA_CAP - REWRITE_SHARE, 6);
+    tickUpkeep([era], 1, 0.025);
+    expect(era.extra).toBeCloseTo(EXTRA_CAP - REWRITE_SHARE + 0.005, 6);
+  });
+
+  it('drops wires at −1 and still snaps in debt', () => {
+    const sim = new Sim(320, 200);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.ambientEnergy = 0;
+    params.upkeep = 0;
+    params.snapRadius = 40;
+    params.rewriteDuration = 20;
+    const a = sim.spawn('era', 80, 100, 0, params, true)!;
+    const b = sim.spawn('era', 200, 100, Math.PI, params, true)!;
+    a.extra = 1;
+    b.extra = 1;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    a.extra = -1;
+    sim.graph.detachAgent(a.id);
+    expect(sim.graph.wires.size).toBe(0);
+
+    const c = sim.spawn('era', 100, 100, 0, params, true)!;
+    const d = sim.spawn('era', 100, 103, 0, params, true)!;
+    c.extra = -0.5;
+    d.extra = -0.5;
+    sim.graph.snap(sim.agents, sim.w, sim.h, params, sim.time);
+    expect(sim.graph.wires.size).toBe(1);
+  });
+});
+
+describe('EnergyGrid.forEachStored', () => {
+  it('visits only cells that have been written', () => {
+    const grid = new EnergyGrid(48, 0.1);
+    grid.addAt(10, 10, 1);
+    grid.setCell(-3, 4, 0);
+    const seen: string[] = [];
+    grid.forEachStored((i, j, e) => seen.push(`${i},${j}:${e}`));
+    expect(seen).toHaveLength(2);
+    expect(seen).toContain('0,0:1.1');
+    expect(seen).toContain('-3,4:0');
+  });
+});

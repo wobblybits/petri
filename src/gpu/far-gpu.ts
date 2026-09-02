@@ -6,6 +6,7 @@ import {
   FAR_SPAN_COMP,
   FAR_STRIDE,
   FAR_SUBSTEPS,
+  FAR_WIRE_STRIDE,
   stepFarKernel,
 } from './far-kernel.ts';
 
@@ -80,7 +81,7 @@ export class FarGpu {
 
   /**
    * Run `substeps` of FAR physics. `data` is packed `FAR_STRIDE` floats per
-   * body; `wires` is `[a, b, rest, 0] * nWires`. Mutates `data` in place.
+   * body; `wires` is `[a, b, rest, pad, oax, oay, obx, oby] * nWires`. Mutates `data` in place.
    * Returns false if the CPU twin ran instead.
    */
   async step(
@@ -112,9 +113,9 @@ export class FarGpu {
       device.queue.writeBuffer(this.uniform!, 0, uniform);
       device.queue.writeBuffer(this.particles!, 0, data.buffer, data.byteOffset, n * PARTICLE_BYTES);
       if (nWires > 0) {
-        device.queue.writeBuffer(this.wires!, 0, wires.buffer, wires.byteOffset, nWires * 16);
+        device.queue.writeBuffer(this.wires!, 0, wires.buffer, wires.byteOffset, nWires * FAR_WIRE_STRIDE * 4);
       } else {
-        device.queue.writeBuffer(this.wires!, 0, new Float32Array(4));
+        device.queue.writeBuffer(this.wires!, 0, new Float32Array(FAR_WIRE_STRIDE));
       }
 
       const encoder = device.createCommandEncoder();
@@ -160,8 +161,8 @@ export class FarGpu {
   /** Scratch packed arrays the sim can reuse. */
   packTarget(n: number, nWires: number): { data: Float32Array; wires: Float32Array } {
     if (this.cpuData.length < n * FAR_STRIDE) this.cpuData = new Float32Array(n * FAR_STRIDE * 2);
-    if (this.cpuWires.length < Math.max(1, nWires) * 4) {
-      this.cpuWires = new Float32Array(Math.max(4, nWires * 8));
+    if (this.cpuWires.length < Math.max(1, nWires) * FAR_WIRE_STRIDE) {
+      this.cpuWires = new Float32Array(Math.max(FAR_WIRE_STRIDE, nWires * FAR_WIRE_STRIDE * 2));
     }
     return { data: this.cpuData, wires: this.cpuWires };
   }
@@ -199,14 +200,14 @@ export class FarGpu {
       this.wireCap = Math.max(16, nWires * 2);
       this.wires?.destroy();
       this.wires = device.createBuffer({
-        size: this.wireCap * 16,
+        size: this.wireCap * FAR_WIRE_STRIDE * 4,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       });
     }
     if (!this.wires) {
       this.wireCap = 16;
       this.wires = device.createBuffer({
-        size: this.wireCap * 16,
+        size: this.wireCap * FAR_WIRE_STRIDE * 4,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       });
     }

@@ -1,4 +1,6 @@
-import { ERA_RADIUS, portLocal, slotsFor, stemRoot, stemWorld, triangleLocal, wireCubic, type Agent, type AgentKind } from './agents.ts';
+import { boundRadius, ERA_RADIUS, portLocal, slotsFor, stemRoot, stemWorld, triangleLocal, wireCubic, type Agent, type AgentKind } from './agents.ts';
+import { EXTRA_CAP, EXTRA_FLOOR, REQUEST_FULL } from './energy.ts';
+import { WIRE_STROKE_PX, wiresDrawable } from './audio/lod.ts';
 import { clampPolylineToChord, WAVE_DISP_PX, wireBowBudget } from './geom.ts';
 import type { WaveSnapshot } from './audio/types.ts';
 import type { Camera } from './camera.ts';
@@ -18,6 +20,10 @@ import type { Sim } from './sim.ts';
 
 export interface ViewOpts {
   overlay: boolean;
+  energyGrid: boolean;
+  energyCircles: boolean;
+  /** Kind hues with energy as saturation, instead of a ring around each body. */
+  kindColors: boolean;
 }
 
 let overlayCanvas: HTMLCanvasElement | null = null;
@@ -47,6 +53,8 @@ export function render(
   ctx.save();
   camera.apply(ctx);
 
+  if (opts.energyGrid) drawEnergyGrid(ctx, sim, camera);
+
   if (opts.overlay) {
     const octx = overlayFor(sim.fields);
     const img = octx.createImageData(sim.fields.cols, sim.fields.rows);
@@ -64,16 +72,168 @@ export function render(
     ctx.globalAlpha = 1;
   }
 
-  drawWires(ctx, sim, waves);
+  if (wiresDrawable(camera.zoom)) {
+    drawWires(ctx, sim, waves);
+    for (const rw of sim.rewrites) {
+      drawCommuteGhostWires(ctx, rw, sim.w, sim.h);
+    }
+  }
   for (const rw of sim.rewrites) {
-    drawCommuteGhostWires(ctx, rw, sim.w, sim.h);
-    for (const g of rw.ghosts) drawAgent(ctx, ghostAsAgent(g), 1);
+    for (const g of rw.ghosts) drawAgent(ctx, ghostAsAgent(g), 1, undefined, opts.kindColors);
   }
   for (const agent of sim.agents.values()) {
-    drawAgent(ctx, agent, agent.alpha, sim.graph);
+    if (opts.energyCircles && !opts.kindColors) drawEnergySlot(ctx, agent);
+    drawAgent(ctx, agent, agent.alpha, sim.graph, opts.kindColors);
   }
   ctx.restore();
   ctx.restore();
+}
+
+function drawEnergyGrid(ctx: CanvasRenderingContext2D, sim: Sim, camera: Camera): void {
+  const grid = sim.energy;
+  const size = grid.cellSize;
+  const ambient = Math.max(0.001, grid.ambient);
+  const pad = size;
+  const left = camera.x - camera.coverWidth() * 0.5 - pad;
+  const top = camera.y - camera.coverHeight() * 0.5 - pad;
+  const right = camera.x + camera.coverWidth() * 0.5 + pad;
+  const bottom = camera.y + camera.coverHeight() * 0.5 + pad;
+  const i0 = Math.floor(left / size);
+  const i1 = Math.ceil(right / size);
+  const j0 = Math.floor(top / size);
+  const j1 = Math.ceil(bottom / size);
+  const gold = (e: number): string => {
+    const a = Math.min(0.28, 0.06 + 0.12 * (e / ambient));
+    return `rgba(232, 196, 88, ${a})`;
+  };
+  // Uniform ambient as one fill — walking every cell in a far-zoom cover is
+  // hundreds of thousands of fillRects and freezes the tab.
+  ctx.fillStyle = gold(grid.ambient);
+  ctx.fillRect(left, top, right - left, bottom - top);
+  grid.forEachStored((i, j, e) => {
+    if (i < i0 || i >= i1 || j < j0 || j >= j1) return;
+    if (e <= 0) {
+      ctx.fillStyle = '#0c0d10';
+      ctx.fillRect(i * size, j * size, size, size);
+      return;
+    }
+    if (Math.abs(e - grid.ambient) < 1e-6) return;
+    ctx.fillStyle = gold(e);
+    ctx.fillRect(i * size, j * size, size, size);
+  });
+}
+
+function drawEnergySlot(ctx: CanvasRenderingContext2D, agent: Agent): void {
+  const r = boundRadius(agent) + 6;
+  ctx.save();
+  if (agent.request > 0) {
+    const a = Math.min(0.4, 0.06 + 0.35 * Math.min(1, agent.request / REQUEST_FULL));
+    ctx.beginPath();
+    ctx.arc(agent.x, agent.y, r + 4, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(232, 196, 88, ${a})`;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.arc(agent.x, agent.y, r, 0, Math.PI * 2);
+  if (agent.extra > 0) {
+    ctx.fillStyle = `rgba(232, 196, 88, ${0.12 + 0.3 * Math.min(1, agent.extra)})`;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(232, 196, 88, 0.95)';
+  } else if (agent.extra < 0) {
+    ctx.strokeStyle = `rgba(196, 92, 72, ${0.35 + 0.4 * Math.min(1, -agent.extra)})`;
+  } else {
+    ctx.strokeStyle = 'rgba(232, 196, 88, 0.4)';
+  }
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+  ctx.restore();
+}
+
+type Rgb = readonly [number, number, number];
+type Hsl = { h: number; s: number; l: number };
+
+/** Dup red, Con blue, Era yellow — full saturation at `EXTRA_CAP`. */
+const KIND_RGB: Record<AgentKind, Rgb> = {
+  dup: [255, 0, 0],
+  con: [0, 0, 255],
+  era: [255, 255, 0],
+};
+
+const KIND_HSL: Record<AgentKind, Hsl> = {
+  dup: rgbToHsl(...KIND_RGB.dup),
+  con: rgbToHsl(...KIND_RGB.con),
+  era: rgbToHsl(...KIND_RGB.era),
+};
+
+function rgbToHsl(r: number, g: number, b: number): Hsl {
+  const rr = r / 255;
+  const gg = g / 255;
+  const bb = b / 255;
+  const max = Math.max(rr, gg, bb);
+  const min = Math.min(rr, gg, bb);
+  const l = (max + min) / 2;
+  if (max === min) return { h: 0, s: 0, l };
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h = 0;
+  if (max === rr) h = (gg - bb) / d + (gg < bb ? 6 : 0);
+  else if (max === gg) h = (bb - rr) / d + 2;
+  else h = (rr - gg) / d + 4;
+  return { h: h * 60, s, l };
+}
+
+function hueToRgb(p: number, q: number, t: number): number {
+  let tt = t;
+  if (tt < 0) tt += 1;
+  if (tt > 1) tt -= 1;
+  if (tt < 1 / 6) return p + (q - p) * 6 * tt;
+  if (tt < 1 / 2) return q;
+  if (tt < 2 / 3) return p + (q - p) * (2 / 3 - tt) * 6;
+  return p;
+}
+
+function hslToRgb(h: number, s: number, l: number): Rgb {
+  const hh = ((h % 360) + 360) % 360 / 360;
+  if (s <= 0) {
+    const g = Math.round(l * 255);
+    return [g, g, g];
+  }
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return [
+    Math.round(hueToRgb(p, q, hh + 1 / 3) * 255),
+    Math.round(hueToRgb(p, q, hh) * 255),
+    Math.round(hueToRgb(p, q, hh - 1 / 3) * 255),
+  ];
+}
+
+function cssRgb(rgb: Rgb): string {
+  return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+}
+
+function chroma(rgb: Rgb): number {
+  return Math.max(rgb[0], rgb[1], rgb[2]) - Math.min(rgb[0], rgb[1], rgb[2]);
+}
+
+function energySat(extra: number): number {
+  return Math.max(0, Math.min(1, (extra - EXTRA_FLOOR) / (EXTRA_CAP - EXTRA_FLOOR)));
+}
+
+/** Kind fill with energy as saturation. Full tank is the named hue; empty is gray. */
+export function kindFillRgb(kind: AgentKind, extra: number): Rgb {
+  const t = energySat(extra);
+  if (t >= 1) return KIND_RGB[kind];
+  const { h, s, l } = KIND_HSL[kind];
+  return hslToRgb(h, s * t, l);
+}
+
+export function kindFillCss(kind: AgentKind, extra: number): string {
+  return cssRgb(kindFillRgb(kind, extra));
+}
+
+export function kindChroma(kind: AgentKind, extra: number): number {
+  return chroma(kindFillRgb(kind, extra));
 }
 
 function ghostAsAgent(g: Ghost): Agent {
@@ -99,6 +259,8 @@ function ghostAsAgent(g: Ghost): Agent {
     integVx: 0,
     integVy: 0,
     integOmega: 0,
+    extra: 0,
+    request: 0,
   };
 }
 
@@ -125,7 +287,7 @@ export function waveDisplace(fwd: number, back: number, env: number, pin: number
 }
 
 function drawWires(ctx: CanvasRenderingContext2D, sim: Sim, waves: WaveSnapshot | null): void {
-  ctx.lineWidth = 1.35;
+  ctx.lineWidth = WIRE_STROKE_PX;
   ctx.strokeStyle = '#ffffff';
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -168,7 +330,7 @@ function drawCommuteGhostWires(
   if (alpha < 0.02) return;
   ctx.save();
   ctx.globalAlpha = alpha;
-  ctx.lineWidth = 1.35;
+  ctx.lineWidth = WIRE_STROKE_PX;
   ctx.strokeStyle = '#ffffff';
   ctx.lineCap = 'round';
   for (const link of COMMUTE_K22) {
@@ -368,43 +530,55 @@ function pathSamples(pts: { x: number; y: number }[], n: number): PathSample[] {
   return out;
 }
 
-function drawAgent(ctx: CanvasRenderingContext2D, agent: Agent, alpha: number, graph?: Graph): void {
+function drawAgent(
+  ctx: CanvasRenderingContext2D,
+  agent: Agent,
+  alpha: number,
+  graph?: Graph,
+  kindColors = false,
+): void {
   ctx.save();
   ctx.translate(agent.x, agent.y);
   ctx.rotate(agent.heading);
   ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
   ctx.scale(agent.scale, agent.scale);
-  if (agent.kind === 'era') drawEra(ctx);
-  else drawTriangle(ctx, agent.kind);
-  drawPortStems(ctx, agent, graph);
+  const fill = kindColors ? kindFillCss(agent.kind, agent.extra) : undefined;
+  if (agent.kind === 'era') drawEra(ctx, fill);
+  else drawTriangle(ctx, agent.kind, fill);
+  drawPortStems(ctx, agent, graph, fill);
   ctx.restore();
 }
 
-function drawEra(ctx: CanvasRenderingContext2D): void {
+function drawEra(ctx: CanvasRenderingContext2D, fill?: string): void {
   ctx.beginPath();
   ctx.arc(0, 0, ERA_RADIUS, 0, Math.PI * 2);
-  ctx.fillStyle = '#f3f3f3';
+  ctx.fillStyle = fill ?? '#f3f3f3';
   ctx.fill();
   ctx.lineWidth = 1.2;
-  ctx.strokeStyle = '#ffffff';
+  ctx.strokeStyle = fill ?? '#ffffff';
   ctx.stroke();
 }
 
-function drawTriangle(ctx: CanvasRenderingContext2D, kind: AgentKind): void {
+function drawTriangle(ctx: CanvasRenderingContext2D, kind: AgentKind, fill?: string): void {
   const [a, b, c] = triangleLocal(1);
   ctx.beginPath();
   ctx.moveTo(a.x, a.y);
   ctx.lineTo(b.x, b.y);
   ctx.lineTo(c.x, c.y);
   ctx.closePath();
-  ctx.fillStyle = kind === 'dup' ? '#111213' : '#f4f4f4';
-  ctx.strokeStyle = '#ffffff';
+  ctx.fillStyle = fill ?? (kind === 'dup' ? '#111213' : '#f4f4f4');
+  ctx.strokeStyle = fill ?? '#ffffff';
   ctx.fill();
   ctx.lineWidth = 1.4;
   ctx.stroke();
 }
 
-function drawPortStems(ctx: CanvasRenderingContext2D, agent: Agent, graph?: Graph): void {
+function drawPortStems(
+  ctx: CanvasRenderingContext2D,
+  agent: Agent,
+  graph?: Graph,
+  stroke?: string,
+): void {
   ctx.beginPath();
   let any = false;
   for (const slot of slotsFor(agent.kind)) {
@@ -418,6 +592,6 @@ function drawPortStems(ctx: CanvasRenderingContext2D, agent: Agent, graph?: Grap
   if (!any) return;
   ctx.lineWidth = 1.6;
   ctx.lineCap = 'round';
-  ctx.strokeStyle = '#ffffff';
+  ctx.strokeStyle = stroke ?? '#ffffff';
   ctx.stroke();
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { CAMERA_MIN_ZOOM } from '../camera.ts';
 import {
   AGENT_BAND,
   HYSTERESIS,
@@ -7,6 +8,8 @@ import {
   LOD_NEAR,
   LodSelector,
   WIRE_BAND,
+  WIRE_HAIRLINE_PX,
+  WIRE_STROKE_PX,
   COST_US,
   VOICE_BUDGET_US,
   agentKey,
@@ -16,6 +19,7 @@ import {
   onScreen,
   tierFor,
   wireKey,
+  wiresDrawable,
   type LodCandidate,
 } from './lod.ts';
 import { buildTopology } from './topology.ts';
@@ -37,6 +41,15 @@ describe('apparent size', () => {
     expect(apparentPx(100, view(4))).toBe(400);
     expect(apparentPx(100, view(0.25))).toBe(25);
     expect(apparentPx(100, null)).toBe(100);
+  });
+
+  it('hides wires once the stroke is a hairline', () => {
+    const hairline = WIRE_HAIRLINE_PX / WIRE_STROKE_PX;
+    expect(wiresDrawable(1)).toBe(true);
+    expect(wiresDrawable(hairline)).toBe(true);
+    expect(wiresDrawable(CAMERA_MIN_ZOOM)).toBe(true);
+    expect(wiresDrawable(hairline * 0.9)).toBe(false);
+    expect(wiresDrawable(0)).toBe(true);
   });
 
   it('counts a wire straddling the edge as on screen', () => {

@@ -1,4 +1,4 @@
-import { ERA_RADIUS, boundRadius, triangleWorld, type Agent } from './agents.ts';
+import { ERA_RADIUS, boundRadius, discRadius, triangleWorld, type Agent } from './agents.ts';
 import { wrapDeltaVec, type Vec2 } from './wrap.ts';
 
 const SKIN = 0.85;
@@ -116,17 +116,21 @@ function shapeAt(agent: Agent, x: number, y: number): Shape {
 }
 
 /**
- * Disc overlap from bounding radii. FAR physics uses this instead of SAT:
- * same separation axis convention as `queryHit`, cheap enough to run on every
- * pair the broadphase still reports.
+ * Disc overlap, the cheap stand-in for `queryHit`. Same separation-axis
+ * convention, cheap enough to run on every pair the broadphase reports.
+ *
+ * The radius is the glyph-area disc, not the SAT bound: this is the same
+ * contact seen at a coarser tier, so it has to settle where SAT settles or
+ * the net changes size when the camera crosses the LOD line.
  */
 export function queryDiscHit(A: Agent, B: Agent, w: number, h: number): Hit | null {
   const d = wrapDeltaVec(A.x, A.y, B.x, B.y, w, h);
-  const minDist = boundRadius(A) + boundRadius(B);
+  const rA = discRadius(A);
+  const minDist = rA + discRadius(B);
   const dist = Math.hypot(d.x, d.y);
   if (dist >= minDist) return null;
   if (dist < 1e-6) {
-    return { nx: 1, ny: 0, overlap: minDist, px: A.x + boundRadius(A), py: A.y };
+    return { nx: 1, ny: 0, overlap: minDist, px: A.x + rA, py: A.y };
   }
   const nx = d.x / dist;
   const ny = d.y / dist;
@@ -134,8 +138,8 @@ export function queryDiscHit(A: Agent, B: Agent, w: number, h: number): Hit | nu
     nx,
     ny,
     overlap: minDist - dist,
-    px: A.x + nx * boundRadius(A),
-    py: A.y + ny * boundRadius(A),
+    px: A.x + nx * rA,
+    py: A.y + ny * rA,
   };
 }
 

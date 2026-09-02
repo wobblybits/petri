@@ -3,7 +3,7 @@ import { createAgent, momentOfInertia, boundRadius, type Agent } from '../agents
 import { solveContact, solveWire, solveWireSpan, contactMechanics, type ChainNode } from '../chain.ts';
 import { queryHit, SLOP } from '../collide.ts';
 import { Fields } from '../fields.ts';
-import { FAR, FAR_STRIDE, FAR_SUBSTEPS, stepFarKernel } from '../gpu/far-kernel.ts';
+import { FAR, FAR_STRIDE, FAR_SUBSTEPS, FAR_WIRE_STRIDE, packFarWire, stepFarKernel } from '../gpu/far-kernel.ts';
 import { defaultParams } from '../params.ts';
 import { wrapAngle } from '../wrap.ts';
 import {
@@ -77,6 +77,15 @@ function unpackAgent(native: NativeSolver, i: number, a: Agent): void {
   a.omega = bodies[o + FAR.omega];
 }
 
+function packWires(...rows: number[][]): Float32Array {
+  const wires = new Float32Array(rows.length * FAR_WIRE_STRIDE);
+  for (let k = 0; k < rows.length; k++) {
+    const [a, b, rest, oax = 0, oay = 0, obx = 0, oby = 0] = rows[k];
+    packFarWire(wires, k, a, b, rest, oax, oay, obx, oby);
+  }
+  return wires;
+}
+
 describe('native WASM solver', () => {
   it('loads and matches the TS FAR kernel on a two-body overlap', async () => {
     const native = new NativeSolver();
@@ -86,10 +95,23 @@ describe('native WASM solver', () => {
     particle(ts, 0, 0, 0, 10);
     particle(ts, 1, 2, 0, 10);
     wa.set(ts);
-    stepFarKernel(ts, 2, new Float32Array(4), 0, 1 / 60, FAR_SUBSTEPS);
-    expect(native.stepFar(wa, 2, new Float32Array(4), 0, 1 / 60, FAR_SUBSTEPS)).toBe(true);
+    stepFarKernel(ts, 2, new Float32Array(FAR_WIRE_STRIDE), 0, 1 / 60, FAR_SUBSTEPS);
+    expect(native.stepFar(wa, 2, new Float32Array(FAR_WIRE_STRIDE), 0, 1 / 60, FAR_SUBSTEPS)).toBe(true);
     expect(Math.abs(wa[FAR.x] - ts[FAR.x])).toBeLessThan(0.05);
     expect(Math.abs(wa[FAR_STRIDE + FAR.x] - ts[FAR_STRIDE + FAR.x])).toBeLessThan(0.05);
+  });
+
+  it('does not disc-push a wired pair whose rest sits inside the discs', async () => {
+    const native = new NativeSolver();
+    expect(await native.init(), native.lastError).toBe(true);
+    const data = new Float32Array(2 * FAR_STRIDE);
+    particle(data, 0, 0, 0, 15);
+    particle(data, 1, 20, 0, 15);
+    const wires = packWires([0, 1, 20]);
+    expect(native.stepFar(data, 2, wires, 1, 1 / 60, FAR_SUBSTEPS)).toBe(true);
+    const dist = Math.abs(data[FAR.x] - data[FAR_STRIDE + FAR.x]);
+    expect(dist).toBeLessThan(24);
+    expect(dist).toBeGreaterThan(16);
   });
 
   it('holds a chord near rest length', async () => {
@@ -98,7 +120,7 @@ describe('native WASM solver', () => {
     const data = new Float32Array(2 * FAR_STRIDE);
     particle(data, 0, 0, 0, 4);
     particle(data, 1, 80, 0, 4);
-    const wires = new Float32Array([0, 1, 40, 0]);
+    const wires = packWires([0, 1, 40]);
     native.stepFar(data, 2, wires, 1, 1 / 60, FAR_SUBSTEPS);
     const dist = Math.hypot(
       data[FAR_STRIDE + FAR.x] - data[FAR.x],
@@ -106,6 +128,26 @@ describe('native WASM solver', () => {
     );
     expect(dist).toBeLessThan(50);
     expect(dist).toBeGreaterThan(30);
+  });
+
+  it('matches TS FAR on two stem-offset chords of one pair', async () => {
+    const native = new NativeSolver();
+    expect(await native.init(), native.lastError).toBe(true);
+    const ts = new Float32Array(2 * FAR_STRIDE);
+    const wa = new Float32Array(2 * FAR_STRIDE);
+    particle(ts, 0, 0, 0, 18);
+    particle(ts, 1, 80, 0, 18);
+    wa.set(ts);
+    const wires = packWires(
+      [0, 1, 46, 17, 0, -17, 0],
+      [0, 1, Math.hypot(80, 40), 0, 20, 0, -20],
+    );
+    stepFarKernel(ts, 2, wires, 2, 1 / 60, FAR_SUBSTEPS);
+    expect(native.stepFar(wa, 2, wires, 2, 1 / 60, FAR_SUBSTEPS)).toBe(true);
+    for (const field of [FAR.x, FAR.y, FAR.vx, FAR.vy] as const) {
+      expect(Math.abs(wa[field] - ts[field])).toBeLessThan(0.05);
+      expect(Math.abs(wa[FAR_STRIDE + field] - ts[FAR_STRIDE + field])).toBeLessThan(0.05);
+    }
   });
 
   it('does not move a locked body', async () => {
@@ -116,7 +158,7 @@ describe('native WASM solver', () => {
     particle(data, 1, 2, 0, 10);
     data[FAR.locked] = 1;
     data[FAR.invMass] = 0;
-    native.stepFar(data, 2, new Float32Array(4), 0, 1 / 60, FAR_SUBSTEPS);
+    native.stepFar(data, 2, new Float32Array(FAR_WIRE_STRIDE), 0, 1 / 60, FAR_SUBSTEPS);
     expect(data[FAR.x]).toBe(0);
     expect(data[FAR_STRIDE + FAR.x]).toBeGreaterThan(2);
   });
@@ -266,7 +308,7 @@ describe('native WASM solver', () => {
     const h = 1 / 60 / 8;
     solveContact(aTs, bTs, hit!, SLOP, h);
 
-    const np = native.nearContacts(2, h);
+    const np = native.nearContacts(2, 0, h);
     unpackAgent(native, 0, a);
     unpackAgent(native, 1, b);
     expect(np).toBeGreaterThan(0);
@@ -299,7 +341,7 @@ describe('native WASM solver', () => {
     const hit = queryHit(a, b, 240, 160);
     expect(hit).not.toBeNull();
     const m = contactMechanics(a, b, hit!);
-    native.nearContacts(2, 1 / 60 / 8);
+    native.nearContacts(2, 0, 1 / 60 / 8);
     expect(native.hitCount()).toBeGreaterThan(0);
     const H = native.hits!;
     expect(Math.abs(H[HIT.vN] - m.vN)).toBeLessThan(2e-3);

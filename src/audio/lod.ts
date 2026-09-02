@@ -1,4 +1,5 @@
 import type { PanView } from './types.ts';
+import { CAMERA_MIN_ZOOM } from '../camera.ts';
 
 /**
  * How much of an object the listener is entitled to hear in full.
@@ -44,6 +45,25 @@ export interface LodBand {
  */
 export const WIRE_BAND: LodBand = { near: 48, mid: 12 };
 export const AGENT_BAND: LodBand = { near: 20, mid: 6 };
+
+/** World-space stroke used for wires. Screen width is this times zoom. */
+export const WIRE_STROKE_PX = 1.35;
+/**
+ * Below this many screen pixels a wire is a hairline — skip drawing it, and
+ * drop the live rope for a chord span. Canvas will still rasterize a 0.05 px
+ * cubic as a device-pixel streak across the view.
+ *
+ * Set to the stroke width at `CAMERA_MIN_ZOOM` so a fully zoomed-out net still
+ * draws as a net. Live ropes do not come along for the ride: they also need a
+ * detailed body, and bodies have already gone FAR by then.
+ */
+export const WIRE_HAIRLINE_PX = CAMERA_MIN_ZOOM * WIRE_STROKE_PX;
+
+/** False when zoom has shrunk the stroke below a readable hairline. */
+export function wiresDrawable(zoom: number): boolean {
+  if (!(zoom > 0)) return true;
+  return zoom * WIRE_STROKE_PX >= WIRE_HAIRLINE_PX;
+}
 
 /**
  * Fraction of a threshold an object must clear to move up a tier, and fall

@@ -17,7 +17,7 @@ import {
 } from './presets.ts';
 import { albedo, strikeSharpness } from './voice.ts';
 import { buildTopology, kindBrightness } from './topology.ts';
-import type { AudioEvent, LiveContact, LiveWireContact, WorkletInMessage } from './types.ts';
+import type { AudioEvent, LiveContact, WorkletInMessage } from './types.ts';
 import type { NetTopology } from './types.ts';
 
 /** Pure dispatch logic — maps sim events to worklet messages (testable without AudioContext). */
@@ -45,7 +45,7 @@ export function planLatchMessages(
  */
 export function planCollisionMessages(
   ev: Extract<AudioEvent, { type: 'collision' }>,
-): WorkletInMessage[] {
+): Extract<WorkletInMessage, { type: 'strike' }>[] {
   const tau = contactSeconds(ev.effMass, ev.vN);
   const dur = Math.max(2, Math.round(tau * getSampleRate()));
   const peak = contactPeak(ev.effMass, ev.vN, tau);
@@ -90,27 +90,6 @@ export function planContactMessage(
     });
   }
   return { type: 'contact', items };
-}
-
-/**
- * One message a frame for every scraping string. Empty list is how they
- * separate. A pair (`wireB` > 0) bows both; `wireB` 0 is a body on one string.
- */
-export function planWireContactMessage(
-  contacts: Map<string, LiveWireContact>,
-): Extract<WorkletInMessage, { type: 'wireContact' }> {
-  const items: Extract<WorkletInMessage, { type: 'wireContact' }>['items'] = [];
-  for (const c of contacts.values()) {
-    items.push({
-      wireA: c.wireA,
-      wireB: c.wireB,
-      load: Math.max(0, Math.min(1, c.overlap / 1.6)),
-      slide: Math.abs(c.vT) < SLIDE_DEADZONE ? 0 : bowSpeed(c.vT),
-      atA: Math.max(0.02, Math.min(0.98, c.atA)),
-      atB: Math.max(0.02, Math.min(0.98, c.atB)),
-    });
-  }
-  return { type: 'wireContact', items };
 }
 
 /**

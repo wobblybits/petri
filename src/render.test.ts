@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { waveDisplace } from './render.ts';
+import { kindChroma, kindFillRgb, waveDisplace } from './render.ts';
+import { EXTRA_CAP, EXTRA_FLOOR } from './energy.ts';
 import { WAVE_DISP_PX } from './geom.ts';
 
 describe('waveDisplace', () => {
@@ -22,5 +23,24 @@ describe('waveDisplace', () => {
   it('caps a full-scale ring at three-quarters of WAVE_DISP_PX', () => {
     const peak = Math.abs(waveDisplace(2, 2, 1, 1));
     expect(peak).toBeCloseTo(WAVE_DISP_PX * 0.75 * 1.7, 5);
+  });
+});
+
+describe('kind colors', () => {
+  it('paints a full tank as red, blue, and yellow', () => {
+    expect(kindFillRgb('dup', EXTRA_CAP)).toEqual([255, 0, 0]);
+    expect(kindFillRgb('con', EXTRA_CAP)).toEqual([0, 0, 255]);
+    expect(kindFillRgb('era', EXTRA_CAP)).toEqual([255, 255, 0]);
+  });
+
+  it('maps energy to saturation, gray at the floor', () => {
+    const dead = kindFillRgb('con', EXTRA_FLOOR);
+    expect(dead[0]).toBe(dead[1]);
+    expect(dead[1]).toBe(dead[2]);
+    expect(kindChroma('dup', EXTRA_FLOOR)).toBe(0);
+    expect(kindChroma('dup', 0)).toBeGreaterThan(kindChroma('dup', EXTRA_FLOOR));
+    expect(kindChroma('dup', EXTRA_CAP)).toBeGreaterThan(kindChroma('dup', 0));
+    expect(kindChroma('con', EXTRA_CAP)).toBeGreaterThan(kindChroma('con', 0));
+    expect(kindChroma('era', EXTRA_CAP)).toBeGreaterThan(kindChroma('era', 0));
   });
 });

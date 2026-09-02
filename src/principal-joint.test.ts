@@ -75,6 +75,7 @@ describe('principal joint rest length', () => {
         0.05,
       );
     });
+
   });
 
   describe('principal–principal', () => {
@@ -93,6 +94,25 @@ describe('principal joint rest length', () => {
         Math.abs(err),
         `stem span should match wire.rest (span err=${err.toFixed(2)}, rest=${wire.rest.toFixed(2)})`,
       ).toBeLessThan(0.5);
+    });
+
+    it('FAR packed path still holds stem rest, not center rest', () => {
+      const sim = new Sim(400, 240);
+      const params = quietParams();
+      params.wireShrink = 20;
+      params.wireMinRest = 40;
+      const a = sim.spawn('era', 120, 120, 0, params, true)!;
+      const b = sim.spawn('era', 260, 120, Math.PI, params, true)!;
+      sim.wire(a.id, 'p', b.id, 'p', params);
+      const far = { x: 190, y: 120, zoom: 0.05, viewW: 800, viewH: 600 };
+      for (let i = 0; i < 90; i++) sim.step(1 / 60, params, far);
+      const wire = [...sim.graph.wires.values()][0];
+      const err = spanError(sim, wire);
+      const cen = Math.hypot(b.x - a.x, b.y - a.y);
+      expect(Math.abs(err), `stem err=${err.toFixed(2)}`).toBeLessThan(2);
+      expect(cen, `centers should sit outside the stems (cen=${cen.toFixed(1)})`).toBeGreaterThan(
+        wire.rest + 6,
+      );
     });
 
     it('stem span follows wire.rest while the wire shrinks', () => {

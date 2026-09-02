@@ -1,5 +1,8 @@
 import { clamp } from './wrap.ts';
 
+export const CAMERA_MIN_ZOOM = 0.05;
+export const CAMERA_MAX_ZOOM = 6;
+
 export class Camera {
   x = 0;
   y = 0;
@@ -39,7 +42,7 @@ export class Camera {
   }
 
   zoomBy(factor: number): void {
-    this.zoom = clamp(this.zoom * factor, 0.18, 6);
+    this.zoom = clamp(this.zoom * factor, CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
   }
 
   apply(ctx: CanvasRenderingContext2D): void {

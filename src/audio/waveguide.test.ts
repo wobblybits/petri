@@ -535,19 +535,6 @@ describe('traveling-wave snapshot', () => {
     expect(absEnergy(waveChannel(packed, 1, 'back'))).toBeGreaterThan(0.1);
   });
 
-  it('injectProfile writes a measured bow onto both delay lines', () => {
-    const net = new WaveguideNet();
-    net.handle({ type: 'topology', topo: sampleTopo(1, 10, 20, 80) });
-    const samples = new Array(16).fill(0);
-    for (let i = 1; i < 15; i++) samples[i] = Math.sin((Math.PI * i) / 15);
-    net.handle({ type: 'pluck', wireId: 1, gain: 1, samples });
-    const packed = snapCopy(net);
-    expect(packed[0]).toBe(1);
-    expect(absEnergy(waveChannel(packed, 1, 'fwd'))).toBeGreaterThan(0.05);
-    expect(absEnergy(waveChannel(packed, 1, 'back'))).toBeGreaterThan(0.05);
-    expect(peak(collect(net, 256))).toBeGreaterThan(0.005);
-  });
-
   it('an impulse at A travels toward B on the forward line', () => {
     const net = new WaveguideNet();
     net.handle({ type: 'topology', topo: sampleTopo(1, 10, 20, 64) });
@@ -747,75 +734,6 @@ describe('friction bowing', () => {
     net.handle(touching(10, 20, 0.85, bowSpeed(40)));
     collect(net, 4000);
     expect(net.wireEnergy(1)).toBeGreaterThan(1e-6);
-  });
-
-  it('a wire-wire scrape bows both strings', () => {
-    const net = new WaveguideNet();
-    net.handle({
-      type: 'topology',
-      topo: {
-        wires: [
-          { id: 1, length: 90, loss: 0.999, bend: 0.05, agentA: 10, agentB: 20, zA: 1, zB: 1 },
-          { id: 2, length: 100, loss: 0.999, bend: 0.05, agentA: 30, agentB: 40, zA: 1, zB: 1 },
-        ],
-        agents: [
-          { id: 10, kind: 0, openPorts: 0, impedance: 1 },
-          { id: 20, kind: 0, openPorts: 0, impedance: 1 },
-          { id: 30, kind: 1, openPorts: 0, impedance: 1 },
-          { id: 40, kind: 1, openPorts: 0, impedance: 1 },
-        ],
-      },
-    });
-    net.handle({
-      type: 'wireContact',
-      items: [{ wireA: 1, wireB: 2, load: 0.85, slide: bowSpeed(50), atA: 0.4, atB: 0.55 }],
-    });
-    collect(net, 4000);
-    const e1 = net.wireEnergy(1);
-    const e2 = net.wireEnergy(2);
-    expect(e1).toBeGreaterThan(1e-6);
-    expect(e2).toBeGreaterThan(1e-6);
-    expect(Math.max(e1, e2) / Math.min(e1, e2)).toBeLessThan(8);
-  });
-
-  it('a body on a string bows that string', () => {
-    const net = new WaveguideNet();
-    net.handle({ type: 'topology', topo: sampleTopo(1, 10, 20, 90) });
-    net.handle({
-      type: 'wireContact',
-      items: [{ wireA: 1, wireB: 0, load: 0.85, slide: bowSpeed(50), atA: 0.45, atB: 0.45 }],
-    });
-    collect(net, 4000);
-    expect(net.wireEnergy(1)).toBeGreaterThan(1e-6);
-  });
-
-  it('an empty wireContact list lifts the bow', () => {
-    const net = new WaveguideNet();
-    net.handle({
-      type: 'topology',
-      topo: {
-        wires: [
-          { id: 1, length: 90, loss: 0.999, bend: 0.05, agentA: 10, agentB: 20, zA: 1, zB: 1 },
-          { id: 2, length: 100, loss: 0.999, bend: 0.05, agentA: 30, agentB: 40, zA: 1, zB: 1 },
-        ],
-        agents: [
-          { id: 10, kind: 0, openPorts: 0, impedance: 1 },
-          { id: 20, kind: 0, openPorts: 0, impedance: 1 },
-          { id: 30, kind: 1, openPorts: 0, impedance: 1 },
-          { id: 40, kind: 1, openPorts: 0, impedance: 1 },
-        ],
-      },
-    });
-    net.handle({
-      type: 'wireContact',
-      items: [{ wireA: 1, wireB: 2, load: 0.9, slide: bowSpeed(50), atA: 0.5, atB: 0.5 }],
-    });
-    collect(net, 4000);
-    const hot = net.wireEnergy(1) + net.wireEnergy(2);
-    expect(hot).toBeGreaterThan(1e-6);
-    net.handle({ type: 'wireContact', items: [] });
-    collect(net, 48000);
-    expect(net.wireEnergy(1) + net.wireEnergy(2)).toBeLessThan(hot * 0.25);
   });
 
   it('a ringing body in resting contact drives the other', () => {
@@ -1133,7 +1051,7 @@ describe('event ducking', () => {
 });
 
 describe('loudness ordering', () => {
-  it('collision is loudest, bow sits under it, scrape is quietest', () => {
+  it('collision is louder than a scrape', () => {
     // A deliberate mix decision, and a fragile one: the three levels are set by
     // constants that interact non-linearly, and two of them have already been
     // found to flip the order when nudged. Measured at matched drive so the
@@ -1178,15 +1096,7 @@ describe('loudness ordering', () => {
     const collision = rmsOf((net) =>
       net.handle({ type: 'strike', agentId: 1, peak: 0.73, dur: 88, sharp: 0.6 }),
     );
-    const bow = rmsOf((net) =>
-      net.handle({
-        type: 'wireContact',
-        items: [{ wireA: 1, wireB: 2, load: 0.8, slide: bowSpeed(120), atA: 0.4, atB: 0.4 }],
-      }),
-    );
-    // Measured on bodies with nothing tied to them. Scraping a *wired* body
-    // also bows its string, and that is bowing — it belongs in the middle, not
-    // down here, so mixing the two cases would compare the wrong things.
+    // Measured on bodies with nothing tied to them.
     const scrape = (() => {
       const net = new WaveguideNet();
       net.handle({
@@ -1207,10 +1117,9 @@ describe('loudness ordering', () => {
       return Math.sqrt(sum / n);
     })();
 
-    // Every one of them still has to be audible.
+    // Both still have to be audible.
     expect(scrape).toBeGreaterThan(0.004);
-    expect(bow).toBeGreaterThan(scrape);
-    expect(collision).toBeGreaterThan(bow);
+    expect(collision).toBeGreaterThan(scrape);
   });
 });
 

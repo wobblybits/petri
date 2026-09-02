@@ -173,15 +173,7 @@ export interface SpawnEvent {
   kind: AgentKind;
 }
 
-export interface WirePluckEvent {
-  type: 'pluck';
-  wireId: number;
-  gain: number;
-  /** Signed waveguide samples along A→B. Ends are zero. */
-  samples: number[];
-}
-
-export type AudioEvent = LatchEvent | CollisionEvent | RewriteEvent | SpawnEvent | WirePluckEvent;
+export type AudioEvent = LatchEvent | CollisionEvent | RewriteEvent | SpawnEvent;
 
 /** One touching pair, sent every frame while the overlap lasts. */
 export interface ContactItem {
@@ -193,16 +185,6 @@ export interface ContactItem {
   slide: number;
 }
 
-/** Two strings scraping, or a body bowing one string (`wireB` is 0). */
-export interface WireContactItem {
-  wireA: number;
-  /** Partner string, or 0 when a body is the bow. */
-  wireB: number;
-  load: number;
-  slide: number;
-  atA: number;
-  atB: number;
-}
 
 /** Live contact as the sim reports it, before load/slide mapping. */
 export interface LiveContact {
@@ -213,18 +195,6 @@ export interface LiveContact {
   vT: number;
 }
 
-/** Two ropes scraping, or a body bowing one string (`wireB` is 0). */
-export interface LiveWireContact {
-  wireA: number;
-  /** Partner string, or 0 when a body is the bow. */
-  wireB: number;
-  overlap: number;
-  /** Signed slip speed of wire A relative to the partner, px/s. */
-  vT: number;
-  /** Contact along each string, 0 at end A, 1 at end B. */
-  atA: number;
-  atB: number;
-}
 
 /** Direct air path between two bodies. Delay is travel time, gain dies with distance. */
 export interface AirItem {
@@ -255,11 +225,6 @@ export type WorkletInMessage =
       items: ContactItem[];
     }
   | {
-      /** Scraping strings this frame — wire/wire or a body on a wire. Empty = lifted. */
-      type: 'wireContact';
-      items: WireContactItem[];
-    }
-  | {
       /** Line-of-sight air paths this frame. Empty list = nobody in range. */
       type: 'air';
       items: AirItem[];
@@ -272,13 +237,6 @@ export type WorkletInMessage =
       agentB: number;
       leftovers: number[];
       gain: number;
-    }
-  | {
-      /** Geometric bow released onto a ringing (or quiet) wire. */
-      type: 'pluck';
-      wireId: number;
-      gain: number;
-      samples: number[];
     }
   | { type: 'gain'; master: number }
   | {

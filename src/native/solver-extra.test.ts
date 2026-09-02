@@ -1,9 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { createAgent, momentOfInertia, boundRadius, type Agent } from '../agents.ts';
+import { afterEach, describe, expect, it } from 'vitest';
+import { createAgent, momentOfInertia, boundRadius, discRadius, type Agent } from '../agents.ts';
 import { solveContact, solveWire, solveWireSpan, type ChainNode } from '../chain.ts';
 import { queryHit, SLOP } from '../collide.ts';
 import { FAR, FAR_STRIDE } from '../gpu/far-kernel.ts';
-import { defaultParams } from '../params.ts';
+import { defaultParams, type Params } from '../params.ts';
+import { Sim } from '../sim.ts';
+import { nativeSolver as sharedSolver } from './solver.ts';
 import { wrapAngle } from '../wrap.ts';
 import {
   HIT,
@@ -122,7 +124,7 @@ function solveDiscPair(A: Agent, B: Agent, h: number): void {
   const dx = B.x - A.x;
   const dy = B.y - A.y;
   const dist = Math.hypot(dx, dy);
-  const keep = boundRadius(A) + boundRadius(B);
+  const keep = discRadius(A) + discRadius(B);
   if (dist >= keep || dist < 1e-6) return;
   const depth = keep - dist - SLOP;
   if (depth <= 0) return;
@@ -288,7 +290,7 @@ describe('native WASM solver extras', () => {
       const h = 1 / 60 / 8;
       solveContact(aTs, bTs, hit!, SLOP, h);
 
-      const np = native.nearContacts(2, h);
+      const np = native.nearContacts(2, 0, h);
       unpackAgent(native, 0, a);
       unpackAgent(native, 1, b);
       expect(np).toBeGreaterThan(0);
@@ -313,7 +315,7 @@ describe('native WASM solver extras', () => {
     const bh = b.heading;
     packAgent(native, 0, a, true);
     packAgent(native, 1, b, true);
-    native.nearContacts(2, 1 / 60 / 8);
+    native.nearContacts(2, 0, 1 / 60 / 8);
     unpackAgent(native, 0, a);
     unpackAgent(native, 1, b);
     expect(native.hitCount()).toBe(0);
@@ -348,7 +350,7 @@ describe('native WASM solver extras', () => {
     const e1Ts = cloneAgent(e1);
     solveDiscPair(e0Ts, e1Ts, h);
 
-    native.nearContacts(4, h);
+    native.nearContacts(4, 0, h);
     unpackAgent(native, 0, c0);
     unpackAgent(native, 1, c1);
     unpackAgent(native, 2, e0);
@@ -522,6 +524,230 @@ describe('native WASM solver extras', () => {
         expect(Math.abs(N[o + ND.x] - jsNodes[i][k].x)).toBeLessThan(2e-4);
         expect(Math.abs(N[o + ND.y] - jsNodes[i][k].y)).toBeLessThan(2e-4);
       }
+    }
+  });
+});
+
+// `Sim.nativeForces` is a static, and vitest reuses a worker process across
+// test files. A test that throws between flipping it and flipping it back
+// leaks the JS path into whatever file runs next in that worker, which shows
+// up as unrelated tests failing in some runs and not others.
+afterEach(() => {
+  Sim.nativeForces = true;
+});
+
+describe('force passes: WASM against the JS reference', () => {
+  /** A wired net with every port kind in play and nothing else running. */
+  function net(): { sim: Sim; params: Params } {
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.snapRadius = 0;
+    params.stepSpeed = 0;
+    params.sense = 0;
+    params.gravity = 0;
+    params.flockAlign = 0;
+    params.flockSep = 0;
+    params.declutter = 0;
+    params.uncross = 0;
+    params.rewriteDuration = 0;
+    params.upkeep = 0;
+    const sim = new Sim(600, 400);
+    const con = sim.spawn('con', 280, 200, 0.3, params, true)!;
+    const dup = sim.spawn('dup', 340, 210, Math.PI * 0.8, params, true)!;
+    const e1 = sim.spawn('era', 240, 250, 1.1, params, true)!;
+    const e2 = sim.spawn('era', 380, 160, -0.6, params, true)!;
+    const e3 = sim.spawn('era', 250, 150, 2.4, params, true)!;
+    sim.wire(con.id, 'p', dup.id, 'p', params);
+    sim.wire(con.id, 'l', e1.id, 'p', params);
+    sim.wire(con.id, 'r', e3.id, 'p', params);
+    sim.wire(dup.id, 'l', e2.id, 'p', params);
+    for (const a of sim.agents.values()) a.omega = (a.id % 3) - 1;
+    return { sim, params };
+  }
+
+  function spins(sim: Sim): number[] {
+    return [...sim.agents.values()].sort((a, b) => a.id - b.id).map((a) => a.omega);
+  }
+
+  it('port torques match to a few parts in 10^4', async () => {
+    expect(await sharedSolver.init(), sharedSolver.lastError).toBe(true);
+    const dt = 1 / 60;
+
+    Sim.nativeForces = false;
+    const js = net();
+    js.sim.step(dt, js.params);
+    const wantSpin = spins(js.sim);
+
+    Sim.nativeForces = true;
+    const wasm = net();
+    wasm.sim.step(dt, wasm.params);
+    const gotSpin = spins(wasm.sim);
+
+    expect(gotSpin.length).toBe(wantSpin.length);
+    for (let i = 0; i < wantSpin.length; i++) {
+      expect(
+        Math.abs(gotSpin[i] - wantSpin[i]),
+        `agent ${i}: wasm ${gotSpin[i].toFixed(6)} vs js ${wantSpin[i].toFixed(6)}`,
+      ).toBeLessThan(2e-3);
+    }
+    // And it is doing something: the torques actually moved the spins.
+    expect(wantSpin.some((v, i) => Math.abs(v - ((i % 3) - 1)) > 1e-6)).toBe(true);
+  });
+
+  it('holds parity over many frames rather than only the first', async () => {
+    expect(await sharedSolver.init(), sharedSolver.lastError).toBe(true);
+    Sim.nativeForces = false;
+    const js = net();
+    Sim.nativeForces = true;
+    const wasm = net();
+    for (let f = 0; f < 120; f++) {
+      Sim.nativeForces = false;
+      js.sim.step(1 / 60, js.params);
+      Sim.nativeForces = true;
+      wasm.sim.step(1 / 60, wasm.params);
+    }
+    const a = [...js.sim.agents.values()].sort((p, q) => p.id - q.id);
+    const b = [...wasm.sim.agents.values()].sort((p, q) => p.id - q.id);
+    for (let i = 0; i < a.length; i++) {
+      const drift = Math.hypot(b[i].x - a[i].x, b[i].y - a[i].y);
+      expect(drift, `agent ${a[i].id} drifted ${drift.toFixed(4)} px over 2 s`).toBeLessThan(1);
+    }
+  });
+});
+
+describe('every ported force pass against its JS reference', () => {
+  /** Two crowded nets so declutter has separate components to push apart. */
+  function crowd(): { sim: Sim; params: Params } {
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.snapRadius = 0;
+    params.stepSpeed = 0;
+    params.sense = 0;
+    params.rewriteDuration = 0;
+    params.upkeep = 0;
+    params.uncross = 0;
+    // The passes under test, all on.
+    params.declutter = 1.4;
+    params.gravity = 8;
+    params.flockAlign = 0.6;
+    params.flockSep = 0.6;
+    params.portStiff = 1;
+    const sim = new Sim(600, 400);
+    const mk = (ox: number, oy: number) => {
+      const c = sim.spawn('con', ox, oy, 0.2, params, true)!;
+      const d = sim.spawn('dup', ox + 44, oy + 6, Math.PI * 0.9, params, true)!;
+      const e = sim.spawn('era', ox - 30, oy + 28, 1.0, params, true)!;
+      const f = sim.spawn('era', ox + 74, oy - 24, -0.7, params, true)!;
+      sim.wire(c.id, 'p', d.id, 'p', params);
+      sim.wire(c.id, 'l', e.id, 'p', params);
+      sim.wire(d.id, 'r', f.id, 'p', params);
+    };
+    // Close enough that the two nets crowd each other.
+    mk(250, 190);
+    mk(300, 215);
+    return { sim, params };
+  }
+
+  it('a full frame of forces agrees whichever side runs them', async () => {
+    expect(await sharedSolver.init(), sharedSolver.lastError).toBe(true);
+    Sim.nativeForces = false;
+    const js = crowd();
+    Sim.nativeForces = true;
+    const wasm = crowd();
+    for (let f = 0; f < 120; f++) {
+      Sim.nativeForces = false;
+      js.sim.step(1 / 60, js.params);
+      Sim.nativeForces = true;
+      wasm.sim.step(1 / 60, wasm.params);
+    }
+    const a = [...js.sim.agents.values()].sort((p, q) => p.id - q.id);
+    const b = [...wasm.sim.agents.values()].sort((p, q) => p.id - q.id);
+    expect(b.length).toBe(a.length);
+    let worst = 0;
+    for (let i = 0; i < a.length; i++) {
+      worst = Math.max(worst, Math.hypot(b[i].x - a[i].x, b[i].y - a[i].y));
+    }
+    expect(worst, `worst drift ${worst.toFixed(4)} px over 2 s`).toBeLessThan(2);
+    // The scene has to have actually moved, or agreement is meaningless.
+    const spread = Math.hypot(a[0].x - a[4].x, a[0].y - a[4].y);
+    expect(spread, 'declutter pushed the two nets apart').toBeGreaterThan(20);
+  });
+});
+
+describe('steering: WASM against the JS reference', () => {
+  /**
+   * Foraging, face attraction, the snap well and locomotion all live.
+   *
+   * `swimNoise` is 0 on purpose. The Ornstein-Uhlenbeck kick draws from
+   * Math.random, and the two paths walk the bodies in different orders — the
+   * JS pass in spatial-grid order, the packed one in id order — so the two
+   * runs would consume the stream differently and the comparison would be
+   * measuring the noise rather than the steering.
+   */
+  function forager(): { sim: Sim; params: Params } {
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.rewriteDuration = 0;
+    params.upkeep = 0;
+    params.uncross = 0;
+    params.swimNoise = 0;
+    params.wireShrink = 0.9;
+    params.sense = 220;
+    params.stepSpeed = 30;
+    params.faceAttract = 40;
+    params.snapWell = 60;
+    params.snapRadius = 40;
+    const sim = new Sim(600, 400);
+    sim.setFieldCover(600, 400);
+    for (let i = 0; i < 14; i++) {
+      const kind = i % 3 === 0 ? 'era' : i % 3 === 1 ? 'con' : 'dup';
+      sim.spawn(kind, 120 + (i * 61) % 360, 110 + (i * 97) % 200, i * 0.83, params, true);
+    }
+    // A wired pair, so the principal-wire bias term is exercised too.
+    const ids = [...sim.agents.keys()];
+    sim.wire(ids[1], 'p', ids[2], 'p', params);
+    // Lay down scent so the sensors have a gradient to climb.
+    for (let f = 0; f < 30; f++) sim.step(1 / 60, params);
+    return { sim, params };
+  }
+
+  it('agrees on where a foraging soup ends up', async () => {
+    expect(await sharedSolver.init(), sharedSolver.lastError).toBe(true);
+    Sim.nativeForces = false;
+    const js = forager();
+    Sim.nativeForces = true;
+    const wasm = forager();
+    for (let f = 0; f < 90; f++) {
+      Sim.nativeForces = false;
+      js.sim.step(1 / 60, js.params);
+      Sim.nativeForces = true;
+      wasm.sim.step(1 / 60, wasm.params);
+    }
+    const a = [...js.sim.agents.values()].sort((p, q) => p.id - q.id);
+    const b = [...wasm.sim.agents.values()].sort((p, q) => p.id - q.id);
+    expect(b.length).toBe(a.length);
+    let worst = 0;
+    let moved = 0;
+    for (let i = 0; i < a.length; i++) {
+      worst = Math.max(worst, Math.hypot(b[i].x - a[i].x, b[i].y - a[i].y));
+      moved = Math.max(moved, Math.hypot(a[i].vx, a[i].vy));
+    }
+    expect(moved, 'the soup is actually swimming').toBeGreaterThan(1);
+    expect(worst, `worst drift ${worst.toFixed(3)} px over 1.5 s`).toBeLessThan(3);
+  });
+
+  it('agrees on trail strength, which feeds turn authority', async () => {
+    expect(await sharedSolver.init(), sharedSolver.lastError).toBe(true);
+    Sim.nativeForces = false;
+    const js = forager();
+    Sim.nativeForces = true;
+    const wasm = forager();
+    const t = (s: Sim) => [...s.agents.values()].sort((p, q) => p.id - q.id).map((a) => a.trail);
+    const wantTrail = t(js.sim);
+    const gotTrail = t(wasm.sim);
+    expect(Math.max(...wantTrail), 'there is scent to smell').toBeGreaterThan(0);
+    for (let i = 0; i < wantTrail.length; i++) {
+      expect(Math.abs(gotTrail[i] - wantTrail[i]), `agent ${i} trail`).toBeLessThan(1e-3);
     }
   });
 });

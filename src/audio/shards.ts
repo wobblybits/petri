@@ -226,23 +226,3 @@ export function partitionPairs<T extends { agentA: number; agentB: number }>(
   return parts;
 }
 
-/** Wire scrapes follow the string's slot. Unknown wires stay in the soup. */
-export function partitionWirePairs<T extends { wireA: number }>(
-  items: T[],
-  wireSlot: Map<number, number>,
-  slotCount = SHARD_COUNT,
-): T[][] {
-  const parts: T[][] = [];
-  for (let s = 0; s < slotCount; s++) parts.push([]);
-  for (const it of items) {
-    const s = wireSlot.get(it.wireA) ?? SOUP_SLOT;
-    parts[s < slotCount ? s : SOUP_SLOT].push(it);
-  }
-  return parts;
-}
-
-export function wireSlots(topo: NetTopology, shardOf: Map<number, number>): Map<number, number> {
-  const out = new Map<number, number>();
-  for (const w of topo.wires) out.set(w.id, shardOf.get(w.agentA) ?? SOUP_SLOT);
-  return out;
-}

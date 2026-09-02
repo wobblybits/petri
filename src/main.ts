@@ -21,7 +21,7 @@ app.innerHTML = `
   <canvas id="view"></canvas>
   <aside id="panel">
     <h1>Interaction nets</h1>
-    <p class="lede">Era, Dup, and Con forage on an infinite plane, latch ports, and rewrite like Lafont combinators.</p>
+    <p class="lede">Era, Dup, and Con forage on an energy grid, latch ports, and rewrite like Lafont combinators. Annihilation releases energy; a Con–Dup commute spends it.</p>
     <div class="row">
       <button type="button" id="pause">Pause</button>
       <button type="button" id="step">Step</button>
@@ -29,8 +29,11 @@ app.innerHTML = `
       <button type="button" id="recentre">Recentre</button>
     </div>
     <label class="check"><input type="checkbox" id="overlay" /> Field overlay</label>
-    <label class="check"><input type="checkbox" id="sound" checked /> Sound</label>
-    <p class="hint sound-hint" id="sound-hint">Click anywhere to enable sound.</p>
+    <label class="check"><input type="checkbox" id="energy-circles" /> Energy circles</label>
+    <label class="check"><input type="checkbox" id="kind-colors" checked /> Kind colors</label>
+    <label class="check"><input type="checkbox" id="energy-grid" /> Energy grid</label>
+    <label class="check"><input type="checkbox" id="sound" /> Sound</label>
+    <p class="hint sound-hint" id="sound-hint">Tick Sound to start the synth.</p>
     <label class="slider">
       <span>Wave speed</span>
       <input type="range" id="wave-speed" min="0.35" max="2.8" step="0.05" value="1" />
@@ -75,7 +78,7 @@ const params: Params = defaultParams();
 const sim = new Sim(800, 600);
 const camera = new Camera();
 const interaction = new Interaction(sim, camera);
-const view = { overlay: false };
+const view = { overlay: false, energyGrid: false, energyCircles: false, kindColors: true };
 let paused = false;
 let spawnKind: AgentKind = 'era';
 let currentPreset: PresetName = 'soup';
@@ -191,7 +194,23 @@ document.querySelector('#recentre')!.addEventListener('click', () => {
 document.querySelector('#overlay')!.addEventListener('change', (ev) => {
   view.overlay = (ev.target as HTMLInputElement).checked;
 });
+document.querySelector('#energy-circles')!.addEventListener('change', (ev) => {
+  view.energyCircles = (ev.target as HTMLInputElement).checked;
+});
+document.querySelector('#kind-colors')!.addEventListener('change', (ev) => {
+  view.kindColors = (ev.target as HTMLInputElement).checked;
+});
+document.querySelector('#energy-grid')!.addEventListener('change', (ev) => {
+  view.energyGrid = (ev.target as HTMLInputElement).checked;
+});
 soundCheck.addEventListener('change', () => {
+  // Booting builds the whole synthesis graph, so a pond nobody is listening to
+  // never pays for one. Ticking the box is the gesture that boots it, and it
+  // counts as the user activation an AudioContext needs.
+  if (soundCheck.checked && !audioReady) {
+    void bootAudio();
+    return;
+  }
   audio.setMuted(!soundCheck.checked);
 });
 
@@ -207,7 +226,7 @@ async function bootAudio(): Promise<void> {
 }
 
 function armAudio(): void {
-  void bootAudio();
+  if (soundCheck.checked) void bootAudio();
 }
 
 // Dev-only handle for checking what the audio path is actually doing:
@@ -260,6 +279,9 @@ canvas.addEventListener('pointermove', (ev) => {
 canvas.addEventListener('pointerup', (ev) => {
   const { wx, wy } = pointerWorld(ev);
   const spawnAt = interaction.end(wx, wy, (a, b) => {
+    const A = sim.agents.get(a.id);
+    const B = sim.agents.get(b.id);
+    if (!A || !B) return;
     sim.wire(a.id, a.slot, b.id, b.slot, params);
   });
   if (spawnAt) sim.spawn(spawnKind, spawnAt.x, spawnAt.y, Math.random() * Math.PI * 2, params);
@@ -322,7 +344,7 @@ function drawGesture(): void {
 function paint(): void {
   render(ctx, sim, camera, view, audio.waves);
   drawGesture();
-  statsEl.textContent = `${sim.agents.size} agents · ${sim.graph.wires.size} wires · ${sim.rewrites.length} rewrites`;
+  statsEl.textContent = `${sim.agents.size} agents · ${sim.graph.wires.size} wires · ${sim.rewrites.length} rewrites · ${format(sim.totalFree())} extra / ${sim.totalBound()} bound`;
   if (lambdaRoot) {
     const value = readChurch(sim.agents, sim.graph, lambdaRoot);
     if (value !== null) lambdaOut.textContent = `${lambdaLabel} = ${value}`;

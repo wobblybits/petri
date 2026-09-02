@@ -15,7 +15,6 @@ export const MAX_DELAY = 4096;
 export const MAX_AGENTS = 256;
 export const MAX_PORTS = 4;
 export const MAX_CONTACTS = 48;
-export const MAX_WIRE_CONTACTS = 24;
 export const MAX_AIR = 48;
 export const MAX_AIR_DELAY = 512;
 export const MAX_STUBS = 96;
@@ -85,21 +84,6 @@ const STEAL_ENV = 0.002;
  * range, not a free parameter.
  */
 const RUB_TO_JUNCTION = 0.06;
-/** Slip-slide force into both delay lines when two wires scrape. */
-/**
- * Bow force onto a string from another string or a body.
- *
- * This sits inside the friction's feedback loop, so it does not behave like a
- * volume: the injected force changes the string's velocity, which changes what
- * the friction sees next sample. Below about 0.2 the limit cycle stops
- * sustaining altogether — a bow too light to speak, which is what a real one
- * does too. 0.18 is just under that knee, which puts a sustained bow at about
- * the loudness of a latch pluck instead of well above a collision. Measured
- * RMS: 0.35 gave 0.124, this gives 0.034, against 0.033 for a pluck and 0.079
- * for a median collision.
- */
-const WIRE_BOW = 0.18;
-
 /**
  * How far the sustained bed steps aside when something happens.
  *
@@ -375,14 +359,9 @@ export type WorkletMessage =
   | { type: 'junction'; agentId: number; gain: number }
   | { type: 'strike'; agentId: number; peak: number; dur: number; sharp: number }
   | { type: 'contact'; items: { agentA: number; agentB: number; load: number; slide: number }[] }
-  | {
-      type: 'wireContact';
-      items: { wireA: number; wireB: number; load: number; slide: number; atA: number; atB: number }[];
-    }
   | { type: 'air'; items: { agentA: number; agentB: number; length: number; gain: number; damp: number }[] }
   | { type: 'latch'; topo: NetTopology; wireId: number; gain: number }
   | { type: 'rewrite'; phase: 0 | 1; wireId: number; agentA: number; agentB: number; leftovers: number[]; gain: number }
-  | { type: 'pluck'; wireId: number; gain: number; samples: number[] }
   | { type: 'gain'; master: number }
   | {
       type: 'listen';
@@ -583,33 +562,6 @@ function makeContact(): ContactState {
   };
 }
 
-interface WireContactState {
-  active: boolean;
-  idxA: number;
-  idxB: number;
-  idA: number;
-  idB: number;
-  atA: number;
-  atB: number;
-  load: number;
-  slide: number;
-  noise: number;
-}
-
-function makeWireContact(): WireContactState {
-  return {
-    active: false,
-    idxA: 0,
-    idxB: 0,
-    idA: -1,
-    idB: -1,
-    atA: 0.5,
-    atB: 0.5,
-    load: 0,
-    slide: 0,
-    noise: 1,
-  };
-}
 
 interface AirState {
   active: boolean;
@@ -825,7 +777,6 @@ export class WaveguideNet {
   agentById = new Map<number, number>();
   tissueById = new Map<number, number>();
   contacts: ContactState[] = [];
-  wireContacts: WireContactState[] = [];
   airs: AirState[] = [];
   tissues: TissueState[] = [];
   stubs: StubState[] = [];
@@ -887,8 +838,6 @@ export class WaveguideNet {
   private liveTissueN = 0;
   private liveContacts = new Int32Array(MAX_CONTACTS);
   private liveContactN = 0;
-  private liveWireContacts = new Int32Array(MAX_WIRE_CONTACTS);
-  private liveWireContactN = 0;
 
   private quantumPos = 0;
   /** Sidechain gain on the sustained bed. 1 is untouched. */
@@ -910,7 +859,6 @@ export class WaveguideNet {
     for (let i = 0; i < MAX_WIRES; i++) this.wires.push(makeWire());
     for (let i = 0; i < MAX_AGENTS; i++) this.agents.push(makeAgent());
     for (let i = 0; i < MAX_CONTACTS; i++) this.contacts.push(makeContact());
-    for (let i = 0; i < MAX_WIRE_CONTACTS; i++) this.wireContacts.push(makeWireContact());
     for (let i = 0; i < MAX_AIR; i++) this.airs.push(makeAir());
     for (let i = 0; i < MAX_TISSUES; i++) this.tissues.push(makeTissue());
     for (let i = 0; i < MAX_STUBS; i++) this.stubs.push(makeStub());
@@ -968,10 +916,6 @@ export class WaveguideNet {
         this.setContacts(msg.items);
         return;
       }
-      if (msg.type === 'wireContact') {
-        this.setWireContacts(msg.items);
-        return;
-      }
       if (msg.type === 'air') {
         this.setAir(msg.items);
         return;
@@ -982,10 +926,6 @@ export class WaveguideNet {
       }
       if (msg.type === 'tune') {
         this.applyTune(msg.wires);
-        return;
-      }
-      if (msg.type === 'pluck') {
-        this.injectProfile(msg.wireId, msg.samples, msg.gain);
         return;
       }
       if (msg.type === 'rewrite') {
@@ -1035,13 +975,7 @@ export class WaveguideNet {
     this.liveContactN = n;
   }
 
-  private refreshLiveWireContacts(): void {
-    let n = 0;
-    for (let i = 0; i < MAX_WIRE_CONTACTS; i++) {
-      if (this.wireContacts[i].active) this.liveWireContacts[n++] = i;
-    }
-    this.liveWireContactN = n;
-  }
+
 
   private wakeAgent(a: AgentState, amt = 0): void {
     a.quiet = false;
@@ -1217,52 +1151,6 @@ export class WaveguideNet {
     return true;
   }
 
-  /**
-   * Write a measured transverse profile onto the delay lines. `samples` are
-   * already in waveguide units (world px / WAVE_DISP_PX). Same layout as a
-   * pluck: half on each travelling wave so the first snapshot looks like the
-   * bow that produced it.
-   */
-  injectProfile(wireId: number, samples: number[], gainRaw?: number): boolean {
-    const idx = this.wireById.get(wireId);
-    if (idx === undefined) return false;
-    const n = samples.length;
-    if (n < 2) return false;
-    const gain = Math.max(-8, Math.min(8, num(gainRaw, 1)));
-    if (gain === 0) return false;
-    this.triggerDuck(Math.abs(gain) / 1.2);
-    const w = this.wires[idx];
-    const L = Math.max(8, w.length | 0);
-    const vals = new Float32Array(L);
-    let mean = 0;
-    let peak = 0;
-    for (let k = 0; k < L; k++) {
-      const t = k / L;
-      const x = t * (n - 1);
-      const i0 = x | 0;
-      const i1 = i0 + 1 < n ? i0 + 1 : n - 1;
-      const frac = x - i0;
-      let v = (samples[i0] + frac * (samples[i1] - samples[i0])) * gain;
-      if (k === 0 || k === L - 1) v = 0;
-      vals[k] = v;
-      mean += v;
-      const a = v < 0 ? -v : v;
-      if (a > peak) peak = a;
-    }
-    mean /= L;
-    const amp = 0.5;
-    for (let k = 1; k < L; k++) {
-      const s = (vals[k] - mean) * amp;
-      w.bufFwd[wrapDelayIndex(w.pos, k) | 0] += s;
-      w.bufBack[wrapDelayIndex(w.pos, L - k) | 0] += s;
-    }
-    w.quiet = false;
-    w.env = Math.max(w.env, peak, 1e-4);
-    this.wakeAgentId(w.agentA, peak);
-    this.wakeAgentId(w.agentB, peak);
-    return true;
-  }
-
   addJunction(agentId: number, gainRaw: number): void {
     const aIdx = this.agentById.get(agentId);
     if (aIdx === undefined) return;
@@ -1376,49 +1264,6 @@ export class WaveguideNet {
       c.idB = -1;
     }
     this.refreshLiveContacts();
-  }
-
-  /** Replace the set of scraping strings. `wireB` 0 is a body bowing `wireA`. */
-  setWireContacts(
-    items: { wireA: number; wireB: number; load: number; slide: number; atA: number; atB: number }[],
-  ): void {
-    let n = 0;
-    for (const it of items) {
-      if (n >= MAX_WIRE_CONTACTS) break;
-      const ia = this.wireById.get(it.wireA);
-      if (ia === undefined) continue;
-      const bodyBow = !(it.wireB > 0);
-      const ib = bodyBow ? -1 : this.wireById.get(it.wireB);
-      if (!bodyBow && (ib === undefined || ib === ia)) continue;
-      const c = this.wireContacts[n];
-      c.active = true;
-      c.idxA = ia;
-      c.idxB = bodyBow ? -1 : ib!;
-      c.idA = it.wireA;
-      c.idB = bodyBow ? 0 : it.wireB;
-      c.load = Math.max(0, Math.min(1, num(it.load)));
-      c.slide = Math.max(-0.08, Math.min(0.08, num(it.slide)));
-      c.atA = Math.max(0.02, Math.min(0.98, num(it.atA, 0.5)));
-      c.atB = Math.max(0.02, Math.min(0.98, num(it.atB, 0.5)));
-      n++;
-      if (c.load > 0) {
-        const A = this.wires[ia];
-        A.quiet = false;
-        A.env = Math.max(A.env, c.load * 0.5);
-        if (!bodyBow) {
-          const B = this.wires[ib!];
-          B.quiet = false;
-          B.env = Math.max(B.env, c.load * 0.5);
-        }
-      }
-    }
-    for (; n < MAX_WIRE_CONTACTS; n++) {
-      const c = this.wireContacts[n];
-      c.active = false;
-      c.idA = -1;
-      c.idB = -1;
-    }
-    this.refreshLiveWireContacts();
   }
 
   /** Replace the set of line-of-sight air paths. Matching pairs keep their delay lines. */
@@ -1880,72 +1725,6 @@ export class WaveguideNet {
         c.ridgePhase = 0;
         c.ridgeEnv = 0;
       }
-    }
-  }
-
-  /**
-   * Transverse velocity at `at` along a string. Forward minus backward is the
-   * characteristic velocity at that point; the two lines run opposite ways
-   * so sample k and L-k are the same place.
-   */
-  private stringVel(w: WireState, at: number): number {
-    const L = Math.max(8, w.length | 0);
-    const t = at > 0.98 ? 0.98 : at < 0.02 ? 0.02 : at;
-    const k = Math.max(1, Math.min(L - 1, (t * L) | 0));
-    return this.read(w.bufFwd, w.pos, k) - this.read(w.bufBack, w.pos, L - k);
-  }
-
-  /** Force at a point: half on each travelling wave so the first snapshot is a bow. */
-  private injectStringForce(w: WireState, at: number, s: number): void {
-    if (s === 0) return;
-    const L = Math.max(8, w.length | 0);
-    const t = at > 0.98 ? 0.98 : at < 0.02 ? 0.02 : at;
-    const k = Math.max(1, Math.min(L - 1, (t * L) | 0));
-    const half = s * 0.5;
-    w.bufFwd[wrapDelayIndex(w.pos, k) | 0] += half;
-    w.bufBack[wrapDelayIndex(w.pos, L - k) | 0] += half;
-    w.quiet = false;
-    const a = s < 0 ? -s : s;
-    w.env = Math.max(w.env, a);
-    this.wakeAgentId(w.agentA, a);
-    this.wakeAgentId(w.agentB, a);
-  }
-
-  /**
-   * Slip-slide bow. A pair (`idB` > 0) drives both strings with the same force.
-   * `idB` 0 is a body on one string — Helmholtz against the rigid slide.
-   */
-  private applyWireContacts(): void {
-    for (let k = 0; k < this.liveWireContactN; k++) {
-      const c = this.wireContacts[this.liveWireContacts[k]];
-      if (c.load <= 1e-6) continue;
-      let A = this.wires[c.idxA];
-      if (!A || A.wireId !== c.idA || !A.active) {
-        const ia = this.wireById.get(c.idA);
-        if (ia === undefined) continue;
-        c.idxA = ia;
-        A = this.wires[ia];
-      }
-      if (!A.active) continue;
-      if (!(c.idB > 0)) {
-        const Ft = this.friction(c.slide + this.stringVel(A, c.atA), c.load, c);
-        this.injectStringForce(A, c.atA, Ft * WIRE_BOW * this.duck);
-        continue;
-      }
-      let B = c.idxB >= 0 ? this.wires[c.idxB] : undefined;
-      if (!B || B.wireId !== c.idB || !B.active) {
-        const ib = this.wireById.get(c.idB);
-        if (ib === undefined) continue;
-        c.idxB = ib;
-        B = this.wires[ib];
-      }
-      if (!B.active || A === B) continue;
-      const vA = this.stringVel(A, c.atA);
-      const vB = this.stringVel(B, c.atB);
-      const Ft = this.friction(c.slide + (vA + vB) * 0.5, c.load, c);
-      const s = Ft * WIRE_BOW * this.duck;
-      this.injectStringForce(A, c.atA, s);
-      this.injectStringForce(B, c.atB, s);
     }
   }
 
@@ -2612,7 +2391,7 @@ export class WaveguideNet {
     const dryR = y * src.panR * src.dry;
     const wetL = y * src.panL * src.wet;
     const wetR = y * src.panR * src.wet;
-    const lod = src.lod | 0;
+    const lod = (src.lod ?? 0) | 0;
     if (lod >= 2) {
       this.farDryL += dryL;
       this.farDryR += dryR;
@@ -2855,7 +2634,6 @@ export class WaveguideNet {
 
     if (!shedAir) this.applyAirReads();
     this.applyContacts();
-    this.applyWireContacts();
 
     for (let k = 0; k < this.liveAgentN; k++) {
       const agent = this.agents[this.liveAgents[k]];

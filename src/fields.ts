@@ -89,13 +89,24 @@ export class Fields {
 
   /** Stamp a world-space segment onto the scent wall mask. */
   markSegment(x0: number, y0: number, x1: number, y1: number): void {
+    if (
+      !Number.isFinite(x0) ||
+      !Number.isFinite(y0) ||
+      !Number.isFinite(x1) ||
+      !Number.isFinite(y1)
+    ) {
+      return;
+    }
     const cellW = this.worldW / this.cols;
     const cellH = this.worldH / this.rows;
     const dx = x1 - x0;
     const dy = y1 - y0;
     const len = Math.hypot(dx, dy);
+    if (!Number.isFinite(len)) return;
     const step = Math.max(0.35 * Math.min(cellW, cellH), 0.5);
-    const n = Math.max(1, Math.ceil(len / step));
+    // A blown-up rope used to walk billions of cells here and freeze the tab.
+    const cap = (this.cols + this.rows) * 4;
+    const n = Math.min(cap, Math.max(1, Math.ceil(len / step)));
     for (let k = 0; k <= n; k++) {
       const t = k / n;
       const { gx, gy } = this.toGrid(x0 + dx * t, y0 + dy * t);
@@ -256,15 +267,24 @@ export class Fields {
     for (let j = 0; j < rows; j++) {
       for (let i = 0; i < cols; i++) {
         const base = (j * cols + i) * CHANNELS;
-        const con = data[base + CH.conP] / peak;
-        const dup = data[base + CH.dupP] / peak;
-        const era = data[base + CH.eraP] / peak;
-        const aux = data[base + CH.aux] / peak;
+        const posCon = Math.max(0, data[base + CH.conP]);
+        const posDup = Math.max(0, data[base + CH.dupP]);
+        const posEra = Math.max(0, data[base + CH.eraP]);
+        const posAux = Math.max(0, data[base + CH.aux]);
+        const neg =
+          Math.max(0, -data[base + CH.conP]) +
+          Math.max(0, -data[base + CH.dupP]) +
+          Math.max(0, -data[base + CH.eraP]) +
+          Math.max(0, -data[base + CH.aux]);
+        const con = posCon / peak;
+        const dup = posDup / peak;
+        const era = posEra / peak;
+        const aux = posAux / peak;
         const p = (j * cols + i) * 4;
-        pix[p] = Math.min(255, (con * 210 + aux * 70) | 0);
+        pix[p] = Math.min(255, (con * 210 + aux * 70 + (neg / peak) * 140) | 0);
         pix[p + 1] = Math.min(255, (aux * 90 + era * 40) | 0);
         pix[p + 2] = Math.min(255, (dup * 200 + era * 160 + aux * 40) | 0);
-        pix[p + 3] = Math.min(180, ((con + dup + era + aux) * 140) | 0);
+        pix[p + 3] = Math.min(180, ((con + dup + era + aux + neg / peak) * 140) | 0);
       }
     }
   }

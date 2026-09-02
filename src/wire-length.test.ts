@@ -104,10 +104,14 @@ function strokeReport(sim: Sim, wire: Wire): {
 
 function expectStrokeSane(sim: Sim, wire: Wire, label: string): void {
   const r = strokeReport(sim, wire);
+  // The renderer clamps to exactly this budget, so a bowed stroke sits *on*
+  // the bound rather than under it and the comparison is a float tie. One ulp
+  // of slack, not a loosened bound.
+  const budget = bowBudget(r.span, r.rest);
   expect(
     r.dev,
     `${label}: stroke ${r.dev.toFixed(1)} px off a ${r.span.toFixed(1)} px chord (lastLen ${r.lastLen.toFixed(1)}, stroke ${r.len.toFixed(1)})`,
-  ).toBeLessThanOrEqual(bowBudget(r.span, r.rest));
+  ).toBeLessThanOrEqual(budget * (1 + 1e-9));
 }
 
 function wiredPair(sim: Sim, params: ReturnType<typeof quietParams>) {
@@ -256,6 +260,9 @@ describe('a live soup does not grow off-screen wires', () => {
     const sim = new Sim(480, 320);
     const params = defaultParams();
     params.spawnInterval = 0;
+    // Pinned: this is a geometry check at a particular density, not a test of
+    // whatever the product's default soup happens to be.
+    params.soupCount = 28;
     loadPreset(sim, 'soup', params);
     for (let i = 0; i < 180; i++) {
       sim.step(1 / 60, params);

@@ -46,18 +46,36 @@ export class PairGrid {
       if (y > maxY) maxY = y;
     }
 
+    // NaN/Inf bounds make cols*rows stay non-finite, so the coarsen loop
+    // never exits and the tab freezes.
+    if (
+      !Number.isFinite(minX) ||
+      !Number.isFinite(minY) ||
+      !Number.isFinite(maxX) ||
+      !Number.isFinite(maxY)
+    ) {
+      minX = 0;
+      minY = 0;
+      maxX = 0;
+      maxY = 0;
+    }
+
     // A scattered swarm could otherwise ask for billions of empty buckets.
     // Prefer more cells (tighter buckets) until the cap: coarsening toward
     // all-pairs is how a spread of 400 became as expensive as 400 stacked.
-    let cell = Math.max(1e-3, cellSize);
+    let cell = Math.max(1e-3, Number.isFinite(cellSize) ? cellSize : 1);
     const maxCells = Math.min(65536, Math.max(256, count * 32));
     let cols = Math.floor((maxX - minX) / cell) + 1;
     let rows = Math.floor((maxY - minY) / cell) + 1;
-    while (cols * rows > maxCells) {
+    let guard = 0;
+    while (cols * rows > maxCells && guard++ < 64) {
       cell *= 2;
+      if (!Number.isFinite(cell) || cell <= 0) break;
       cols = Math.floor((maxX - minX) / cell) + 1;
       rows = Math.floor((maxY - minY) / cell) + 1;
     }
+    if (!Number.isFinite(cols) || cols < 1) cols = 1;
+    if (!Number.isFinite(rows) || rows < 1) rows = 1;
 
     this.cols = cols;
     this.rows = rows;

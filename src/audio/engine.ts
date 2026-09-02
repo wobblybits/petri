@@ -6,14 +6,13 @@ import {
   planRewriteMessages,
   planSpawnMessages,
   planContactMessage,
-  planWireContactMessage,
   planAirMessage,
 } from './dispatch.ts';
 import { buildTopology } from './topology.ts';
 import { LodSelector } from './lod.ts';
 import { setSampleRate } from './presets.ts';
 import { makeReverbIR } from './reverb.ts';
-import type { AudioEvent, LiveContact, LiveWireContact, NetTopology, PanView, WaveSnapshot, WorkletInMessage } from './types.ts';
+import type { AudioEvent, LiveContact, NetTopology, PanView, WaveSnapshot, WorkletInMessage } from './types.ts';
 import workletUrl from './worklet/net-processor.ts?url';
 import workerUrl from './worklet/net-worker.ts?url';
 import { AudioRing, ringBytes } from './ring.ts';
@@ -23,9 +22,7 @@ import {
   ShardAssigner,
   emptyTopology,
   partitionPairs,
-  partitionWirePairs,
   splitTopology,
-  wireSlots,
 } from './shards.ts';
 
 /**
@@ -72,7 +69,6 @@ function sharedMemoryAvailable(): boolean {
 
 function eventGain(ev: AudioEvent): number {
   if (ev.type === 'latch') return 1.5;
-  if (ev.type === 'pluck') return Math.min(1.4, 0.4 + ev.gain);
   if (ev.type === 'rewrite') return ev.phase === 'commit' ? 1.4 : 1;
   // A spawn outranks a light bump but yields to a latch, so a busy frame keeps
   // the structural events and drops the incidental ones.
@@ -101,16 +97,13 @@ export class AudioEngine {
   private lod = new LodSelector();
   private readonly assigner = new ShardAssigner();
   private shardOf = new Map<number, number>();
-  private wireSlot = new Map<number, number>();
   private parts: NetTopology[] = [];
   private readonly topoKeys = new Array<number>(SHARD_COUNT).fill(-1);
   private readonly poseKeys = new Array<number>(SHARD_COUNT).fill(-1);
   private readonly tuneKeys = new Array<number>(SHARD_COUNT).fill(-1);
   private readonly contactKeys = new Array<number>(SHARD_COUNT).fill(-1);
-  private readonly wireContactKeys = new Array<number>(SHARD_COUNT).fill(-1);
   private readonly airKeys = new Array<number>(SHARD_COUNT).fill(-1);
   private readonly contactedLast = new Array<boolean>(SHARD_COUNT).fill(false);
-  private readonly wiredLast = new Array<boolean>(SHARD_COUNT).fill(false);
   private readonly airedLast = new Array<boolean>(SHARD_COUNT).fill(false);
   onPost: ((msg: WorkletInMessage) => void) | null = null;
   /** Latest traveling-wave snapshot from the worklet. Null until the first one. */
@@ -422,7 +415,7 @@ export class AudioEngine {
   /** Cooldowns keep one agent or wire from retriggering every frame. */
   private allow(ev: AudioEvent): boolean {
     if (ev.type === 'spawn') return true;
-    if (ev.type === 'latch' || ev.type === 'pluck') {
+    if (ev.type === 'latch') {
       if ((this.lastWire.get(ev.wireId) ?? -1) > this.now - WIRE_COOLDOWN) return false;
       this.lastWire.set(ev.wireId, this.now);
       return true;
@@ -519,14 +512,6 @@ export class AudioEngine {
         ids.add(ev.agent);
         continue;
       }
-      if (ev.type === 'pluck') {
-        const w = this.graph?.wires.get(ev.wireId);
-        if (w) {
-          ids.add(w.a.id);
-          ids.add(w.b.id);
-        }
-        continue;
-      }
       if ('agentA' in ev) ids.add(ev.agentA);
       if ('agentB' in ev) ids.add(ev.agentB);
       if (ev.type === 'rewrite') for (const id of ev.leftovers) ids.add(id);
@@ -547,7 +532,6 @@ export class AudioEngine {
    */
   contacts: Map<string, LiveContact> | null = null;
   /** Scraping wire pairs for this frame. Same contract as `contacts`. */
-  wireContacts: Map<string, LiveWireContact> | null = null;
 
   frame(graph: Graph, agents: Map<number, Agent>, dt = 1 / 60, view?: PanView | null): void {
     this.graph = graph;
@@ -568,11 +552,9 @@ export class AudioEngine {
     if (this.sharded) {
       this.shardOf = this.assigner.assign(graph.componentIds(agents));
       this.parts = splitTopology(topo, this.shardOf, SHARD_COUNT);
-      this.wireSlot = wireSlots(topo, this.shardOf);
     } else {
       this.shardOf = new Map();
       this.parts = [topo];
-      this.wireSlot = new Map();
     }
     for (let s = 0; s < slots; s++) this.syncShard(s, this.parts[s] ?? emptyTopology(topo.height));
     this.drainEvents();
@@ -648,21 +630,6 @@ export class AudioEngine {
       }
     }
 
-    if (this.wireContacts && (this.wireContacts.size > 0 || this.wiredLast.some(Boolean))) {
-      const msg = planWireContactMessage(this.wireContacts);
-      const parts = this.sharded
-        ? partitionWirePairs(msg.items, this.wireSlot, SHARD_COUNT)
-        : [msg.items];
-      for (let s = 0; s < slots; s++) {
-        const items = parts[s] ?? [];
-        const wKey = wireContactKeyOf(items);
-        if (wKey !== this.wireContactKeys[s]) {
-          this.wireContactKeys[s] = wKey;
-          this.post({ type: 'wireContact', items }, s);
-        }
-        this.wiredLast[s] = items.length > 0;
-      }
-    }
   }
 
   private syncAir(agents: Map<number, Agent>, slots: number): void {
@@ -690,10 +657,8 @@ export class AudioEngine {
     this.poseKeys.fill(-1);
     this.tuneKeys.fill(-1);
     this.contactKeys.fill(-1);
-    this.wireContactKeys.fill(-1);
     this.airKeys.fill(-1);
     this.airedLast.fill(false);
-    this.wiredLast.fill(false);
     this.contactedLast.fill(false);
     this.events.length = 0;
     this.lastAgent.clear();
@@ -728,11 +693,6 @@ export class AudioEngine {
       for (const msg of planRewriteMessages(ev)) this.post(msg, slot);
       return;
     }
-    if (ev.type === 'pluck') {
-      const slot = this.wireSlot.get(ev.wireId) ?? SOUP_SLOT;
-      this.post({ type: 'pluck', wireId: ev.wireId, gain: ev.gain, samples: ev.samples }, slot);
-      return;
-    }
     for (const msg of planCollisionMessages(ev)) {
       this.post(msg, this.slotOf(msg.agentId));
     }
@@ -755,21 +715,6 @@ function contactKeyOf(items: { agentA: number; agentB: number; load: number; sli
   return h;
 }
 
-function wireContactKeyOf(
-  items: { wireA: number; wireB: number; load: number; slide: number; atA: number; atB: number }[],
-): number {
-  let h = 2166136261;
-  for (const it of items) {
-    h = mix(
-      mix(
-        mix(mix(mix(mix(h, it.wireA), it.wireB), (it.load * 20) | 0), (it.slide * 40) | 0),
-        (it.atA * 20) | 0,
-      ),
-      (it.atB * 20) | 0,
-    );
-  }
-  return h;
-}
 
 /**
  * FNV-1a step. These four keys exist only to answer "did anything change", and

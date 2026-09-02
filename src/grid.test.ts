@@ -106,4 +106,14 @@ describe('PairGrid', () => {
     grid.forEachNear(0, 0, 10, () => visited++);
     expect(visited).toBe(0);
   });
+
+  it('does not hang when every position is NaN', () => {
+    const grid = new PairGrid();
+    const t0 = Date.now();
+    grid.build([NaN, NaN, NaN], [NaN, NaN, NaN], 3, 10);
+    let visited = 0;
+    grid.forEachPair(() => visited++);
+    expect(Date.now() - t0).toBeLessThan(100);
+    expect(visited).toBeGreaterThanOrEqual(0);
+  });
 });

@@ -28,6 +28,8 @@ describe('picking', () => {
     const { sim, camera, params } = scene();
     const a = sim.spawn('era', 380, 300, 0, params, true)!;
     const b = sim.spawn('era', 460, 300, Math.PI, params, true)!;
+    a.extra = 1;
+    b.extra = 1;
     const pa = portWorld(a, 'p', sim.w, sim.h);
     expect(pickPort(sim, pa.x, pa.y, camera.zoom)?.id).toBe(a.id);
     sim.wire(a.id, 'p', b.id, 'p', params);
@@ -72,6 +74,8 @@ describe('gestures', () => {
     const { sim, camera, params, ui } = scene();
     const con = sim.spawn('con', 400, 300, 0, params, true)!;
     const era = sim.spawn('era', 470, 300, Math.PI, params, true)!;
+    con.extra = 1;
+    era.extra = 1;
     const pc = portWorld(con, 'p', sim.w, sim.h);
     const pe = portWorld(era, 'p', sim.w, sim.h);
 

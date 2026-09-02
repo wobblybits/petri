@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { boundRadius, stemWorld } from './agents.ts';
+import { boundRadius, portWorld, stemWorld } from './agents.ts';
 import { defaultParams } from './params.ts';
 import { loadPreset } from './presets.ts';
 import { queryHit, SLOP } from './collide.ts';
-import { closestPointOnSegment, transverseProfile, WIRE_RADIUS } from './geom.ts';
-import { mixScent, scentSlowFactor, scentTurnBoost, Sim } from './sim.ts';
+import { closestPointOnSegment, WIRE_RADIUS } from './geom.ts';
+import { applyTransportRecoil, mixScent, scentSlowFactor, scentTurnBoost, Sim } from './sim.ts';
 import { nativeSolver } from './native/solver.ts';
 import { CH } from './fields.ts';
 import { angleDelta } from './wrap.ts';
+import { AGENT_BAND, WIRE_HAIRLINE_PX, WIRE_STROKE_PX, wiresDrawable } from './audio/lod.ts';
+
+/** Zoom at which a wire stroke falls to a hairline and the rope is dropped. */
+const hairlineZoom = WIRE_HAIRLINE_PX / WIRE_STROKE_PX;
 
 function fastParams() {
   const params = defaultParams();
@@ -17,6 +21,7 @@ function fastParams() {
   params.springK = 90;
   params.gravity = 0;
   params.spawnInterval = 0;
+  params.upkeep = 0;
   return params;
 }
 
@@ -48,6 +53,11 @@ describe('scent steering', () => {
       params.snapWell = 0;
       params.snapRadius = 0;
       params.gravity = 0;
+      // The swimming kick is coloured noise off Math.random, and it moves the
+      // agent, which moves where it lays scent, which is what the two sensors
+      // read. Left in, this test asks whether an unseeded random walk happened
+      // to stay symmetric to five places.
+      params.swimNoise = 0;
       const heading = 0.4;
       const agent = sim.spawn(kind, 120, 80, heading, params, true)!;
       step(sim, params, 45);
@@ -166,19 +176,6 @@ describe('scent steering', () => {
   });
 });
 
-describe('transverse profile', () => {
-  it('pins the ends and reports the bow height', () => {
-    const p = transverseProfile([
-      { x: 0, y: 0 },
-      { x: 50, y: 20 },
-      { x: 100, y: 0 },
-    ]);
-    expect(p.samples[0]).toBe(0);
-    expect(p.samples[p.samples.length - 1]).toBe(0);
-    expect(p.peak).toBeGreaterThan(10);
-  });
-});
-
 describe('hop distances', () => {
   it('reuses the hop table while the graph is unchanged', () => {
     const sim = new Sim(240, 160);
@@ -199,10 +196,20 @@ describe('hop distances', () => {
 });
 
 describe('simulation presets', () => {
+  it('seeds a soup with fifteen hundred agents', () => {
+    const sim = new Sim(480, 320);
+    const params = defaultParams();
+    expect(params.soupCount).toBe(1500);
+    expect(params.spawnInterval).toBe(0.5);
+    loadPreset(sim, 'soup', params);
+    expect(sim.agents.size).toBe(1500);
+  });
+
   it('steps a soup without throwing', () => {
     const sim = new Sim(480, 320);
     const params = defaultParams();
     params.spawnInterval = 0;
+    params.soupCount = 28;
     loadPreset(sim, 'soup', params);
     expect(sim.agents.size).toBeGreaterThan(0);
     step(sim, params, 30);
@@ -239,11 +246,32 @@ describe('simulation presets', () => {
     expect(sim.fields.peak()).toBe(0);
   });
 
+  it('starving agents still deposit from free ports', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.decay = 0;
+    params.diffuse = 0;
+    params.deposit = 4;
+    params.ambientEnergy = 0;
+    params.upkeep = 0;
+    params.spawnInterval = 0;
+    params.rewriteDuration = 20;
+    params.stepSpeed = 0;
+    const a = sim.spawn('era', 80, 80, 0, params, true)!;
+    a.extra = -0.5;
+    sim.fields.clear();
+    step(sim, params, 8);
+    const p = portWorld(a, 'p', sim.w, sim.h);
+    expect(sim.fields.sample(CH.eraP, p.x, p.y)).toBeGreaterThan(0.5);
+  });
+
   it('rewrites a principal meeting even when aux ports are still free', () => {
     const sim = new Sim(480, 320);
     const params = fastParams();
     const c = sim.spawn('con', 200, 160, 0, params, true)!;
     const d = sim.spawn('dup', 280, 160, Math.PI, params, true)!;
+    c.extra = 1;
+    d.extra = 1;
     sim.wire(c.id, 'p', d.id, 'p', params);
     expect(sim.graph.portsFilled(c)).toBe(false);
     step(sim, params, 50);
@@ -269,6 +297,25 @@ describe('simulation presets', () => {
     expect(between.length).toBe(1);
   });
 
+  it('starving agents still snap', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 28;
+    params.snapArc = 0.45;
+    params.wireShrink = 20;
+    params.rewriteDuration = 20;
+    params.ambientEnergy = 0;
+    params.upkeep = 0;
+    const a = sim.spawn('era', 90, 80, 0, params, true)!;
+    const b = sim.spawn('era', 130, 80, Math.PI, params, true)!;
+    a.extra = -0.5;
+    b.extra = -0.5;
+    sim.step(1 / 60, params);
+    expect(sim.graph.wires.size).toBe(1);
+    expect(a.extra).toBeLessThan(0);
+    expect(b.extra).toBeLessThan(0);
+  });
+
   it('does not snap ports that are close but not facing or touching', () => {
     const sim = new Sim(240, 160);
     const params = defaultParams();
@@ -292,6 +339,8 @@ describe('simulation presets', () => {
     // Same heading: not facing. Tips nearly coincident.
     const a = sim.spawn('era', 100, 100, 0, params, true)!;
     const b = sim.spawn('era', 100, 103, 0, params, true)!;
+    a.extra = 1;
+    b.extra = 1;
     sim.graph.snap(sim.agents, sim.w, sim.h, params, sim.time);
     expect(sim.graph.wires.size).toBe(1);
     expect(sim.graph.isFree({ id: a.id, slot: 'p' })).toBe(false);
@@ -672,6 +721,37 @@ describe('isolated motion rules', () => {
     expect(vThick).toBeLessThan(vClear * 0.75);
   });
 
+  it('a starving agent still turns toward scent', () => {
+    const params = quietParams();
+    params.stepSpeed = 48;
+    params.drag = 0.2;
+    params.sense = 800;
+    params.ambientEnergy = 0;
+    params.upkeep = 0;
+    const bias = (s: Sim) => {
+      for (let i = 0; i < 40; i++) {
+        for (let dy = -8; dy <= 16; dy += 4) {
+          s.fields.deposit(CH.conP, 80 + 22, 60 + dy, 28);
+        }
+      }
+    };
+
+    const fed = new Sim(320, 200);
+    const a = fed.spawn('era', 80, 60, 0, params, true)!;
+    a.extra = 1;
+    bias(fed);
+    step(fed, params, 36);
+
+    const starved = new Sim(320, 200);
+    const b = starved.spawn('era', 80, 60, 0, params, true)!;
+    b.extra = -0.5;
+    bias(starved);
+    step(starved, params, 36);
+
+    expect(Math.abs(a.heading), `fed heading ${a.heading.toFixed(3)}`).toBeGreaterThan(0.08);
+    expect(Math.abs(b.heading), `starved heading ${b.heading.toFixed(3)}`).toBeGreaterThan(0.08);
+  });
+
   it('stronger scent increases turn agility while slowing cruise', () => {
     const sim = new Sim(320, 200);
     const params = quietParams();
@@ -784,6 +864,28 @@ describe('physics lod', () => {
   const zoomedOut = { x: 120, y: 80, zoom: 0.18, viewW: 800, viewH: 600 };
   const closeUp = { x: 120, y: 80, zoom: 2, viewW: 400, viewH: 300 };
 
+  it('does not inflate a FAR wired pair whose stems sit inside the bound discs', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.faceAttract = 0;
+    params.snapWell = 0;
+    params.stepSpeed = 0;
+    params.spawnInterval = 0;
+    params.wireShrink = 0;
+    params.flockAlign = 0;
+    params.flockSep = 0;
+    params.declutter = 0;
+    params.gravity = 0;
+    const a = sim.spawn('con', 100, 80, 0, params, true)!;
+    const b = sim.spawn('con', 122, 80, 0, params, true)!;
+    sim.wire(a.id, 'r', b.id, 'l', params);
+    for (let i = 0; i < 24; i++) sim.step(1 / 60, params, zoomedOut);
+    const dist = Math.hypot(a.x - b.x, a.y - b.y);
+    expect(dist).toBeLessThan(boundRadius(a) + boundRadius(b) - 4);
+    expect(dist).toBeGreaterThan(8);
+  });
+
   it('still separates overlapping agents when they are FAR', () => {
     const sim = new Sim(240, 160);
     const params = defaultParams();
@@ -867,6 +969,91 @@ describe('physics lod', () => {
     expect(sim.isPhysicsDetailed(ids[15])).toBe(false);
   });
 
+  it('still promotes a close-up rewrite onto SAT so leftover ropes reel with the pull', () => {
+    const sim = new Sim(480, 320);
+    const params = fastParams();
+    params.snapRadius = 0;
+    params.stepSpeed = 0;
+    loadPreset(sim, 'commute', params);
+    const close = { x: 240, y: 160, zoom: 2, viewW: 400, viewH: 300 };
+    let sawRewrite = false;
+    for (let i = 0; i < 80; i++) {
+      sim.step(1 / 60, params, close);
+      if (sim.rewrites.length > 0) {
+        sawRewrite = true;
+        const rw = sim.rewrites[0];
+        expect(sim.isPhysicsDetailed(rw.a)).toBe(true);
+        expect(sim.isPhysicsDetailed(rw.b)).toBe(true);
+        break;
+      }
+    }
+    expect(sawRewrite).toBe(true);
+  });
+
+  it('keeps a FAR rewrite on the packed path instead of promoting leftover ropes', () => {
+    const sim = new Sim(480, 320);
+    const params = fastParams();
+    params.snapRadius = 0;
+    params.stepSpeed = 0;
+    loadPreset(sim, 'commute', params);
+    const far = { x: 240, y: 160, zoom: 0.05, viewW: 800, viewH: 600 };
+    let sawRewrite = false;
+    for (let i = 0; i < 80; i++) {
+      sim.step(1 / 60, params, far);
+      if (sim.rewrites.length > 0) {
+        sawRewrite = true;
+        for (const a of sim.agents.values()) {
+          expect(sim.isPhysicsDetailed(a.id), `agent ${a.id} detailed during FAR rewrite`).toBe(false);
+        }
+        for (const w of sim.graph.wires.values()) {
+          expect(sim.wireSimulatesRope(w), `wire ${w.id} live during FAR rewrite`).toBe(false);
+        }
+        break;
+      }
+    }
+    expect(sawRewrite).toBe(true);
+  });
+
+  it('FAR commute still copies into two cons and two dups', () => {
+    const sim = new Sim(480, 320);
+    const params = fastParams();
+    params.snapRadius = 0;
+    params.stepSpeed = 0;
+    loadPreset(sim, 'commute', params);
+    const far = { x: 240, y: 160, zoom: 0.05, viewW: 800, viewH: 600 };
+    let sawCopy = false;
+    for (let i = 0; i < 120; i++) {
+      sim.step(1 / 60, params, far);
+      const kinds = [...sim.agents.values()].map((a) => a.kind);
+      if (
+        kinds.filter((k) => k === 'con').length === 2 &&
+        kinds.filter((k) => k === 'dup').length === 2 &&
+        kinds.filter((k) => k === 'era').length === 4
+      ) {
+        sawCopy = true;
+        break;
+      }
+    }
+    expect(sawCopy).toBe(true);
+    for (const w of sim.graph.wires.values()) {
+      expect(Number.isFinite(w.rest)).toBe(true);
+      expect(w.rest).toBeLessThan(3000);
+      expect(Number.isFinite(w.lastLen)).toBe(true);
+      expect(w.lastLen).toBeLessThan(8000);
+    }
+  });
+
+  it('FAR annihilate-con still consumes both constructors', () => {
+    const sim = new Sim(480, 320);
+    const params = fastParams();
+    params.snapRadius = 0;
+    params.stepSpeed = 0;
+    loadPreset(sim, 'annihilate-con', params);
+    const far = { x: 240, y: 160, zoom: 0.05, viewW: 800, viewH: 600 };
+    for (let i = 0; i < 120; i++) sim.step(1 / 60, params, far);
+    expect([...sim.agents.values()].every((a) => a.kind !== 'con')).toBe(true);
+  });
+
   it('still rewrites a FAR era–era pair', () => {
     const sim = new Sim(240, 160);
     const params = fastParams();
@@ -879,6 +1066,61 @@ describe('physics lod', () => {
     for (let i = 0; i < 80; i++) sim.step(1 / 60, params, far);
     expect(sim.rewrites.length + (2 - sim.agents.size)).toBeGreaterThan(0);
     expect(sim.agents.size).toBeLessThan(2);
+  });
+
+  it('drops live ropes at hairline zoom', () => {
+    // A wire whose stroke is sub-pixel draws the same streak whether or not a
+    // rope is under it, so the nodes go. Derived zoom: this test went stale
+    // the first time the hairline threshold moved.
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.stepSpeed = 0;
+    params.spawnInterval = 0;
+    const a = sim.spawn('con', 120, 80, 0, params, true)!;
+    const b = sim.spawn('con', 160, 80, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    const hairline = { x: 140, y: 80, zoom: hairlineZoom * 0.9, viewW: 800, viewH: 600 };
+    sim.step(1 / 60, params, hairline);
+    expect(wiresDrawable(hairline.zoom)).toBe(false);
+    const wire = [...sim.graph.wires.values()][0];
+    expect(sim.wireSimulatesRope(wire)).toBe(false);
+  });
+
+  it('demotes bodies on apparent size, independently of the wire hairline', () => {
+    const build = () => {
+      const sim = new Sim(240, 160);
+      const params = defaultParams();
+      params.snapRadius = 0;
+      params.stepSpeed = 0;
+      params.spawnInterval = 0;
+      const a = sim.spawn('con', 120, 80, 0, params, true)!;
+      const b = sim.spawn('con', 160, 80, Math.PI, params, true)!;
+      sim.wire(a.id, 'p', b.id, 'p', params);
+      return { sim, params, a };
+    };
+    const { a: probe } = build();
+    const bodyMidZoom = AGENT_BAND.mid / (boundRadius(probe) * 2);
+    // Hairline is past the agent band now, so wires stay drawn after bodies
+    // have already gone FAR. The two cuts used to be one number, which put a
+    // SAT-to-packed cliff at whatever zoom the stroke happened to vanish.
+    expect(hairlineZoom).toBeLessThan(bodyMidZoom);
+
+    const { sim: closeSim, params: closeParams, a: closeA } = build();
+    closeSim.step(1 / 60, closeParams, { x: 140, y: 80, zoom: bodyMidZoom * 1.3, viewW: 800, viewH: 600 });
+    expect(closeSim.isPhysicsDetailed(closeA.id)).toBe(true);
+    expect(wiresDrawable(bodyMidZoom * 1.3)).toBe(true);
+
+    const between = (hairlineZoom + bodyMidZoom) * 0.5;
+    const { sim: midSim, params: midParams, a: midA } = build();
+    midSim.step(1 / 60, midParams, { x: 140, y: 80, zoom: between, viewW: 800, viewH: 600 });
+    expect(wiresDrawable(between)).toBe(true);
+    expect(midSim.isPhysicsDetailed(midA.id)).toBe(false);
+
+    const { sim, params, a } = build();
+    sim.step(1 / 60, params, { x: 140, y: 80, zoom: 0.05, viewW: 800, viewH: 600 });
+    expect(sim.isPhysicsDetailed(a.id)).toBe(false);
+    expect(wiresDrawable(0.05)).toBe(true);
   });
 });
 
@@ -931,4 +1173,120 @@ describe('native mixed solve', () => {
     for (let i = 0; i < 60; i++) sim.step(1 / 60, params);
     expect(sim.kineticEnergy()).toBeLessThan(e0 + 8);
   });
+});
+
+describe('far zoom', () => {
+  it('keeps poses and rest lengths finite when the camera is fully zoomed out', () => {
+    const sim = new Sim(800, 600);
+    const params = defaultParams();
+    params.upkeep = 0;
+    params.spawnInterval = 0;
+    params.soupCount = 28;
+    loadPreset(sim, 'soup', params);
+    const view = { x: 400, y: 300, zoom: 0.05, viewW: 800, viewH: 600 };
+    sim.setFieldCover((view.viewW / view.zoom) * 1.7, (view.viewH / view.zoom) * 1.7);
+    for (let i = 0; i < 90; i++) sim.step(1 / 60, params, view);
+    for (const a of sim.agents.values()) {
+      expect(Number.isFinite(a.x), `agent ${a.id} x`).toBe(true);
+      expect(Number.isFinite(a.y), `agent ${a.id} y`).toBe(true);
+      expect(Math.abs(a.x)).toBeLessThan(50_000);
+      expect(Math.abs(a.y)).toBeLessThan(50_000);
+    }
+    for (const w of sim.graph.wires.values()) {
+      expect(Number.isFinite(w.rest)).toBe(true);
+      expect(w.rest).toBeLessThan(3000);
+      expect(Number.isFinite(w.lastLen)).toBe(true);
+      expect(w.lastLen).toBeLessThan(8000);
+    }
+  });
+});
+
+describe('transport recoil', () => {
+  function pumpBody(x: number, mass: number) {
+    return { x, y: 0, vx: 0, vy: 0, mass, locked: false };
+  }
+
+  it('kicks the sender back and the receiver on, conserving momentum', () => {
+    const a = pumpBody(0, 1);
+    const b = pumpBody(40, 1);
+    applyTransportRecoil(a, b, 1, 6, 800, 600);
+    expect(a.vx, 'sends east, recoils west').toBeLessThan(0);
+    expect(b.vx, 'receiver is pushed east').toBeGreaterThan(0);
+    expect(a.vx * a.mass + b.vx * b.mass, 'net momentum unchanged').toBeCloseTo(0, 9);
+    expect(a.vy).toBe(0);
+    expect(b.vy).toBe(0);
+  });
+
+  it('is an impulse, so a light body moves further than a heavy one', () => {
+    const light = pumpBody(0, 0.45);
+    const heavy = pumpBody(40, 1);
+    applyTransportRecoil(light, heavy, 1, 6, 800, 600);
+    expect(Math.abs(light.vx)).toBeGreaterThan(Math.abs(heavy.vx));
+    expect(light.vx * light.mass + heavy.vx * heavy.mass).toBeCloseTo(0, 9);
+  });
+
+  it('scales with how much energy moved, and is off at gain 0', () => {
+    const small = [pumpBody(0, 1), pumpBody(40, 1)] as const;
+    const big = [pumpBody(0, 1), pumpBody(40, 1)] as const;
+    applyTransportRecoil(small[0], small[1], 0.1, 6, 800, 600);
+    applyTransportRecoil(big[0], big[1], 1, 6, 800, 600);
+    expect(Math.abs(big[0].vx)).toBeCloseTo(Math.abs(small[0].vx) * 10, 6);
+    const off = [pumpBody(0, 1), pumpBody(40, 1)] as const;
+    applyTransportRecoil(off[0], off[1], 1, 0, 800, 600);
+    expect(off[0].vx).toBe(0);
+  });
+
+  it('does not shove a locked body', () => {
+    const a = pumpBody(0, 1);
+    const anchored = { ...pumpBody(40, 1), locked: true };
+    applyTransportRecoil(a, anchored, 1, 6, 800, 600);
+    expect(a.vx).toBe(0);
+    expect(anchored.vx).toBe(0);
+  });
+
+  it('does not let a driven chain wind itself up', () => {
+    // A standing gradient — one end held full, the other held hungry — is the
+    // worst case for a momentum pump, so the chain has to settle rather than
+    // gain energy frame after frame.
+    //
+    // Seeded: steering kicks each body with coloured noise off Math.random, so
+    // an unseeded run put the ratio either side of the bound at random.
+    const realRandom = Math.random;
+    let rs = 20260902 >>> 0;
+    Math.random = () => {
+      rs = (rs * 1664525 + 1013904223) >>> 0;
+      return rs / 4294967296;
+    };
+    try {
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.rewriteDuration = 0;
+    params.snapRadius = 0;
+    params.upkeep = 0;
+    params.ambientEnergy = 0;
+    params.transportRecoil = 12;
+    const sim = new Sim(900, 600);
+    sim.energy.configure(params.energyCell, 0);
+    const ids: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      const a = sim.spawn(i % 2 === 0 ? 'con' : 'dup', 300 + i * 45, 300, 0, params, true)!;
+      a.extra = 0;
+      ids.push(a.id);
+    }
+    for (let i = 0; i + 1 < 8; i++) sim.wire(ids[i], 'r', ids[i + 1], 'l', params);
+    const head = sim.agents.get(ids[7])!;
+    const tail = sim.agents.get(ids[0])!;
+    let early = 0;
+    for (let f = 0; f < 1800; f++) {
+      head.extra = 1.25;
+      tail.extra = -0.9;
+      sim.step(1 / 60, params);
+      if (f === 600) early = sim.kineticEnergy();
+    }
+    expect(sim.kineticEnergy(), `KE ${early.toFixed(0)} -> ${sim.kineticEnergy().toFixed(0)}`)
+      .toBeLessThan(early * 1.5);
+    } finally {
+      Math.random = realRandom;
+    }
+  }, 30_000);
 });
