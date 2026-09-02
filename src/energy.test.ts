@@ -27,7 +27,7 @@ import {
   spendExtra,
   spreadRequests,
   tickUpkeep,
-  wireNeighbors,
+  WireAdjacency,
 } from './energy.ts';
 import { Sim } from './sim.ts';
 import { defaultParams } from './params.ts';
@@ -44,6 +44,87 @@ function body(
 ): SlotBody {
   return { id, kind, x, y, extra, request, locked };
 }
+
+
+/**
+ * Dense list plus the flat adjacency the energy passes take. They work in
+ * index space now: a Map of neighbour arrays cost an array per body per frame.
+ */
+function net(agents: Map<number, SlotBody>, wires: { a: { id: number }; b: { id: number } }[]) {
+  const list = [...agents.values()];
+  const index = new Map<number, number>();
+  list.forEach((b, i) => index.set(b.id, i));
+  const adj = new WireAdjacency();
+  adj.build(list.length, index, () => wires);
+  return { list, adj };
+}
+
+describe('wire adjacency', () => {
+  /** Reference: the Map of arrays this replaced. */
+  function reference(n: number, index: Map<number, number>, wires: { a: { id: number }; b: { id: number } }[]) {
+    const out: number[][] = [];
+    for (let i = 0; i < n; i++) out.push([]);
+    for (const w of wires) {
+      const ia = index.get(w.a.id);
+      const ib = index.get(w.b.id);
+      if (ia === undefined || ib === undefined || ia === ib) continue;
+      out[ia].push(ib);
+      out[ib].push(ia);
+    }
+    return out;
+  }
+
+  it('matches a per-body neighbour list, order included', () => {
+    const ids = [7, 3, 11, 2, 9];
+    const index = new Map(ids.map((id, i) => [id, i]));
+    const wires = [
+      { a: { id: 7 }, b: { id: 3 } },
+      { a: { id: 11 }, b: { id: 7 } },
+      { a: { id: 2 }, b: { id: 9 } },
+      { a: { id: 3 }, b: { id: 11 } },
+      // Dropped: a self-wire, and an end that is not in the index.
+      { a: { id: 9 }, b: { id: 9 } },
+      { a: { id: 9 }, b: { id: 404 } },
+    ];
+    const adj = new WireAdjacency();
+    adj.build(ids.length, index, () => wires);
+    const want = reference(ids.length, index, wires);
+    for (let i = 0; i < ids.length; i++) {
+      const got = Array.from(adj.nei.subarray(adj.off[i], adj.off[i + 1]));
+      expect(got, `body ${i}`).toEqual(want[i]);
+    }
+  });
+
+  it('survives a source that can only be walked once', () => {
+    // The counting sort walks the wires twice. Handed `map.values()` directly
+    // the second pass would see nothing and every neighbour would read as body
+    // zero — wrong, but quietly: the field still spreads, through a graph
+    // nobody built. Taking a factory is what makes that unrepresentable.
+    const index = new Map([
+      [1, 0],
+      [2, 1],
+      [3, 2],
+    ]);
+    const wires = new Map([
+      [10, { a: { id: 1 }, b: { id: 2 } }],
+      [11, { a: { id: 2 }, b: { id: 3 } }],
+    ]);
+    const adj = new WireAdjacency();
+    adj.build(3, index, () => wires.values());
+    expect(Array.from(adj.nei.subarray(adj.off[0], adj.off[1]))).toEqual([1]);
+    expect(Array.from(adj.nei.subarray(adj.off[1], adj.off[2]))).toEqual([0, 2]);
+    expect(Array.from(adj.nei.subarray(adj.off[2], adj.off[3]))).toEqual([1]);
+  });
+
+  it('is reusable across builds of different sizes', () => {
+    const adj = new WireAdjacency();
+    adj.build(3, new Map([[1, 0], [2, 1], [3, 2]]), () => [{ a: { id: 1 }, b: { id: 3 } }]);
+    expect(Array.from(adj.nei.subarray(adj.off[0], adj.off[1]))).toEqual([2]);
+    adj.build(2, new Map([[5, 0], [6, 1]]), () => [{ a: { id: 5 }, b: { id: 6 } }]);
+    expect(Array.from(adj.nei.subarray(adj.off[0], adj.off[1]))).toEqual([1]);
+    expect(Array.from(adj.nei.subarray(adj.off[1], adj.off[2]))).toEqual([0]);
+  });
+});
 
 describe('rewrite energy', () => {
   it('values every kind of body the same, at a full tank', () => {
@@ -178,12 +259,12 @@ describe('request gradient', () => {
       [2, body(2, 10, 0)],
       [3, body(3, 20, 0)],
     ]);
-    const adj = wireNeighbors([
+    const { list, adj } = net(agents, [
       { a: { id: 1 }, b: { id: 2 } },
       { a: { id: 2 }, b: { id: 3 } },
     ]);
     seedRequest(agents.get(1)!, 1);
-    spreadRequests(agents, adj);
+    spreadRequests(list, adj);
     expect(agents.get(1)!.request).toBe(1);
     expect(agents.get(2)!.request).toBeCloseTo(REQUEST_DECAY, 6);
     expect(agents.get(3)!.request).toBeCloseTo(REQUEST_DECAY ** 2, 6);
@@ -198,14 +279,14 @@ describe('request gradient', () => {
       [3, body(3, 20, 0)],
       [4, body(4, 30, 0)],
     ]);
-    const adj = wireNeighbors([
+    const { list, adj } = net(agents, [
       { a: { id: 1 }, b: { id: 2 } },
       { a: { id: 2 }, b: { id: 3 } },
       { a: { id: 3 }, b: { id: 4 } },
     ]);
     seedRequest(agents.get(1)!, 1);
     seedRequest(agents.get(4)!, 0.2);
-    spreadRequests(agents, adj);
+    spreadRequests(list, adj);
     // 1 reaches 3 at 0.8^2 = 0.64; 4 only offers 0.2 there.
     expect(agents.get(3)!.request).toBeCloseTo(REQUEST_DECAY ** 2, 6);
     expect(agents.get(3)!.request).toBeGreaterThan(agents.get(4)!.request);
@@ -217,17 +298,17 @@ describe('request gradient', () => {
       [2, body(2, 10, 0, 0, REQUEST_DECAY)],
       [3, body(3, 20, 0, 1, REQUEST_DECAY ** 2)],
     ]);
-    const adj = wireNeighbors([
+    const { list, adj } = net(agents, [
       { a: { id: 1 }, b: { id: 2 } },
       { a: { id: 2 }, b: { id: 3 } },
     ]);
     // 3 holds the surplus and 1 is the one that needs it, two hops away. Each
     // frame moves one wire's worth, throttled by the field at the receiving
     // end — 0.8 here, since that is how much of 1's need is visible from 2.
-    expect(flowCharges(agents, adj)).toBeCloseTo(REQUEST_DECAY, 6);
+    expect(flowCharges(list, adj)).toBeCloseTo(REQUEST_DECAY, 6);
     expect(agents.get(3)!.extra).toBeCloseTo(1 - REQUEST_DECAY, 6);
     expect(agents.get(2)!.extra).toBeCloseTo(REQUEST_DECAY, 6);
-    flowCharges(agents, adj);
+    flowCharges(list, adj);
     expect(agents.get(1)!.extra, 'reaches the body that needs it').toBeGreaterThan(0.5);
   });
 
@@ -236,8 +317,8 @@ describe('request gradient', () => {
       [1, body(1, 0, 0, 0.7, 0.3)],
       [2, body(2, 10, 0, 1, 0.24)],
     ]);
-    const adj = wireNeighbors([{ a: { id: 1 }, b: { id: 2 } }]);
-    expect(flowCharges(agents, adj)).toBeCloseTo(0.3, 6);
+    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
+    expect(flowCharges(list, adj)).toBeCloseTo(0.3, 6);
     expect(agents.get(1)!.extra).toBeCloseTo(1, 6);
     expect(agents.get(2)!.extra, 'donor keeps the rest').toBeCloseTo(0.7, 6);
   });
@@ -251,11 +332,11 @@ describe('request gradient', () => {
       [2, body(2, 10, 0, 0, REQUEST_DECAY)],
       [3, body(3, 20, 0, 1, REQUEST_DECAY ** 2)],
     ]);
-    const adj = wireNeighbors([
+    const { list, adj } = net(agents, [
       { a: { id: 1 }, b: { id: 2 } },
       { a: { id: 2 }, b: { id: 3 } },
     ]);
-    flowCharges(agents, adj);
+    flowCharges(list, adj);
     expect(agents.get(2)!.extra, 'held by the conduit').toBeCloseTo(REQUEST_DECAY, 6);
   });
 
@@ -267,17 +348,17 @@ describe('request gradient', () => {
       [2, body(2, 10, 0, 1)],
       [3, body(3, 20, 0, 0)],
     ]);
-    const adj = wireNeighbors([
+    const { list, adj } = net(agents, [
       { a: { id: 1 }, b: { id: 2 } },
       { a: { id: 2 }, b: { id: 3 } },
     ]);
     seedRequest(agents.get(1)!, 1);
     seedRequest(agents.get(3)!, 1);
-    spreadRequests(agents, adj);
+    spreadRequests(list, adj);
     expect(agents.get(1)!.request).toBeCloseTo(agents.get(3)!.request, 6);
     // The middle body is the one holding energy, and both neighbours pull on
     // it equally hard, so it gives to exactly one of them rather than tearing.
-    const moved = flowCharges(agents, adj);
+    const moved = flowCharges(list, adj);
     expect(moved).toBeGreaterThan(0);
     const fed = [agents.get(1)!.extra, agents.get(3)!.extra];
     expect(fed.filter((e) => e > 0.5).length, 'one of the two, not both').toBe(1);
@@ -288,8 +369,8 @@ describe('request gradient', () => {
       [1, body(1, 0, 0, 1, 1)],
       [2, body(2, 10, 0, 0, 1)],
     ]);
-    const adj = wireNeighbors([{ a: { id: 1 }, b: { id: 2 } }]);
-    expect(flowCharges(agents, adj)).toBe(0);
+    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
+    expect(flowCharges(list, adj)).toBe(0);
     expect(agents.get(1)!.extra).toBe(1);
     expect(extrasOf(agents.get(1)!, agents.get(2)!)).toBe(1);
   });
@@ -315,15 +396,15 @@ describe('request gradient', () => {
       [2, body(2, 10, 0, -0.2)],
       [3, body(3, 20, 0, 1)],
     ]);
-    const adj = wireNeighbors([
+    const { list, adj } = net(agents, [
       { a: { id: 1 }, b: { id: 2 } },
       { a: { id: 2 }, b: { id: 3 } },
     ]);
     for (let i = 0; i < 2; i++) {
       resetRequests(agents.values());
       for (const a of agents.values()) seedRequest(a, hungerNeed(a));
-      spreadRequests(agents, adj);
-      flowCharges(agents, adj);
+      spreadRequests(list, adj);
+      flowCharges(list, adj);
     }
     expect(agents.get(2)!.extra, 'out of debt first').toBeGreaterThanOrEqual(0);
     const total = [...agents.values()].reduce((t, a) => t + a.extra, 0);

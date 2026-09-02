@@ -49,7 +49,7 @@ import {
   spendExtra,
   spreadRequests,
   tickUpkeep,
-  wireNeighbors,
+  WireAdjacency,
 } from './energy.ts';
 import { audio } from './audio/engine.ts';
 import type { CollisionEvent, LiveContact, PanView, RewriteEvent } from './audio/types.ts';
@@ -188,6 +188,7 @@ export class Sim {
   energy = new EnergyGrid(48, 0.1);
   /** Per-agent unmet need this frame, rebuilt by `pulseRequests`. */
   private readonly needOf = new Map<number, number>();
+  private readonly wireAdj = new WireAdjacency();
   /** Connected-component root per agent, refreshed once per frame. */
   private components = new Map<number, number>();
   /** Broad-phase results for wire clearance, flattened pairs, rebuilt per frame. */
@@ -2619,11 +2620,21 @@ export class Sim {
       const a = this.agents.get(id);
       if (a) seedRequest(a, n);
     }
-    const adj = wireNeighbors(this.graph.wires.values());
-    spreadRequests(this.agents, adj);
+    // Dense list and index, reused rather than rebuilt: the force block has
+    // already made both, and a Map of neighbour arrays cost an array per body
+    // per frame for a structure thrown away at the end of it.
+    const list = this.forceList();
+    const index = this.packIndex;
+    if (!this.forceBlock) {
+      index.clear();
+      for (let i = 0; i < list.length; i++) index.set(list[i].id, i);
+    }
+    const adj = this.wireAdj;
+    adj.build(list.length, index, () => this.graph.wires.values());
+    spreadRequests(list, adj);
     const recoil = params.transportRecoil;
     flowCharges(
-      this.agents,
+      list,
       adj,
       recoil > 0 ? (from, to, amount) => this.recoil(from, to, amount, recoil) : undefined,
     );

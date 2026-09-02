@@ -339,23 +339,73 @@ export function spareEnergy(a: SlotBody): number {
   return a.extra > 0 ? a.extra : 0;
 }
 
-export function wireNeighbors(
-  wires: Iterable<{ a: { id: number }; b: { id: number } }>,
-): Map<number, number[]> {
-  const adj = new Map<number, number[]>();
-  const add = (from: number, to: number) => {
-    let n = adj.get(from);
-    if (!n) {
-      n = [];
-      adj.set(from, n);
-    }
-    if (!n.includes(to)) n.push(to);
-  };
-  for (const w of wires) {
-    add(w.a.id, w.b.id);
-    add(w.b.id, w.a.id);
+/**
+ * Flat neighbour lists for the wire graph, in the caller's index space.
+ *
+ * A Map of arrays cost one array per body per frame — some ten thousand
+ * short-lived objects on a grown pond — for a structure that is rebuilt from
+ * scratch every time anyway. This fills two reusable typed arrays instead:
+ * `off[i]..off[i+1]` are body `i`'s neighbours in `nei`. Built by counting
+ * sort, so neighbours arrive in wire order exactly as appending would give.
+ *
+ * Self-wires and ends outside the index are dropped; a duplicate wire between
+ * the same pair is not, which matches the graph — two ports can join the same
+ * two bodies and both should conduct.
+ */
+export class WireAdjacency {
+  off = new Int32Array(1);
+  nei = new Int32Array(0);
+  private cursor = new Int32Array(0);
+  private work = new Int32Array(0);
+
+  /**
+   * Scratch for a relaxation over the graph. Sized generously: a body can be
+   * re-queued each time a bigger need reaches it, and the decay bounds how
+   * often that can happen.
+   */
+  queue(n: number): Int32Array {
+    const want = Math.max(64, n * 8);
+    if (this.work.length < want) this.work = new Int32Array(want);
+    return this.work;
   }
-  return adj;
+
+  /**
+   * `index` maps agent id to its slot in the caller's dense list.
+   *
+   * `wires` is a factory, not an iterable, because the counting sort walks the
+   * set twice and the obvious thing to hand in — `graph.wires.values()` — is a
+   * one-shot iterator. Passing it directly leaves the second pass empty and
+   * every neighbour reading as body 0, which is wrong quietly rather than
+   * loudly: the field still spreads, just through a graph nobody built.
+   */
+  build(
+    n: number,
+    index: Map<number, number>,
+    wires: () => Iterable<{ a: { id: number }; b: { id: number } }>,
+  ): void {
+    if (this.off.length < n + 1) this.off = new Int32Array(Math.max(16, (n + 1) * 2));
+    if (this.cursor.length < n) this.cursor = new Int32Array(Math.max(16, n * 2));
+    this.off.fill(0, 0, n + 1);
+    let total = 0;
+    for (const w of wires()) {
+      const ia = index.get(w.a.id);
+      const ib = index.get(w.b.id);
+      if (ia === undefined || ib === undefined || ia === ib) continue;
+      this.off[ia + 1]++;
+      this.off[ib + 1]++;
+      total += 2;
+    }
+    for (let i = 0; i < n; i++) this.off[i + 1] += this.off[i];
+    if (this.nei.length < total) this.nei = new Int32Array(Math.max(16, total * 2));
+    for (let i = 0; i < n; i++) this.cursor[i] = this.off[i];
+    for (const w of wires()) {
+      const ia = index.get(w.a.id);
+      const ib = index.get(w.b.id);
+      if (ia === undefined || ib === undefined || ia === ib) continue;
+      this.nei[this.cursor[ia]++] = ib;
+      this.nei[this.cursor[ib]++] = ia;
+    }
+  }
 }
 
 export function resetRequests(agents: Iterable<SlotBody>): void {
@@ -380,22 +430,28 @@ export function seedRequest(agent: SlotBody, amount: number): void {
  * Locked bodies still conduct, so a rewrite in progress does not cut the net
  * in two.
  */
-export function spreadRequests(
-  agents: Map<number, SlotBody>,
-  adj: Map<number, number[]>,
-): void {
-  const q: SlotBody[] = [];
-  for (const a of agents.values()) if (a.request > REQUEST_FLOOR) q.push(a);
-  let i = 0;
-  while (i < q.length) {
-    const a = q[i++]!;
-    const next = a.request * REQUEST_DECAY;
+export function spreadRequests(list: SlotBody[], adj: WireAdjacency): void {
+  const { off, nei } = adj;
+  // Indices throughout. Queueing the bodies themselves would need a lookup
+  // back to their slot, and a Map keyed on the objects is the allocation this
+  // whole structure exists to avoid.
+  const q = adj.queue(list.length);
+  let head = 0;
+  let tail = 0;
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].request > REQUEST_FLOOR) q[tail++] = i;
+  }
+  while (head < tail) {
+    const at = q[head++];
+    const next = list[at].request * REQUEST_DECAY;
     if (next <= REQUEST_FLOOR) continue;
-    for (const nid of adj.get(a.id) ?? []) {
-      const n = agents.get(nid);
+    for (let k = off[at]; k < off[at + 1]; k++) {
+      const ni = nei[k];
+      const n = list[ni];
       if (!n || n.request >= next) continue;
       n.request = next;
-      q.push(n);
+      if (tail >= q.length) return;
+      q[tail++] = ni;
     }
   }
 }
@@ -419,29 +475,35 @@ export function spreadRequests(
  * energy accounting depends on it.
  */
 export function flowCharges(
-  agents: Map<number, SlotBody>,
-  adj: Map<number, number[]>,
+  list: SlotBody[],
+  adj: WireAdjacency,
   onMoved?: (from: SlotBody, to: SlotBody, amount: number) => void,
 ): number {
-  const donors: SlotBody[] = [];
-  for (const a of agents.values()) {
+  const { off, nei } = adj;
+  const donors: number[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const a = list[i];
     if (a.locked) continue;
-    if (spareEnergy(a) > FLOW_EPS) donors.push(a);
+    if (spareEnergy(a) > FLOW_EPS) donors.push(i);
   }
   // Neediest donor first, so a body that is itself being fed passes on what it
   // does not need in the same frame rather than sitting on it.
-  donors.sort((a, b) => b.request - a.request || a.id - b.id);
+  donors.sort((p, q) => list[q].request - list[p].request || list[p].id - list[q].id);
   const taken = new Set<number>();
   let moved = 0;
-  for (const d of donors) {
+  for (const di of donors) {
+    const d = list[di];
     let best: SlotBody | null = null;
+    let bestSlot = -1;
     let bestR = d.request;
-    for (const nid of adj.get(d.id) ?? []) {
-      if (taken.has(nid)) continue;
-      const n = agents.get(nid);
+    for (let k = off[di]; k < off[di + 1]; k++) {
+      const ni = nei[k];
+      if (taken.has(ni)) continue;
+      const n = list[ni];
       if (!n || n.locked) continue;
       if (n.request > bestR) {
         best = n;
+        bestSlot = ni;
         bestR = n.request;
       }
     }
@@ -461,7 +523,7 @@ export function flowCharges(
     if (give <= FLOW_EPS) continue;
     d.extra -= give;
     best.extra += give;
-    taken.add(best.id);
+    taken.add(bestSlot);
     moved += give;
     onMoved?.(d, best, give);
   }
