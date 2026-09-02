@@ -73,6 +73,18 @@ export type RopePath = 'full' | 'no-shape' | 'span';
  * The taut threshold itself is `params.wireTaut`.
  */
 export const ROPE_TAUT_HYSTERESIS = 0.08;
+
+/**
+ * Drop a wire's shape samples without replacing the array.
+ *
+ * `wire.shape = []` reads as free and is not: the coarsened branch runs for
+ * every wire every frame, so at pond scale it minted fourteen thousand empty
+ * arrays a frame purely to say "nothing here". Truncating in place says the
+ * same thing to every reader — they all test `length`.
+ */
+function clearShape(wire: Wire): void {
+  if (wire.shape.length > 0) wire.shape.length = 0;
+}
 /** Rest lengths past this yank the FAR span joint across the view. */
 export const REST_CAP = 2500;
 
@@ -319,7 +331,7 @@ export class Graph {
     wire.pitchFloor = span * 0.5;
     wire.collapse = 0;
     wire.born = time;
-    wire.shape = [];
+    clearShape(wire);
     wire.ropePath = 'full';
   }
 
@@ -708,7 +720,7 @@ export class Graph {
     if (!A || !B) return;
     const c = wireCubic(A, wire.a.slot, B, wire.b.slot, w, h, wire.rest);
     wire.nodes = sampleChain(c, desiredLinks(wire.rest), w, h);
-    wire.shape = [];
+    clearShape(wire);
   }
 
   /**
@@ -759,13 +771,13 @@ export class Graph {
   ): void {
     for (const wire of this.wires.values()) {
       if (detailed && !detailed(wire)) {
-        wire.shape = [];
+        clearShape(wire);
         wire.ropeLen = Number.isFinite(wire.rest) ? wire.rest : 40;
         this.sitNodesOnChord(wire, agents, w, h);
         continue;
       }
       if (wire.ropePath === 'span') {
-        wire.shape = [];
+        clearShape(wire);
         wire.ropeLen = wire.rest;
         continue;
       }
@@ -774,7 +786,7 @@ export class Graph {
       if (!A || !B) continue;
       const n0 = wire.nodes.length;
       if (n0 === 0 || wire.ropePath === 'no-shape') {
-        wire.shape = [];
+        clearShape(wire);
         wire.ropeLen = wire.rest;
         continue;
       }
@@ -784,7 +796,7 @@ export class Graph {
       }
       const n = wire.nodes.length;
       if (n === 0) {
-        wire.shape = [];
+        clearShape(wire);
         wire.ropeLen = wire.rest;
         continue;
       }

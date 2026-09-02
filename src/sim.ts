@@ -1553,8 +1553,12 @@ export class Sim {
     const n = list.length;
     if (n === 0) return true;
     const index = this.packIndex;
-    index.clear();
-    for (let i = 0; i < n; i++) index.set(list[i].id, i);
+    // The force block built this from the same list; no agent has come or
+    // gone since, so rebuilding it is nine thousand Map writes for nothing.
+    if (!this.forceBlock) {
+      index.clear();
+      for (let i = 0; i < n; i++) index.set(list[i].id, i);
+    }
     const wireList = this.wirePack;
     wireList.length = 0;
     for (const w of this.graph.wires.values()) {
