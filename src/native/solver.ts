@@ -132,7 +132,9 @@ type Exp = {
     turnRate: number,
     desired: number,
     maxHops: number,
+    reuse: number,
   ): void;
+  solver_flock_pairs(): number;
   solver_scent(): number;
   solver_scent_tmp(): number;
   solver_walls(): number;
@@ -207,6 +209,7 @@ export class NativeSolver {
       const exp = instance.exports as unknown as Exp;
       exp._initialize?.();
       const mem = exp.memory;
+      this.fkSim = -1;
       this.staticBytes = exp.solver_static_bytes();
       this.heapBytes = mem.buffer.byteLength;
       this.bodyCap = exp.solver_cap();
@@ -419,6 +422,54 @@ export class NativeSolver {
     return this.ready && n <= this.bodyCap && nAdj <= this.adjCap;
   }
 
+  /*
+   * Owner of the flocking neighbourhood cache inside the wasm module.
+   *
+   * The module is a singleton and a process can hold several Sims — the test
+   * suite routinely does. The cached pair list is indices into whichever Sim
+   * packed the adjacency last, so replaying it against a different Sim's
+   * bodies would be quietly, thoroughly wrong. Tracking the owner here rather
+   * than in C keeps one authority: a caller whose key does not match has to
+   * repack the adjacency, and the repack and the rebuild then happen together.
+   */
+  private fkSim = -1;
+  private fkGraph = -1;
+  private fkRoster = -1;
+  private fkN = -1;
+  private fkHops = -1;
+
+  /** True when the cached pair list is this caller's and still current. */
+  flockCacheHolds(
+    simId: number,
+    graphVersion: number,
+    rosterVersion: number,
+    n: number,
+    maxHops: number,
+  ): boolean {
+    return (
+      this.ready &&
+      this.fkSim === simId &&
+      this.fkGraph === graphVersion &&
+      this.fkRoster === rosterVersion &&
+      this.fkN === n &&
+      this.fkHops === maxHops
+    );
+  }
+
+  private claimFlockCache(
+    simId: number,
+    graphVersion: number,
+    rosterVersion: number,
+    n: number,
+    maxHops: number,
+  ): void {
+    this.fkSim = simId;
+    this.fkGraph = graphVersion;
+    this.fkRoster = rosterVersion;
+    this.fkN = n;
+    this.fkHops = maxHops;
+  }
+
   flock(
     n: number,
     align: number,
@@ -427,11 +478,24 @@ export class NativeSolver {
     turnRate: number,
     desired: number,
     maxHops: number,
+    simId: number,
+    graphVersion: number,
+    rosterVersion: number,
   ): boolean {
     const exp = this.exp;
     if (!this.ready || !exp || n <= 0 || dt <= 0) return false;
-    exp.solver_flock(n, align, sep, dt, turnRate, desired, maxHops);
+    const reuse = this.flockCacheHolds(simId, graphVersion, rosterVersion, n, maxHops);
+    exp.solver_flock(n, align, sep, dt, turnRate, desired, maxHops, reuse ? 1 : 0);
+    this.claimFlockCache(simId, graphVersion, rosterVersion, n, maxHops);
     return true;
+  }
+
+  /**
+   * Pairs held in the flocking neighbourhood cache, or -1 when it is not
+   * valid — which means the pair list overran and every frame is searching.
+   */
+  flockPairs(): number {
+    return this.exp?.solver_flock_pairs() ?? -1;
   }
 
   scentDiffuse(fields: Fields, mix: number): boolean {

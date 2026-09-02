@@ -105,6 +105,9 @@ export function scentTurnBoost(trail: number): number {
   return clamp(1 + spin / Math.max(0.1, linear), 1, 8);
 }
 
+/** Monotonic, process-wide. Only ever compared for equality. */
+let nextSimId = 1;
+
 export class Sim {
   /** Substeps per frame. One constraint iteration each. */
   private static readonly SUBSTEPS = 8;
@@ -180,6 +183,16 @@ export class Sim {
   coverH: number;
   time = 0;
   nextId = 1;
+  /**
+   * Bumped whenever the agent roster changes. Passes that cache anything keyed
+   * on *index* — flocking's neighbourhood cache is the only one so far — need
+   * this as well as `graph.version`, because `agents` is a Map iterated in
+   * insertion order: deleting one body renumbers every body after it without
+   * touching a single wire.
+   */
+  rosterVersion = 0;
+  /** Identifies this Sim to the shared wasm solver's flocking cache. */
+  private readonly simId = nextSimId++;
   spawnAcc = 0;
   agents = new Map<number, Agent>();
   graph = new Graph();
@@ -289,6 +302,7 @@ export class Sim {
     this.energy.clear();
     this.time = 0;
     this.nextId = 1;
+    this.rosterVersion++;
     this.spawnAcc = 0;
     this.home = null;
     this.contactAudioPrev.clear();
@@ -323,6 +337,7 @@ export class Sim {
       params,
     );
     this.agents.set(a.id, a);
+    this.rosterVersion++;
     // Queued, so it lands after the topology that first contains this agent.
     audio.push({ type: 'spawn', agent: a.id, kind: a.kind }, this.graph, this.agents);
     return a;
@@ -345,6 +360,7 @@ export class Sim {
     this.energy.addAt(agent.x, agent.y, deathYield(agent));
     this.graph.detachAgent(id);
     this.agents.delete(id);
+    this.rosterVersion++;
     if (this.grabbed?.id === id) this.grabbed = null;
   }
 
@@ -2373,6 +2389,7 @@ export class Sim {
     turnRate: number,
     desired: number,
     maxHops: number,
+    reuse: boolean,
   ): boolean {
     const bodies = nativeSolver.bodies;
     const adjOff = nativeSolver.adjOff;
@@ -2382,15 +2399,20 @@ export class Sim {
     const sw = nativeSolver.swim;
     if (!bodies || !adjOff || !adjNei || !ids || !mass || !sw) return false;
 
-    let nAdj = 0;
-    for (let i = 0; i < n; i++) nAdj += adj[i].length;
-    if (!nativeSolver.canFlock(n, nAdj)) return false;
-    adjOff[0] = 0;
-    let at = 0;
-    for (let i = 0; i < n; i++) {
-      const nei = adj[i];
-      for (let k = 0; k < nei.length; k++) adjNei[at++] = nei[k];
-      adjOff[i + 1] = at;
+    // On a reuse frame the solver never reads the adjacency — it replays the
+    // pair list it already built from it — so neither the fit check nor the
+    // CSR copy has anything to do.
+    if (!reuse) {
+      let nAdj = 0;
+      for (let i = 0; i < n; i++) nAdj += adj[i].length;
+      if (!nativeSolver.canFlock(n, nAdj)) return false;
+      adjOff[0] = 0;
+      let at = 0;
+      for (let i = 0; i < n; i++) {
+        const nei = adj[i];
+        for (let k = 0; k < nei.length; k++) adjNei[at++] = nei[k];
+        adjOff[i + 1] = at;
+      }
     }
 
     const shared = this.forceBlock;
@@ -2410,7 +2432,14 @@ export class Sim {
       mass[i] = a.mass;
       sw[i] = swim[i];
     }
-    if (!nativeSolver.flock(n, align, sep, dt, turnRate, desired, maxHops)) return false;
+    if (
+      !nativeSolver.flock(
+        n, align, sep, dt, turnRate, desired, maxHops,
+        this.simId, this.graph.version, this.rosterVersion,
+      )
+    ) {
+      return false;
+    }
     if (!shared) this.unpackDrift(list);
     return true;
   }
@@ -2431,19 +2460,36 @@ export class Sim {
     const n = list.length;
     if (n === 0) return;
 
-    const idx = this.flockIndex;
-    idx.clear();
-    for (let i = 0; i < n; i++) idx.set(list[i].id, i);
-
+    const maxHops = Sim.FLOCK_HOPS;
+    /*
+     * Adjacency, the index map and the swim flags are all functions of the
+     * topology and the roster, so on a frame where neither moved they are
+     * already correct from last time — as is the neighbourhood cache inside
+     * the solver, which is keyed on exactly the same thing. Rebuilding them
+     * anyway was most of what this pass cost at scale.
+     */
     const adj = this.flockAdj;
-    while (adj.length < n) adj.push([]);
-    for (let i = 0; i < n; i++) adj[i].length = 0;
-    for (const wire of this.graph.wires.values()) {
-      const ia = idx.get(wire.a.id);
-      const ib = idx.get(wire.b.id);
-      if (ia === undefined || ib === undefined || ia === ib) continue;
-      adj[ia].push(ib);
-      adj[ib].push(ia);
+    const reuse = nativeSolver.flockCacheHolds(
+      this.simId,
+      this.graph.version,
+      this.rosterVersion,
+      n,
+      maxHops,
+    );
+    if (!reuse) {
+      const idx = this.flockIndex;
+      idx.clear();
+      for (let i = 0; i < n; i++) idx.set(list[i].id, i);
+
+      while (adj.length < n) adj.push([]);
+      for (let i = 0; i < n; i++) adj[i].length = 0;
+      for (const wire of this.graph.wires.values()) {
+        const ia = idx.get(wire.a.id);
+        const ib = idx.get(wire.b.id);
+        if (ia === undefined || ib === undefined || ia === ib) continue;
+        adj[ia].push(ib);
+        adj[ib].push(ia);
+      }
     }
 
     if (this.flockDist.length < n) {
@@ -2457,14 +2503,19 @@ export class Sim {
     const q = this.flockQ;
     const swim = this.flockSwim;
     dist.fill(-1, 0, n);
-    for (let i = 0; i < n; i++) {
-      swim[i] = this.graph.isFreeAt(list[i].id, 'p') ? 1 : 0;
+    if (!reuse) {
+      for (let i = 0; i < n; i++) {
+        swim[i] = this.graph.isFreeAt(list[i].id, 'p') ? 1 : 0;
+      }
     }
 
-    const maxHops = Sim.FLOCK_HOPS;
     const desired = Math.max(18, params.wireMinRest * 0.9);
     const turnRate = params.turnRate;
-    if (this.flockNative(list, adj, swim, n, align, sep, dt, turnRate, desired, maxHops)) return;
+    if (
+      this.flockNative(list, adj, swim, n, align, sep, dt, turnRate, desired, maxHops, reuse)
+    ) {
+      return;
+    }
 
     const seen = this.flockSeen;
 
