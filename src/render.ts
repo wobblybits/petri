@@ -242,6 +242,10 @@ function ghostAsAgent(g: Ghost): Agent {
     kind: g.kind,
     x: g.x,
     y: g.y,
+    // Cold: a ghost is built fresh each time, so there is nothing to reuse.
+    csHeading: NaN,
+    csCos: 1,
+    csSin: 0,
     vx: 0,
     vy: 0,
     heading: g.heading,

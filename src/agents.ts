@@ -42,6 +42,21 @@ export interface Agent {
   extra: number;
   /** Request gradient toward a hungry redex. 0 = quiet. */
   request: number;
+  /**
+   * Memoized cosine and sine of `heading`, with the heading they were taken
+   * at. Every port position in the sim goes through `stemOffsetInto`, which
+   * needs both; at pond scale that was ~60,000 sin and 60,000 cos a frame in
+   * the wall-mask pass alone, and as much again in the length refresh and the
+   * rope shape pass — all of them recomputing the same handful of headings,
+   * because the work is indexed per wire-endpoint and the heading is per body.
+   *
+   * Memoizing on the agent rather than in a frame-keyed side table means the
+   * guard is exact and self-invalidating: heading moves, the memo misses. NaN
+   * starts it cold and keeps it cold if a heading ever goes bad.
+   */
+  csHeading: number;
+  csCos: number;
+  csSin: number;
 }
 
 /** Slot as a small integer: principal 0, left 1, right 2. */
@@ -201,6 +216,9 @@ export function createAgent(
     integVx: 0,
     integVy: 0,
     integOmega: 0,
+    csHeading: NaN,
+    csCos: 1,
+    csSin: 0,
     extra: 0,
     request: 0,
   };
@@ -341,7 +359,6 @@ export function stemOffset(agent: Agent, slot: PortSlot): Vec2 {
   return stemOffsetAt(agent.heading, agent, slot);
 }
 
-const stemRootScratch: Vec2 = { x: 0, y: 0 };
 
 /**
  * `stemOffset` writing into `out`.
@@ -350,12 +367,60 @@ const stemRootScratch: Vec2 = { x: 0, y: 0 };
  * and the result — and the FAR pack calls it twice per wire, which on a pond
  * of 14000 wires is most of a hundred thousand short-lived objects a frame.
  */
+/**
+ * Cosine and sine of the agent's heading, computed at most once per heading.
+ *
+ * Exact, not approximate: `Math.cos` is deterministic for a given input, so a
+ * hit returns the identical bits the call would have. The guard is a float
+ * compare against the heading the memo was taken at.
+ */
+export function poseSinCos(agent: Agent): void {
+  if (agent.csHeading !== agent.heading) {
+    agent.csHeading = agent.heading;
+    agent.csCos = Math.cos(agent.heading);
+    agent.csSin = Math.sin(agent.heading);
+  }
+}
+
+/*
+ * Flattened on purpose. This is the single hottest geometric routine in the
+ * sim — every port position in every pass comes through it, twice per wire —
+ * and it used to reach `stemRootInto`, which reaches `agentSize`, through a
+ * scratch object, then two calls to `wrap`. Measured at pond scale that chain
+ * cost 71ns a call with the trigonometry already memoized away, which is call
+ * overhead rather than arithmetic: about 4.2ms a frame in the wall-mask pass
+ * alone. The bodies of `stemRootInto` and `agentSize` are inlined here; the
+ * originals stay for everyone else. Same operations in the same order, so the
+ * result is bit-for-bit what the chain produced.
+ */
 export function stemOffsetInto(agent: Agent, slot: PortSlot, out: Vec2): Vec2 {
-  const loc = stemRootInto(agent.kind, slot, stemRootScratch);
-  const lx = loc.x * agent.scale;
-  const ly = loc.y * agent.scale;
-  const c = Math.cos(agent.heading);
-  const sn = Math.sin(agent.heading);
+  const kind = agent.kind;
+  let rx: number;
+  let ry: number;
+  if (kind === 'era') {
+    rx = slot === 'p' ? 8 : 0;
+    ry = 0;
+  } else {
+    const sz = 16;
+    if (slot === 'p') {
+      rx = sz * 1.05;
+      ry = 0;
+    } else {
+      const legY = sz * 0.82 * 0.7;
+      rx = -sz * 0.55;
+      ry = slot === 'l' ? -legY : legY;
+    }
+  }
+  const scale = agent.scale;
+  const lx = rx * scale;
+  const ly = ry * scale;
+  if (agent.csHeading !== agent.heading) {
+    agent.csHeading = agent.heading;
+    agent.csCos = Math.cos(agent.heading);
+    agent.csSin = Math.sin(agent.heading);
+  }
+  const c = agent.csCos;
+  const sn = agent.csSin;
   out.x = lx * c - ly * sn;
   out.y = lx * sn + ly * c;
   return out;
@@ -403,8 +468,13 @@ export function stemWorldInto(
   // rope shape pass. On a pond of 14000 wires that was six figures of garbage
   // a frame from the function whose entire point is not to make any.
   const o = stemOffsetInto(agent, slot, stemWorldScratch);
-  out.x = wrap(agent.x + o.x, w);
-  out.y = wrap(agent.y + o.y, h);
+  // `wrap` is the identity — the world stopped being toroidal — and the two
+  // calls did not always vanish in the JIT. Kept in the signature so the
+  // shape is obvious if wrapping ever comes back.
+  void w;
+  void h;
+  out.x = agent.x + o.x;
+  out.y = agent.y + o.y;
   return out;
 }
 

@@ -822,6 +822,43 @@ export class Sim {
 
   private listRoster = -1;
   private wireListVersion = -1;
+  private wireListRoster = -1;
+  private readonly wireEndA: (Agent | undefined)[] = [];
+  private readonly wireEndB: (Agent | undefined)[] = [];
+
+  /**
+   * The wires in Map order, with both endpoints already resolved to agents.
+   *
+   * Both halves are pure topology. Resolving endpoints was two Map lookups per
+   * wire in each of a dozen passes — 1.9ms a frame in the wall-mask pass alone
+   * at 29,600 wires, which is more than the pass spends on arithmetic.
+   *
+   * Keyed on the roster as well as the graph version, because an agent that
+   * dies takes its wires with it but the array of resolved references would
+   * otherwise keep them alive and hand out a body that is no longer in the sim.
+   */
+  private wireListResolved(): Wire[] {
+    const list = this.wirePack;
+    if (
+      this.wireListVersion === this.graph.version &&
+      this.wireListRoster === this.rosterVersion
+    ) {
+      return list;
+    }
+    list.length = 0;
+    const eA = this.wireEndA;
+    const eB = this.wireEndB;
+    eA.length = 0;
+    eB.length = 0;
+    for (const w of this.graph.wires.values()) {
+      list.push(w);
+      eA.push(this.agents.get(w.a.id));
+      eB.push(this.agents.get(w.b.id));
+    }
+    this.wireListVersion = this.graph.version;
+    this.wireListRoster = this.rosterVersion;
+    return list;
+  }
   private scratchFresh = false;
   private readonly scratchIndex = new Map<number, number>();
 
@@ -853,7 +890,8 @@ export class Sim {
     const pwire = nativeSolver.steerPwire;
     const comp = nativeSolver.declComp;
     const sat = nativeSolver.declSat;
-    if (!flags || !pwire || !comp || !sat) return;
+    const free = nativeSolver.portFree;
+    if (!flags || !pwire || !comp || !sat || !free) return;
     if (!nativeSolver.ready || n > nativeSolver.bodyCap) return;
 
     const idx = this.scratchIndex;
@@ -865,8 +903,21 @@ export class Sim {
       const a = list[i];
       // Bit 0 is "principal port free". Bit 2 is stun, which is per-frame and
       // written by the steer pass on top of this.
-      flags[i] = g.isFreeAt(a.id, 'p') ? 1 : 0;
+      const pFree = g.isFreeAt(a.id, 'p');
+      flags[i] = pFree ? 1 : 0;
       sat[i] = g.portsFilledAt(a) ? 1 : 0;
+      // Bitmask of free ports, for the scent deposit in endFrame. Built here
+      // rather than there so the slot list is walked once per topology instead
+      // of once per body per frame — `slotsFor` returns a fresh array, so that
+      // loop was 20k allocations a frame on its own.
+      free[i] =
+        a.kind === 'era'
+          ? pFree
+            ? 1
+            : 0
+          : (pFree ? 1 : 0) |
+            (g.isFreeAt(a.id, 'l') ? 2 : 0) |
+            (g.isFreeAt(a.id, 'r') ? 4 : 0);
       comp[i] = this.components.get(a.id) ?? -1 - i;
       const pw = g.wireAtSlot(a.id, 'p');
       if (pw) {
@@ -937,19 +988,7 @@ export class Sim {
     if (!Sim.nativeForces || !nativeSolver.ready) return false;
     const list = this.forceList();
     if (list.length === 0) return true;
-    const wireList = this.wirePack;
-    /*
-     * Pure topology, so it holds until a wire changes. Keyed on the graph's own
-     * version rather than on `scratchFresh`: the scratch is claimed earlier in
-     * the frame than this runs, so borrowing its flag skipped the very first
-     * build and left the list permanently empty — which reads as "no wires"
-     * and silently turns the whole pass off.
-     */
-    if (this.wireListVersion !== this.graph.version) {
-      wireList.length = 0;
-      for (const w of this.graph.wires.values()) wireList.push(w);
-      this.wireListVersion = this.graph.version;
-    }
+    const wireList = this.wireListResolved();
     if (wireList.length === 0) return true;
     if (this.packForces(list, wireList) < 0) return false;
     nativeSolver.portTorques(list.length, this.packedWires, gain, splay, dt);
@@ -2241,34 +2280,61 @@ export class Sim {
     const n = list.length;
     if (!nativeSolver.canNear(n, 0, 0)) return false;
     if (!nativeSolver.loadScent(this.fields)) return false;
+    Sim.phase('scent:load');
 
+    const bodies = nativeSolver.bodies;
+    if (!bodies) return false;
+    /*
+     * This runs in endFrame, after rewrites and upkeep have had their turn at
+     * the roster, so the flag computed back in beginFrame cannot be trusted
+     * here — the key is asked again.
+     */
+    const freeFresh = nativeSolver.scratchHolds(
+      this.simId,
+      this.graph.version,
+      this.rosterVersion,
+      n,
+    );
     for (let i = 0; i < n; i++) {
       const a = list[i];
       const o = i * FAR_STRIDE;
-      nativeSolver.bodies![o + FAR.x] = a.x;
-      nativeSolver.bodies![o + FAR.y] = a.y;
-      nativeSolver.bodies![o + FAR.heading] = a.heading;
-      nativeSolver.bodies![o + FAR.locked] = a.locked ? 1 : 0;
+      bodies[o + FAR.x] = a.x;
+      bodies[o + FAR.y] = a.y;
+      bodies[o + FAR.heading] = a.heading;
+      bodies[o + FAR.locked] = a.locked ? 1 : 0;
       kinds[i] = this.kindCode(a.kind);
       sc[i] = a.scale;
-      let mask = 0;
-      for (const slot of slotsFor(a.kind)) {
-        if (this.graph.isFreeAt(a.id, slot)) mask |= 1 << this.slotCode(slot);
+      if (!freeFresh) {
+        let mask = 0;
+        for (const slot of slotsFor(a.kind)) {
+          if (this.graph.isFreeAt(a.id, slot)) mask |= 1 << this.slotCode(slot);
+        }
+        free[i] = mask;
       }
-      free[i] = mask;
     }
+    Sim.phase('scent:bodyPack');
     nativeSolver.deposit(n, params.deposit);
+    Sim.phase('scent:deposit');
 
     // Polylines for the wall mask. The host packs them because it owns the
     // rope nodes; the marking walk is what costs.
     let at = 0;
     let nRuns = 0;
     const cap = nativeSolver.wallPtCap;
-    for (const wire of this.graph.wires.values()) {
-      const A = this.agents.get(wire.a.id);
-      const B = this.agents.get(wire.b.id);
+    const wireList = this.wireListResolved();
+    const endA = this.wireEndA;
+    const endB = this.wireEndB;
+    // Hoisted: `wireSimulatesRope` bottoms out in `ropesDrawable && ...`, so
+    // when ropes are not drawable every wire answers false and the per-wire
+    // call is 2.35ms of pure indirection at pond scale — which is exactly the
+    // zoom where there are the most wires to ask.
+    const ropesLive = this.ropesDrawable;
+    for (let wi = 0; wi < wireList.length; wi++) {
+      const wire = wireList[wi];
+      const A = endA[wi];
+      const B = endB[wi];
       if (!A || !B) continue;
-      const mid = this.wireSimulatesRope(wire) ? wire.nodes.length : 0;
+      const mid = ropesLive && this.wireSimulatesRope(wire) ? wire.nodes.length : 0;
       if (at + mid + 2 > cap || nRuns >= runs.length) break;
       const sa = stemWorldInto(A, wire.a.slot, this.w, this.h, this.tmpStemA);
       pts[at * 2] = sa.x;
@@ -2285,10 +2351,13 @@ export class Sim {
       at++;
       runs[nRuns++] = mid + 2;
     }
+    Sim.phase('scent:wallPack');
     nativeSolver.paintWalls(nRuns);
+    Sim.phase('scent:paintWalls');
 
     nativeSolver.storeScent(this.fields);
     nativeSolver.storeWalls(this.fields);
+    Sim.phase('scent:store');
     return true;
   }
 
