@@ -190,6 +190,25 @@ export class Graph {
     return !this.portWire.has(portKeyAt(id, slot));
   }
 
+  /** `wireAt` without building a PortRef for it. */
+  wireAtSlot(id: number, slot: PortSlot): Wire | undefined {
+    const wid = this.portWire.get(portKeyAt(id, slot));
+    if (wid === undefined) return undefined;
+    return this.wires.get(wid);
+  }
+
+  /** `portsFilled` without allocating the slot list. */
+  portsFilledAt(agent: Agent): boolean {
+    if (this.portWire.has(portKeyAt(agent.id, 'p'))) {
+      if (agent.kind === 'era') return true;
+      return (
+        this.portWire.has(portKeyAt(agent.id, 'l')) &&
+        this.portWire.has(portKeyAt(agent.id, 'r'))
+      );
+    }
+    return false;
+  }
+
   /** True when `a` and `b` already share a wire. FAR discs skip those pairs. */
   sharesWire(aId: number, bId: number): boolean {
     if (aId === bId) return false;

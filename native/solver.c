@@ -164,6 +164,13 @@ static float sparams[32];
 static int scent_cols = 0, scent_rows = 0;
 static float scent_ox = 0.f, scent_oy = 0.f, scent_ww = 1.f, scent_wh = 1.f;
 static uint8_t decl_sat[MAX_BODIES];
+/*
+ * Gravitate's own "component is small enough" flag. It used to borrow
+ * decl_sat, which was harmless while both were rewritten every frame but
+ * blocks caching either: gravitate runs after declutter, so a cached decl_sat
+ * would be read back as gravitate's flags on the following frame.
+ */
+static uint8_t grav_sat[MAX_BODIES];
 static float body_mass[MAX_BODIES];
 static int32_t flock_id[MAX_BODIES];
 static int32_t flock_dist[MAX_BODIES];
@@ -1716,9 +1723,9 @@ void solver_gravitate(int n, float cx, float cy, float base, float reach,
   for (int i = 0; i < n; i++) {
     float *p = bodies + i * STRIDE;
     if (p[FAR_LOCKED] >= 0.5f) continue;
-    /* decl_sat doubles as the "component is small enough" flag here; the host
-     * knows the sizes already and packing a byte beats rebuilding them. */
-    if (!decl_sat[i]) continue;
+    /* The host knows component sizes already; packing a byte beats
+     * rebuilding them here. */
+    if (!grav_sat[i]) continue;
     (void)max_comp;
     float dx = cx - p[FAR_X];
     float dy = cy - p[FAR_Y];
@@ -1732,6 +1739,7 @@ void solver_gravitate(int n, float cx, float cy, float base, float reach,
 
 int32_t *solver_decl_comp(void) { return decl_comp; }
 uint8_t *solver_decl_sat(void) { return decl_sat; }
+uint8_t *solver_grav_sat(void) { return grav_sat; }
 float *solver_body_mass(void) { return body_mass; }
 
 void solver_port_torques(int n, int n_wires, float gain, float splay, float dt) {

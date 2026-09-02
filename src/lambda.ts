@@ -915,6 +915,7 @@ export function injectTerm(
     w: number;
     h: number;
     wire: (aId: number, aSlot: PortSlot, bId: number, bSlot: PortSlot, p: Params) => void;
+    noteRosterChange: () => void;
   },
   term: Term,
   cx: number,
@@ -937,6 +938,8 @@ export function injectTerm(
     );
     sim.agents.set(agent.id, agent);
   }
+  // Written straight into the Map, so the roster caches need telling.
+  sim.noteRosterChange();
   sim.nextId = built.nextId;
 
   for (const w of built.net.wires) {

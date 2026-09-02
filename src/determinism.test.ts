@@ -134,11 +134,28 @@ describe('determinism', () => {
   it('gives the same state twice from the same seed', async () => {
     expect(await nativeSolver.init(), nativeSolver.lastError).toBe(true);
     const lines: string[] = [];
+    const seen = new Map<string, string>();
     for (const sc of SCENARIOS) {
       const a = runScenario(sc);
       const b = runScenario(sc);
       lines.push(`  ${sc.name.padEnd(26)} ${a}`);
       expect(a, `${sc.name} is not reproducible`).toBe(b);
+      /*
+       * Distinctness is a separate check from reproducibility, and it catches
+       * a different failure: a pass that has been silently switched off.
+       * Caching the port-torque wire list against the wrong key left the list
+       * permanently empty, which reads as "no wires" and disables the pass —
+       * and two scenarios that should settle differently collapsed onto the
+       * same hash. Reproducibility was perfect throughout.
+       */
+      const clash = seen.get(a);
+      expect(
+        clash,
+        `${sc.name} and ${clash} settle to the identical state (${a}). ` +
+          'Two different scenes agreeing bit-for-bit usually means a pass ' +
+          'stopped running rather than that they genuinely converged.',
+      ).toBeUndefined();
+      seen.set(a, sc.name);
     }
     console.log(`\nstate hashes @ ${SCENARIOS[0].frames}+ frames\n${lines.join('\n')}\n`);
   }, 180_000);

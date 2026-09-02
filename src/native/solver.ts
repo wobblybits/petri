@@ -102,6 +102,7 @@ type Exp = {
   solver_gravitate(n: number, cx: number, cy: number, base: number, reach: number, maxComp: number, dt: number): void;
   solver_decl_comp(): number;
   solver_decl_sat(): number;
+  solver_grav_sat(): number;
   solver_body_mass(): number;
   solver_step_near(
     n: number,
@@ -187,6 +188,7 @@ export class NativeSolver {
   bodyDrive: Float32Array | null = null;
   bodyTrail: Float32Array | null = null;
   declSat: Uint8Array | null = null;
+  gravSat: Uint8Array | null = null;
   bodyMass: Float32Array | null = null;
   flockMass: Float32Array | null = null;
   swim: Uint8Array | null = null;
@@ -210,6 +212,7 @@ export class NativeSolver {
       exp._initialize?.();
       const mem = exp.memory;
       this.fkSim = -1;
+      this.skSim = -1;
       this.staticBytes = exp.solver_static_bytes();
       this.heapBytes = mem.buffer.byteLength;
       this.bodyCap = exp.solver_cap();
@@ -246,6 +249,7 @@ export class NativeSolver {
       this.bodyDrive = new Float32Array(mem.buffer, exp.solver_body_drive(), this.bodyCap);
       this.bodyTrail = new Float32Array(mem.buffer, exp.solver_body_trail(), this.bodyCap);
       this.declSat = new Uint8Array(mem.buffer, exp.solver_decl_sat(), this.bodyCap);
+      this.gravSat = new Uint8Array(mem.buffer, exp.solver_grav_sat(), this.bodyCap);
       this.bodyMass = new Float32Array(mem.buffer, exp.solver_body_mass(), this.bodyCap);
       this.flockMass = new Float32Array(mem.buffer, exp.solver_flock_mass(), this.bodyCap);
       this.swim = new Uint8Array(mem.buffer, exp.solver_swim(), this.bodyCap);
@@ -437,6 +441,36 @@ export class NativeSolver {
   private fkRoster = -1;
   private fkN = -1;
   private fkHops = -1;
+
+  /*
+   * Owner of the per-body scratch arrays that the force passes read —
+   * steerFlags, steerPwire, declComp, declSat. Same problem and same shape as
+   * the flocking cache above: all of it is derived from the topology and the
+   * roster, none of it from the pose, and all of it lives in wasm memory that
+   * every Sim in the process shares.
+   */
+  private skSim = -1;
+  private skGraph = -1;
+  private skRoster = -1;
+  private skN = -1;
+
+  /** True when the per-body scratch is this caller's and still current. */
+  scratchHolds(simId: number, graphVersion: number, rosterVersion: number, n: number): boolean {
+    return (
+      this.ready &&
+      this.skSim === simId &&
+      this.skGraph === graphVersion &&
+      this.skRoster === rosterVersion &&
+      this.skN === n
+    );
+  }
+
+  claimScratch(simId: number, graphVersion: number, rosterVersion: number, n: number): void {
+    this.skSim = simId;
+    this.skGraph = graphVersion;
+    this.skRoster = rosterVersion;
+    this.skN = n;
+  }
 
   /** True when the cached pair list is this caller's and still current. */
   flockCacheHolds(

@@ -191,6 +191,19 @@ export class Sim {
    * touching a single wire.
    */
   rosterVersion = 0;
+
+  /**
+   * Register a roster change made without going through `spawn` or `kill`.
+   *
+   * `commitRewrite` and the lambda loader write into the agents Map directly.
+   * Every cache keyed on the roster is wrong from the moment one of those runs
+   * until this is called, and the failure is silent: a stale body list indexes
+   * the wrong agents rather than throwing. The determinism hashes are what
+   * catch a missing call, which is how the one in `commitRewrite` was found.
+   */
+  noteRosterChange(): void {
+    this.rosterVersion++;
+  }
   /** Identifies this Sim to the shared wasm solver's flocking cache. */
   private readonly simId = nextSimId++;
 
@@ -467,6 +480,7 @@ export class Sim {
     // 13 ms to 1.6 ms of compute still cost 7 ms because it packed 6 ms of
     // bodies to get there.
     const block = this.openForceBlock(params);
+    this.refreshForceScratch(this.forceList());
     Sim.phase('openForceBlock');
     this.steer(params, t);
     Sim.phase('steer');
@@ -608,6 +622,13 @@ export class Sim {
         sc[i] = a.scale;
       }
     }
+    /*
+     * Not cacheable, though it looks it. Endpoints and slots are pure
+     * topology, but `wiresNear` and `wires` are two views over the same wasm
+     * buffer and the FAR and NEAR solves write their own layout through it
+     * every frame — so the table has to be re-laid each time even when nothing
+     * about the graph moved. The JS-side wire list above does survive.
+     */
     const wires = nativeSolver.wiresNear;
     let k = 0;
     for (const w of wireList) {
@@ -783,11 +804,82 @@ export class Sim {
     }
   }
 
+  /**
+   * The bodies, in the order every force pass indexes them by.
+   *
+   * Rebuilt once a frame, not once a pass. Six passes each walking the agent
+   * Map into an array was 120k pushes a frame at pond scale, for a list that
+   * cannot change between them: nothing in the force phase spawns or kills.
+   */
   private forceList(): Agent[] {
     const list = this.agentList;
+    if (this.listRoster === this.rosterVersion) return list;
     list.length = 0;
     for (const a of this.agents.values()) list.push(a);
+    this.listRoster = this.rosterVersion;
     return list;
+  }
+
+  private listRoster = -1;
+  private wireListVersion = -1;
+  private scratchFresh = false;
+  private readonly scratchIndex = new Map<number, number>();
+
+  /**
+   * The per-body scratch the force passes read out of wasm memory: which
+   * principal ports are free, what each principal wire's far end is, each
+   * body's component, and whether every port is filled.
+   *
+   * All four are functions of the topology and the roster and none of them of
+   * the pose, so like the flocking pair list they only change when the graph
+   * does — and rebuilding them every frame was most of what the force passes
+   * cost. Measured at 20k bodies, steer, portTorques and declutter spent
+   * 14.5ms a frame between them handing over data for passes that take 1-4.5ms
+   * to run.
+   *
+   * The arrays live in wasm memory, which every Sim in the process shares, so
+   * ownership is tracked in the binding exactly as the flocking cache is.
+   */
+  private refreshForceScratch(list: Agent[]): void {
+    const n = list.length;
+    this.scratchFresh = nativeSolver.scratchHolds(
+      this.simId,
+      this.graph.version,
+      this.rosterVersion,
+      n,
+    );
+    if (this.scratchFresh || n === 0) return;
+    const flags = nativeSolver.steerFlags;
+    const pwire = nativeSolver.steerPwire;
+    const comp = nativeSolver.declComp;
+    const sat = nativeSolver.declSat;
+    if (!flags || !pwire || !comp || !sat) return;
+    if (!nativeSolver.ready || n > nativeSolver.bodyCap) return;
+
+    const idx = this.scratchIndex;
+    idx.clear();
+    for (let i = 0; i < n; i++) idx.set(list[i].id, i);
+
+    const g = this.graph;
+    for (let i = 0; i < n; i++) {
+      const a = list[i];
+      // Bit 0 is "principal port free". Bit 2 is stun, which is per-frame and
+      // written by the steer pass on top of this.
+      flags[i] = g.isFreeAt(a.id, 'p') ? 1 : 0;
+      sat[i] = g.portsFilledAt(a) ? 1 : 0;
+      comp[i] = this.components.get(a.id) ?? -1 - i;
+      const pw = g.wireAtSlot(a.id, 'p');
+      if (pw) {
+        const other = pw.a.id === a.id ? pw.b : pw.a;
+        pwire[i * 2] = idx.get(other.id) ?? -1;
+        pwire[i * 2 + 1] = this.slotCode(other.slot);
+      } else {
+        pwire[i * 2] = -1;
+        pwire[i * 2 + 1] = 0;
+      }
+    }
+    nativeSolver.claimScratch(this.simId, this.graph.version, this.rosterVersion, n);
+    this.scratchFresh = true;
   }
 
   /** Declutter in WASM. False when the scene will not pack. */
@@ -800,10 +892,14 @@ export class Sim {
     const n = list.length;
     if (n === 0) return true;
     if (!this.forceBlock && !this.packPose(list)) return false;
-    for (let i = 0; i < n; i++) {
-      const a = list[i];
-      sat[i] = this.graph.portsFilled(a) ? 1 : 0;
-      comp[i] = this.components.get(a.id) ?? -1 - i;
+    if (!this.scratchFresh) {
+      // Only when the topology cache could not be claimed — a scene too big
+      // for the solver, or another Sim holding the arrays.
+      for (let i = 0; i < n; i++) {
+        const a = list[i];
+        sat[i] = this.graph.portsFilledAt(a) ? 1 : 0;
+        comp[i] = this.components.get(a.id) ?? -1 - i;
+      }
     }
     nativeSolver.declutter(n, reach, atReach, cutoff, Sim.DECLUTTER_FLOOR, dt);
     if (!this.forceBlock) this.unpackDrift(list);
@@ -819,7 +915,7 @@ export class Sim {
     dt: number,
   ): boolean {
     if (!Sim.nativeForces || !nativeSolver.ready) return false;
-    const sat = nativeSolver.declSat;
+    const sat = nativeSolver.gravSat;
     if (!sat) return false;
     const list = this.forceList();
     const n = list.length;
@@ -839,13 +935,21 @@ export class Sim {
   /** The same pass in WASM. False when the scene will not pack. */
   private portTorquesNative(gain: number, splay: number, dt: number): boolean {
     if (!Sim.nativeForces || !nativeSolver.ready) return false;
-    const list = this.agentList;
-    list.length = 0;
-    for (const a of this.agents.values()) list.push(a);
+    const list = this.forceList();
     if (list.length === 0) return true;
     const wireList = this.wirePack;
-    wireList.length = 0;
-    for (const w of this.graph.wires.values()) wireList.push(w);
+    /*
+     * Pure topology, so it holds until a wire changes. Keyed on the graph's own
+     * version rather than on `scratchFresh`: the scratch is claimed earlier in
+     * the frame than this runs, so borrowing its flag skipped the very first
+     * build and left the list permanently empty — which reads as "no wires"
+     * and silently turns the whole pass off.
+     */
+    if (this.wireListVersion !== this.graph.version) {
+      wireList.length = 0;
+      for (const w of this.graph.wires.values()) wireList.push(w);
+      this.wireListVersion = this.graph.version;
+    }
     if (wireList.length === 0) return true;
     if (this.packForces(list, wireList) < 0) return false;
     nativeSolver.portTorques(list.length, this.packedWires, gain, splay, dt);
@@ -1258,7 +1362,7 @@ export class Sim {
     const sat = this.satBuf;
     const comp = this.compBuf;
     for (let i = 0; i < n; i++) {
-      sat[i] = this.graph.portsFilled(list[i]) ? 1 : 0;
+      sat[i] = this.graph.portsFilledAt(list[i]) ? 1 : 0;
       comp[i] = this.components.get(list[i].id) ?? -1 - i;
     }
     this.bodyGrid.forEachPair((i, j) => {
@@ -2240,35 +2344,58 @@ export class Sim {
     if (!nativeSolver.loadScent(this.fields)) return false;
     if (!this.forceBlock && !this.packPose(list)) return false;
 
-    const index = this.packIndex;
-    if (!this.forceBlock) {
-      index.clear();
-      for (let i = 0; i < n; i++) index.set(list[i].id, i);
-    }
-    for (let i = 0; i < n; i++) {
-      const a = list[i];
-      const pFree = this.graph.isFreeAt(a.id, 'p');
-      flags[i] = (pFree ? 1 : 0) | (a.stun > 0 ? 4 : 0);
+    /*
+     * Bit 0 of `flags` and the whole of `pwire` come from the topology, so
+     * refreshForceScratch has already written them and they survive until a
+     * wire changes. What is left here is genuinely per-frame: the stun bit,
+     * the drive level, and three fresh random numbers.
+     */
+    if (this.scratchFresh) {
+      for (let i = 0; i < n; i++) {
+        const a = list[i];
+        flags[i] = (flags[i] & 1) | (a.stun > 0 ? 4 : 0);
+        // Under a force block packPose has already written these; without one
+        // nothing else does, and scale moves every frame as bodies grow.
+        if (!this.forceBlock) {
+          kinds[i] = this.kindCode(a.kind);
+          sc[i] = a.scale;
+        }
+        drive[i] = a.drive;
+        // Drawn host-side so a seeded run stays reproducible; the solver only
+        // consumes them.
+        noise[i * 3] = Math.random();
+        noise[i * 3 + 1] = Math.random();
+        noise[i * 3 + 2] = Math.random();
+      }
+    } else {
+      const index = this.packIndex;
       if (!this.forceBlock) {
-        kinds[i] = this.kindCode(a.kind);
-        sc[i] = a.scale;
+        index.clear();
+        for (let i = 0; i < n; i++) index.set(list[i].id, i);
       }
-      drive[i] = a.drive;
-      const pw = this.graph.wireAt({ id: a.id, slot: 'p' });
-      let pj = -1;
-      let pslot = 0;
-      if (pw) {
-        const other = pw.a.id === a.id ? pw.b : pw.a;
-        pj = index.get(other.id) ?? -1;
-        pslot = this.slotCode(other.slot);
+      for (let i = 0; i < n; i++) {
+        const a = list[i];
+        const pFree = this.graph.isFreeAt(a.id, 'p');
+        flags[i] = (pFree ? 1 : 0) | (a.stun > 0 ? 4 : 0);
+        if (!this.forceBlock) {
+          kinds[i] = this.kindCode(a.kind);
+          sc[i] = a.scale;
+        }
+        drive[i] = a.drive;
+        const pw = this.graph.wireAtSlot(a.id, 'p');
+        let pj = -1;
+        let pslot = 0;
+        if (pw) {
+          const other = pw.a.id === a.id ? pw.b : pw.a;
+          pj = index.get(other.id) ?? -1;
+          pslot = this.slotCode(other.slot);
+        }
+        pwire[i * 2] = pj;
+        pwire[i * 2 + 1] = pslot;
+        noise[i * 3] = Math.random();
+        noise[i * 3 + 1] = Math.random();
+        noise[i * 3 + 2] = Math.random();
       }
-      pwire[i * 2] = pj;
-      pwire[i * 2 + 1] = pslot;
-      // Drawn host-side so a seeded run stays reproducible; the solver only
-      // consumes them.
-      noise[i * 3] = Math.random();
-      noise[i * 3 + 1] = Math.random();
-      noise[i * 3 + 2] = Math.random();
     }
     sp[0] = params.faceRadius;
     sp[1] = params.snapRadius;
@@ -3061,6 +3188,10 @@ export class Sim {
         this.w,
         this.h,
       );
+      // It writes into the agents Map itself, so nothing else knows the roster
+      // moved. Anything keyed on it — the body list, the flocking pair list,
+      // the force scratch — is stale until this line.
+      this.noteRosterChange();
       const recipients: Agent[] = [];
       for (const id of leftoverIds) {
         const ag = this.agents.get(id);
