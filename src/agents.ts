@@ -389,6 +389,8 @@ export function stemFromPose(
 }
 
 /** Write the stem into `out` so a hot loop does not allocate a result vector. */
+const stemWorldScratch: Vec2 = { x: 0, y: 0 };
+
 export function stemWorldInto(
   agent: Agent,
   slot: PortSlot,
@@ -396,7 +398,11 @@ export function stemWorldInto(
   h: number,
   out: { x: number; y: number },
 ): { x: number; y: number } {
-  const o = stemOffset(agent, slot);
+  // Through the into-form: the allocating `stemOffset` costs three objects a
+  // call, and this is called twice per wire by both the length refresh and the
+  // rope shape pass. On a pond of 14000 wires that was six figures of garbage
+  // a frame from the function whose entire point is not to make any.
+  const o = stemOffsetInto(agent, slot, stemWorldScratch);
   out.x = wrap(agent.x + o.x, w);
   out.y = wrap(agent.y + o.y, h);
   return out;
