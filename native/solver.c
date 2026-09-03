@@ -59,8 +59,19 @@ typedef v128_t v128;
 #define WIRE_FAR 8
 #define WIRE_NEAR 12
 #define NODE_STRIDE 8
-#define MAX_COLS 160
-#define MAX_ROWS 512
+/*
+ * The scent grid is square and world-fixed: 1024 cells a side at 10 world
+ * units, so 10,240 units across. Sized to hold the whole field rather than a
+ * camera window, because the steering pass samples it in here and a grid it
+ * cannot hold means a body that smells nothing at all.
+ *
+ * This is 32 MB of statics for the two buffers, and the host copy in and out
+ * is 16 MB a frame each way — which is the honest cost of running the field on
+ * the CPU at this resolution, and the reason the GPU path is the one that
+ * should carry it whenever there is a GPU.
+ */
+#define MAX_COLS 1024
+#define MAX_ROWS 1024
 #define CHANNELS 4
 #define MAX_SCENT (MAX_COLS * MAX_ROWS * CHANNELS)
 
@@ -136,7 +147,6 @@ static uint8_t detailed[MAX_BODIES];
 static float delta[MAX_BODIES * 2];
 static float scent[MAX_SCENT];
 static float scent_tmp[MAX_SCENT];
-static uint8_t walls[MAX_COLS * MAX_ROWS];
 static int g_pairs = 0;
 
 static int32_t cell_of[MAX_BODIES];
@@ -153,9 +163,6 @@ static uint8_t disc_nfill[MAX_BODIES];
 static int32_t decl_comp[MAX_BODIES];
 static uint8_t steer_flags[MAX_BODIES];
 static uint8_t port_free[MAX_BODIES];
-#define MAX_WALL_PTS 262144
-static float wall_pts[MAX_WALL_PTS * 2];
-static int32_t wall_runs[MAX_WIRES];
 static int32_t steer_pwire[MAX_BODIES * 2];
 static float steer_noise[MAX_BODIES * 3];
 static float body_drive[MAX_BODIES];
@@ -1443,13 +1450,23 @@ static void port_world(int i, int slot, float *px, float *py) {
  * from a seeded Math.random and the determinism harness keeps working.
  */
 uint8_t *solver_port_free(void) { return port_free; }
-float *solver_wall_pts(void) { return wall_pts; }
-int32_t *solver_wall_runs(void) { return wall_runs; }
-int solver_wall_pt_cap(void) { return MAX_WALL_PTS; }
 
 /** Bilinear splat into one channel. Mirrors Fields.deposit. */
+/*
+ * Deposits are normalised to a density before they land — see Fields.REF_CELL
+ * for why. A cell holds a total, so a wider cell collects proportionally more
+ * of the same pond, and every constant that reads a raw cell value (slow
+ * factor, turn boost, the steering dead zone) would shift with resolution.
+ */
+#define SCENT_REF_CELL 20.f
+
 static void scent_add(int ch, float x, float y, float amount) {
   if (scent_cols <= 0 || scent_rows <= 0) return;
+  float cell = scent_ww / (float)scent_cols;
+  if (cell > 1e-6f) {
+    float c = SCENT_REF_CELL / cell;
+    amount *= c * c;
+  }
   float gx = ((x - scent_ox) / scent_ww) * (float)scent_cols;
   float gy = ((y - scent_oy) / scent_wh) * (float)scent_rows;
   int i0 = (int)floorf(gx), j0 = (int)floorf(gy);
@@ -1489,62 +1506,6 @@ void solver_deposit(int n, float amount) {
       int ch = slot == 0 ? (kind[i] == 2 ? 0 : kind[i] == 1 ? 1 : 2) : 3;
       scent_add(ch, px, py, slot == 0 ? amount : amount * 0.7f);
     }
-  }
-}
-
-static void mark_cell(int i, int j) {
-  if (i < 0 || j < 0 || i >= scent_cols || j >= scent_rows) return;
-  walls[j * scent_cols + i] = 1;
-}
-
-/**
- * Stamp the wire polylines onto the wall mask, so scent will not diffuse
- * through a wire. Mirrors Fields.markSegment over Sim.paintScentWalls.
- *
- * The host packs the points because it owns the rope nodes; the walk itself
- * is what costs — a few cells marked per step along every segment of every
- * wire, which was the most expensive thing left in a settled frame.
- */
-void solver_paint_walls(int n_runs) {
-  if (scent_cols <= 0 || scent_rows <= 0) return;
-  memset(walls, 0, (size_t)(scent_cols * scent_rows));
-  if (n_runs <= 0) return;
-  float cellW = scent_ww / (float)scent_cols;
-  float cellH = scent_wh / (float)scent_rows;
-  float minCell = cellW < cellH ? cellW : cellH;
-  float step = 0.35f * minCell;
-  if (step < 0.5f) step = 0.5f;
-  int cap = (scent_cols + scent_rows) * 4;
-  int at = 0;
-  for (int r = 0; r < n_runs; r++) {
-    int count = wall_runs[r];
-    if (count < 2) {
-      at += count > 0 ? count : 0;
-      continue;
-    }
-    for (int e = 0; e + 1 < count; e++) {
-      float x0 = wall_pts[(at + e) * 2], y0 = wall_pts[(at + e) * 2 + 1];
-      float x1 = wall_pts[(at + e + 1) * 2], y1 = wall_pts[(at + e + 1) * 2 + 1];
-      if (!isfinite(x0) || !isfinite(y0) || !isfinite(x1) || !isfinite(y1)) continue;
-      float dx = x1 - x0, dy = y1 - y0;
-      float len = sqrtf(dx * dx + dy * dy);
-      if (!isfinite(len)) continue;
-      int steps = (int)ceilf(len / step);
-      if (steps < 1) steps = 1;
-      if (steps > cap) steps = cap;
-      for (int k = 0; k <= steps; k++) {
-        float t = (float)k / (float)steps;
-        float gx = (((x0 + dx * t) - scent_ox) / scent_ww) * (float)scent_cols;
-        float gy = (((y0 + dy * t) - scent_oy) / scent_wh) * (float)scent_rows;
-        int i = (int)floorf(gx), j = (int)floorf(gy);
-        mark_cell(i, j);
-        mark_cell(i - 1, j);
-        mark_cell(i + 1, j);
-        mark_cell(i, j - 1);
-        mark_cell(i, j + 1);
-      }
-    }
-    at += count;
   }
 }
 
@@ -1750,6 +1711,16 @@ void solver_gravitate(int n, float cx, float cy, float base, float reach,
        * diagonally by an axis it is already inside. */
       float ox = (dx < 0.f ? -dx : dx) - half;
       float oy = (dy < 0.f ? -dy : dy) - half;
+      /*
+       * Saturating, not linear. The pull grows with the overshoot so that it
+       * is nothing at the boundary, but a body that gets a long way out should
+       * be walked home, not fired there: unclamped, an agent 108,000 units
+       * past the edge was handed 38,000 px/s, which is a slingshot and reads
+       * as the whole pond convulsing. Past one bound's worth of overshoot the
+       * pull stops growing.
+       */
+      if (ox > half) ox = half;
+      if (oy > half) oy = half;
       if (ox > 0.f) p[FAR_VX] += (dx < 0.f ? -1.f : 1.f) * ox * edge * dt;
       if (oy > 0.f) p[FAR_VY] += (dy < 0.f ? -1.f : 1.f) * oy * edge * dt;
     }
@@ -2244,9 +2215,7 @@ void solver_step_near(int n, int n_wires, float dt, int substeps,
 
 float *solver_scent(void) { return scent; }
 float *solver_scent_tmp(void) { return scent_tmp; }
-uint8_t *solver_walls(void) { return walls; }
 int solver_scent_cap(void) { return MAX_SCENT; }
-int solver_wall_cap(void) { return MAX_COLS * MAX_ROWS; }
 
 void solver_scent_diffuse(int cols, int rows, float mix) {
   if (mix <= 0.f || cols <= 0 || rows <= 0) return;
@@ -2261,23 +2230,12 @@ void solver_scent_diffuse(int cols, int rows, float mix) {
     int has_up = j > 0;
     int has_down = j < rows - 1;
     for (int i = 0; i < cols; i++) {
-      int cell = j * cols + i;
-      int base = cell * CHANNELS;
-      if (walls[cell]) {
-#if HAVE_SIMD
-        wasm_v128_store(dst + base, wasm_v128_load(src + base));
-#else
-        dst[base] = src[base];
-        dst[base + 1] = src[base + 1];
-        dst[base + 2] = src[base + 2];
-        dst[base + 3] = src[base + 3];
-#endif
-        continue;
-      }
-      int left = (i > 0 && !walls[cell - 1]) ? base - CHANNELS : -1;
-      int right = (i < cols - 1 && !walls[cell + 1]) ? base + CHANNELS : -1;
-      int up = (has_up && !walls[cell - cols]) ? base - row_stride : -1;
-      int down = (has_down && !walls[cell + cols]) ? base + row_stride : -1;
+      int base = (j * cols + i) * CHANNELS;
+      /* -1 reflects off the edge: the boundary neither absorbs nor invents. */
+      int left = (i > 0) ? base - CHANNELS : -1;
+      int right = (i < cols - 1) ? base + CHANNELS : -1;
+      int up = has_up ? base - row_stride : -1;
+      int down = has_down ? base + row_stride : -1;
 #if HAVE_SIMD
       v128 self = wasm_v128_load(src + base);
       v128 a = left >= 0 ? wasm_v128_load(src + left) : self;

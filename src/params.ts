@@ -103,7 +103,11 @@ export interface Params {
   soupCount: number;
   /** Seconds between automatic free-agent spawns (0 = off). */
   spawnInterval: number;
-  /** World-space size of one energy cell. */
+  /**
+   * World-space size of one energy cell. Kept a whole multiple of the scent
+   * field's cell (10 units) so the two grids line up — an energy cell is a
+   * 4x4 block of scent cells rather than a lattice at an unrelated pitch.
+   */
   energyCell: number;
   /**
    * Free energy in an unvisited cell. A cell holds a whole extra, so an agent
@@ -231,7 +235,7 @@ export function defaultParams(): Params {
     maxAgents: 10000,
     soupCount: 2500,
     spawnInterval: 0.5,
-    energyCell: 48,
+    energyCell: 40,
     ambientEnergy: 2,
     upkeep: 0.015,
     rescueTo: 1,

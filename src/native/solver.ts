@@ -93,11 +93,7 @@ type Exp = {
   solver_body_trail(): number;
   solver_scent_frame(cols: number, rows: number, ox: number, oy: number, ww: number, wh: number): void;
   solver_deposit(n: number, amount: number): void;
-  solver_paint_walls(nRuns: number): void;
   solver_port_free(): number;
-  solver_wall_pts(): number;
-  solver_wall_runs(): number;
-  solver_wall_pt_cap(): number;
   solver_declutter(n: number, reach: number, atReach: number, cutoff: number, floorFrac: number, dt: number): void;
   solver_gravitate(n: number, cx: number, cy: number, base: number, reach: number, maxComp: number, dt: number, half: number, edge: number): void;
   solver_decl_comp(): number;
@@ -138,9 +134,7 @@ type Exp = {
   solver_flock_pairs(): number;
   solver_scent(): number;
   solver_scent_tmp(): number;
-  solver_walls(): number;
   solver_scent_cap(): number;
-  solver_wall_cap(): number;
   solver_scent_diffuse(cols: number, rows: number, mix: number): void;
   solver_scent_decay(n: number, keep: number): void;
   _initialize?: () => void;
@@ -179,9 +173,6 @@ export class NativeSolver {
   declComp: Int32Array | null = null;
   steerParams: Float32Array | null = null;
   portFree: Uint8Array | null = null;
-  wallPts: Float32Array | null = null;
-  wallRuns: Int32Array | null = null;
-  wallPtCap = 0;
   steerFlags: Uint8Array | null = null;
   steerPwire: Int32Array | null = null;
   steerNoise: Float32Array | null = null;
@@ -195,9 +186,7 @@ export class NativeSolver {
   adjCap = 0;
   private exp: Exp | null = null;
   private scent: Float32Array | null = null;
-  private walls: Uint8Array | null = null;
   private scentCap = 0;
-  private wallCap = 0;
 
   async init(source?: ArrayBuffer | Uint8Array): Promise<boolean> {
     try {
@@ -220,7 +209,6 @@ export class NativeSolver {
       this.nodeCap = exp.solver_node_cap();
       this.pairCap = exp.solver_pair_cap();
       this.scentCap = exp.solver_scent_cap();
-      this.wallCap = exp.solver_wall_cap();
       this.bodies = new Float32Array(mem.buffer, exp.solver_bodies(), this.bodyCap * FAR_STRIDE);
       this.wires = new Float32Array(mem.buffer, exp.solver_wires(), this.wireCap * FAR_WIRE_STRIDE);
       this.wiresNear = new Float32Array(mem.buffer, exp.solver_wires(), this.wireCap * WIRE_NEAR_STRIDE);
@@ -240,9 +228,6 @@ export class NativeSolver {
       this.declComp = new Int32Array(mem.buffer, exp.solver_decl_comp(), this.bodyCap);
       this.steerParams = new Float32Array(mem.buffer, exp.solver_steer_params(), 32);
       this.portFree = new Uint8Array(mem.buffer, exp.solver_port_free(), this.bodyCap);
-      this.wallPtCap = exp.solver_wall_pt_cap();
-      this.wallPts = new Float32Array(mem.buffer, exp.solver_wall_pts(), this.wallPtCap * 2);
-      this.wallRuns = new Int32Array(mem.buffer, exp.solver_wall_runs(), this.wireCap);
       this.steerFlags = new Uint8Array(mem.buffer, exp.solver_steer_flags(), this.bodyCap);
       this.steerPwire = new Int32Array(mem.buffer, exp.solver_steer_pwire(), this.bodyCap * 2);
       this.steerNoise = new Float32Array(mem.buffer, exp.solver_steer_noise(), this.bodyCap * 3);
@@ -254,7 +239,6 @@ export class NativeSolver {
       this.flockMass = new Float32Array(mem.buffer, exp.solver_flock_mass(), this.bodyCap);
       this.swim = new Uint8Array(mem.buffer, exp.solver_swim(), this.bodyCap);
       this.scent = new Float32Array(mem.buffer, exp.solver_scent(), this.scentCap);
-      this.walls = new Uint8Array(mem.buffer, exp.solver_walls(), this.wallCap);
       this.exp = exp;
       this.ready = true;
       this.lastError = '';
@@ -337,11 +321,19 @@ export class NativeSolver {
    * Copy the live scent window in and tell the solver where it sits in the
    * world, so steering can sample it. Returns false when it will not fit.
    */
+  /*
+   * Only the live box crosses, not the whole grid.
+   *
+   * At 1024 squared the field is 16 MB, and copying it in and back out every
+   * frame is 2 GB/s of memcpy at 60 fps — more than everything else in the
+   * frame put together. The box is where the scent is, so the rows outside it
+   * are zeros being copied back and forth.
+   */
   loadScent(fields: Fields): boolean {
     if (!this.ready || !this.exp || !this.scent) return false;
     const n = fields.cols * fields.rows;
     if (n * 4 > this.scentCap) return false;
-    this.scent.set(fields.data.subarray(0, n * 4));
+    this.copyScentRows(fields, fields.data, this.scent);
     this.exp.solver_scent_frame(
       fields.cols,
       fields.rows,
@@ -357,26 +349,27 @@ export class NativeSolver {
     this.exp?.solver_steer(n, dt);
   }
 
-  /** Copy the solver's scent window back out to the host field. */
+  /** Copy the solver's scent box back out to the host field. */
   storeScent(fields: Fields): void {
     if (!this.scent) return;
-    const n = fields.cols * fields.rows * 4;
-    fields.data.set(this.scent.subarray(0, n));
+    this.copyScentRows(fields, this.scent, fields.data);
   }
 
-  /** Copy the solver's wall mask back out. */
-  storeWalls(fields: Fields): void {
-    if (!this.walls) return;
-    const n = fields.cols * fields.rows;
-    fields.walls.set(this.walls.subarray(0, n));
+  /** Row-by-row over the live box only. */
+  private copyScentRows(fields: Fields, src: Float32Array, dst: Float32Array): void {
+    const loI = fields.boxLoI;
+    const hiI = fields.boxHiI;
+    if (hiI < loI) return;
+    const width = (hiI - loI + 1) * 4;
+    const stride = fields.cols * 4;
+    for (let j = fields.boxLoJ; j <= fields.boxHiJ; j++) {
+      const at = j * stride + loI * 4;
+      dst.set(src.subarray(at, at + width), at);
+    }
   }
 
   deposit(n: number, amount: number): void {
     this.exp?.solver_deposit(n, amount);
-  }
-
-  paintWalls(nRuns: number): void {
-    this.exp?.solver_paint_walls(nRuns);
   }
 
   declutter(n: number, reach: number, atReach: number, cutoff: number, floorFrac: number, dt: number): void {
@@ -535,13 +528,19 @@ export class NativeSolver {
     return this.exp?.solver_flock_pairs() ?? -1;
   }
 
+  /*
+   * Declined for a grid this size. These walk every cell and need the field
+   * copied both ways to do it, which on a million-cell grid costs far more
+   * than the arithmetic saves; the TS twin walks only the live box instead.
+   * Kept for small grids, and for whatever the GPU path ends up leaving here.
+   */
   scentDiffuse(fields: Fields, mix: number): boolean {
     const exp = this.exp;
-    if (!this.ready || !exp || !this.scent || !this.walls) return false;
+    if (!this.ready || !exp || !this.scent) return false;
     const n = fields.cols * fields.rows;
-    if (n * 4 > this.scentCap || n > this.wallCap) return false;
+    if (n > 65_536) return false;
+    if (n * 4 > this.scentCap) return false;
     this.scent.set(fields.data.subarray(0, n * 4));
-    this.walls.set(fields.walls.subarray(0, n));
     exp.solver_scent_diffuse(fields.cols, fields.rows, mix);
     fields.data.set(this.scent.subarray(0, n * 4));
     return true;
@@ -550,6 +549,7 @@ export class NativeSolver {
   scentDecay(fields: Fields, keep: number): boolean {
     const exp = this.exp;
     if (!this.ready || !exp || !this.scent) return false;
+    if (fields.cols * fields.rows > 65_536) return false;
     const n = fields.cols * fields.rows * 4;
     if (n > this.scentCap) return false;
     this.scent.set(fields.data.subarray(0, n));

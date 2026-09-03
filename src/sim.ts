@@ -220,6 +220,24 @@ export class Sim {
    * and differencing whole frames — cannot resolve anything smaller than the
    * machine's own drift, several milliseconds on a frame this size.
    */
+  /**
+   * Prefer the WebGPU FAR solve over the wasm one when both can take a frame.
+   *
+   * Off, and it needs to stay off until the GPU kernel is verified against the
+   * others. Turning it on is what broke the pond: the order used to be wasm
+   * first, and since the wasm module loads on every machine, `solveFarGpu` had
+   * never once executed in production. Preferring it ran it for the first time
+   * — and it runs precisely when `canFarGpu` allows, which is when the LOD has
+   * put every body on the FAR tier, i.e. at one particular zoom level. Wires
+   * went to infinite length and the view jittered as the camera chased bodies
+   * that had been flung apart.
+   *
+   * No test caught it and none can: there is no WebGPU under Node, so
+   * `farGpu.ready` is false and the path is skipped in the whole suite. It
+   * needs verifying in a browser before this becomes the default.
+   */
+  static gpuFirst = false;
+
   static profile: Map<string, number> | null = null;
   private static profileMark = 0;
 
@@ -259,7 +277,6 @@ export class Sim {
   private wirePack: Wire[] = [];
   private packIndex = new Map<number, number>();
   private clearWireList: Wire[] = [];
-  private wallPts: { x: number; y: number }[] = [];
   private flockAdj: number[][] = [];
   private flockIndex = new Map<number, number>();
   private flockDist = new Int32Array(0);
@@ -329,7 +346,7 @@ export class Sim {
     this.h = Math.max(1, h);
     this.coverW = this.w;
     this.coverH = this.h;
-    this.fields = new Fields(this.w, this.h);
+    this.fields = new Fields();
     this.graph.onLatch = (ev) => audio.push(ev, this.graph, this.agents);
     audio.contacts = this.contacts;
   }
@@ -340,7 +357,12 @@ export class Sim {
     this.h = Math.max(1, h);
   }
 
-  setFieldCover(w: number, h: number): void {
+  /**
+   * Size of the visible area, in world units. Nothing to do with the scent
+   * field any more — that is world-fixed — but auto-spawn still places new
+   * bodies within a fraction of what you can see.
+   */
+  setViewExtent(w: number, h: number): void {
     this.coverW = Math.max(32, w);
     this.coverH = Math.max(32, h);
   }
@@ -474,9 +496,22 @@ export class Sim {
     this.graph.syncRest(this.time, params, this.wireDetailed);
     this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
-    if (this.solveFarNative(params, t)) {
+    /*
+     * WASM, then the GPU, then the TS twin — with `Sim.gpuFirst` able to put
+     * the GPU in front once its kernel has been verified. See the flag.
+     *
+     * `canFarGpu` declines a frame that needs the NEAR tier whichever order is
+     * used, and that is a capability limit rather than a preference: the kernel
+     * implements the FAR solve only, so a body on ropes and SAT would get the
+     * wrong physics rather than slower physics.
+     */
+    if (Sim.gpuFirst && this.canFarGpu() && (await this.solveFarGpu(params, t))) {
+      this.finishIntegrate(t);
+    } else if (this.solveFarNative(params, t)) {
       this.finishIntegrate(t);
     } else if (this.canFarGpu()) {
+      // Exactly as it was: this branch only runs when the wasm module is
+      // missing, which is why the kernel below it has never been exercised.
       await this.solveFarGpu(params, t);
       this.finishIntegrate(t);
     } else {
@@ -488,19 +523,19 @@ export class Sim {
   private beginFrame(dt: number, params: Params): number {
     const t = clamp(dt, 0, 0.05);
     this.time += t;
-    const com = this.centerOfMass();
-    this.fields.cover(
-      com?.x ?? this.w * 0.5,
-      com?.y ?? this.h * 0.5,
-      this.coverW,
-      this.coverH,
-    );
     this.components = this.graph.componentIds(this.agents);
     this.trackHome(t);
-    // The energy grid shares the field's bound, so "off the map" means one
-    // thing rather than two. Tracked to home, which lags the true centre of
-    // mass by half a second and so does not jump when a rewrite deletes a pair.
-    if (this.home) this.energy.setBounds(this.home.x, this.home.y, FIELD_HALF);
+    /*
+     * One centre for the whole world grid. `home` lags the true centre of mass
+     * by half a second, so neither the field nor the bound jumps when a rewrite
+     * deletes a pair — and because both take the same centre, "off the map"
+     * means one thing rather than two.
+     */
+    const h = this.home;
+    if (h) {
+      this.fields.cover(h.x, h.y);
+      this.energy.setBounds(h.x, h.y, FIELD_HALF);
+    }
     this.contactAudioNow.clear();
     this.contacts.clear();
     this.radiated.clear();
@@ -572,10 +607,7 @@ export class Sim {
     }
     this.components = this.graph.componentIds(this.agents);
     Sim.phase('upkeep');
-    if (!this.scentWriteNative(params)) {
-      this.deposit(params);
-      this.paintScentWalls();
-    }
+    if (!this.scentWriteNative(params)) this.deposit(params);
     Sim.phase('scentWrite');
     this.fields.diffuse(params.diffuse);
     this.fields.diffuse(params.diffuse * 0.65);
@@ -853,6 +885,10 @@ export class Sim {
   }
 
   private listRoster = -1;
+  /** Scratch owned by `packFar`; see the note there. */
+  private readonly farIndex = new Map<number, number>();
+  private readonly farWirePack: Wire[] = [];
+
   private wireListVersion = -1;
   private wireListRoster = -1;
   private readonly wireEndA: (Agent | undefined)[] = [];
@@ -1918,10 +1954,25 @@ export class Sim {
     for (const a of this.agents.values()) list.push(a);
     const n = list.length;
     if (n === 0) return null;
-    const index = this.packIndex;
+    /*
+     * Its own scratch, not the shared `packIndex` and `wirePack`.
+     *
+     * `wireListResolved` caches `wirePack` and stamps it valid against the
+     * graph and roster versions, with `wireEndA`/`wireEndB` resolved to match
+     * it position by position. This pass builds a *filtered* wire list — only
+     * wires whose endpoints are both in the pack — so borrowing that array
+     * left the cache holding a different list under a stamp that still claimed
+     * to be current, and every later reader paired wire k with the endpoints
+     * of some other wire. Port torques then reel unrelated bodies together and
+     * wires appear to grow without bound.
+     *
+     * It only bites on the GPU path, which is the only caller, and that path
+     * had never run — so the shared arrays looked safe to cache.
+     */
+    const index = this.farIndex;
     index.clear();
     for (let i = 0; i < n; i++) index.set(list[i].id, i);
-    const wireList = this.wirePack;
+    const wireList = this.farWirePack;
     wireList.length = 0;
     for (const w of this.graph.wires.values()) {
       if (index.has(w.a.id) && index.has(w.b.id) && w.a.id !== w.b.id) wireList.push(w);
@@ -2063,7 +2114,29 @@ export class Sim {
   }
 
   /** Packed FAR pass on the GPU. True when the kernel ran. */
+  /**
+   * Take the frame on the GPU.
+   *
+   * The first thing this has to do is close the force block, and not doing so
+   * is what made the GPU path unusable. `beginFrame` leaves the block open on
+   * purpose so the wasm solve can inherit the packed bodies — steer, port
+   * torques, declutter, flocking and gravity all wrote their velocities into
+   * that buffer and *not* into the agents. `solveFarNative` reads the buffer,
+   * so it sees them. This packs from the agents, so it did not: it integrated
+   * a frame using last frame's velocities, and then `endFrame`'s `syncForces`
+   * unpacked the force-pass velocities straight over the top of the result.
+   *
+   * Positions from the GPU, velocities from before the solve — which is to say
+   * the velocity feedback XPBD uses to hold a constraint was thrown away every
+   * frame. That is an energy source. Wires grow without bound and the view
+   * shakes, and it only happens at the zoom where the LOD lets the GPU take
+   * the frame at all.
+   *
+   * `syncForces` hands the velocities to the agents and closes the block, so
+   * the pack below sees this frame's forces and nothing overwrites the result.
+   */
   private async solveFarGpu(params: Params, dt: number): Promise<boolean> {
+    this.syncForces();
     const packed = this.packFar(params);
     if (!packed) return true;
     await farGpu.step(packed.data, packed.list.length, packed.wires, packed.nWires, dt);
@@ -2446,29 +2519,6 @@ export class Sim {
     }
   }
 
-  /** Rasterize wire chains so scent diffusion cannot cross them. */
-  private paintScentWalls(): void {
-    this.fields.clearWalls();
-    const pts = this.wallPts;
-    for (const wire of this.graph.wires.values()) {
-      const A = this.agents.get(wire.a.id);
-      const B = this.agents.get(wire.b.id);
-      if (!A || !B) continue;
-      const n = this.wireSimulatesRope(wire) ? wire.nodes.length : 0;
-      const need = n + 2;
-      while (pts.length < need) pts.push({ x: 0, y: 0 });
-      stemWorldInto(A, wire.a.slot, this.w, this.h, pts[0]);
-      for (let i = 0; i < n; i++) {
-        pts[i + 1].x = wire.nodes[i].x;
-        pts[i + 1].y = wire.nodes[i].y;
-      }
-      stemWorldInto(B, wire.b.slot, this.w, this.h, pts[n + 1]);
-      for (let i = 0; i < need - 1; i++) {
-        this.fields.markSegment(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y);
-      }
-    }
-  }
-
   /** Drop a free forager near the flock every spawnInterval seconds. */
   private autoSpawn(params: Params, dt: number): void {
     const interval = params.spawnInterval;
@@ -2496,26 +2546,35 @@ export class Sim {
   }
 
   /**
-   * Laying scent and stamping the wire walls, both in the solver.
+   * Laying scent, in the solver.
    *
-   * They go together because they share the copy: the field goes across once,
-   * both passes write it in place, and it comes back once. Separately they
-   * were the two most expensive things left in a settled frame — 4.5 ms of
-   * wall marking and 2.5 ms of deposit at 9600 bodies — and both are
-   * arithmetic over a grid the solver already holds a mirror of.
+   * The field goes across once, the deposit writes it in place, and it comes
+   * back once — arithmetic over a grid the solver already holds a mirror of.
+   *
+   * This used to stamp a wall mask alongside the deposit, rasterizing every
+   * wire so scent could not diffuse across it. That went when the field became
+   * world-fixed: a cell is 160 world units and a wire is 40, so a dense net put
+   * a wire in nearly every cell it occupied and scent stopped moving through
+   * tissue at all. Packing the polylines to achieve that was also the single
+   * most expensive piece of host work left in the frame.
    */
   private scentWriteNative(params: Params): boolean {
     if (!Sim.nativeForces || !nativeSolver.ready) return false;
     const free = nativeSolver.portFree;
-    const pts = nativeSolver.wallPts;
-    const runs = nativeSolver.wallRuns;
     const kinds = nativeSolver.kind;
     const sc = nativeSolver.scale;
-    if (!free || !pts || !runs || !kinds || !sc) return false;
+    if (!free || !kinds || !sc) return false;
 
     const list = this.forceList();
     const n = list.length;
     if (!nativeSolver.canNear(n, 0, 0)) return false;
+    /*
+     * Grow the live box to cover the bodies before anything crosses. The
+     * solver deposits and samples inside wasm, so `Fields.deposit` is never
+     * called on this path and the box would never learn where the pond is —
+     * and the box is what decides which rows get copied across.
+     */
+    for (let i = 0; i < n; i++) this.fields.touchWorld(list[i].x, list[i].y);
     if (!nativeSolver.loadScent(this.fields)) return false;
     Sim.phase('scent:load');
 
@@ -2553,47 +2612,7 @@ export class Sim {
     nativeSolver.deposit(n, params.deposit);
     Sim.phase('scent:deposit');
 
-    // Polylines for the wall mask. The host packs them because it owns the
-    // rope nodes; the marking walk is what costs.
-    let at = 0;
-    let nRuns = 0;
-    const cap = nativeSolver.wallPtCap;
-    const wireList = this.wireListResolved();
-    const endA = this.wireEndA;
-    const endB = this.wireEndB;
-    // Hoisted: `wireSimulatesRope` bottoms out in `ropesDrawable && ...`, so
-    // when ropes are not drawable every wire answers false and the per-wire
-    // call is 2.35ms of pure indirection at pond scale — which is exactly the
-    // zoom where there are the most wires to ask.
-    const ropesLive = this.ropesDrawable;
-    for (let wi = 0; wi < wireList.length; wi++) {
-      const wire = wireList[wi];
-      const A = endA[wi];
-      const B = endB[wi];
-      if (!A || !B) continue;
-      const mid = ropesLive && this.wireSimulatesRope(wire) ? wire.nodes.length : 0;
-      if (at + mid + 2 > cap || nRuns >= runs.length) break;
-      const sa = stemWorldInto(A, wire.a.slot, this.w, this.h, this.tmpStemA);
-      pts[at * 2] = sa.x;
-      pts[at * 2 + 1] = sa.y;
-      at++;
-      for (let i = 0; i < mid; i++) {
-        pts[at * 2] = wire.nodes[i].x;
-        pts[at * 2 + 1] = wire.nodes[i].y;
-        at++;
-      }
-      const sb = stemWorldInto(B, wire.b.slot, this.w, this.h, this.tmpStemB);
-      pts[at * 2] = sb.x;
-      pts[at * 2 + 1] = sb.y;
-      at++;
-      runs[nRuns++] = mid + 2;
-    }
-    Sim.phase('scent:wallPack');
-    nativeSolver.paintWalls(nRuns);
-    Sim.phase('scent:paintWalls');
-
     nativeSolver.storeScent(this.fields);
-    nativeSolver.storeWalls(this.fields);
     Sim.phase('scent:store');
     return true;
   }
@@ -3117,8 +3136,9 @@ export class Sim {
       if (confine) {
         // Per axis, so a body far out on one axis is not dragged diagonally
         // by an axis it is already inside.
-        const ox = Math.abs(dx) - FIELD_HALF;
-        const oy = Math.abs(dy) - FIELD_HALF;
+        // Saturating past one bound's worth of overshoot; see the C twin.
+        const ox = Math.min(Math.abs(dx) - FIELD_HALF, FIELD_HALF);
+        const oy = Math.min(Math.abs(dy) - FIELD_HALF, FIELD_HALF);
         if (ox > 0) agent.vx += Math.sign(dx) * ox * edge * dt;
         if (oy > 0) agent.vy += Math.sign(dy) * oy * edge * dt;
       }

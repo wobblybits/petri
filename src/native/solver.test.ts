@@ -166,9 +166,9 @@ describe('native WASM solver', () => {
   it('matches JS scent diffusion on a small stamp', async () => {
     const native = new NativeSolver();
     expect(await native.init(), native.lastError).toBe(true);
-    const js = new Fields(80, 80);
+    const js = new Fields();
     js.deposit(0, 40, 40, 8);
-    const wa = new Fields(80, 80);
+    const wa = new Fields();
     wa.data.set(js.data);
     js.diffuse(0.28);
     expect(native.scentDiffuse(wa, 0.28)).toBe(true);

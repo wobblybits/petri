@@ -39,7 +39,7 @@ describe('physics LOD across zoom', () => {
         for (let i = 0; i < side; i += 2)
           if (ids[j][i] > 0 && ids[j + 1][i] > 0) sim.wire(ids[j][i], 'p', ids[j + 1][i], 'p', params);
       const view = { x: 550, y: 550, zoom, viewW: 1200, viewH: 800 };
-      sim.setFieldCover((view.viewW / zoom) * 1.7, (view.viewH / zoom) * 1.7);
+      sim.setViewExtent((view.viewW / zoom) * 1.7, (view.viewH / zoom) * 1.7);
       for (let f = 0; f < 20; f++) sim.step(1 / 60, params, view);
       const ts: number[] = [];
       let det = 0;

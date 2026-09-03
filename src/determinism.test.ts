@@ -86,14 +86,32 @@ export const SCENARIOS: Scenario[] = [
       p.soupCount = 60;
     },
   },
+  /*
+   * A partial zoom, where some bodies are detailed and some are not.
+   *
+   * This used to be `zoom: 1`, which since the field became world-fixed is the
+   * same simulation as "no view": at that zoom every body is on screen and
+   * detailed, so the only thing that ever distinguished the two was the scent
+   * grid resizing itself to the camera. Now that it does not, the two agreed
+   * bit-for-bit and the guard against exactly that fired — correctly.
+   *
+   * A zoom that straddles the LOD band is a genuinely third state, and it is
+   * also the one worth pinning: the mixed case is where a tier disagreement
+   * between neighbouring bodies would show up.
+   */
   {
-    name: 'soup, zoomed in (NEAR)',
+    name: 'soup, part-zoomed (mixed LOD)',
     frames: 300,
     build: (sim, params) => loadPreset(sim, 'soup', params),
     tune: (p) => {
       p.soupCount = 60;
     },
-    view: { x: 600, y: 400, zoom: 1, viewW: 1200, viewH: 800 },
+    // A small viewport over one corner, not a zoom level. Zoom alone no longer
+    // separates this from "no view": the scent field stopped resizing itself
+    // to the camera, and at any zoom where the whole soup is on screen every
+    // body is detailed either way. Showing only part of the pond is what
+    // actually splits the population between the two tiers.
+    view: { x: 300, y: 200, zoom: 1, viewW: 400, viewH: 300 },
   },
   {
     name: 'soup, zoomed out (FAR)',

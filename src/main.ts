@@ -156,8 +156,9 @@ function syncCamera(dt: number): void {
       camera.follow(com.x, com.y, dt);
     }
   }
-  sim.setFieldCover(camera.coverWidth() * 1.7, camera.coverHeight() * 1.7);
-  sim.fields.cover(com?.x ?? camera.x, com?.y ?? camera.y, sim.coverW, sim.coverH);
+  // The field follows `home` from inside beginFrame now, so there is nothing
+  // to do here but tell the sim how much world is on screen for auto-spawn.
+  sim.setViewExtent(camera.coverWidth() * 1.7, camera.coverHeight() * 1.7);
 }
 
 function setPaused(next: boolean): void {

@@ -122,7 +122,7 @@ describe('running in the simulation', () => {
     const params = defaultParams();
     params.spawnInterval = 0;
     const sim = new Sim(900, 700);
-    sim.setFieldCover(900, 700);
+    sim.setViewExtent(900, 700);
     const { root } = injectTerm(sim, ap(PLUS, church(a), church(b)), 450, 350, params);
     for (let f = 0; f < 60 * seconds; f++) {
       sim.step(1 / 60, params);

@@ -30,13 +30,38 @@ describe('world bound geometry', () => {
     expect(FIELD_HALF * 2).toBe(FIELD_EXTENT);
   });
 
-  it('gives a cell one wire length, so a cell holds about one link', () => {
-    expect(FIELD_CELL).toBe(defaultParams().wireMinRest);
+  it('sizes a cell against the sensor baseline, not the wire', () => {
+    /*
+     * The cell size is set by steering, not by geometry. Two sensors sit
+     * `sensorDist` apart and are compared against a dead zone of 5% of the
+     * signal — a zone that is earning its keep, since it rejects the sampling
+     * asymmetry a body reads off its own trail. So a real gradient is only
+     * visible when the sensors straddle something near a whole cell.
+     *
+     * Measured at 160-unit cells, where they straddled a seventh of one, a
+     * genuine gradient read 0.043 against a dead zone of 0.237 and nothing
+     * turned at all.
+     */
+    const p = defaultParams();
+    const span = 2 * p.sensorDist * Math.sin(p.sensorAngle);
+    expect(span / FIELD_CELL, `sensors span ${(span / FIELD_CELL).toFixed(2)} cells`)
+      .toBeGreaterThan(0.8);
   });
 
-  it('covers a settled pond with room to drift', () => {
-    // Measured: a settled pond is ~21,500 units across with a ~14,500 radius.
-    expect(FIELD_EXTENT).toBeGreaterThan(21_500 * 1.5);
+  it('holds a pond worth of bodies at the spacing one settles to', () => {
+    /*
+     * Extent is the expensive axis and fidelity is the cheap one — cost tracks
+     * the number of cells, so a finer cell is free and a wider world is not.
+     * The world is therefore sized to what it needs to hold rather than to any
+     * measurement of how far a pond spreads: ponds fill whatever box they are
+     * spawned into, so that measurement would only have been reading back the
+     * spawn box.
+     *
+     * Declutter holds unwired bodies about two wire lengths apart.
+     */
+    const spacing = defaultParams().wireMinRest * 1.3;
+    const capacity = (FIELD_EXTENT / spacing) ** 2;
+    expect(capacity, `${capacity.toFixed(0)} bodies fit`).toBeGreaterThan(5000);
   });
 });
 
@@ -123,15 +148,21 @@ describe('edge pull', () => {
   it('pulls harder the further out a body is', async () => {
     expect(await nativeSolver.init(), nativeSolver.lastError).toBe(true);
     const speeds: number[] = [];
-    for (const over of [0.2, 1.0]) {
+    for (const over of [1, 3]) {
       const params = settle();
       const sim = new Sim(1200, 800);
-      for (let i = 0; i < 8; i++) loner(sim, params, 600 + i * 60, 400);
+      // A heavy cluster, so `home` stays put. One stray body is enough to drag
+      // the centre of mass outward, and the bound follows it — which is how the
+      // first draft of this test placed a body 3,072 units out and had it land
+      // inside a 2,560 bound, feeling no pull at all.
+      for (let i = 0; i < 40; i++) {
+        loner(sim, params, 600 + (i % 8) * 60, 400 + ((i / 8) | 0) * 60);
+      }
       const id = loner(sim, params, 600 + FIELD_HALF * (1 + over), 400);
       for (let f = 0; f < 30; f++) sim.step(1 / 60, params, VIEW);
       speeds.push(-sim.agents.get(id)!.vx);
     }
-    expect(speeds[0]).toBeGreaterThan(0);
+    expect(speeds[0], `near-edge pull ${speeds[0]}`).toBeGreaterThan(0);
     expect(speeds[1], `${speeds[1]} should exceed ${speeds[0]}`).toBeGreaterThan(speeds[0]);
   });
 

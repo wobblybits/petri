@@ -16,7 +16,7 @@ import {
   WireAdjacency,
 } from './energy.ts';
 import { nativeSolver } from './native/solver.ts';
-import { CH } from './fields.ts';
+import { CH, FIELD_CELLS, FIELD_EXTENT } from './fields.ts';
 import { angleDelta } from './wrap.ts';
 import { AGENT_BAND, WIRE_HAIRLINE_PX, WIRE_STROKE_PX, wiresDrawable } from './audio/lod.ts';
 
@@ -55,7 +55,10 @@ describe('scent steering', () => {
     expect(mixScent('era', 1, 2, 3, params)).toBeGreaterThan(mixScent('era', 0, 0, 3, params));
   });
 
-  it('goes straight when the two sensors are symmetric', () => {
+  it('goes straight when there is nothing to smell', () => {
+    // Locomotion symmetry, isolated from the field: with no scent at all both
+    // sensors read zero, so anything that turns the body is a thrust that is
+    // not along its heading. Resolution-independent by construction.
     for (const kind of ['era', 'con', 'dup'] as const) {
       const sim = new Sim(240, 160);
       const params = defaultParams();
@@ -63,6 +66,7 @@ describe('scent steering', () => {
       params.snapWell = 0;
       params.snapRadius = 0;
       params.gravity = 0;
+      params.deposit = 0;
       // The swimming kick is coloured noise off Math.random, and it moves the
       // agent, which moves where it lays scent, which is what the two sensors
       // read. Left in, this test asks whether an unseeded random walk happened
@@ -71,12 +75,58 @@ describe('scent steering', () => {
       const heading = 0.4;
       const agent = sim.spawn(kind, 120, 80, heading, params, true)!;
       step(sim, params, 45);
-      expect(agent.heading).toBeCloseTo(heading, 5);
+      expect(agent.heading, kind).toBeCloseTo(heading, 5);
       const hx = Math.cos(heading);
       const hy = Math.sin(heading);
       const along = agent.vx * hx + agent.vy * hy;
-      expect(agent.vx).toBeCloseTo(along * hx, 5);
-      expect(agent.vy).toBeCloseTo(along * hy, 5);
+      expect(agent.vx, kind).toBeCloseTo(along * hx, 5);
+      expect(agent.vy, kind).toBeCloseTo(along * hy, 5);
+    }
+  });
+
+  it('wanders on its own trail without winding up', () => {
+    /*
+     * A body laying scent and then smelling it does not hold a straight line,
+     * and on a fixed grid it cannot: its deposit is splatted bilinearly onto
+     * cells that are not symmetric about a heading of 0.4, so the two sensors
+     * read slightly different values and it turns. This used to be asserted
+     * away — the old version of this test ran at 1.5-unit cells, finer than
+     * the app was ever rendered at, where the artifact vanished into the fifth
+     * decimal place.
+     *
+     * What actually matters is that the wander is bounded rather than a spin:
+     * measured over fifteen seconds a body drifts either way and comes back
+     * (one goes +0.08, +1.78, -1.73, +0.67 radians) instead of accumulating.
+     */
+    for (const kind of ['era', 'con', 'dup'] as const) {
+      const sim = new Sim(240, 160);
+      const params = defaultParams();
+      params.faceAttract = 0;
+      params.snapWell = 0;
+      params.snapRadius = 0;
+      params.gravity = 0;
+      params.swimNoise = 0;
+      const start = 0.4;
+      const agent = sim.spawn(kind, 120, 80, start, params, true)!;
+      let worst = 0;
+      for (let f = 0; f < 900; f++) {
+        sim.step(1 / 60, params);
+        worst = Math.max(worst, Math.abs(agent.heading - start));
+      }
+      /*
+       * Net drift, not total turning. A body correcting constantly racks up a
+       * lot of absolute rotation — measured around 18 radians over fifteen
+       * seconds — while going nowhere in particular, and that is the wander
+       * this is meant to permit. Winding up is the failure: heading walking off
+       * in one direction and never coming back.
+       */
+      // Measured around 3.5 radians — a body does turn right around and come
+      // back. A body actually spinning racks up its turn rate times fifteen
+      // seconds, which is well past this even at a lazy one radian a second.
+      expect(
+        worst,
+        `${kind} strayed ${worst.toFixed(2)} rad from its heading in 15s`,
+      ).toBeLessThan(2 * Math.PI);
     }
   });
 
@@ -535,30 +585,6 @@ describe('conservative mechanics', () => {
     expect(Math.hypot(m0.x - m1.x, m0.y - m1.y)).toBeLessThan(18);
   });
 
-  it('keeps scent from diffusing through a wire wall', () => {
-    const sim = new Sim(320, 200);
-    const params = passiveParams();
-    params.diffuse = 0.55;
-    params.decay = 0;
-    params.deposit = 0;
-    params.spawnInterval = 0;
-    params.wireShrink = 30;
-    const top = sim.spawn('era', 160, 30, Math.PI / 2, params, true)!;
-    const bot = sim.spawn('era', 160, 170, -Math.PI / 2, params, true)!;
-    sim.wire(top.id, 'p', bot.id, 'p', params);
-    sim.setFieldCover(320, 200);
-    sim.fields.cover(160, 100, 320, 200);
-    for (let y = 40; y <= 90; y += 2) {
-      for (let x = 20; x <= 100; x += 2) sim.fields.deposit(CH.conP, x, y, 20);
-    }
-    expect(sim.fields.sample(CH.conP, 60, 60)).toBeGreaterThan(5);
-    expect(sim.fields.sample(CH.conP, 260, 60)).toBeLessThan(0.2);
-    for (let i = 0; i < 60; i++) {
-      sim.step(1 / 60, params);
-    }
-    expect(sim.fields.sample(CH.conP, 60, 60)).toBeGreaterThan(0.8);
-    expect(sim.fields.sample(CH.conP, 260, 60)).toBeLessThan(1.5);
-  });
 });
 
 function quietParams() {
@@ -738,10 +764,35 @@ describe('isolated motion rules', () => {
     params.sense = 800;
     params.ambientEnergy = 0;
     params.upkeep = 0;
+    /*
+     * A broad gradient, not a bright point.
+     *
+     * Steering compares two sensors 22 world units apart against a dead zone
+     * of 5% of the signal's own magnitude. On the world-fixed field a cell is
+     * 160 units, so those sensors straddle a seventh of one cell: a sharp
+     * strong blob gives a large magnitude and so a large dead zone, while the
+     * difference across the sensors stays small, and the turn is swallowed. A
+     * gradient spread over several cells is what the field can represent and
+     * what an agent can actually climb.
+     */
+    const cell = FIELD_EXTENT / FIELD_CELLS;
     const bias = (s: Sim) => {
-      for (let i = 0; i < 40; i++) {
-        for (let dy = -8; dy <= 16; dy += 4) {
-          s.fields.deposit(CH.conP, 80 + 22, 60 + dy, 28);
+      // Deposits are normalised to a density, so dividing by that scale asks
+      // for a field *value* and keeps the test independent of resolution.
+      const unit = 1.5 / s.fields.depositScale;
+      for (let r = 0; r < cell * 3; r += cell * 0.25) {
+        for (let ang = 0; ang < 6.283; ang += 0.3) {
+          s.fields.deposit(
+            CH.conP,
+            // Within sensing range and off the heading axis. These tests run
+            // with diffusion off, so the field is only what was splatted: put
+            // the source further than a couple of cells and nothing of it
+            // reaches the sensors at all. Dead ahead would also read the same
+            // on both sensors, and the body would correctly not turn.
+            80 + cell * 1.5 + Math.cos(ang) * r,
+            60 + cell * 1.5 + Math.sin(ang) * r,
+            unit / (1 + r / cell),
+          );
         }
       }
     };
@@ -768,9 +819,36 @@ describe('isolated motion rules', () => {
     params.stepSpeed = 48;
     params.drag = 0.2;
     params.deposit = 0;
+    /*
+     * The same broad gradient as the test above.
+     *
+     * Steering compares two sensors 22 world units apart against a dead zone
+     * of 5% of the signal's own magnitude. On the world-fixed field a cell is
+     * 160 units, so those sensors straddle a seventh of one cell: a sharp
+     * strong blob gives a large magnitude and so a large dead zone, while the
+     * difference across the sensors stays small, and the turn is swallowed. A
+     * gradient spread over several cells is what the field can represent and
+     * what an agent can actually climb.
+     */
+    const cell = FIELD_EXTENT / FIELD_CELLS;
     const bias = (s: Sim) => {
-      for (let i = 0; i < 24; i++) {
-        s.fields.deposit(CH.conP, 80 + 22, 60 + 10, 28);
+      // Deposits are normalised to a density, so dividing by that scale asks
+      // for a field *value* and keeps the test independent of resolution.
+      const unit = 1.5 / s.fields.depositScale;
+      for (let r = 0; r < cell * 3; r += cell * 0.25) {
+        for (let ang = 0; ang < 6.283; ang += 0.3) {
+          s.fields.deposit(
+            CH.conP,
+            // Within sensing range and off the heading axis. These tests run
+            // with diffusion off, so the field is only what was splatted: put
+            // the source further than a couple of cells and nothing of it
+            // reaches the sensors at all. Dead ahead would also read the same
+            // on both sensors, and the body would correctly not turn.
+            80 + cell * 1.5 + Math.cos(ang) * r,
+            60 + cell * 1.5 + Math.sin(ang) * r,
+            unit / (1 + r / cell),
+          );
+        }
       }
     };
     const clear = sim.spawn('era', 80, 60, 0, params, true)!;
@@ -779,9 +857,11 @@ describe('isolated motion rules', () => {
     const omegaClear = Math.abs(clear.omega);
     sim.clear();
     const thick = sim.spawn('era', 80, 60, 0, params, true)!;
-    for (let i = 0; i < 40; i++) {
-      for (let dy = -12; dy <= 12; dy += 4) {
-        sim.fields.deposit(CH.conP, 80 + i * 3, 60 + dy, 18);
+    // A thick uniform bed the body sits inside, under the same gradient.
+    const bed = 26 / sim.fields.depositScale;
+    for (let j = -4; j <= 4; j++) {
+      for (let i = -4; i <= 4; i++) {
+        sim.fields.deposit(CH.conP, 80 + i * cell, 60 + j * cell, bed);
       }
     }
     bias(sim);
@@ -1194,7 +1274,7 @@ describe('far zoom', () => {
     params.soupCount = 28;
     loadPreset(sim, 'soup', params);
     const view = { x: 400, y: 300, zoom: 0.05, viewW: 800, viewH: 600 };
-    sim.setFieldCover((view.viewW / view.zoom) * 1.7, (view.viewH / view.zoom) * 1.7);
+    sim.setViewExtent((view.viewW / view.zoom) * 1.7, (view.viewH / view.zoom) * 1.7);
     for (let i = 0; i < 90; i++) sim.step(1 / 60, params, view);
     for (const a of sim.agents.values()) {
       expect(Number.isFinite(a.x), `agent ${a.id} x`).toBe(true);

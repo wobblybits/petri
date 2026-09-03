@@ -29,7 +29,7 @@ function run(view: typeof far, frames = 180, frozen = false) {
   params.wireShrink = 0.9;
   if (frozen) params.rewriteDuration = 0;
   loadPreset(sim, 'oscillator', params);
-  sim.setFieldCover((view.viewW / view.zoom) * 1.7, (view.viewH / view.zoom) * 1.7);
+  sim.setViewExtent((view.viewW / view.zoom) * 1.7, (view.viewH / view.zoom) * 1.7);
   let peakSpeed = 0;
   let peakLastLen = 0;
   for (let f = 0; f < frames; f++) {
@@ -122,7 +122,7 @@ describe('oscillator far zoom', () => {
     params.rewriteDuration = 0.12;
     const sim = new Sim(800, 600);
     loadPreset(sim, 'oscillator', params);
-    sim.setFieldCover((far.viewW / far.zoom) * 1.7, (far.viewH / far.zoom) * 1.7);
+    sim.setViewExtent((far.viewW / far.zoom) * 1.7, (far.viewH / far.zoom) * 1.7);
     const start = sim.agents.size;
     let rewrote = false;
     for (let f = 0; f < 120; f++) {

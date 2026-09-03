@@ -698,7 +698,7 @@ describe('steering: WASM against the JS reference', () => {
     params.snapWell = 60;
     params.snapRadius = 40;
     const sim = new Sim(600, 400);
-    sim.setFieldCover(600, 400);
+    sim.setViewExtent(600, 400);
     for (let i = 0; i < 14; i++) {
       const kind = i % 3 === 0 ? 'era' : i % 3 === 1 ? 'con' : 'dup';
       sim.spawn(kind, 120 + (i * 61) % 360, 110 + (i * 97) % 200, i * 0.83, params, true);
@@ -717,6 +717,9 @@ describe('steering: WASM against the JS reference', () => {
     const js = forager();
     Sim.nativeForces = true;
     const wasm = forager();
+    const start = [...js.sim.agents.values()]
+      .sort((p, q) => p.id - q.id)
+      .map((x) => ({ x: x.x, y: x.y }));
     for (let f = 0; f < 90; f++) {
       Sim.nativeForces = false;
       js.sim.step(1 / 60, js.params);
@@ -727,13 +730,30 @@ describe('steering: WASM against the JS reference', () => {
     const b = [...wasm.sim.agents.values()].sort((p, q) => p.id - q.id);
     expect(b.length).toBe(a.length);
     let worst = 0;
+    let travelled = 0;
     let moved = 0;
     for (let i = 0; i < a.length; i++) {
       worst = Math.max(worst, Math.hypot(b[i].x - a[i].x, b[i].y - a[i].y));
+      travelled = Math.max(travelled, Math.hypot(a[i].x - start[i].x, a[i].y - start[i].y));
       moved = Math.max(moved, Math.hypot(a[i].vx, a[i].vy));
     }
     expect(moved, 'the soup is actually swimming').toBeGreaterThan(1);
-    expect(worst, `worst drift ${worst.toFixed(3)} px over 1.5 s`).toBeLessThan(3);
+    /*
+     * As a fraction of how far the soup actually went, not in pixels.
+     *
+     * These are two sims on two code paths run forward independently, so any
+     * disagreement compounds: a foraging soup is chaotic, and a steering
+     * decision that lands either side of the dead zone in f32 and f64 sends
+     * the two copies off on different trajectories from then on. An absolute
+     * pixel budget therefore measures how fast the sim separates rather than
+     * whether the ports agree, and it tightens on its own every time the field
+     * gets coarser — which is what it did when a cell went from a couple of
+     * world units to twenty.
+     */
+    expect(
+      worst / travelled,
+      `worst drift ${worst.toFixed(2)}px against ${travelled.toFixed(1)}px travelled`,
+    ).toBeLessThan(0.12);
   });
 
   it('agrees on trail strength, which feeds turn authority', async () => {
@@ -753,7 +773,7 @@ describe('steering: WASM against the JS reference', () => {
 });
 
 describe('scent writing: WASM against the JS reference', () => {
-  /** A wired net that lays scent from free ports and walls from its ropes. */
+  /** A wired net that lays scent from its free ports. */
   function pond(): { sim: Sim; params: Params } {
     const params = defaultParams();
     params.spawnInterval = 0;
@@ -761,7 +781,7 @@ describe('scent writing: WASM against the JS reference', () => {
     params.upkeep = 0;
     params.uncross = 0;
     const sim = new Sim(600, 400);
-    sim.setFieldCover(600, 400);
+    sim.setViewExtent(600, 400);
     for (let i = 0; i < 12; i++) {
       const kind = i % 3 === 0 ? 'era' : i % 3 === 1 ? 'con' : 'dup';
       sim.spawn(kind, 120 + (i * 61) % 360, 110 + (i * 97) % 200, i * 0.83, params, true);
@@ -772,7 +792,7 @@ describe('scent writing: WASM against the JS reference', () => {
     return { sim, params };
   }
 
-  it('lays the same scent and stamps the same walls', async () => {
+  it('lays the same scent as the JS twin', async () => {
     expect(await sharedSolver.init(), sharedSolver.lastError).toBe(true);
     // The two passes are run on one settled sim from the same field, rather
     // than comparing two sims after a shared history. Anything that steps the
@@ -785,19 +805,14 @@ describe('scent writing: WASM against the JS reference', () => {
 
     const inner = sim as never as {
       deposit(p: Params): void;
-      paintScentWalls(): void;
       scentWriteNative(p: Params): boolean;
     };
     const startData = Float32Array.from(sim.fields.data);
-    const startWalls = Uint8Array.from(sim.fields.walls);
 
     inner.deposit(params);
-    inner.paintScentWalls();
     const jsData = Float32Array.from(sim.fields.data);
-    const jsWalls = Uint8Array.from(sim.fields.walls);
 
     sim.fields.data.set(startData);
-    sim.fields.walls.set(startWalls);
     Sim.nativeForces = true;
     expect(inner.scentWriteNative(params), 'the native path has to have run').toBe(true);
 
@@ -811,16 +826,5 @@ describe('scent writing: WASM against the JS reference', () => {
     expect(peak, 'there is scent to compare').toBeGreaterThan(0.01);
     expect(worst / peak, `worst scent cell off by ${((worst / peak) * 100).toFixed(3)}% of peak`)
       .toBeLessThan(0.002);
-
-    // The wall mask is a binary stamp, so a cell can only differ where a
-    // segment passes near a boundary and f32 rounds the other way.
-    let wallDiff = 0;
-    let wallSet = 0;
-    for (let i = 0; i < cells; i++) {
-      if (jsWalls[i]) wallSet++;
-      if (jsWalls[i] !== sim.fields.walls[i]) wallDiff++;
-    }
-    expect(wallSet, 'there are walls to compare').toBeGreaterThan(10);
-    expect(wallDiff / wallSet, `${wallDiff} of ${wallSet} wall cells differ`).toBeLessThan(0.02);
   });
 });

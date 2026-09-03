@@ -278,6 +278,14 @@ export class EnergyGrid {
     this.ambient = Math.max(0, ambient);
   }
 
+  /*
+   * Anchored at the world origin, and the cell size is a whole multiple of the
+   * scent field's, so an energy cell is an exact block of scent cells rather
+   * than a grid at some unrelated offset and pitch. The field slides with home
+   * and this does not, which is fine precisely because both are anchored to
+   * world coordinates: a body at a given place always reads the same energy
+   * cell, however the field's window has scrolled.
+   */
   index(x: number, y: number): { i: number; j: number; key: string } {
     const i = Math.floor(x / this.cellSize);
     const j = Math.floor(y / this.cellSize);

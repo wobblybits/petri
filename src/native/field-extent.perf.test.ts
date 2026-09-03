@@ -45,7 +45,6 @@ describe('field extent', () => {
       ox += cols * 52 + 400;
     }
     const view = { x: 6000, y: 3000, zoom: 0.05, viewW: 1600, viewH: 900 };
-    sim.setFieldCover((view.viewW / view.zoom) * 1.7, (view.viewH / view.zoom) * 1.7);
     for (let f = 0; f < 20; f++) sim.step(1 / 60, params, view);
 
     const f = sim.fields;
@@ -63,8 +62,6 @@ describe('field extent', () => {
       if (gx >= 0 && gx < f.cols && gy >= 0 && gy < f.rows) inside++;
     }
     const n = sim.agents.size;
-    let walled = 0;
-    for (let k = 0; k < f.walls.length; k++) if (f.walls[k]) walled++;
     let nonzero = 0;
     for (let k = 0; k < f.data.length; k++) if (f.data[k] !== 0) nonzero++;
     console.log(
@@ -76,8 +73,6 @@ describe('field extent', () => {
         `  pond spans      ${(maxX - minX).toFixed(0)} x ${(maxY - minY).toFixed(0)} world units\n` +
         `  bodies inside   ${inside} / ${n}  (${((inside / n) * 100).toFixed(0)}%)\n` +
         `  bodies per cell ${(inside / (f.cols * f.rows)).toFixed(1)}\n` +
-        `  wall cells      ${walled} / ${f.cols * f.rows}  ` +
-        `(${((walled / (f.cols * f.rows)) * 100).toFixed(0)}% of the grid)\n` +
         `  nonzero scent   ${nonzero} / ${f.data.length} slots\n`,
     );
     expect(n).toBeGreaterThan(0);
