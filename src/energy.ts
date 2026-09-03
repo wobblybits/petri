@@ -233,9 +233,40 @@ export class EnergyGrid {
   ambient: number;
   private readonly cells = new Map<string, number>();
 
+  /*
+   * The world bound, tracked to `home`. Outside it there is no ground: nothing
+   * can be harvested and nothing deposited, so a body that drifts past the edge
+   * starves on whatever it was carrying. That is the intended pressure — the
+   * pull back toward home is weak, not a wall — and it is the same bound the
+   * scent field uses, so "off the map" means one thing rather than two.
+   *
+   * Stored cells outside the bound are kept rather than pruned. The bound
+   * moves with home, and a cell that falls outside today can fall back inside
+   * tomorrow with its contents intact; dropping them would quietly destroy
+   * energy and the economy is supposed to conserve it.
+   */
+  private boundX = 0;
+  private boundY = 0;
+  private boundHalf = Infinity;
+
   constructor(cellSize: number, ambient: number) {
     this.cellSize = Math.max(1, cellSize);
     this.ambient = Math.max(0, ambient);
+  }
+
+  /** Centre and half-extent of the live world, in world units. */
+  setBounds(cx: number, cy: number, half: number): void {
+    this.boundX = cx;
+    this.boundY = cy;
+    this.boundHalf = half;
+  }
+
+  /** Square, to match the field grid it shares geometry with. */
+  inBounds(x: number, y: number): boolean {
+    return (
+      Math.abs(x - this.boundX) <= this.boundHalf &&
+      Math.abs(y - this.boundY) <= this.boundHalf
+    );
   }
 
   clear(): void {
@@ -259,6 +290,7 @@ export class EnergyGrid {
   }
 
   getAt(x: number, y: number): number {
+    if (!this.inBounds(x, y)) return 0;
     const { i, j } = this.index(x, y);
     return this.getCell(i, j);
   }
@@ -274,6 +306,7 @@ export class EnergyGrid {
 
   addAt(x: number, y: number, amount: number): void {
     if (amount === 0) return;
+    if (!this.inBounds(x, y)) return;
     const { key } = this.index(x, y);
     this.cells.set(key, (this.cells.has(key) ? (this.cells.get(key) ?? 0) : this.ambient) + amount);
   }
@@ -320,6 +353,8 @@ export function harvestSlots(agents: Iterable<SlotBody>, grid: EnergyGrid): void
   const hungry = new Map<string, SlotBody[]>();
   for (const a of agents) {
     if (a.locked || atCap(a)) continue;
+    // Off the map is barren, not merely empty: no ambient either.
+    if (!grid.inBounds(a.x, a.y)) continue;
     const { key } = grid.index(a.x, a.y);
     let list = hungry.get(key);
     if (!list) {

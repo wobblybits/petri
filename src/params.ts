@@ -77,6 +77,11 @@ export interface Params {
    * A coarsened wire stays coarsened until it exceeds this by a small band.
    */
   wireTaut: number;
+  /**
+   * Pull back toward home for a body outside the world bound, per world unit
+   * of overshoot per second. 0 = off, and the pond is unbounded again.
+   */
+  edgePull: number;
   wireMinRest: number;
   wireShrink: number;
   eraMass: number;
@@ -207,6 +212,7 @@ export function defaultParams(): Params {
     wireShapeAge: 2,
     wireSpanAge: 10,
     wireTaut: 1.08,
+    edgePull: 0.35,
     wireMinRest: 40,
     wireShrink: 0.2,
     eraMass: 0.45,
@@ -262,6 +268,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'snapRadius', label: 'Snap reach', min: 4, max: 48, step: 1 },
   { key: 'snapArc', label: 'Snap arc', min: 0.08, max: 1.2, step: 0.02 },
   { key: 'wireShrink', label: 'Wire shrink', min: 0.1, max: 3, step: 0.05 },
+  { key: 'edgePull', label: 'Edge pull', min: 0, max: 2, step: 0.05 },
   { key: 'wireMinRest', label: 'Wire min length', min: 8, max: 48, step: 1 },
   { key: 'springK', label: 'Spring stiffness', min: 0, max: 80, step: 0.5 },
   { key: 'springDamp', label: 'Rope damp', min: 0, max: 120, step: 1 },

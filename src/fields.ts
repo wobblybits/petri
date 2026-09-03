@@ -9,6 +9,30 @@ export const CH = {
 
 export const CHANNELS = 4;
 
+/*
+ * The world grid: one geometry shared by the scent field and the energy grid.
+ *
+ * Cell size is one wire rest length, so a cell holds about one link of a net
+ * rather than the sixteen-agent block the camera-sized window gave at pond
+ * scale. Fixed in world units, so zoom no longer changes what an agent smells.
+ *
+ * 1024 squared is chosen against the WebGPU floor, not against taste. A field
+ * buffer is cells x 4 channels x 4 bytes, and `maxStorageBufferBindingSize` is
+ * only guaranteed to be 128 MiB, which caps a single binding at 2896 cells a
+ * side. 1024 lands at 16 MiB a buffer and roughly 8 GB/s of bandwidth for the
+ * two diffusion passes and the decay — nothing even on an integrated GPU —
+ * while 2048 stays available later without changing the layout.
+ *
+ * The extent it buys is 40,960 world units. A settled pond measures about
+ * 21,500 across with a 14,500 radius, so that is the spawn box twice over.
+ * Nothing outside is simulated as world: no scent, no energy, and a weak pull
+ * back toward home, so drifting out is survivable but not free.
+ */
+export const FIELD_CELLS = 1024;
+export const FIELD_CELL = 40;
+export const FIELD_EXTENT = FIELD_CELLS * FIELD_CELL;
+export const FIELD_HALF = FIELD_EXTENT / 2;
+
 export class Fields {
   cols: number;
   rows: number;

@@ -99,7 +99,7 @@ type Exp = {
   solver_wall_runs(): number;
   solver_wall_pt_cap(): number;
   solver_declutter(n: number, reach: number, atReach: number, cutoff: number, floorFrac: number, dt: number): void;
-  solver_gravitate(n: number, cx: number, cy: number, base: number, reach: number, maxComp: number, dt: number): void;
+  solver_gravitate(n: number, cx: number, cy: number, base: number, reach: number, maxComp: number, dt: number, half: number, edge: number): void;
   solver_decl_comp(): number;
   solver_decl_sat(): number;
   solver_grav_sat(): number;
@@ -383,8 +383,11 @@ export class NativeSolver {
     this.exp?.solver_declutter(n, reach, atReach, cutoff, floorFrac, dt);
   }
 
-  gravitate(n: number, cx: number, cy: number, base: number, reach: number, maxComp: number, dt: number): void {
-    this.exp?.solver_gravitate(n, cx, cy, base, reach, maxComp, dt);
+  gravitate(
+    n: number, cx: number, cy: number, base: number, reach: number,
+    maxComp: number, dt: number, half: number, edge: number,
+  ): void {
+    this.exp?.solver_gravitate(n, cx, cy, base, reach, maxComp, dt, half, edge);
   }
 
   /** Standalone contact pass. `nWires` lets it skip wired pairs the way

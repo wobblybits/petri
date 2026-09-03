@@ -1716,19 +1716,48 @@ void solver_declutter(int n, float reach, float at_reach, float cutoff,
  * Mirrors Sim.gravitate: `decl_comp` carries the component root and
  * `comp_size` how many bodies share it, so a large net is left alone.
  */
+/*
+ * Two pulls toward home, with different jobs.
+ *
+ * `base` is cohesion, and it is deliberately only for loners and tiny latches
+ * (`grav_sat`): pulling a large net toward its own centre is what used to
+ * crumple machines into a ball.
+ *
+ * `edge` is confinement, and it applies to everything. Outside `half` there is
+ * no world — no scent to steer by, no energy to harvest — so a body that drifts
+ * past the edge would otherwise never come back and simply starve where it
+ * stopped. The pull scales with how far outside it is, so it is nothing at the
+ * boundary and firm a long way out: a soft basin rather than a wall, and a net
+ * that wanders off gets walked home instead of teleported.
+ *
+ * Square, not circular, because the bound has to be the field's bound and the
+ * field is a square grid. A circular pull would leave the corners unreachable
+ * in one sense and unprotected in the other.
+ */
 void solver_gravitate(int n, float cx, float cy, float base, float reach,
-                      int max_comp, float dt) {
-  if (n <= 0 || base <= 0.f || dt <= 0.f) return;
+                      int max_comp, float dt, float half, float edge) {
+  if (n <= 0 || dt <= 0.f) return;
+  if (base <= 0.f && edge <= 0.f) return;
   if (n > MAX_BODIES) n = MAX_BODIES;
+  int confine = edge > 0.f && half > 0.f;
   for (int i = 0; i < n; i++) {
     float *p = bodies + i * STRIDE;
     if (p[FAR_LOCKED] >= 0.5f) continue;
+    float dx = cx - p[FAR_X];
+    float dy = cy - p[FAR_Y];
+    if (confine) {
+      /* Overshoot per axis, so a body far out on one axis is not dragged
+       * diagonally by an axis it is already inside. */
+      float ox = (dx < 0.f ? -dx : dx) - half;
+      float oy = (dy < 0.f ? -dy : dy) - half;
+      if (ox > 0.f) p[FAR_VX] += (dx < 0.f ? -1.f : 1.f) * ox * edge * dt;
+      if (oy > 0.f) p[FAR_VY] += (dy < 0.f ? -1.f : 1.f) * oy * edge * dt;
+    }
+    if (base <= 0.f) continue;
     /* The host knows component sizes already; packing a byte beats
      * rebuilding them here. */
     if (!grav_sat[i]) continue;
     (void)max_comp;
-    float dx = cx - p[FAR_X];
-    float dy = cy - p[FAR_Y];
     float dist = sqrtf(dx * dx + dy * dy);
     if (dist < 1e-6f) continue;
     float pull = (base * (dist < reach ? dist : reach)) / dist;

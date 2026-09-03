@@ -19,7 +19,7 @@ import { queryHit, queryDiscHit, SLOP, type Hit } from './collide.ts';
 import { closestTOnSegment, segmentsIntersect, WIRE_RADIUS, wireBowBudget } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
-import { CH, Fields } from './fields.ts';
+import { CH, Fields, FIELD_HALF } from './fields.ts';
 import { Graph, ropeIsLive, wrapPos, type Wire } from './graph.ts';
 import type { Params } from './params.ts';
 import {
@@ -497,6 +497,10 @@ export class Sim {
     );
     this.components = this.graph.componentIds(this.agents);
     this.trackHome(t);
+    // The energy grid shares the field's bound, so "off the map" means one
+    // thing rather than two. Tracked to home, which lags the true centre of
+    // mass by half a second and so does not jump when a rewrite deletes a pair.
+    if (this.home) this.energy.setBounds(this.home.x, this.home.y, FIELD_HALF);
     this.contactAudioNow.clear();
     this.contacts.clear();
     this.radiated.clear();
@@ -992,6 +996,7 @@ export class Sim {
     base: number,
     cap: number,
     dt: number,
+    edge: number,
   ): boolean {
     if (!Sim.nativeForces || !nativeSolver.ready) return false;
     const sat = nativeSolver.gravSat;
@@ -1006,7 +1011,7 @@ export class Sim {
       const root = this.components.get(a.id) ?? a.id;
       sat[i] = (sizes.get(root) ?? 1) > cap ? 0 : 1;
     }
-    nativeSolver.gravitate(n, cx, cy, base, Sim.HOME_REACH, cap, dt);
+    nativeSolver.gravitate(n, cx, cy, base, Sim.HOME_REACH, cap, dt, FIELD_HALF, edge);
     if (!this.forceBlock) this.unpackDrift(list);
     return true;
   }
@@ -3078,13 +3083,23 @@ export class Sim {
   }
 
   /**
-   * Optional cohesion toward the flock centre, for loners and tiny latches
-   * only. Larger nets keep the shape the wires gave them — a pull toward
-   * their own centre of mass is what used to crumple machines into a ball.
+   * Two pulls toward home, with different jobs.
+   *
+   * Cohesion (`gravity`) is for loners and tiny latches only. Larger nets keep
+   * the shape the wires gave them — a pull toward their own centre of mass is
+   * what used to crumple machines into a ball.
+   *
+   * Confinement (`edgePull`) applies to everything, and only outside the world
+   * bound. Past that edge there is no world: no scent to steer by and no energy
+   * to harvest, so a body that drifts out would otherwise never come back and
+   * would starve wherever it stopped. The pull grows with the overshoot, so it
+   * is nothing at the boundary and firm a long way out — a soft basin, not a
+   * wall, and a net that wanders off gets walked home rather than snapped back.
    */
   private gravitate(params: Params, dt: number): void {
     const base = params.gravity;
-    if (base <= 0 || dt <= 0) return;
+    const edge = params.edgePull;
+    if ((base <= 0 && edge <= 0) || dt <= 0) return;
     const com = this.home ?? this.centerOfMass();
     if (!com) return;
     const sizes = this.compSize;
@@ -3093,13 +3108,23 @@ export class Sim {
       sizes.set(root, (sizes.get(root) ?? 0) + 1);
     }
     const cap = Sim.GRAV_MAX_COMP;
-    if (this.gravitateNative(com.x, com.y, base, cap, dt)) return;
+    if (this.gravitateNative(com.x, com.y, base, cap, dt, edge)) return;
+    const confine = edge > 0;
     for (const agent of this.agents.values()) {
       if (agent.locked) continue;
-      const root = this.components.get(agent.id) ?? agent.id;
-      if ((sizes.get(root) ?? 1) > cap) continue;
       const dx = com.x - agent.x;
       const dy = com.y - agent.y;
+      if (confine) {
+        // Per axis, so a body far out on one axis is not dragged diagonally
+        // by an axis it is already inside.
+        const ox = Math.abs(dx) - FIELD_HALF;
+        const oy = Math.abs(dy) - FIELD_HALF;
+        if (ox > 0) agent.vx += Math.sign(dx) * ox * edge * dt;
+        if (oy > 0) agent.vy += Math.sign(dy) * oy * edge * dt;
+      }
+      if (base <= 0) continue;
+      const root = this.components.get(agent.id) ?? agent.id;
+      if ((sizes.get(root) ?? 1) > cap) continue;
       const dist = Math.hypot(dx, dy);
       if (dist < 1e-6) continue;
       const pull = (base * Math.min(dist, Sim.HOME_REACH)) / dist;
