@@ -31,8 +31,11 @@ import {
   COLLAPSE_START,
   COMMUTE_ACROSS_MIN,
   PULL_END,
+  TRAIT_KEYS,
+  TRAIT_RANGE,
   type NetSnapshot,
 } from './rewrite.ts';
+import { EXTRA_CAP } from './energy.ts';
 import { Sim } from './sim.ts';
 import { defaultParams, type Params } from './params.ts';
 import { buildTopology } from './audio/topology.ts';
@@ -548,7 +551,7 @@ describe('heritable traits', () => {
     return { sim, params };
   }
 
-  it('blends both parents into each commute child instead of copying either', () => {
+  it('recombines both parents into every commute child, whichever mechanism its kind uses', () => {
     const { sim, params } = oscillatorPair();
     const dup = [...sim.agents.values()].find((a) => a.kind === 'dup')!;
     const con = [...sim.agents.values()].find((a) => a.kind === 'con')!;
@@ -584,6 +587,66 @@ describe('heritable traits', () => {
     expect(decays.size, 'siblings recombine independently').toBeGreaterThan(1);
     expect(children.some((c) => c.requestDecay === dup.requestDecay)).toBe(false);
     expect(children.some((c) => c.requestDecay === con.requestDecay)).toBe(false);
+  });
+
+  it('assorts a Dup child from one whole parent per trait, instead of blending like a Con child', () => {
+    // A Dup duplicates a value; it does not combine two of them. So unlike a
+    // Con child — which can land anywhere between its parents — a Dup child's
+    // own trait has to sit within mutation range of one parent's *exact*
+    // value, on every trait, no matter which way the coin fell.
+    const { sim, params } = oscillatorPair();
+    const dup = [...sim.agents.values()].find((a) => a.kind === 'dup')!;
+    const con = [...sim.agents.values()].find((a) => a.kind === 'con')!;
+    dup.requestDecay = 0.55;
+    con.requestDecay = 0.95;
+    dup.energyCap = EXTRA_CAP * 0.6;
+    con.energyCap = EXTRA_CAP * 1.8;
+    dup.transportThrust = 0.05;
+    con.transportThrust = 0.95;
+    dup.transportRecoil = 10;
+    con.transportRecoil = 190;
+
+    const before = new Set(sim.agents.keys());
+    const rw = beginRewrite(dup, con, sim.graph, sim.agents, sim.w, sim.h, 1);
+    sim.nextId = commitRewrite(
+      rw,
+      sim.agents,
+      sim.graph,
+      params,
+      sim.nextId,
+      sim.time,
+      sim.w,
+      sim.h,
+    );
+
+    const children = [...sim.agents.values()].filter((a) => !before.has(a.id));
+    const dupChildren = children.filter((a) => a.kind === 'dup');
+    const conChildren = children.filter((a) => a.kind === 'con');
+    expect(dupChildren).toHaveLength(2);
+    expect(conChildren).toHaveLength(2);
+
+    for (const key of TRAIT_KEYS) {
+      const mutate = TRAIT_RANGE[key].mutate;
+      for (const c of dupChildren) {
+        const nearDup = Math.abs(c[key] - dup[key]) <= mutate + 1e-9;
+        const nearCon = Math.abs(c[key] - con[key]) <= mutate + 1e-9;
+        expect(
+          nearDup || nearCon,
+          `dup child's ${key} = ${c[key]} should copy one whole parent (dup ${dup[key]}, con ${con[key]})`,
+        ).toBe(true);
+      }
+      // A blended Con child is not pinned to either endpoint: it can only be
+      // guaranteed to fall somewhere in the (mutation-widened) span between
+      // its two parents, which is a strictly larger range than "near one
+      // parent" whenever the parents differ by more than a couple of mutation
+      // steps, as they do here.
+      const lo = Math.min(dup[key], con[key]) - mutate;
+      const hi = Math.max(dup[key], con[key]) + mutate;
+      for (const c of conChildren) {
+        expect(c[key]).toBeGreaterThanOrEqual(lo);
+        expect(c[key]).toBeLessThanOrEqual(hi);
+      }
+    }
   });
 
   it('leaves a non-commute rewrite child at the slider default', () => {

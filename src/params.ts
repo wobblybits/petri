@@ -134,8 +134,9 @@ export interface Params {
    * stops dead.
    *
    * Heritable: this only seeds a fresh body's own `requestDecay`. Once alive,
-   * a body relays demand at its own rate, and a Con+Dup commute blends the
-   * two parents' rates into each child — this slider just sets where a new
+   * a body relays demand at its own rate, and a Con+Dup commute recombines
+   * the two parents' rates into each child (blended for a Con child, one
+   * whole parent's rate for a Dup child) — this slider just sets where a new
    * population starts and what a mutation is centred near.
    */
   requestDecay: number;

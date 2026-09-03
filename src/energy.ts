@@ -51,9 +51,10 @@ export const ERA_CAP_RATIO = 2;
 /**
  * What a fresh body of this kind can hold, before any breeding drifts it.
  *
- * A body's actual ceiling lives on it as `energyCap` — heritable, and blended
- * across a Con+Dup commute's children rather than reset to this — so this is
- * only the seed `createAgent` gives a body born outside a rewrite.
+ * A body's actual ceiling lives on it as `energyCap` — heritable, and
+ * recombined from both parents across a Con+Dup commute's children rather
+ * than reset to this — so this is only the seed `createAgent` gives a body
+ * born outside a rewrite.
  */
 export function extraCapFor(kind: AgentKind): number {
   return kind === 'era' ? EXTRA_CAP * ERA_CAP_RATIO : EXTRA_CAP;

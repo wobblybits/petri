@@ -776,8 +776,8 @@ function snapshotTargets(
 }
 
 /** The heritable fields a Con+Dup commute recombines into its children. */
-const TRAIT_KEYS = ['requestDecay', 'energyCap', 'transportThrust', 'transportRecoil'] as const;
-type TraitKey = (typeof TRAIT_KEYS)[number];
+export const TRAIT_KEYS = ['requestDecay', 'energyCap', 'transportThrust', 'transportRecoil'] as const;
+export type TraitKey = (typeof TRAIT_KEYS)[number];
 
 /**
  * Bounds a bred trait is clamped to, and how far one generation's mutation
@@ -786,7 +786,7 @@ type TraitKey = (typeof TRAIT_KEYS)[number];
  * the tank a fresh Con or Dup starts at, since commute parents are always
  * one of each.
  */
-const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: number }> = {
+export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: number }> = {
   requestDecay: { min: 0.5, max: 0.98, mutate: 0.03 },
   energyCap: { min: EXTRA_CAP * 0.5, max: EXTRA_CAP * 2, mutate: EXTRA_CAP * 0.1 },
   transportThrust: { min: 0, max: 1, mutate: 0.08 },
@@ -795,17 +795,31 @@ const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: number }
 
 /**
  * A commute child's traits are its own recombination of its two parents',
- * not a copy of either: each trait picks an independent blend weight, so the
- * four children of one commute do not all inherit the same mix, then a small
- * mutation nudge so a lineage can drift past whatever range its ancestors
- * already spanned. This is the only place traits change — a body created any
- * other way just keeps whatever `createAgent` seeded it with.
+ * not a copy of either, then a small mutation nudge so a lineage can drift
+ * past whatever range its ancestors already spanned. This is the only place
+ * traits change — a body created any other way just keeps whatever
+ * `createAgent` seeded it with.
+ *
+ * The two child kinds recombine differently, matching what each node
+ * actually does in the calculus. A Con child blends: each trait picks its
+ * own independent weight between the two parents, so it can land anywhere
+ * on the line between them. A Dup child instead assorts: each trait is
+ * copied whole from a coin-flipped parent, never averaged — duplication
+ * copies a value, it does not combine two of them. Both draw the flip or
+ * the weight per trait rather than once for all four, which is what lets
+ * the four children of one commute end up with four different profiles
+ * instead of two blends and two copies.
  */
 function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent): void {
+  const assort = child.kind === 'dup';
   for (const key of TRAIT_KEYS) {
     const range = TRAIT_RANGE[key];
-    const blended = lerp(conParent[key], dupParent[key], Math.random());
-    const mutated = blended + (Math.random() * 2 - 1) * range.mutate;
+    const combined = assort
+      ? Math.random() < 0.5
+        ? conParent[key]
+        : dupParent[key]
+      : lerp(conParent[key], dupParent[key], Math.random());
+    const mutated = combined + (Math.random() * 2 - 1) * range.mutate;
     child[key] = Math.min(range.max, Math.max(range.min, mutated));
   }
 }

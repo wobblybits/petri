@@ -57,9 +57,10 @@ export interface Agent {
   /**
    * Heritable traits. Seeded from the matching global slider when a body is
    * created outside a rewrite, so a fresh soup starts homogeneous just as it
-   * did before these existed. A Con+Dup commute instead blends both parents'
-   * values into each child (see `inheritTraits` in rewrite.ts), which is the
-   * only place a population's traits can actually drift.
+   * did before these existed. A Con+Dup commute instead recombines both
+   * parents' values into each child — blended for a Con child, assorted
+   * whole from one parent per trait for a Dup child (see `inheritTraits` in
+   * rewrite.ts) — which is the only place a population's traits can drift.
    */
   /** How much of this body's own demand survives one more hop outward. */
   requestDecay: number;
