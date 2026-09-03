@@ -192,6 +192,15 @@ static float flock_mass[MAX_BODIES];
 static float body_emit[MAX_BODIES * 4];
 static float body_taste[MAX_BODIES * 4];
 /*
+ * Sensor readings handed in from outside, three per body: left, right, own.
+ * Set when the field lives on the GPU and this module has no copy of it to
+ * sample — the whole of what steering needs from the field is these three
+ * scalars, which is why the field can stay on the GPU and only a few hundred
+ * kilobytes come back rather than sixteen megabytes.
+ */
+static float steer_samples[MAX_BODIES * 3];
+static int use_samples = 0;
+/*
  * Cached flocking neighbourhoods: for each start body, the bodies within
  * max_hops that carry a higher flock_id, packed as index + hop count. 64 per
  * body averaged is roughly 128 neighbours inside a 6-hop ball, which covers
@@ -1642,7 +1651,9 @@ void solver_steer(int n, float dt) {
     for (int e = 0; e < 2; e++) {
       float a = e ? rightA : leftA;
       float ca = cosf(a), sa = sinf(a);
-      float v = mix_scent(i, p[FAR_X] + ca * sdist, p[FAR_Y] + sa * sdist) * gain;
+      float raw = use_samples ? steer_samples[i * 3 + e]
+                              : mix_scent(i, p[FAR_X] + ca * sdist, p[FAR_Y] + sa * sdist);
+      float v = raw * gain;
       if (bm > 1e-6f) v += (1.6f * (bx * ca + by * sa)) / bm;
       score[e] = v;
     }
@@ -1674,7 +1685,7 @@ void solver_steer(int n, float dt) {
       if (rel < 0.f) t = -t;
     }
     float err = wrap_angle(arc * t);
-    float trail = mix_scent(i, p[FAR_X], p[FAR_Y]);
+    float trail = use_samples ? steer_samples[i * 3 + 2] : mix_scent(i, p[FAR_X], p[FAR_Y]);
     body_trail[i] = trail;
     float slow = slow_factor(trail);
     float boost = turn_boost(trail);
@@ -2169,6 +2180,8 @@ int32_t *solver_flock_id(void) { return flock_id; }
 float *solver_flock_mass(void) { return flock_mass; }
 float *solver_body_emit(void) { return body_emit; }
 float *solver_body_taste(void) { return body_taste; }
+float *solver_steer_samples(void) { return steer_samples; }
+void solver_use_samples(int on) { use_samples = on ? 1 : 0; }
 uint8_t *solver_swim(void) { return swim; }
 int solver_adj_cap(void) { return MAX_WIRES * 2; }
 

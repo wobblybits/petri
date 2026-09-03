@@ -331,6 +331,15 @@ window.addEventListener('keydown', (ev) => {
   if (ev.key === 'x' || ev.key === 'X') setEraser(!interaction.eraserMode);
 });
 
+/*
+ * Move the scent field to the GPU if this machine has one. All or nothing for
+ * the session — see `openFieldGpu`. Nothing waits on it: until it resolves the
+ * field runs here, and if there is no device it simply keeps doing so.
+ */
+void sim.openFieldGpu().then((ok) => {
+  if (ok) console.info('scent field: GPU');
+});
+
 new ResizeObserver(() => sizeCanvas()).observe(canvas);
 
 function drawGesture(): void {

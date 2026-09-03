@@ -72,8 +72,28 @@ export class FieldGpu {
         this.ready = false;
         this.device = null;
       });
+      /*
+       * WebGPU reports validation failures asynchronously and then silently
+       * drops the work. A bad binding therefore looks exactly like a shader
+       * that computed nothing, which is a bad way to spend an afternoon.
+       */
+      device.addEventListener('uncapturederror', (e) => {
+        const err = (e as GPUUncapturedErrorEvent).error;
+        this.lastError = String(err.message ?? err);
+        console.error('field-gpu:', this.lastError);
+      });
       this.device = device;
       const module = device.createShaderModule({ code: shader });
+      // Compilation failures are reported here, not thrown: without this a bad
+      // shader yields an invalid pipeline that silently drops every dispatch.
+      const info = await module.getCompilationInfo();
+      const bad = info.messages.filter((m) => m.type === 'error');
+      if (bad.length > 0) {
+        this.lastError = bad.map((m) => `${m.lineNum}:${m.linePos} ${m.message}`).join('\n');
+        console.error('field.wgsl:\n' + this.lastError);
+        this.ready = false;
+        return false;
+      }
       const storage = { type: 'storage' } as const;
       const readonly = { type: 'read-only-storage' } as const;
       this.layout = device.createBindGroupLayout({
@@ -132,6 +152,11 @@ export class FieldGpu {
     this.fieldB = device.createBuffer({ size: bytes, usage: st });
     this.acc = device.createBuffer({ size: bytes, usage: st });
     this.aLive = true;
+  }
+
+  /** Size the staging arrays before the caller writes into them. */
+  reserve(nDeposit: number, nProbe: number): void {
+    if (this.device) this.ensureLists(nDeposit, nProbe);
   }
 
   private ensureLists(nDeposit: number, nProbe: number): void {
@@ -275,6 +300,34 @@ export class FieldGpu {
       this.lastError = String(e);
       return false;
     }
+  }
+
+  /** Debug: pull the live field back and report what is in it. */
+  async debugField(): Promise<{ nonZero: number; max: number; total: number }> {
+    const device = this.device;
+    const live = this.aLive ? this.fieldA : this.fieldB;
+    if (!device || !live) return { nonZero: 0, max: 0, total: 0 };
+    const bytes = this.cells * CHANNELS * 4;
+    const rb = device.createBuffer({
+      size: bytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(live, 0, rb, 0, bytes);
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const a = new Float32Array(rb.getMappedRange());
+    let nonZero = 0;
+    let max = 0;
+    let total = 0;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== 0) nonZero++;
+      max = Math.max(max, Math.abs(a[i]));
+      total += a[i];
+    }
+    rb.unmap();
+    rb.destroy();
+    return { nonZero, max, total };
   }
 
   get depositStride(): number {

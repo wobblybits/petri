@@ -118,16 +118,17 @@ fn applyAcc(@builtin(global_invocation_id) gid: vec3u) {
 fn diffuseAt(idx: u32, m: f32) {
   let i = idx % P.cols;
   let j = idx / P.cols;
-  let self = src[idx];
-  var a = self;
-  var b = self;
-  var c = self;
-  var e = self;
+  // `self` is a reserved keyword in WGSL, hence `here`.
+  let here = src[idx];
+  var a = here;
+  var b = here;
+  var c = here;
+  var e = here;
   if (i > 0u) { a = src[idx - 1u]; }
   if (i + 1u < P.cols) { b = src[idx + 1u]; }
   if (j > 0u) { c = src[idx - P.cols]; }
   if (j + 1u < P.rows) { e = src[idx + P.cols]; }
-  dst[idx] = (1.0 - m) * self + m * (a + b + c + e) * 0.25;
+  dst[idx] = (1.0 - m) * here + m * (a + b + c + e) * 0.25;
 }
 
 // Two entry points rather than one dispatched twice, because the host runs the

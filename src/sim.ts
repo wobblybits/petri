@@ -57,6 +57,7 @@ import { audio } from './audio/engine.ts';
 import type { CollisionEvent, LiveContact, PanView, RewriteEvent } from './audio/types.ts';
 import { AGENT_BAND, LOD_FAR, LodSelector, agentKey, apparentPx, onScreen, wiresDrawable } from './audio/lod.ts';
 import { farGpu } from './gpu/far-gpu.ts';
+import { fieldGpu } from './gpu/field-gpu.ts';
 import { FAR, FAR_STRIDE, packFarWire } from './gpu/far-kernel.ts';
 import {
   KIND_CON,
@@ -533,6 +534,10 @@ export class Sim {
       this.solve(params, t);
     }
     this.endFrame(params, t);
+    if (this.fieldOnGpu) {
+      await this.gpuFieldStep(params);
+      Sim.phase('fieldGpu');
+    }
   }
 
   private beginFrame(dt: number, params: Params): number {
@@ -622,12 +627,22 @@ export class Sim {
     }
     this.components = this.graph.componentIds(this.agents);
     Sim.phase('upkeep');
-    if (!this.scentWriteNative(params)) this.deposit(params);
-    Sim.phase('scentWrite');
-    this.fields.diffuse(params.diffuse);
-    this.fields.diffuse(params.diffuse * 0.65);
-    this.fields.decay(params.decay);
-    Sim.phase('fields');
+    /*
+     * The GPU owns the field when it is available, and then none of this runs:
+     * the deposit is a list of world positions handed over rather than a
+     * scatter done here, and the two diffusions and the decay — 13.7ms a frame
+     * at a million cells, the second largest fixed cost after the solve —
+     * happen there. `gpuFieldStep` does it at the end of `stepAsync`, because
+     * it has to await and this does not.
+     */
+    if (!this.fieldOnGpu) {
+      if (!this.scentWriteNative(params)) this.deposit(params);
+      Sim.phase('scentWrite');
+      this.fields.diffuse(params.diffuse);
+      this.fields.diffuse(params.diffuse * 0.65);
+      this.fields.decay(params.decay);
+      Sim.phase('fields');
+    }
     this.autoSpawn(params, t);
     Sim.phase('autoSpawn');
 
@@ -2129,6 +2144,129 @@ export class Sim {
   }
 
   /** Packed FAR pass on the GPU. True when the kernel ran. */
+  /** True once a device exists and the field has moved there for good. */
+  private fieldOnGpu = false;
+
+  /**
+   * Move the field to the GPU if there is one. Call once, at startup.
+   *
+   * All or nothing for the session: a field that lived on the GPU on some
+   * frames and here on others would have to be copied between them, and the
+   * copy is 16 MB each way — several times what running it here costs in the
+   * first place.
+   */
+  async openFieldGpu(): Promise<boolean> {
+    if (this.fieldOnGpu) return true;
+    const ok = await fieldGpu.init(this.fields.cols);
+    this.fieldOnGpu = ok;
+    nativeSolver.useSamples(ok);
+    return ok;
+  }
+
+  /**
+   * Hand the field a frame's worth of work and take back what steering needs.
+   *
+   * Everything geometric happens here rather than in the shader: the port
+   * positions to deposit at and the sensor positions to sample come from the
+   * same helpers the CPU path uses, so there is one place that knows where a
+   * port is rather than three. `field.wgsl` sees bare world coordinates.
+   *
+   * The samples that come back describe the pose this frame *started* with,
+   * and steering reads them at the top of the next one. A frame of latency in
+   * smell is invisible at 60fps and much cheaper than stalling the pipeline to
+   * map a buffer mid-frame.
+   */
+  private async gpuFieldStep(params: Params): Promise<void> {
+    const list = this.forceList();
+    const n = list.length;
+    // Reserve before taking references, not after: `reserve` reallocates the
+    // staging arrays when it grows them, so a reference captured first points
+    // at the array they replaced. Done the wrong way round this writes every
+    // deposit and probe into a discarded buffer and the GPU reads zeros —
+    // silently, because nothing about it is an error.
+    fieldGpu.reserve(n * 3, n);
+    const dep = fieldGpu.depositData;
+    const pro = fieldGpu.probeData;
+    const dStride = fieldGpu.depositStride;
+    const pStride = fieldGpu.probeStride;
+
+    const scale = this.fields.depositScale;
+    const amt = params.deposit * scale;
+    let nDep = 0;
+    for (let i = 0; i < n; i++) {
+      const a = list[i];
+      if (a.locked) continue;
+      const c = a.chem;
+      for (const slot of slotsFor(a.kind)) {
+        if (!this.graph.isFreeAt(a.id, slot)) continue;
+        const w = portWorld(a, slot, this.w, this.h);
+        const o = nDep * dStride;
+        dep[o] = w.x;
+        dep[o + 1] = w.y;
+        if (slot === 'p') {
+          dep[o + 4] = amt * c[EMIT];
+          dep[o + 5] = amt * c[EMIT + 1];
+          dep[o + 6] = amt * c[EMIT + 2];
+          dep[o + 7] = amt * c[EMIT + 3];
+        } else {
+          dep[o + 4] = 0;
+          dep[o + 5] = 0;
+          dep[o + 6] = 0;
+          dep[o + 7] = amt * 0.7;
+        }
+        nDep++;
+      }
+    }
+
+    const arc = params.sensorAngle;
+    const sd = params.sensorDist;
+    for (let i = 0; i < n; i++) {
+      const a = list[i];
+      const o = i * pStride;
+      const h = a.heading;
+      const lc = Math.cos(h - arc);
+      const ls = Math.sin(h - arc);
+      const rc = Math.cos(h + arc);
+      const rs = Math.sin(h + arc);
+      pro[o] = a.x + lc * sd;
+      pro[o + 1] = a.y + ls * sd;
+      pro[o + 2] = a.x + rc * sd;
+      pro[o + 3] = a.y + rs * sd;
+      pro[o + 4] = a.x;
+      pro[o + 5] = a.y;
+      pro[o + 8] = a.chem[TASTE];
+      pro[o + 9] = a.chem[TASTE + 1];
+      pro[o + 10] = a.chem[TASTE + 2];
+      pro[o + 11] = a.chem[TASTE + 3];
+    }
+
+    const ok = await fieldGpu.step(
+      this.fields,
+      nDep,
+      n,
+      params.diffuse,
+      params.diffuse * 0.65,
+      Math.max(0, 1 - params.decay),
+    );
+    if (!ok) {
+      // The device went away mid-session. Fall back for good rather than
+      // leaving the field frozen on whatever the GPU last held.
+      this.fieldOnGpu = false;
+      nativeSolver.useSamples(false);
+      return;
+    }
+    const out = nativeSolver.steerSamples;
+    const got = fieldGpu.sampleData;
+    if (out) {
+      for (let i = 0; i < n; i++) {
+        out[i * 3] = got[i * 4];
+        out[i * 3 + 1] = got[i * 4 + 1];
+        out[i * 3 + 2] = got[i * 4 + 2];
+      }
+      nativeSolver.useSamples(true);
+    }
+  }
+
   /**
    * Take the frame on the GPU.
    *

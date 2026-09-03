@@ -121,6 +121,8 @@ type Exp = {
   solver_flock_mass(): number;
   solver_body_emit(): number;
   solver_body_taste(): number;
+  solver_steer_samples(): number;
+  solver_use_samples(on: number): void;
   solver_swim(): number;
   solver_adj_cap(): number;
   solver_flock(
@@ -187,6 +189,9 @@ export class NativeSolver {
   /** Per-body chemistry, mirroring Agent.chem. Four weights each. */
   bodyEmit: Float32Array | null = null;
   bodyTaste: Float32Array | null = null;
+  /** Three sensor readings per body — left, right, own — when the field is
+   *  somewhere this module cannot sample. */
+  steerSamples: Float32Array | null = null;
   swim: Uint8Array | null = null;
   adjCap = 0;
   private exp: Exp | null = null;
@@ -245,6 +250,7 @@ export class NativeSolver {
       this.flockMass = new Float32Array(mem.buffer, exp.solver_flock_mass(), this.bodyCap);
       this.bodyEmit = new Float32Array(mem.buffer, exp.solver_body_emit(), this.bodyCap * 4);
       this.bodyTaste = new Float32Array(mem.buffer, exp.solver_body_taste(), this.bodyCap * 4);
+      this.steerSamples = new Float32Array(mem.buffer, exp.solver_steer_samples(), this.bodyCap * 3);
       this.swim = new Uint8Array(mem.buffer, exp.solver_swim(), this.bodyCap);
       this.scent = new Float32Array(mem.buffer, exp.solver_scent(), this.scentCap);
       this.exp = exp;
@@ -545,6 +551,11 @@ export class NativeSolver {
     exp.solver_flock(n, align, sep, dt, turnRate, desired, maxHops, reuse ? 1 : 0);
     this.claimFlockCache(simId, graphVersion, rosterVersion, n, maxHops);
     return true;
+  }
+
+  /** Steer from handed-in sensor readings rather than sampling the field. */
+  useSamples(on: boolean): void {
+    this.exp?.solver_use_samples(on ? 1 : 0);
   }
 
   /**
