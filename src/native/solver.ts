@@ -119,6 +119,8 @@ type Exp = {
   solver_adj_nei(): number;
   solver_flock_id(): number;
   solver_flock_mass(): number;
+  solver_body_emit(): number;
+  solver_body_taste(): number;
   solver_swim(): number;
   solver_adj_cap(): number;
   solver_flock(
@@ -182,6 +184,9 @@ export class NativeSolver {
   gravSat: Uint8Array | null = null;
   bodyMass: Float32Array | null = null;
   flockMass: Float32Array | null = null;
+  /** Per-body chemistry, mirroring Agent.chem. Four weights each. */
+  bodyEmit: Float32Array | null = null;
+  bodyTaste: Float32Array | null = null;
   swim: Uint8Array | null = null;
   adjCap = 0;
   private exp: Exp | null = null;
@@ -238,6 +243,8 @@ export class NativeSolver {
       this.gravSat = new Uint8Array(mem.buffer, exp.solver_grav_sat(), this.bodyCap);
       this.bodyMass = new Float32Array(mem.buffer, exp.solver_body_mass(), this.bodyCap);
       this.flockMass = new Float32Array(mem.buffer, exp.solver_flock_mass(), this.bodyCap);
+      this.bodyEmit = new Float32Array(mem.buffer, exp.solver_body_emit(), this.bodyCap * 4);
+      this.bodyTaste = new Float32Array(mem.buffer, exp.solver_body_taste(), this.bodyCap * 4);
       this.swim = new Uint8Array(mem.buffer, exp.solver_swim(), this.bodyCap);
       this.scent = new Float32Array(mem.buffer, exp.solver_scent(), this.scentCap);
       this.exp = exp;

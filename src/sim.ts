@@ -8,6 +8,8 @@ import {
   slotsFor,
   stemRoot,
   stemOffset,
+  EMIT,
+  TASTE,
   stemOffsetInto,
   stemWorld,
   stemWorldInto,
@@ -75,18 +77,31 @@ import {
 import { angleDelta, clamp, wrapAngle, wrapDeltaVec } from './wrap.ts';
 
 /** Attraction-only chemotaxis. Own principal trails are a different channel and are ignored. */
-export function mixScent(
-  kind: AgentKind,
-  con: number,
-  dup: number,
-  aux: number,
-  params: Params,
-): number {
-  const S = params.attractStrong;
-  const M = params.attractMedium;
-  if (kind === 'era') return S * (con + dup) + M * aux;
-  if (kind === 'dup') return M * (con + aux);
-  return M * (dup + aux);
+/**
+ * Normalised sensor asymmetry that earns a full-arc turn.
+ *
+ * Steering compares the two sensors as `(right - left) / (|right| + |left|)`,
+ * which is dimensionless and lives in [-1, 1]. This is where that saturates:
+ * a quarter of the signal's own magnitude between the two sensors is a strong
+ * gradient and turns as hard as the body can. Below it the turn ramps, so the
+ * size of the difference means something and not only its sign.
+ *
+ * Passed to the solver through `sparams` rather than written down there too. A
+ * constant that has to agree across the wasm wall and is stated twice
+ * eventually disagrees — the deposit normalisation was 20 on one side and 10
+ * on the other, and quadrupled every scent reading on the path the app runs.
+ */
+export const SENSE_SPAN = 0.1;
+
+/**
+ * What a body smells at a point: its taste weights against the four channels.
+ *
+ * This used to be a switch on kind returning one of three fixed weight rows.
+ * Those rows are now the seed of a per-body genome (`seedChem`), so the switch
+ * is a dot product and the weights can drift.
+ */
+export function mixScent(chem: Float32Array, s0: number, s1: number, s2: number, s3: number): number {
+  return chem[TASTE] * s0 + chem[TASTE + 1] * s1 + chem[TASTE + 2] * s2 + chem[TASTE + 3] * s3;
 }
 
 /** Cruise multiplier from local trail strength (1 = clear, →0 in dense scent). */
@@ -2563,7 +2578,8 @@ export class Sim {
     const free = nativeSolver.portFree;
     const kinds = nativeSolver.kind;
     const sc = nativeSolver.scale;
-    if (!free || !kinds || !sc) return false;
+    const emit = nativeSolver.bodyEmit;
+    if (!free || !kinds || !sc || !emit) return false;
 
     const list = this.forceList();
     const n = list.length;
@@ -2600,6 +2616,7 @@ export class Sim {
       bodies[o + FAR.locked] = a.locked ? 1 : 0;
       kinds[i] = this.kindCode(a.kind);
       sc[i] = a.scale;
+      emit.set(a.chem.subarray(EMIT, EMIT + 4), i * 4);
       if (!freeFresh) {
         let mask = 0;
         for (const slot of slotsFor(a.kind)) {
@@ -2623,27 +2640,30 @@ export class Sim {
       for (const slot of slotsFor(agent.kind)) {
         if (!this.graph.isFreeAt(agent.id, slot)) continue;
         const p = portWorld(agent, slot, this.w, this.h);
-        const ch =
-          slot === 'p'
-            ? agent.kind === 'con'
-              ? CH.conP
-              : agent.kind === 'dup'
-                ? CH.dupP
-                : CH.eraP
-            : CH.aux;
-        const amt = slot === 'p' ? params.deposit : params.deposit * 0.7;
-        this.fields.deposit(ch, p.x, p.y, amt);
+        if (slot === 'p') {
+          // A principal lays this body's own emit vector across all four
+          // channels; which channel that lands in is now a gene, not the kind.
+          const c = agent.chem;
+          for (let ch = 0; ch < 4; ch++) {
+            const w = c[EMIT + ch];
+            if (w !== 0) this.fields.deposit(ch, p.x, p.y, params.deposit * w);
+          }
+        } else {
+          // Aux ports still lay into the shared channel, so it keeps meaning
+          // "a free port is here" independently of anyone's chemistry.
+          this.fields.deposit(CH.aux, p.x, p.y, params.deposit * 0.7);
+        }
       }
     }
   }
 
-  private scentAt(agent: Agent, x: number, y: number, params: Params): number {
+  private scentAt(agent: Agent, x: number, y: number, _params: Params): number {
     return mixScent(
-      agent.kind,
-      this.fields.sample(CH.conP, x, y),
-      this.fields.sample(CH.dupP, x, y),
-      this.fields.sample(CH.aux, x, y),
-      params,
+      agent.chem,
+      this.fields.sample(0, x, y),
+      this.fields.sample(1, x, y),
+      this.fields.sample(2, x, y),
+      this.fields.sample(3, x, y),
     );
   }
 
@@ -2658,10 +2678,13 @@ export class Sim {
     const pwire = nativeSolver.steerPwire;
     const noise = nativeSolver.steerNoise;
     const drive = nativeSolver.bodyDrive;
+    const taste = nativeSolver.bodyTaste;
     const trail = nativeSolver.bodyTrail;
     const kinds = nativeSolver.kind;
     const sc = nativeSolver.scale;
-    if (!sp || !flags || !pwire || !noise || !drive || !trail || !kinds || !sc) return false;
+    if (!sp || !flags || !pwire || !noise || !drive || !trail || !kinds || !sc || !taste) {
+      return false;
+    }
     const list = this.forceList();
     const n = list.length;
     if (n === 0) return true;
@@ -2686,6 +2709,7 @@ export class Sim {
           sc[i] = a.scale;
         }
         drive[i] = a.drive;
+        taste.set(a.chem.subarray(TASTE, TASTE + 4), i * 4);
         // Drawn host-side so a seeded run stays reproducible; the solver only
         // consumes them.
         noise[i * 3] = Math.random();
@@ -2707,6 +2731,7 @@ export class Sim {
           sc[i] = a.scale;
         }
         drive[i] = a.drive;
+        taste.set(a.chem.subarray(TASTE, TASTE + 4), i * 4);
         const pw = this.graph.wireAtSlot(a.id, 'p');
         let pj = -1;
         let pslot = 0;
@@ -2736,6 +2761,7 @@ export class Sim {
     sp[11] = params.swimNoise;
     sp[12] = params.attractStrong;
     sp[13] = params.attractMedium;
+    sp[14] = SENSE_SPAN;
     nativeSolver.steer(n, dt);
     for (let i = 0; i < n; i++) {
       const a = list[i];
@@ -2816,12 +2842,19 @@ export class Sim {
       };
       const left = scoreAt(leftA);
       const right = scoreAt(rightA);
-      const dead = 0.05 * (Math.abs(left) + Math.abs(right)) + 0.03;
-      let bestHeading = agent.heading;
-      if (left > right + dead) bestHeading = leftA;
-      else if (right > left + dead) bestHeading = rightA;
-
-      const err = angleDelta(agent.heading, bestHeading);
+      // Proportional past a deadband; see the C twin in solver_steer.
+      const diff = right - left;
+      const mag = Math.abs(left) + Math.abs(right) + 1e-6;
+      const rel = diff / mag;
+      const dz = 0.05 + 0.03 / mag;
+      const over = Math.abs(rel) - dz;
+      let t = 0;
+      if (over > 0) {
+        const span = SENSE_SPAN - dz;
+        t = span > 1e-6 ? Math.min(1, over / span) : 1;
+        if (rel < 0) t = -t;
+      }
+      const err = angleDelta(agent.heading, agent.heading + arc * t);
       const trail = this.scentAt(agent, agent.x, agent.y, params);
       agent.trail = trail;
       const slow = scentSlowFactor(trail);

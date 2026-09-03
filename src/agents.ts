@@ -44,6 +44,25 @@ export interface Agent {
   /** Request gradient toward a hungry redex. 0 = quiet. */
   request: number;
   /**
+   * Chemistry: what this body says, and what it listens for.
+   *
+   * Eight floats in one array — `emit` in 0..3, `taste` in 4..7 — because both
+   * sides of the scent field were already linear maps with the coefficients
+   * hardcoded by kind. A principal port laid into the channel for its kind;
+   * `mixScent` was a fixed dot product chosen by a switch. Making them per-body
+   * turns those constants into genes without changing the shape of anything.
+   *
+   * Seeded from kind so a fresh pond behaves exactly as it did, and inherited
+   * with mutation at a commute like the other heritable traits. Once they
+   * drift the channels stop meaning con/dup/era/aux and become four registers
+   * whose meaning is whatever a lineage has settled on — which is the point:
+   * a net can evolve onto a channel pair nobody else answers.
+   *
+   * Aux ports still lay into channel 3 regardless, so that channel keeps its
+   * kind-independent "a free port is here" sense and the genome stays at eight.
+   */
+  chem: Float32Array;
+  /**
    * Set when the body falls into debt, cleared when it is back on its feet.
    *
    * Hunger measured against break-even stops the moment the debt is settled,
@@ -214,6 +233,44 @@ export function portLocal(kind: AgentKind, slot: PortSlot): Vec2 {
   return { x: root.x - PORT_EXTRUDE, y: root.y };
 }
 
+/** `chem` layout: emit in 0..3, taste in 4..7. */
+export const EMIT = 0;
+export const TASTE = 4;
+
+/**
+ * The hardcoded weights, written out as a genome.
+ *
+ * Emit is one-hot on the channel that kind's principal used to lay into. Taste
+ * is the row `mixScent` used to select with a switch — Con seeks Dup, Dup seeks
+ * Con, the pairing that makes a redex, and Era seeks both strongly. Everyone is
+ * mildly drawn to the aux channel, which is "unwired tissue here" rather than a
+ * kind.
+ *
+ * The attract sliders seed a new body and are not read again, which is how
+ * every other heritable trait already works: the slider sets where a fresh
+ * population starts, and breeding takes it from there.
+ */
+export function seedChem(kind: AgentKind, params: Params): Float32Array {
+  const c = new Float32Array(8);
+  const S = params.attractStrong;
+  const M = params.attractMedium;
+  if (kind === 'con') {
+    c[EMIT] = 1;
+    c[TASTE + 1] = M;
+    c[TASTE + 3] = M;
+  } else if (kind === 'dup') {
+    c[EMIT + 1] = 1;
+    c[TASTE] = M;
+    c[TASTE + 3] = M;
+  } else {
+    c[EMIT + 2] = 1;
+    c[TASTE] = S;
+    c[TASTE + 1] = S;
+    c[TASTE + 3] = M;
+  }
+  return c;
+}
+
 export function createAgent(
   id: number,
   kind: AgentKind,
@@ -247,6 +304,7 @@ export function createAgent(
     csHeading: NaN,
     csCos: 1,
     csSin: 0,
+    chem: seedChem(kind, params),
     extra: 0,
     request: 0,
     recovering: false,

@@ -185,6 +185,13 @@ static int32_t flock_q[MAX_BODIES];
 static int32_t flock_seen[MAX_BODIES];
 static float flock_mass[MAX_BODIES];
 /*
+ * Per-body chemistry, mirroring Agent.chem: emit weights then taste weights,
+ * four channels each. Both sides of the field were fixed linear maps chosen by
+ * kind; these are the same coefficients as genes.
+ */
+static float body_emit[MAX_BODIES * 4];
+static float body_taste[MAX_BODIES * 4];
+/*
  * Cached flocking neighbourhoods: for each start body, the bodies within
  * max_hops that carry a higher flock_id, packed as index + hop count. 64 per
  * body averaged is roughly 128 neighbours inside a 6-hop ball, which covers
@@ -1363,6 +1370,11 @@ static float port_exit_angle(int i, int slot, float tx, float ty) {
 #define SP_SWIM_NOISE 11
 #define SP_ATTRACT_STRONG 12
 #define SP_ATTRACT_MEDIUM 13
+/* Normalised sensor asymmetry that earns a full-arc turn. Passed in rather
+ * than defined here: a constant that has to agree across the wasm wall and is
+ * written down twice eventually disagrees, which is how the deposit
+ * normalisation came to be 20 on one side and 10 on the other. */
+#define SP_SENSE_SPAN 14
 
 #define SF_P_FREE 1
 #define SF_STARVING 2
@@ -1408,14 +1420,40 @@ static float scent_sample(int ch, float x, float y) {
 }
 
 /** Kind-weighted blend of the channels an agent can smell. Mirrors mixScent. */
+/*
+ * All four channels at one point, in one bilinear pass.
+ *
+ * The four channels of a cell are contiguous, so the corner taps are one
+ * 16-byte read each rather than four strided ones — and this is the shape a
+ * GPU does for free with a filtered rgba fetch.
+ */
+static void scent_sample4(float x, float y, float *out) {
+  out[0] = 0.f; out[1] = 0.f; out[2] = 0.f; out[3] = 0.f;
+  if (scent_cols <= 0 || scent_rows <= 0) return;
+  float gx = ((x - scent_ox) / scent_ww) * (float)scent_cols;
+  float gy = ((y - scent_oy) / scent_wh) * (float)scent_rows;
+  int i0 = (int)floorf(gx), j0 = (int)floorf(gy);
+  float tx = gx - (float)i0, ty = gy - (float)j0;
+  for (int dj = 0; dj < 2; dj++) {
+    for (int di = 0; di < 2; di++) {
+      int i = i0 + di, j = j0 + dj;
+      if (i < 0 || j < 0 || i >= scent_cols || j >= scent_rows) continue;
+      float w = (di ? tx : 1.f - tx) * (dj ? ty : 1.f - ty);
+      const float *c = scent + (size_t)(j * scent_cols + i) * CHANNELS;
+      out[0] += c[0] * w;
+      out[1] += c[1] * w;
+      out[2] += c[2] * w;
+      out[3] += c[3] * w;
+    }
+  }
+}
+
+/** This body's taste weights against the four channels. Mirrors mixScent. */
 static float mix_scent(int i, float x, float y) {
-  float S = sparams[SP_ATTRACT_STRONG], M = sparams[SP_ATTRACT_MEDIUM];
-  float con = scent_sample(0, x, y);
-  float dup = scent_sample(1, x, y);
-  float aux = scent_sample(3, x, y);
-  if (kind[i] == 0) return S * (con + dup) + M * aux;
-  if (kind[i] == 1) return M * (con + aux);
-  return M * (dup + aux);
+  float sm[4];
+  scent_sample4(x, y, sm);
+  const float *t = body_taste + i * 4;
+  return t[0] * sm[0] + t[1] * sm[1] + t[2] * sm[2] + t[3] * sm[3];
 }
 
 static float slow_factor(float trail) { return 1.f / (1.f + trail / 28.f); }
@@ -1499,15 +1537,23 @@ void solver_deposit(int n, float amount) {
     if (bodies[i * STRIDE + FAR_LOCKED] >= 0.5f) continue;
     uint8_t free_mask = port_free[i];
     if (!free_mask) continue;
+    const float *em = body_emit + i * 4;
     int slots = kind[i] == 0 ? 1 : 3;
     for (int slot = 0; slot < slots; slot++) {
       if (!(free_mask & (1 << slot))) continue;
       float px, py;
       port_world(i, slot, &px, &py);
-      /* Channels: 0 con-p, 1 dup-p, 2 era-p, 3 aux. Kind codes are
-       * 0 era, 1 dup, 2 con. */
-      int ch = slot == 0 ? (kind[i] == 2 ? 0 : kind[i] == 1 ? 1 : 2) : 3;
-      scent_add(ch, px, py, slot == 0 ? amount : amount * 0.7f);
+      if (slot == 0) {
+        /* A principal lays this body's emit vector across all four channels.
+         * Which channel it lands in is a gene now, not the kind. */
+        for (int ch = 0; ch < 4; ch++) {
+          if (em[ch] != 0.f) scent_add(ch, px, py, amount * em[ch]);
+        }
+      } else {
+        /* Aux ports still lay into the shared channel, so it keeps meaning
+         * "a free port is here" independently of anyone's chemistry. */
+        scent_add(3, px, py, amount * 0.7f);
+      }
     }
   }
 }
@@ -1601,11 +1647,33 @@ void solver_steer(int n, float dt) {
       score[e] = v;
     }
     float left = score[0], right = score[1];
-    float dead = 0.05f * (fabsf(left) + fabsf(right)) + 0.03f;
-    float best = head;
-    if (left > right + dead) best = leftA;
-    else if (right > left + dead) best = rightA;
-    float err = wrap_angle(best - head);
+    /*
+     * Proportional beyond a deadband, rather than a hard three-way choice.
+     *
+     * This used to pick leftA, rightA or straight ahead, so `err` was one of
+     * three values and only the *sign* of the sensor difference survived: a
+     * gradient twice as steep produced an identical turn. That caps what the
+     * channels can ever say at about a bit and a half a frame, which is the
+     * ceiling worth removing before asking agents to evolve what they emit.
+     *
+     * The deadband stays and does the same job — it rejects the sampling
+     * asymmetry a body reads off its own trail, which is proportional to
+     * signal strength, which is why the threshold is too. Past it the turn
+     * ramps with how asymmetric the reading actually is.
+     */
+    float diff = right - left;
+    float mag = fabsf(left) + fabsf(right) + 1e-6f;
+    float rel = diff / mag;
+    float dz = 0.05f + 0.03f / mag;
+    float over = fabsf(rel) - dz;
+    float t = 0.f;
+    if (over > 0.f) {
+      float span = sparams[SP_SENSE_SPAN] - dz;
+      t = span > 1e-6f ? over / span : 1.f;
+      if (t > 1.f) t = 1.f;
+      if (rel < 0.f) t = -t;
+    }
+    float err = wrap_angle(arc * t);
     float trail = mix_scent(i, p[FAR_X], p[FAR_Y]);
     body_trail[i] = trail;
     float slow = slow_factor(trail);
@@ -2099,6 +2167,8 @@ int32_t *solver_adj_off(void) { return adj_off; }
 int32_t *solver_adj_nei(void) { return adj_nei; }
 int32_t *solver_flock_id(void) { return flock_id; }
 float *solver_flock_mass(void) { return flock_mass; }
+float *solver_body_emit(void) { return body_emit; }
+float *solver_body_taste(void) { return body_taste; }
 uint8_t *solver_swim(void) { return swim; }
 int solver_adj_cap(void) { return MAX_WIRES * 2; }
 

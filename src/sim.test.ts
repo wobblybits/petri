@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boundRadius, portWorld, stemWorld } from './agents.ts';
+import { boundRadius, portWorld, stemWorld, seedChem} from './agents.ts';
 import { defaultParams } from './params.ts';
 import { loadPreset } from './presets.ts';
 import { queryHit, SLOP } from './collide.ts';
@@ -50,9 +50,15 @@ describe('scent steering', () => {
 
   it('does not mix an agent’s own principal channel', () => {
     const params = defaultParams();
-    expect(mixScent('dup', 1, 50, 3, params)).toBe(mixScent('dup', 1, 0, 3, params));
-    expect(mixScent('con', 50, 2, 3, params)).toBe(mixScent('con', 0, 2, 3, params));
-    expect(mixScent('era', 1, 2, 3, params)).toBeGreaterThan(mixScent('era', 0, 0, 3, params));
+    // Kind now only seeds the weights; a body senses through its own genome.
+    const dup = seedChem('dup', params);
+    const con = seedChem('con', params);
+    const era = seedChem('era', params);
+    // A Dup ignores dup-scent and a Con ignores con-scent: each seeks the kind
+    // that completes a redex with it, not its own.
+    expect(mixScent(dup, 1, 50, 0, 3)).toBe(mixScent(dup, 1, 0, 0, 3));
+    expect(mixScent(con, 50, 2, 0, 3)).toBe(mixScent(con, 0, 2, 0, 3));
+    expect(mixScent(era, 1, 2, 0, 3)).toBeGreaterThan(mixScent(era, 0, 0, 0, 3));
   });
 
   it('goes straight when there is nothing to smell', () => {
