@@ -55,7 +55,8 @@ export function stateHash(sim: Sim): string {
     h.text(a.kind);
     for (const v of [
       a.x, a.y, a.vx, a.vy, a.heading, a.omega,
-      a.extra, a.request, a.scale, a.alpha, a.stun, a.drive, a.trail, a.mass,
+      a.extra, a.request, a.recovering ? 1 : 0,
+      a.scale, a.alpha, a.stun, a.drive, a.trail, a.mass,
     ]) {
       h.num(v);
     }

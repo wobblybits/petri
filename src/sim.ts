@@ -39,7 +39,7 @@ import {
   canPayShare,
   flowCharges,
   harvestSlots,
-  hungerNeed,
+  rescueNeed,
   redexNeed,
   resetRequests,
   rewriteCost,
@@ -300,6 +300,27 @@ export class Sim {
   private readonly physLod = new LodSelector();
   private readonly detailedAgents = new Set<number>();
 
+  /*
+   * Activity LOD — dual-rate islands.
+   *
+   * The view LOD demotes a body for being far away. This demotes it for being
+   * still: a taut, aged, calm net runs the same cheap disc+span path even on
+   * screen and close up, so only the parts of the pond actually doing
+   * something pay NEAR prices. The two compose in `agentDetailed` and either
+   * can veto.
+   *
+   * It is the one change here that reduces how many bodies do expensive work
+   * rather than making the work per body cheaper — and the one that changes
+   * behaviour, because a sleeping body is off the SAT path and settled tissue
+   * can therefore rest a little closer together than it otherwise would.
+   */
+  private sleepActive = false;
+  private readonly awakeAgents = new Set<number>();
+  /** id -> time until which it stays awake, so the boundary cannot flicker. */
+  private readonly holdAwake = new Map<number, number>();
+  /** Contact pairs from the collision pass, flattened, drained each frame. */
+  private readonly hitWake: number[] = [];
+
   /** Eased centre of mass. Rewrites delete agents, which jumps the true COM. */
   private home: { x: number; y: number } | null = null;
 
@@ -353,6 +374,10 @@ export class Sim {
     this.contacts.clear();
     this.physLod.clear();
     this.detailedAgents.clear();
+    this.sleepActive = false;
+    this.awakeAgents.clear();
+    this.holdAwake.clear();
+    this.hitWake.length = 0;
     this.ropesDrawable = true;
     this.lodActive = false;
     audio.invalidateTopology();
@@ -426,6 +451,8 @@ export class Sim {
     Sim.phase('collectRewriteFrozen');
     this.assignPhysicsLod(view);
     Sim.phase('assignPhysicsLod');
+    this.assignActivityLod(params);
+    Sim.phase('assignActivityLod');
     this.graph.syncRest(this.time, params, this.wireDetailed);
     Sim.phase('syncRest');
     this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
@@ -443,6 +470,7 @@ export class Sim {
     const t = this.beginFrame(dt, params);
     this.collectRewriteFrozen();
     this.assignPhysicsLod(view);
+    this.assignActivityLod(params);
     this.graph.syncRest(this.time, params, this.wireDetailed);
     this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
@@ -1005,7 +1033,207 @@ export class Sim {
   }
 
   private agentDetailed(id: number): boolean {
-    return !this.lodActive || this.detailedAgents.has(id);
+    if (this.lodActive && !this.detailedAgents.has(id)) return false;
+    if (this.sleepActive && !this.awakeAgents.has(id)) return false;
+    return true;
+  }
+
+  private static readonly WAKE_HOPS = 2;
+  private static readonly WAKE_HOLD = 0.4;
+  private static readonly LATCH_WAKE = 0.5;
+
+  private wakeGraphVersion = -1;
+  private wakeGraphRoster = -1;
+  private readonly wakeIndex = new Map<number, number>();
+  private readonly wakeList: Agent[] = [];
+  private wakeOff = new Int32Array(1);
+  private wakeNei = new Int32Array(0);
+  private wakeDist = new Int32Array(0);
+  private wakeQ = new Int32Array(0);
+
+  /**
+   * Bodies and their wire adjacency in CSR, rebuilt only when topology moves.
+   *
+   * The version this was ported from rebuilt an array-of-arrays every frame —
+   * the same per-frame rebuild of topology-derived scratch that flocking and
+   * the force passes were each doing, and which cost more than the work it fed.
+   */
+  private refreshWakeGraph(): number {
+    const list = this.wakeList;
+    if (
+      this.wakeGraphVersion === this.graph.version &&
+      this.wakeGraphRoster === this.rosterVersion
+    ) {
+      return list.length;
+    }
+    const index = this.wakeIndex;
+    index.clear();
+    list.length = 0;
+    for (const a of this.agents.values()) {
+      index.set(a.id, list.length);
+      list.push(a);
+    }
+    const n = list.length;
+    if (this.wakeOff.length < n + 2) this.wakeOff = new Int32Array(n * 2 + 4);
+    if (this.wakeDist.length < n) {
+      this.wakeDist = new Int32Array(n * 2);
+      this.wakeQ = new Int32Array(n * 2);
+    }
+    const off = this.wakeOff;
+    off.fill(0, 0, n + 2);
+    // Counting sort into CSR: one pass to count degrees, one to place.
+    const wires = this.wireListResolved();
+    const endA = this.wireEndA;
+    const endB = this.wireEndB;
+    let edges = 0;
+    for (let k = 0; k < wires.length; k++) {
+      const A = endA[k];
+      const B = endB[k];
+      if (!A || !B || A === B) continue;
+      off[index.get(A.id)! + 1]++;
+      off[index.get(B.id)! + 1]++;
+      edges += 2;
+    }
+    for (let i = 0; i < n; i++) off[i + 1] += off[i];
+    if (this.wakeNei.length < edges) this.wakeNei = new Int32Array(edges * 2);
+    const nei = this.wakeNei;
+    const cursor = this.wakeQ;
+    for (let i = 0; i < n; i++) cursor[i] = off[i];
+    for (let k = 0; k < wires.length; k++) {
+      const A = endA[k];
+      const B = endB[k];
+      if (!A || !B || A === B) continue;
+      const ia = index.get(A.id)!;
+      const ib = index.get(B.id)!;
+      nei[cursor[ia]++] = ib;
+      nei[cursor[ib]++] = ia;
+    }
+    this.wakeGraphVersion = this.graph.version;
+    this.wakeGraphRoster = this.rosterVersion;
+    return n;
+  }
+
+  /**
+   * Dual-rate islands. A taut, aged, calm net does not need SAT or a live rope
+   * — the same cheap path the view LOD already uses when zoomed out — even
+   * when it is on screen. Live ropes, loners, grabs, rewrites and fresh
+   * latches stay NEAR. A contact against an already-awake body expands the
+   * set; nothing here ever demotes a live rope.
+   */
+  private assignActivityLod(params: Params): void {
+    this.awakeAgents.clear();
+    this.sleepActive = params.nearBudget > 0;
+    if (!this.sleepActive) {
+      this.holdAwake.clear();
+      this.hitWake.length = 0;
+      return;
+    }
+    const n = this.refreshWakeGraph();
+    if (n === 0) {
+      this.hitWake.length = 0;
+      return;
+    }
+    const index = this.wakeIndex;
+    const list = this.wakeList;
+    const hop = this.wakeDist;
+    const q = this.wakeQ;
+    hop.fill(-1, 0, n);
+    let qt = 0;
+    const now = this.time;
+    const sticky: number[] = [];
+
+    /**
+     * Seed by index. `hold` keeps it awake past the reason that woke it.
+     *
+     * Returns whether this call actually woke something new — which the
+     * contact loop below needs, because it runs to a fixed point. A seed that
+     * changes nothing must not count as progress: `hitWake` is filled during
+     * the collision pass and drained here, so it can name a body that has
+     * since been rewritten away and is no longer in the index at all. Reported
+     * as progress, that pair alone spins the loop forever.
+     */
+    const seed = (id: number, hold: boolean): boolean => {
+      const i = index.get(id);
+      if (i === undefined) return false;
+      if (hop[i] >= 0) {
+        if (hold && !this.holdAwake.has(id)) sticky.push(id);
+        return false;
+      }
+      if (hold) sticky.push(id);
+      hop[i] = 0;
+      q[qt++] = i;
+      this.awakeAgents.add(id);
+      return true;
+    };
+
+    if (this.grabbed) seed(this.grabbed.id, true);
+    for (const id of this.rewriteFrozen) seed(id, true);
+    for (const [id, until] of this.holdAwake) {
+      if (until < now) this.holdAwake.delete(id);
+      else seed(id, false);
+    }
+    // A body with nothing attached is a swimmer: it needs real collision, and
+    // there is no island for it to be the still interior of.
+    for (let i = 0; i < n; i++) {
+      const a = list[i];
+      if (!a.locked && !this.graph.isWired(a)) seed(a.id, true);
+    }
+    // A rope that is still being simulated, or a latch too young to have
+    // settled, means the geometry there is not done moving.
+    for (const w of this.graph.wires.values()) {
+      if (w.ropePath !== 'span' || now - w.born < Sim.LATCH_WAKE) {
+        seed(w.a.id, true);
+        seed(w.b.id, true);
+      }
+    }
+
+    /*
+     * Contact propagation, to a fixed point. If exactly one side of a contact
+     * is awake, wake the other — repeatedly, so a wake travels the whole chain
+     * of touching bodies inside one frame rather than one link per frame. The
+     * budget is the only thing that stops it, which is what makes `nearBudget`
+     * a budget rather than a threshold.
+     */
+    const hits = this.hitWake;
+    const budget = params.nearBudget;
+    let grew = true;
+    while (grew && this.awakeAgents.size < budget) {
+      grew = false;
+      for (let k = 0; k < hits.length; k += 2) {
+        if (this.awakeAgents.size >= budget) break;
+        const a = hits[k];
+        const b = hits[k + 1];
+        const aOn = this.awakeAgents.has(a);
+        const bOn = this.awakeAgents.has(b);
+        if (aOn === bOn) continue;
+        if (seed(aOn ? b : a, true)) grew = true;
+      }
+    }
+    hits.length = 0;
+
+    /*
+     * Spread out to WAKE_HOPS along the wires. Without the halo a body pops to
+     * NEAR while its immediate neighbours stay coarse, and the constraint
+     * between them is then being solved by two different solvers.
+     */
+    let qh = 0;
+    while (qh < qt) {
+      const u = q[qh++];
+      const du = hop[u];
+      if (du >= Sim.WAKE_HOPS) continue;
+      const a0 = this.wakeOff[u];
+      const a1 = this.wakeOff[u + 1];
+      for (let k = a0; k < a1; k++) {
+        const v = this.wakeNei[k];
+        if (hop[v] >= 0) continue;
+        hop[v] = du + 1;
+        q[qt++] = v;
+        this.awakeAgents.add(list[v].id);
+      }
+    }
+
+    const holdUntil = now + Sim.WAKE_HOLD;
+    for (const id of sticky) this.holdAwake.set(id, holdUntil);
   }
 
   /** True when this body is on the SAT / XPBD rope path. */
@@ -1325,6 +1553,7 @@ export class Sim {
     this.components = this.graph.componentIds(this.agents);
     this.collectRewriteFrozen();
     this.assignPhysicsLod(view);
+    this.assignActivityLod(params);
     this.graph.syncRest(this.time, params, this.wireDetailed);
     this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
@@ -2071,6 +2300,9 @@ export class Sim {
     hit: Hit,
     mechanics?: { effMass: number; vN: number; vT: number },
   ): void {
+    // A contact is the one wake signal that cannot be derived from topology:
+    // it is how a moving body tells sleeping tissue that it is coming.
+    if (this.sleepActive) this.hitWake.push(A.id, B.id);
     const key = A.id < B.id ? `${A.id}:${B.id}` : `${B.id}:${A.id}`;
     const m = mechanics ?? contactMechanics(A, B, hit);
     this.noteContact(A, B, hit.overlap, m.vT);
@@ -2959,11 +3191,12 @@ export class Sim {
   /**
    * The net's demand for energy, as one field, and one hop of flow along it.
    *
-   * Two things want energy and they compete on the same scale. A body that
-   * cannot pay its next bill needs whatever it is short by — read from the
-   * upkeep accumulator, so the ask goes out while the body is still wired
-   * rather than after `extra` has gone negative and the wires are already
-   * gone. A stalled redex needs whatever each end is short of a full extra.
+   * Two things want energy and they compete on the same scale. A body that has
+   * fallen into debt asks until it is back on its feet — up to `rescueTo`, not
+   * merely up to zero, which is the difference between an ambulance and a
+   * refill and the reason a surplus at one end of a net drains toward a
+   * starving end at all. A stalled redex needs whatever each end is short of a
+   * full extra.
    *
    * Both are magnitudes in the same units, so nothing has to be ranked by
    * policy: a body two hops away and 0.9 short outpulls a redex next door
@@ -2977,7 +3210,7 @@ export class Sim {
 
     for (const a of this.agents.values()) {
       if (a.locked) continue;
-      const h = hungerNeed(a);
+      const h = rescueNeed(a, params.rescueTo);
       if (h > 0) need.set(a.id, h);
     }
 
@@ -3013,12 +3246,15 @@ export class Sim {
     }
     const adj = this.wireAdj;
     adj.build(list.length, index, () => this.graph.wires.values());
-    spreadRequests(list, adj);
+    spreadRequests(list, adj, params.requestDecay);
     const recoil = params.transportRecoil;
+    const thrust = params.transportThrust;
     flowCharges(
       list,
       adj,
-      recoil > 0 ? (from, to, amount) => this.recoil(from, to, amount, recoil) : undefined,
+      recoil > 0
+        ? (from, to, amount) => this.recoil(from, to, amount, recoil, thrust)
+        : undefined,
     );
   }
 
@@ -3027,10 +3263,11 @@ export class Sim {
     to: { id: number },
     amount: number,
     gain: number,
+    thrust: number,
   ): void {
     const A = this.agents.get(from.id);
     const B = this.agents.get(to.id);
-    if (A && B) applyTransportRecoil(A, B, amount, gain, this.w, this.h);
+    if (A && B) applyTransportRecoil(A, B, amount, gain, this.w, this.h, thrust);
   }
 
   private startRewrites(params: Params): void {
@@ -3280,11 +3517,18 @@ export class Sim {
  * Pumping energy along a wire shoves the two bodies apart along it.
  *
  * A body that ejects energy east recoils west, and the body that absorbs it is
- * pushed east — equal and opposite, as an impulse, so a light Era twitches
- * where a Con barely stirs and the flock's centre of mass never moves. Pure
- * recoil without the matching kick would be a momentum pump: a net with a
- * standing gradient, surplus at one end and shortage at the other, would
- * accelerate in one direction forever.
+ * pushed east, as an impulse, so a light Era twitches where a Con barely stirs.
+ *
+ * `thrust` is how much of the receiver's kick is withheld. At 0 the pair is
+ * equal and opposite and the flock's centre of mass never moves. Above 0 the
+ * pair keeps a net impulse of `thrust * gain * amount` pointing back down the
+ * wire, *against* the direction the energy travelled — so a net with a standing
+ * gradient, surplus at one end and shortage at the other, swims away from its
+ * own supply. That is a momentum pump on purpose: it is the one force in here
+ * that a net can only generate by moving energy through itself, which makes
+ * transport something a body does rather than something that happens to it.
+ * Nothing runs away, because fluid drag turns a sustained pump into a terminal
+ * drift rather than an acceleration.
  *
  * What it buys, at the default gain, is a twitch on the *events*: a fresh
  * latch beside a charged body, a rescue, a pair refilling after a commute —
@@ -3295,6 +3539,10 @@ export class Sim {
  * one-off. Measured over a seeded 30 s soup, net openness at gains 0 / 6 / 12 /
  * 25 is 80 / 86 / 79 / 89 px, which is seed noise. Moving more energy per
  * frame is what would make the tissue breathe; raising this alone will not.
+ * The same arithmetic bounds the swimming: a steady-state transfer of ~4e-4 a
+ * frame at gain 20 and full thrust is under 1 px/s of drift, so the stroke
+ * shows up on the events — a rescue, a refill after a commute — and on a net
+ * held under a real gradient, not on a soup that is already topped up.
  */
 export function applyTransportRecoil(
   A: { x: number; y: number; vx: number; vy: number; mass: number; locked: boolean },
@@ -3303,20 +3551,25 @@ export function applyTransportRecoil(
   gain: number,
   w: number,
   h: number,
+  thrust = 0,
 ): void {
   if (A.locked || B.locked || !(amount > 0) || !(gain > 0)) return;
   const d = wrapDeltaVec(A.x, A.y, B.x, B.y, w, h);
   const dist = Math.hypot(d.x, d.y);
   if (!(dist > 1e-6)) return;
   const p = gain * amount;
+  // The sender's recoil is the whole impulse and never scales — thrust only
+  // decides how much of it the receiver cancels, so dialling thrust up changes
+  // where the pair ends up without changing how hard the pump kicks.
+  const catches = 1 - Math.min(1, Math.max(0, thrust));
   const nx = d.x / dist;
   const ny = d.y / dist;
   const wA = 1 / Math.max(0.08, A.mass);
   const wB = 1 / Math.max(0.08, B.mass);
   A.vx -= nx * p * wA;
   A.vy -= ny * p * wA;
-  B.vx += nx * p * wB;
-  B.vy += ny * p * wB;
+  B.vx += nx * p * catches * wB;
+  B.vy += ny * p * catches * wB;
 }
 
 /** Move the closest point on polyline segment `seg` by (ux, uy). Stems stay put. */

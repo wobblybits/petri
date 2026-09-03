@@ -5,6 +5,14 @@ import { loadPreset } from './presets.ts';
 import { queryHit, SLOP } from './collide.ts';
 import { closestPointOnSegment, WIRE_RADIUS } from './geom.ts';
 import { applyTransportRecoil, mixScent, scentSlowFactor, scentTurnBoost, Sim } from './sim.ts';
+import {
+  flowCharges,
+  resetRequests,
+  seedRequest,
+  type SlotBody,
+  spreadRequests,
+  WireAdjacency,
+} from './energy.ts';
 import { nativeSolver } from './native/solver.ts';
 import { CH } from './fields.ts';
 import { angleDelta } from './wrap.ts';
@@ -196,13 +204,13 @@ describe('hop distances', () => {
 });
 
 describe('simulation presets', () => {
-  it('seeds a soup with fifteen hundred agents', () => {
+  it('seeds a soup with twenty-five hundred agents', () => {
     const sim = new Sim(480, 320);
     const params = defaultParams();
-    expect(params.soupCount).toBe(1500);
+    expect(params.soupCount).toBe(2500);
     expect(params.spawnInterval).toBe(0.5);
     loadPreset(sim, 'soup', params);
-    expect(sim.agents.size).toBe(1500);
+    expect(sim.agents.size).toBe(2500);
   });
 
   it('steps a soup without throwing', () => {
@@ -1206,15 +1214,43 @@ describe('transport recoil', () => {
     return { x, y: 0, vx: 0, vy: 0, mass, locked: false };
   }
 
-  it('kicks the sender back and the receiver on, conserving momentum', () => {
+  it('kicks the sender back and the receiver on, conserving momentum at thrust 0', () => {
     const a = pumpBody(0, 1);
     const b = pumpBody(40, 1);
-    applyTransportRecoil(a, b, 1, 6, 800, 600);
+    applyTransportRecoil(a, b, 1, 6, 800, 600, 0);
     expect(a.vx, 'sends east, recoils west').toBeLessThan(0);
     expect(b.vx, 'receiver is pushed east').toBeGreaterThan(0);
     expect(a.vx * a.mass + b.vx * b.mass, 'net momentum unchanged').toBeCloseTo(0, 9);
     expect(a.vy).toBe(0);
     expect(b.vy).toBe(0);
+  });
+
+  it('thrust leaves the pair moving back against the flow', () => {
+    const a = pumpBody(0, 1);
+    const b = pumpBody(40, 1);
+    applyTransportRecoil(a, b, 1, 6, 800, 600, 1);
+    expect(a.vx, 'sender still recoils west').toBeCloseTo(-6, 9);
+    expect(b.vx, 'receiver catches nothing').toBe(0);
+    expect(a.vx * a.mass + b.vx * b.mass, 'energy east, momentum west').toBeCloseTo(-6, 9);
+  });
+
+  it('scales the net impulse with thrust, without touching the sender', () => {
+    const half = [pumpBody(0, 1), pumpBody(40, 1)] as const;
+    const full = [pumpBody(0, 1), pumpBody(40, 1)] as const;
+    applyTransportRecoil(half[0], half[1], 1, 6, 800, 600, 0.5);
+    applyTransportRecoil(full[0], full[1], 1, 6, 800, 600, 1);
+    expect(half[0].vx, 'sender recoil is thrust-independent').toBeCloseTo(full[0].vx, 9);
+    const netHalf = half[0].vx * half[0].mass + half[1].vx * half[1].mass;
+    const netFull = full[0].vx * full[0].mass + full[1].vx * full[1].mass;
+    expect(netHalf).toBeCloseTo(netFull * 0.5, 9);
+  });
+
+  it('pushes the pair the other way when the flow reverses', () => {
+    const a = pumpBody(0, 1);
+    const b = pumpBody(40, 1);
+    applyTransportRecoil(b, a, 1, 6, 800, 600, 1);
+    expect(b.vx, 'sends west, recoils east').toBeGreaterThan(0);
+    expect(a.vx * a.mass + b.vx * b.mass).toBeCloseTo(6, 9);
   });
 
   it('is an impulse, so a light body moves further than a heavy one', () => {
@@ -1244,10 +1280,50 @@ describe('transport recoil', () => {
     expect(anchored.vx).toBe(0);
   });
 
+  it('walks a whole chain against the direction its energy flows', () => {
+    // The point of thrust: a net that is moving charge from its fed end to its
+    // hungry end is also, by moving it, pushing itself the other way. Done on
+    // the transport passes alone — the sim's own steering noise is orders of
+    // magnitude louder than a frame's worth of pumping.
+    const chain = Array.from({ length: 6 }, (_, i) => ({
+      id: i + 1,
+      kind: 'con' as const,
+      x: i * 40,
+      y: 0,
+      extra: i === 5 ? 1.25 : 0,
+      request: 0,
+      recovering: false,
+      locked: false,
+      vx: 0,
+      vy: 0,
+      mass: 1,
+    }));
+    const byId = new Map(chain.map((b) => [b.id, b]));
+    const list: SlotBody[] = chain;
+    const index = new Map(chain.map((b, i) => [b.id, i]));
+    const wires = chain.slice(1).map((b, i) => ({ a: { id: chain[i].id }, b: { id: b.id } }));
+    const adj = new WireAdjacency();
+    adj.build(list.length, index, () => wires);
+    const west = chain[0];
+    for (let frame = 0; frame < 12; frame++) {
+      west.extra = -0.9;
+      resetRequests(list);
+      seedRequest(west, 0.9);
+      spreadRequests(list, adj);
+      flowCharges(list, adj, (from, to, amount) => {
+        applyTransportRecoil(byId.get(from.id)!, byId.get(to.id)!, amount, 12, 800, 600, 1);
+      });
+    }
+    const momentum = chain.reduce((sum, b) => sum + b.vx * b.mass, 0);
+    expect(momentum, 'energy went west, so the chain is headed east').toBeGreaterThan(0);
+    expect(chain.every((b) => b.vy === 0), 'nothing off-axis').toBe(true);
+  });
+
   it('does not let a driven chain wind itself up', () => {
-    // A standing gradient — one end held full, the other held hungry — is the
-    // worst case for a momentum pump, so the chain has to settle rather than
-    // gain energy frame after frame.
+    // A standing gradient — one end held full, the other held hungry — is a
+    // momentum pump at any thrust above 0, and this runs at the default. What
+    // bounds it is drag, not symmetry: the chain has to reach a cruising speed
+    // and stay there rather than gain energy frame after frame.
     //
     // Seeded: steering kicks each body with coloured noise off Math.random, so
     // an unseeded run put the ratio either side of the bound at random.

@@ -28,6 +28,29 @@ export interface Params {
    * `declutter` was in, which already removes the crossings a local force
    * can plausibly undo. Kept as a knob because the detection is the cheap part.
    */
+  /**
+   * Activity LOD budget. Settled taut islands run the cheap disc+span path
+   * even when they are on screen and close up; 0 turns the whole thing off.
+   * Live ropes, loners, grabs, rewrites and fresh latches stay NEAR whatever
+   * this says — the budget only caps how far a contact can propagate a wake.
+   *
+   * Off by default, because measured on this branch it costs more than it
+   * saves. It does exactly what it claims — a settled 1518-body mesh filling
+   * the viewport goes from 95% detailed to 2% — but the frame goes 22.8ms to
+   * 25.5ms, and the profiler puts the whole difference in `solve`. The reason
+   * is that the two mechanisms overlap almost perfectly: `ropeIsLive` already
+   * returns false for any wire whose `ropePath` is 'span', whatever the detail
+   * flag says, and a wire turns 'span' under the same aged-and-taut condition
+   * that makes its net sleepable. So the expensive half of NEAR is already off
+   * before sleep gets a vote, and all sleep can still remove is SAT on settled
+   * bodies — which is cheaper than the FAR path it moves them onto.
+   *
+   * Kept because the mechanism is sound and cheap when off, and because the
+   * branch it came from carried per-body audio work that NEAR paid for and
+   * this one no longer has. If NEAR ever grows an expensive per-body pass
+   * again, this is already here and already tested.
+   */
+  nearBudget: number;
   uncross: number;
   /**
    * How hard a rope pushes off other ropes and off bodies it is not attached
@@ -86,8 +109,34 @@ export interface Params {
   /** Extra drained per second. 0 = off. Hitting −1 kills the agent. */
   upkeep: number;
   /**
-   * Momentum a body recoils with per unit of energy it pumps to a neighbour,
-   * equal and opposite. 0 = off.
+   * How full a body that has been in debt is fed back up to before it stops
+   * asking. 0 restores the old behaviour, where a rescue stopped at break-even.
+   *
+   * At the default — one whole share — a rescue is a refill: the body comes out
+   * of it able to pay for a rewrite, which is what makes a surplus at one end
+   * of a net actually drain toward a starving end instead of trickling out the
+   * few hundredths needed to keep it at exactly zero. Above `REWRITE_SHARE` it
+   * eats into the headroom too and a starving neighbourhood will strip a
+   * reservoir bare; below it the patient is discharged unable to act.
+   */
+  rescueTo: number;
+  /**
+   * How much of a body's demand its neighbour hears, per wire. 1 = no decay.
+   *
+   * Sets how far a shortage is audible — against the field's floor, a whole
+   * unit of need carries 20 hops at 0.8 and 43 at 0.9 — and how much crosses,
+   * since a transfer is capped by the field at the receiving end. Turn it down
+   * for a net of local pools that each look after their own; turn it up for one
+   * that answers a shortage anywhere on it.
+   *
+   * The slider stops short of 1 because an undecayed field is a flat one: every
+   * body holds the same need, no neighbour is strictly needier, and transport
+   * stops dead.
+   */
+  requestDecay: number;
+  /**
+   * Momentum a body recoils with per unit of energy it pumps to a neighbour.
+   * 0 = off.
    *
    * Stable well past the slider's range — a seeded soup is still calm at 800
    * and only comes apart near 3000. The ceiling is low because the visible
@@ -95,6 +144,27 @@ export interface Params {
    * a ~56 px/s nudge on an Era against settled speeds around 50.
    */
   transportRecoil: number;
+  /**
+   * How much of the receiver's kick is withheld, 0–1, and therefore how much
+   * of a pump's recoil survives as motion of the pair.
+   *
+   * At 0 the pump is equal and opposite and a net can never shift itself by
+   * moving energy around inside itself. At 1 only the sender is kicked, so the
+   * pair — and any net holding a standing gradient — drifts back along the
+   * wire, against the direction the energy is flowing. That is the swimming
+   * stroke: pushing charge toward the hungry end pushes the body the other way.
+   *
+   * Drag bounds it, so this is a cruising speed rather than an acceleration.
+   * One whole unit pumped between an Era and a Con at the default recoil
+   * leaves the pair drifting `20 * thrust / (0.45 + 1)` px/s — ~7 at the
+   * default, ~14 at 1 — against settled speeds around 40. In a live soup that
+   * is invisible for the same reason the recoil gain is: mean speed over a
+   * seeded 30 s soup at 0 / 0.25 / 0.5 / 1 is 40 / 60 / 34 / 47 px/s, which is
+   * seed noise. It reads on the events, and on a net actually holding a
+   * gradient — drive one end full and the other hungry and the chain visibly
+   * runs away from its own supply.
+   */
+  transportThrust: number;
 }
 
 export function defaultParams(): Params {
@@ -115,6 +185,7 @@ export function defaultParams(): Params {
     springDamp: 45,
     auxSpread: 1.7,
     declutter: 1,
+    nearBudget: 0,
     uncross: 0,
     wireClear: 1,
     portStiff: 2,
@@ -137,13 +208,16 @@ export function defaultParams(): Params {
     gravity: 0,
     flockAlign: 5.5,
     flockSep: 36,
-    maxAgents: 3000,
-    soupCount: 1500,
+    maxAgents: 10000,
+    soupCount: 2500,
     spawnInterval: 0.5,
     energyCell: 48,
-    ambientEnergy: 1,
-    upkeep: 0.025,
-    transportRecoil: 20,
+    ambientEnergy: 10,
+    upkeep: 0.015,
+    rescueTo: 1,
+    requestDecay: 0.95,
+    transportRecoil: 50,
+    transportThrust: 0.5,
   };
 }
 
@@ -180,6 +254,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'portStiff', label: 'Port stiffness', min: 0.1, max: 4, step: 0.05 },
   { key: 'auxSpread', label: 'Aux spread', min: 0, max: 3, step: 0.05 },
   { key: 'declutter', label: 'Personal space', min: 0, max: 4, step: 0.05 },
+  { key: 'nearBudget', label: 'NEAR budget', min: 0, max: 2000, step: 25 },
   { key: 'uncross', label: 'Uncross', min: 0, max: 4, step: 0.05 },
   { key: 'wireClear', label: 'Wire clearance', min: 0, max: 4, step: 0.05 },
   { key: 'wireBreathe', label: 'Wire breathe', min: 0, max: 0.15, step: 0.005 },
@@ -193,5 +268,8 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'energyCell', label: 'Energy cell', min: 16, max: 160, step: 1 },
   { key: 'ambientEnergy', label: 'Ambient energy', min: 0, max: 2, step: 0.05 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
+  { key: 'rescueTo', label: 'Rescue to', min: 0, max: 1.25, step: 0.05 },
+  { key: 'requestDecay', label: 'Demand decay', min: 0.5, max: 0.98, step: 0.01 },
   { key: 'transportRecoil', label: 'Pump recoil', min: 0, max: 200, step: 5 },
+  { key: 'transportThrust', label: 'Pump thrust', min: 0, max: 1, step: 0.05 },
 ];

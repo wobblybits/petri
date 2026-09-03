@@ -43,6 +43,17 @@ export interface Agent {
   /** Request gradient toward a hungry redex. 0 = quiet. */
   request: number;
   /**
+   * Set when the body falls into debt, cleared when it is back on its feet.
+   *
+   * Hunger measured against break-even stops the moment the debt is settled,
+   * which left a rescued body pinned at exactly 0 — alive, one frame of upkeep
+   * from dying again, and permanently unable to afford the share a rewrite
+   * costs. The latch is what lets the ask outlive the debt: while it is set,
+   * the body keeps asking up to `rescueTo`, so a rescue tops it back up to
+   * something it can act with instead of parking it on the line.
+   */
+  recovering: boolean;
+  /**
    * Memoized cosine and sine of `heading`, with the heading they were taken
    * at. Every port position in the sim goes through `stemOffsetInto`, which
    * needs both; at pond scale that was ~60,000 sin and 60,000 cos a frame in
@@ -221,6 +232,7 @@ export function createAgent(
     csSin: 0,
     extra: 0,
     request: 0,
+    recovering: false,
   };
 }
 

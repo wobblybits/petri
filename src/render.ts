@@ -265,6 +265,7 @@ function ghostAsAgent(g: Ghost): Agent {
     integOmega: 0,
     extra: 0,
     request: 0,
+    recovering: false,
   };
 }
 

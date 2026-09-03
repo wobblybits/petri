@@ -8,13 +8,16 @@ import {
   canPayShare,
   deathYield,
   EnergyGrid,
+  ERA_CAP_RATIO,
   EXTRA_CAP,
   EXTRA_FLOOR,
+  extraCapFor,
   extrasOf,
   flowCharges,
   harvestSlots,
   hungerNeed,
   redexNeed,
+  rescueNeed,
   REQUEST_DECAY,
   resetRequests,
   REWRITE_SHARE,
@@ -42,7 +45,7 @@ function body(
   locked = false,
   kind: SlotBody['kind'] = 'con',
 ): SlotBody {
-  return { id, kind, x, y, extra, request, locked };
+  return { id, kind, x, y, extra, request, locked, recovering: false };
 }
 
 
@@ -411,6 +414,71 @@ describe('request gradient', () => {
     expect(total, 'and nothing minted').toBeCloseTo(-0.1, 6);
   });
 
+  it('carries a shortage further at a slower decay', () => {
+    const chain = (decay: number) => {
+      const agents = new Map(
+        Array.from({ length: 6 }, (_, i) => [i + 1, body(i + 1, i * 10, 0)] as const),
+      );
+      agents.get(1)!.request = 1;
+      const wires = Array.from({ length: 5 }, (_, i) => ({
+        a: { id: i + 1 },
+        b: { id: i + 2 },
+      }));
+      const { list, adj } = net(agents, wires);
+      spreadRequests(list, adj, decay);
+      return agents.get(6)!.request;
+    };
+    expect(chain(0.8), 'five hops at 0.8').toBeCloseTo(0.8 ** 5, 6);
+    expect(chain(0.9), 'and further at 0.9').toBeCloseTo(0.9 ** 5, 6);
+    expect(chain(0.9)).toBeGreaterThan(chain(0.8));
+  });
+
+  it('never lets the field go flat', () => {
+    // At decay 1 every body holds the same need, no neighbour is strictly
+    // needier than its donor, and nothing moves at all.
+    const agents = new Map([
+      [1, body(1, 0, 0, 0, 1)],
+      [2, body(2, 10, 0, 1)],
+    ]);
+    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
+    spreadRequests(list, adj, 1);
+    expect(agents.get(2)!.request).toBeLessThan(agents.get(1)!.request);
+    expect(flowCharges(list, adj), 'so the surplus still crosses').toBeGreaterThan(0);
+  });
+
+  it('keeps a rescued body asking until it can act again', () => {
+    // The ambulance used to stop at the kerb: hunger goes quiet at 0, so a
+    // rescued body sat at exactly break-even beside a full neighbour, unable
+    // to ask for the share a rewrite costs.
+    const a = body(1, 0, 0, -0.4);
+    expect(rescueNeed(a, 1), 'in debt: still short of a whole share').toBeCloseTo(1.4, 6);
+    expect(a.recovering).toBe(true);
+    a.extra = 0;
+    expect(rescueNeed(a, 1), 'out of debt but not yet standing').toBeCloseTo(1, 6);
+    a.extra = 0.6;
+    expect(rescueNeed(a, 1)).toBeCloseTo(0.4, 6);
+    a.extra = 1;
+    expect(rescueNeed(a, 1), 'discharged').toBe(0);
+    expect(a.recovering).toBe(false);
+    a.extra = 0.2;
+    expect(rescueNeed(a, 1), 'and it does not start asking again on its own').toBe(0);
+  });
+
+  it('leaves a body that has never been in debt quiet', () => {
+    // Otherwise every stock in the net levels out and nobody can concentrate
+    // enough energy to pay for anything.
+    const poor = body(1, 0, 0, 0.05);
+    expect(rescueNeed(poor, 1)).toBe(0);
+    expect(poor.recovering).toBe(false);
+  });
+
+  it('rescues only to break-even at target 0, as it used to', () => {
+    const a = body(1, 0, 0, -0.4);
+    expect(rescueNeed(a, 0)).toBeCloseTo(0.4, 6);
+    a.extra = 0;
+    expect(rescueNeed(a, 0)).toBe(0);
+  });
+
   it('measures a stalled redex end by what it is short of a full extra', () => {
     expect(redexNeed(body(1, 0, 0, 0.8))).toBeCloseTo(0.2, 6);
     expect(redexNeed(body(2, 0, 0, 1))).toBe(0);
@@ -476,6 +544,36 @@ describe('sim energy', () => {
     for (let f = 0; f < 240; f++) sim.step(1 / 60, params);
     expect(sim.agents.size).toBe(2);
     expect(sim.rewrites.length).toBe(0);
+  });
+
+  it('drains a reservoir across an empty corridor to a dying end', () => {
+    // The reported symptom: one end of a net full, the other starving, and no
+    // sign of the surplus ever crossing. It did cross — but only the few
+    // hundredths that put the patient back on exactly zero, after which nobody
+    // was in debt, nobody was asking, and 3.75 units sat parked nine hops away
+    // for the rest of the run.
+    const sim = new Sim(1200, 600);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.ambientEnergy = 0;
+    params.upkeep = 0;
+    params.rewriteDuration = 0;
+    params.snapRadius = 0;
+    params.transportRecoil = 0;
+    sim.energy.configure(params.energyCell, 0);
+    const n = 12;
+    const ids: number[] = [];
+    for (let i = 0; i < n; i++) ids.push(sim.spawn('con', 100 + i * 45, 300, 0, params, true)!.id);
+    for (let i = 0; i + 1 < n; i++) sim.wire(ids[i], 'r', ids[i + 1], 'l', params);
+    for (let i = 0; i < n; i++) sim.agents.get(ids[i])!.extra = i >= n - 3 ? EXTRA_CAP : 0;
+    const dying = sim.agents.get(ids[0])!;
+    dying.extra = -0.5;
+    const reservoir = () =>
+      ids.slice(n - 3).reduce((t, id) => t + (sim.agents.get(id)?.extra ?? 0), 0);
+    const held = reservoir();
+    for (let f = 0; f < 120; f++) sim.step(1 / 60, params);
+    expect(dying.extra, 'fed up to a share, not parked on the line').toBeCloseTo(1, 2);
+    expect(held - reservoir(), 'and it came from nine hops away').toBeGreaterThan(1);
   });
 
   it('lets a commute fire when both agents hold an extra', () => {
@@ -578,20 +676,53 @@ describe('sim energy', () => {
     // Long enough that a Con has been billed several times over.
     for (let i = 0; i < 600; i++) tickUpkeep([era, con], 1, 0.025);
     expect(con.extra, 'a Con burns down to the floor').toBe(EXTRA_FLOOR);
-    expect(era.extra, 'an Era fills instead').toBe(EXTRA_CAP);
+    expect(era.extra, 'an Era fills instead, to its own deeper cap').toBe(extraCapFor('era'));
     expect(tickUpkeep([era], 1000, 0.025), 'and is never reported starved').toEqual([]);
   });
 
+  it('gives an Era a deeper tank than a Con or a Dup', () => {
+    expect(extraCapFor('era')).toBeCloseTo(EXTRA_CAP * ERA_CAP_RATIO, 6);
+    expect(extraCapFor('con')).toBe(EXTRA_CAP);
+    expect(extraCapFor('dup')).toBe(EXTRA_CAP);
+    const era = body(1, 0, 0, EXTRA_CAP, 0, false, 'era');
+    expect(atCap(era), 'a Con-sized tankful is only half an Era').toBe(false);
+    era.extra = extraCapFor('era');
+    expect(atCap(era)).toBe(true);
+  });
+
+  it('fills an Era past a full Con from the ground and along a wire', () => {
+    const grid = new EnergyGrid(10, 0);
+    const era = body(1, 0, 0, 0, 0, false, 'era');
+    grid.setCell(0, 0, 4);
+    harvestSlots([era], grid);
+    expect(era.extra, 'forages up to its own cap').toBeCloseTo(extraCapFor('era'), 6);
+
+    const drained = body(2, 0, 0, 0.5, 0, false, 'era');
+    const donor = body(3, 10, 0, EXTRA_CAP, 0, false, 'con');
+    const agents = new Map([
+      [drained.id, drained],
+      [donor.id, donor],
+    ]);
+    const { list, adj } = net(agents, [{ a: { id: 2 }, b: { id: 3 } }]);
+    seedRequest(drained, 1);
+    spreadRequests(list, adj);
+    flowCharges(list, adj);
+    expect(drained.extra, 'and a pump can push it past a Con-sized full').toBeGreaterThan(
+      EXTRA_CAP,
+    );
+  });
+
   it('caps an Era at full however long it produces for', () => {
+    const cap = extraCapFor('era');
     const era = body(1, 0, 0, 0, 0, false, 'era');
     for (let i = 0; i < 5000; i++) tickUpkeep([era], 1, 0.025);
-    expect(era.extra, 'no banking past the cap').toBe(EXTRA_CAP);
+    expect(era.extra, 'no banking past the cap').toBe(cap);
     // And the next share has to be earned at the same rate as the first.
     spendExtra(era);
     expect(era.extra, 'a share out of a full tank leaves the headroom')
-      .toBeCloseTo(EXTRA_CAP - REWRITE_SHARE, 6);
+      .toBeCloseTo(cap - REWRITE_SHARE, 6);
     tickUpkeep([era], 1, 0.025);
-    expect(era.extra).toBeCloseTo(EXTRA_CAP - REWRITE_SHARE + 0.005, 6);
+    expect(era.extra).toBeCloseTo(cap - REWRITE_SHARE + 0.005, 6);
   });
 
   it('drops wires at −1 and still snaps in debt', () => {

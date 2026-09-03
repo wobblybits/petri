@@ -25,9 +25,33 @@ export const REWRITE_SHARE = 1;
  * rather than for one frame.
  *
  * Transport obeys the cap too: a pump can never push a body past full, which
- * is most of why pumping is slow.
+ * is most of why pumping is slow. This is the figure for a Con or a Dup; an
+ * Era holds `ERA_CAP_RATIO` times it.
  */
 export const EXTRA_CAP = 1.25;
+
+/**
+ * How much more an Era holds than a Con or a Dup.
+ *
+ * An Era is the one body that cannot spend: it has a single port, it never
+ * commutes, and it pays no rent — it produces (`ERA_UPKEEP_RATIO`). Everything
+ * it earns is therefore for somebody else, and the one thing it can usefully
+ * be is a battery. At the same cap as everyone else it filled and then sat
+ * there wasting its income, so a net's leaves were its smallest reserve
+ * instead of its largest.
+ *
+ * Doubling the tank does not double what an Era is worth dead — `BODY_VALUE`
+ * is flat across kinds, and a rewrite still costs and yields the same — so
+ * this buys storage, not a mint. What it does change is the shape of a net's
+ * reserve: energy parked on the boundary rather than spread thin through the
+ * middle, and a deeper buffer between a lean patch and a wave of starvation.
+ */
+export const ERA_CAP_RATIO = 2;
+
+/** The most this kind of body can hold. */
+export function extraCapFor(kind: AgentKind): number {
+  return kind === 'era' ? EXTRA_CAP * ERA_CAP_RATIO : EXTRA_CAP;
+}
 /** A whole unit of debt. The body dies. */
 export const EXTRA_FLOOR = -1;
 const EXTRA_FULL_EPS = 1e-6;
@@ -57,17 +81,27 @@ export const AGENT_VALUE: Record<AgentKind, number> = {
 };
 
 /**
- * How much of a neighbour's need reaches you, per hop.
+ * How much of a neighbour's need reaches you, per hop. The default behind the
+ * `requestDecay` slider; `spreadRequests` takes the live value.
  *
- * The field is `max(own need, best neighbour's field x DECAY)`, so need spreads
+ * The field is `max(own need, best neighbour's field x decay)`, so need spreads
  * as a decaying scent rather than a hop count. Two consequences matter. Need
  * competes by magnitude, so a starving body outpulls a redex that is nearly
  * paid for even from further away. And where two comparable needs face each
  * other across a net the fields meet at equal value, the local gradient there
  * is flat, and nothing crosses — the watershed sits wherever the needs happen
  * to balance instead of at a fixed hop count.
+ *
+ * The value sets how far a shortage is audible, against `REQUEST_FLOOR`: a
+ * whole unit of need carries 20 hops at 0.8 and 43 at 0.9. It also sets how
+ * much moves, because a transfer is capped by the field at the receiving end —
+ * so raising it makes distant demand both visible and worth answering.
+ *
+ * Not 1. At 1 the field stops being a gradient: every body in a connected net
+ * ends up holding the same largest need, no neighbour is ever strictly needier
+ * than another, and transport stops entirely.
  */
-export const REQUEST_DECAY = 0.8;
+export const REQUEST_DECAY = 0.9;
 
 /**
  * Field values below this are not worth carrying further. This bounds the
@@ -114,8 +148,8 @@ export function agentValue(kind: AgentKind): number {
 
 
 /** Holding as much as it can. Nothing more can be harvested or pumped in. */
-export function atCap(a: { extra: number }): boolean {
-  return a.extra >= EXTRA_CAP - EXTRA_FULL_EPS;
+export function atCap(a: { extra: number; kind: AgentKind }): boolean {
+  return a.extra >= extraCapFor(a.kind) - EXTRA_FULL_EPS;
 }
 
 /** Able to pay its side of a rewrite. Not the same as being full. */
@@ -255,7 +289,10 @@ export class EnergyGrid {
   }
 }
 
-export type SlotBody = Pick<Agent, 'id' | 'kind' | 'x' | 'y' | 'extra' | 'locked' | 'request'>;
+export type SlotBody = Pick<
+  Agent,
+  'id' | 'kind' | 'x' | 'y' | 'extra' | 'locked' | 'request' | 'recovering'
+>;
 
 /**
  * Unlocked agents below cap take from their cell, in id order, up to what
@@ -276,11 +313,12 @@ export function harvestSlots(agents: Iterable<SlotBody>, grid: EnergyGrid): void
   for (const [key, list] of hungry) {
     list.sort((a, b) => a.id - b.id);
     for (const a of list) {
-      const room = EXTRA_CAP - a.extra;
+      const cap = extraCapFor(a.kind);
+      const room = cap - a.extra;
       if (room <= EXTRA_FULL_EPS) continue;
       const got = grid.take(key, room);
       if (got <= 0) break;
-      a.extra = Math.min(EXTRA_CAP, a.extra + got);
+      a.extra = Math.min(cap, a.extra + got);
     }
   }
 }
@@ -302,7 +340,7 @@ export function tickUpkeep(agents: Iterable<SlotBody>, dt: number, rate: number)
     const r = upkeepRateFor(a.kind, rate);
     if (r === 0) continue;
     const was = a.extra;
-    a.extra = Math.min(EXTRA_CAP, Math.max(EXTRA_FLOOR, a.extra - r * dt));
+    a.extra = Math.min(extraCapFor(a.kind), Math.max(EXTRA_FLOOR, a.extra - r * dt));
     if (was > EXTRA_FLOOR && a.extra <= EXTRA_FLOOR) dead.push(a.id);
   }
   return dead;
@@ -314,6 +352,32 @@ export function tickUpkeep(agents: Iterable<SlotBody>, dt: number, rate: number)
  */
 export function hungerNeed(a: SlotBody): number {
   return a.extra < 0 ? -a.extra : 0;
+}
+
+/**
+ * How much a body asks for once it has been in debt, and until it is standing
+ * again. Returns what it is short of `target`, and latches `recovering` on the
+ * way past zero in both directions.
+ *
+ * `hungerNeed` alone is an ambulance that stops at the kerb: it goes silent
+ * the instant `extra` reaches 0, so a rescued body sat at exactly break-even
+ * with a full neighbour beside it and no way to ask for more. It could not
+ * afford a rewrite (that costs a whole share), and one frame of upkeep put it
+ * back in debt — so the same body was rescued over and over while the surplus
+ * two hops away stayed untouched. The latch keeps the ask alive across the
+ * zero crossing, which is what turns a rescue into a refill.
+ *
+ * Only bodies that actually went under ask this way. A body that is merely
+ * poor stays quiet, so a well-fed net does not turn into a diffusion pond
+ * where every stock levels out and nobody can concentrate enough to act.
+ */
+export function rescueNeed(a: SlotBody, target: number): number {
+  if (a.extra < 0) a.recovering = true;
+  else if (a.extra >= target - EXTRA_FULL_EPS) a.recovering = false;
+  const hunger = hungerNeed(a);
+  if (!a.recovering) return hunger;
+  const gap = target - a.extra;
+  return gap > hunger ? gap : hunger;
 }
 
 /**
@@ -421,7 +485,7 @@ export function seedRequest(agent: SlotBody, amount: number): void {
  * Relax the need field over the wire graph until it stops improving.
  *
  * Every body ends up holding the largest need it can see, attenuated by
- * `REQUEST_DECAY` per hop — so the field is a potential whose gradient points
+ * `decay` per hop — so the field is a potential whose gradient points
  * at whoever is neediest, weighted by how badly and discounted by how far.
  * A body can be improved more than once (a bigger need further away can beat
  * a small one next door), so this is a relaxation rather than one BFS sweep;
@@ -430,7 +494,14 @@ export function seedRequest(agent: SlotBody, amount: number): void {
  * Locked bodies still conduct, so a rewrite in progress does not cut the net
  * in two.
  */
-export function spreadRequests(list: SlotBody[], adj: WireAdjacency): void {
+export function spreadRequests(
+  list: SlotBody[],
+  adj: WireAdjacency,
+  decay = REQUEST_DECAY,
+): void {
+  // Clamped below 1 for the reason on REQUEST_DECAY: an undecayed field is
+  // flat, and a flat field moves nothing.
+  const keep = Math.min(0.99, Math.max(0, decay));
   const { off, nei } = adj;
   // Indices throughout. Queueing the bodies themselves would need a lookup
   // back to their slot, and a Map keyed on the objects is the allocation this
@@ -443,7 +514,7 @@ export function spreadRequests(list: SlotBody[], adj: WireAdjacency): void {
   }
   while (head < tail) {
     const at = q[head++];
-    const next = list[at].request * REQUEST_DECAY;
+    const next = list[at].request * keep;
     if (next <= REQUEST_FLOOR) continue;
     for (let k = off[at]; k < off[at + 1]; k++) {
       const ni = nei[k];
@@ -519,7 +590,7 @@ export function flowCharges(
     // Because the field decays per hop, a distant shortage is fed in smaller
     // increments than a near one. That is the intended shape: demand you can
     // barely see moves less energy than demand next door.
-    const give = Math.min(spareEnergy(d), best.request, EXTRA_CAP - best.extra);
+    const give = Math.min(spareEnergy(d), best.request, extraCapFor(best.kind) - best.extra);
     if (give <= FLOW_EPS) continue;
     d.extra -= give;
     best.extra += give;
@@ -551,7 +622,7 @@ export function settlePool(
   let left = pool;
   for (const a of list) {
     if (left <= 0) break;
-    const room = EXTRA_CAP - a.extra;
+    const room = extraCapFor(a.kind) - a.extra;
     if (room <= EXTRA_FULL_EPS) continue;
     const give = Math.min(left, room);
     a.extra += give;
