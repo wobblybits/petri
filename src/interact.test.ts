@@ -106,3 +106,46 @@ describe('gestures', () => {
     expect(ui.gesture.kind).toBe('none');
   });
 });
+
+describe('eraser', () => {
+  it('kills a body on a plain click, and a click is not a spawn point', () => {
+    const { sim, params, ui } = scene();
+    const con = sim.spawn('con', 400, 300, 0, params, true)!;
+    ui.eraserMode = true;
+    ui.begin(400, 300, 400, 300);
+    expect(sim.agents.has(con.id)).toBe(false);
+    expect(ui.end(400, 300, () => {})).toBeNull();
+  });
+
+  it('sweeps the whole drag path, not just its endpoints', () => {
+    const { sim, params, ui } = scene();
+    // Sits on the line from begin to move, but far from either endpoint.
+    const mid = sim.spawn('con', 450, 300, 0, params, true)!;
+    ui.eraserMode = true;
+    ui.begin(400, 300, 400, 300);
+    expect(sim.agents.has(mid.id), 'too far from the press point alone').toBe(true);
+    ui.move(500, 300, 500, 300);
+    expect(sim.agents.has(mid.id), 'but the segment passed right over it').toBe(false);
+  });
+
+  it('erases instead of starting a wire, even over a free port', () => {
+    const { sim, params, ui } = scene();
+    const con = sim.spawn('con', 400, 300, 0, params, true)!;
+    const pc = portWorld(con, 'p', sim.w, sim.h);
+    ui.eraserMode = true;
+    ui.begin(pc.x, pc.y, 0, 0);
+    expect(ui.gesture.kind).toBe('erase');
+    expect(sim.grabbed).toBeNull();
+    expect(sim.agents.has(con.id)).toBe(false);
+  });
+
+  it('leaves normal picking alone once switched off again', () => {
+    const { sim, params, ui } = scene();
+    const con = sim.spawn('con', 400, 300, 0, params, true)!;
+    ui.eraserMode = true;
+    ui.eraserMode = false;
+    ui.begin(400, 300, 400, 300);
+    expect(ui.gesture.kind).toBe('drag');
+    expect(sim.agents.has(con.id)).toBe(true);
+  });
+});

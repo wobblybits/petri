@@ -44,6 +44,7 @@ app.innerHTML = `
       <button type="button" data-kind="era" class="on">Era</button>
       <button type="button" data-kind="dup">Dup</button>
       <button type="button" data-kind="con">Con</button>
+      <button type="button" id="eraser">Eraser</button>
     </div>
     <div class="presets lambda">
       <span>λ</span>
@@ -63,7 +64,7 @@ app.innerHTML = `
       <button type="button" data-preset="annihilate-dup">δ–δ</button>
       <button type="button" data-preset="oscillator">Oscillator</button>
     </div>
-    <p class="hint">Click empty space to spawn, drag it to pan. Drag a body to move it; drag from one free port to another to wire them. Scroll to zoom. Keys E / D / C select type. Space pauses.</p>
+    <p class="hint">Click empty space to spawn, drag it to pan. Drag a body to move it; drag from one free port to another to wire them. Eraser: click and drag to remove bodies under the cursor. Scroll to zoom. Keys E / D / C select type, X toggles the eraser. Space pauses.</p>
     <p class="stats" id="stats"></p>
     <div id="sliders"></div>
   </aside>
@@ -85,6 +86,7 @@ let currentPreset: PresetName = 'soup';
 let snapCamera = true;
 
 const pauseBtn = document.querySelector<HTMLButtonElement>('#pause')!;
+const eraserBtn = document.querySelector<HTMLButtonElement>('#eraser')!;
 const statsEl = document.querySelector<HTMLParagraphElement>('#stats')!;
 const sliderRoot = document.querySelector<HTMLDivElement>('#sliders')!;
 const soundHint = document.querySelector<HTMLParagraphElement>('#sound-hint')!;
@@ -165,8 +167,24 @@ function setPaused(next: boolean): void {
 
 function setSpawn(kind: AgentKind): void {
   spawnKind = kind;
+  interaction.eraserMode = false;
+  eraserBtn.classList.remove('on');
   for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-kind]')) {
     btn.classList.toggle('on', btn.dataset.kind === kind);
+  }
+}
+
+function setEraser(on: boolean): void {
+  interaction.eraserMode = on;
+  eraserBtn.classList.toggle('on', on);
+  if (on) {
+    for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-kind]')) {
+      btn.classList.remove('on');
+    }
+  } else {
+    for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-kind]')) {
+      btn.classList.toggle('on', btn.dataset.kind === spawnKind);
+    }
   }
 }
 
@@ -251,6 +269,7 @@ document.querySelector('#app')!.addEventListener('keydown', armAudio, { once: tr
 for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-kind]')) {
   btn.addEventListener('click', () => setSpawn(btn.dataset.kind as AgentKind));
 }
+eraserBtn.addEventListener('click', () => setEraser(!interaction.eraserMode));
 for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-preset]')) {
   btn.addEventListener('click', () => applyPreset(btn.dataset.preset as PresetName));
 }
@@ -308,6 +327,7 @@ window.addEventListener('keydown', (ev) => {
   if (ev.key === 'e' || ev.key === 'E') setSpawn('era');
   if (ev.key === 'd' || ev.key === 'D') setSpawn('dup');
   if (ev.key === 'c' || ev.key === 'C') setSpawn('con');
+  if (ev.key === 'x' || ev.key === 'X') setEraser(!interaction.eraserMode);
 });
 
 new ResizeObserver(() => sizeCanvas()).observe(canvas);

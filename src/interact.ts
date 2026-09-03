@@ -1,9 +1,21 @@
 import { boundRadius, portWorld, slotsFor, type Agent, type PortRef } from './agents.ts';
 import type { Camera } from './camera.ts';
+import { closestPointOnSegment } from './geom.ts';
 import type { Sim } from './sim.ts';
 
 /** How close the pointer must be to a port, in world units, to grab it. */
 const PORT_PICK = 9;
+
+/**
+ * Extra reach the eraser brush gets past an agent's own `boundRadius`.
+ *
+ * `boundRadius` bounds the triangle body, not the port stems reaching past
+ * it — a Con or Dup's principal tip sits about 25px from centre against a
+ * ~18px bound — so brushing the visible port nub of a body should still
+ * erase it. The rest is slack for a fast drag across closely-spaced bodies,
+ * whose centres the segment can miss by a pixel or two between samples.
+ */
+const ERASE_BRUSH = 10;
 
 /** Pointer travel past which a press stops counting as a click. */
 const CLICK_SLOP = 4;
@@ -12,7 +24,8 @@ export type Gesture =
   | { kind: 'none' }
   | { kind: 'pan'; lastX: number; lastY: number; moved: number }
   | { kind: 'drag'; id: number }
-  | { kind: 'wire'; from: PortRef; x: number; y: number; over: PortRef | null };
+  | { kind: 'wire'; from: PortRef; x: number; y: number; over: PortRef | null }
+  | { kind: 'erase'; x: number; y: number };
 
 /** Free port nearest the pointer, if one is close enough to mean it. */
 export function pickPort(sim: Sim, x: number, y: number, zoom: number): PortRef | null {
@@ -60,6 +73,12 @@ export class Interaction {
   gesture: Gesture = { kind: 'none' };
   /** True once the user has panned; the camera stops chasing the flock. */
   freeCamera = false;
+  /**
+   * While set, a press starts an erase stroke instead of the usual
+   * port/body/pan pick — the whole point being that dragging over a body
+   * removes it rather than moving it.
+   */
+  eraserMode = false;
 
   private sim: Sim;
   private camera: Camera;
@@ -70,6 +89,11 @@ export class Interaction {
   }
 
   begin(wx: number, wy: number, sx: number, sy: number): void {
+    if (this.eraserMode) {
+      this.eraseAlong(wx, wy, wx, wy);
+      this.gesture = { kind: 'erase', x: wx, y: wy };
+      return;
+    }
     const port = pickPort(this.sim, wx, wy, this.camera.zoom);
     if (port) {
       this.gesture = { kind: 'wire', from: port, x: wx, y: wy, over: null };
@@ -86,6 +110,12 @@ export class Interaction {
 
   move(wx: number, wy: number, sx: number, sy: number): void {
     const g = this.gesture;
+    if (g.kind === 'erase') {
+      this.eraseAlong(g.x, g.y, wx, wy);
+      g.x = wx;
+      g.y = wy;
+      return;
+    }
     if (g.kind === 'pan') {
       const dx = sx - g.lastX;
       const dy = sy - g.lastY;
@@ -132,8 +162,27 @@ export class Interaction {
     this.sim.grabbed = null;
   }
 
+  /**
+   * Kill every agent whose glyph the brush swept between the last point and
+   * this one. Collected before killing rather than removed mid-scan: `kill`
+   * mutates the same agents map this is iterating, and a starved body's own
+   * death yield lands back on the grid, which is easier to reason about as a
+   * clean batch than interleaved with the scan that found it.
+   */
+  private eraseAlong(x0: number, y0: number, x1: number, y1: number): void {
+    const reach = ERASE_BRUSH / Math.max(0.2, this.camera.zoom);
+    const dead: number[] = [];
+    for (const agent of this.sim.agents.values()) {
+      const p = closestPointOnSegment(agent.x, agent.y, x0, y0, x1, y1);
+      const d = Math.hypot(agent.x - p.x, agent.y - p.y);
+      if (d <= boundRadius(agent) + reach) dead.push(agent.id);
+    }
+    for (const id of dead) this.sim.kill(id);
+  }
+
   /** Cursor hint for the current hover. */
   cursorFor(wx: number, wy: number): string {
+    if (this.eraserMode) return 'crosshair';
     if (this.gesture.kind === 'pan') return 'grabbing';
     if (this.gesture.kind !== 'none') return 'grabbing';
     if (pickPort(this.sim, wx, wy, this.camera.zoom)) return 'crosshair';
