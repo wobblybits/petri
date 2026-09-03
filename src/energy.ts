@@ -248,6 +248,20 @@ export class EnergyGrid {
   private boundX = 0;
   private boundY = 0;
   private boundHalf = Infinity;
+  /*
+   * The lattice this grid is cut on, shared with the scent field.
+   *
+   * It used to index from the world origin while the field indexed from its
+   * own, so the two grids were offset by whatever fraction of a cell the pond
+   * happened to sit at — two rasters of the same world that never lined up.
+   * Taking the field's origin makes an energy cell an exact block of scent
+   * cells, provided `energyCell` stays a whole multiple of `FIELD_CELL`.
+   *
+   * Set once, when the world is pinned. Moving it later would re-key every
+   * stored cell, which is why `setBounds` is not called per frame any more.
+   */
+  private originX = 0;
+  private originY = 0;
 
   constructor(cellSize: number, ambient: number) {
     this.cellSize = Math.max(1, cellSize);
@@ -259,6 +273,8 @@ export class EnergyGrid {
     this.boundX = cx;
     this.boundY = cy;
     this.boundHalf = half;
+    this.originX = cx - half;
+    this.originY = cy - half;
   }
 
   /** Square, to match the field grid it shares geometry with. */
@@ -287,8 +303,8 @@ export class EnergyGrid {
    * cell, however the field's window has scrolled.
    */
   index(x: number, y: number): { i: number; j: number; key: string } {
-    const i = Math.floor(x / this.cellSize);
-    const j = Math.floor(y / this.cellSize);
+    const i = Math.floor((x - this.originX) / this.cellSize);
+    const j = Math.floor((y - this.originY) / this.cellSize);
     return { i, j, key: cellKey(i, j) };
   }
 

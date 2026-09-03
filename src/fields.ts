@@ -272,6 +272,24 @@ export class Fields {
     const rowStride = cols * CHANNELS;
 
     if (this.hiI < this.loI) return;
+    /*
+     * Widen by a cell before diffusing, because a diffusion pass moves scent
+     * exactly one cell and the box has to be somewhere for it to move into.
+     *
+     * Without this the box was a hard ceiling on how far scent could ever
+     * spread — sixteen cells from the nearest deposit, whatever the diffusion
+     * rate — so turning diffusion up flattened the peak without extending the
+     * reach, which looks exactly like turning it down. The box is meant to skip
+     * cells that are zero and will stay zero, not to clip the physics.
+     *
+     * It grows to the whole grid if scent genuinely reaches the whole grid,
+     * which is the correct cost of that happening. Decay is what keeps it
+     * bounded in practice.
+     */
+    if (this.loI > 0) this.loI--;
+    if (this.loJ > 0) this.loJ--;
+    if (this.hiI < this.cols - 1) this.hiI++;
+    if (this.hiJ < this.rows - 1) this.hiJ++;
     for (let j = this.loJ; j <= this.hiJ; j++) {
       const hasUp = j > 0;
       const hasDown = j < rows - 1;

@@ -3431,11 +3431,14 @@ export class Sim {
       if (confine) {
         // Per axis, so a body far out on one axis is not dragged diagonally
         // by an axis it is already inside.
-        // Saturating past one bound's worth of overshoot; see the C twin.
-        const ox = Math.min(Math.abs(dx) - FIELD_HALF, FIELD_HALF);
-        const oy = Math.min(Math.abs(dy) - FIELD_HALF, FIELD_HALF);
-        if (ox > 0) agent.vx += Math.sign(dx) * ox * edge * dt;
-        if (oy > 0) agent.vy += Math.sign(dy) * oy * edge * dt;
+        // Radial and saturating; see the C twin for why it is not per axis.
+        const dist = Math.hypot(dx, dy);
+        const over = Math.min(dist - FIELD_HALF, FIELD_HALF);
+        if (over > 0 && dist > 1e-6) {
+          const k = (over * edge * dt) / dist;
+          agent.vx += dx * k;
+          agent.vy += dy * k;
+        }
       }
       if (base <= 0) continue;
       const root = this.components.get(agent.id) ?? agent.id;

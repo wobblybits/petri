@@ -1795,20 +1795,32 @@ void solver_gravitate(int n, float cx, float cy, float base, float reach,
     if (confine) {
       /* Overshoot per axis, so a body far out on one axis is not dragged
        * diagonally by an axis it is already inside. */
-      float ox = (dx < 0.f ? -dx : dx) - half;
-      float oy = (dy < 0.f ? -dy : dy) - half;
       /*
-       * Saturating, not linear. The pull grows with the overshoot so that it
-       * is nothing at the boundary, but a body that gets a long way out should
-       * be walked home, not fired there: unclamped, an agent 108,000 units
-       * past the edge was handed 38,000 px/s, which is a slingshot and reads
-       * as the whole pond convulsing. Past one bound's worth of overshoot the
-       * pull stops growing.
+       * Radial, not per axis. A square bound has four corners, and a corner is
+       * an attractor: on an edge one velocity component is cancelled and the
+       * body slides along the other, but in a corner both are cancelled and it
+       * is wedged. Measured, 21 of 60 free bodies released on a square boundary
+       * were sitting in corners a minute later and none had come back inside —
+       * which is exactly the Eras piling into the corners of the field.
+       *
+       * A circle of this radius is inscribed in the square grid, so nothing
+       * confined by it can leave the field, and a body pressed outward by its
+       * own swimming slides around the rim forever instead of collecting at
+       * four points.
+       *
+       * Saturating, not linear. The pull grows with the overshoot so it is
+       * nothing at the boundary, but a body a long way out should be walked
+       * home rather than fired there: unclamped, one 108,000 units past the
+       * edge was handed 38,000 px/s, which reads as the whole pond convulsing.
        */
-      if (ox > half) ox = half;
-      if (oy > half) oy = half;
-      if (ox > 0.f) p[FAR_VX] += (dx < 0.f ? -1.f : 1.f) * ox * edge * dt;
-      if (oy > 0.f) p[FAR_VY] += (dy < 0.f ? -1.f : 1.f) * oy * edge * dt;
+      float dist = sqrtf(dx * dx + dy * dy);
+      float over = dist - half;
+      if (over > 0.f && dist > 1e-6f) {
+        if (over > half) over = half;
+        float k = (over * edge * dt) / dist;
+        p[FAR_VX] += dx * k;
+        p[FAR_VY] += dy * k;
+      }
     }
     if (base <= 0.f) continue;
     /* The host knows component sizes already; packing a byte beats

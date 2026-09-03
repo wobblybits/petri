@@ -249,8 +249,8 @@ export interface Params {
 export function defaultParams(): Params {
   return {
     deposit: 5,
-    diffuse: 0.9,
-    decay: 0.005,
+    diffuse: 0.6,
+    decay: 0.00001,
     sense: 520,
     attractStrong: 1.45,
     attractMedium: 0.72,
