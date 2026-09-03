@@ -1,4 +1,4 @@
-import { EMIT, TASTE, createAgent, portWorld, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
+import { CHEM_LEN, EMIT, EMIT_SLOPE, TASTE, TASTE_SLOPE, createAgent, portWorld, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
 import { EXTRA_CAP } from './energy.ts';
 import { otherEnd, type Graph } from './graph.ts';
 import type { Params } from './params.ts';
@@ -790,6 +790,9 @@ export type TraitKey = (typeof TRAIT_KEYS)[number];
 export const CHEM_MUTATE = 0.06;
 /** Ceiling on a taste weight, positive or negative. */
 export const CHEM_TASTE_MAX = 4;
+/** Ceiling on an emit slope. One unit of voice is the base's whole budget, so
+ *  a slope of one can silence a body or double it at full need, no more. */
+export const CHEM_SLOPE_MAX = 1;
 
 export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: number }> = {
   requestDecay: { min: 0.5, max: 0.98, mutate: 0.03 },
@@ -846,7 +849,7 @@ function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent): void {
  */
 function inheritChem(child: Agent, con: Agent, dup: Agent, assort: boolean): void {
   const c = child.chem;
-  for (let k = 0; k < 8; k++) {
+  for (let k = 0; k < CHEM_LEN; k++) {
     const a = con.chem[k];
     const b = dup.chem[k];
     const combined = assort ? (Math.random() < 0.5 ? a : b) : lerp(a, b, Math.random());
@@ -860,6 +863,19 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, assort: boolean): voi
   // A body with nothing left to say is mute, not amplified from noise.
   if (sum > 1e-6) for (let k = EMIT; k < EMIT + 4; k++) c[k] /= sum;
   for (let k = TASTE; k < TASTE + 4; k++) {
+    c[k] = Math.min(CHEM_TASTE_MAX, Math.max(-CHEM_TASTE_MAX, c[k]));
+  }
+  /*
+   * Slopes are only bounded, not normalised or forced positive. A negative
+   * emit slope is a body that goes quiet as its neighbourhood gets hungry, and
+   * a negative taste slope is one that stops caring about a channel under
+   * pressure — both are things worth being able to evolve into, and neither is
+   * expressible if the slope is held to the same shape as the base.
+   */
+  for (let k = EMIT_SLOPE; k < EMIT_SLOPE + 4; k++) {
+    c[k] = Math.min(CHEM_SLOPE_MAX, Math.max(-CHEM_SLOPE_MAX, c[k]));
+  }
+  for (let k = TASTE_SLOPE; k < TASTE_SLOPE + 4; k++) {
     c[k] = Math.min(CHEM_TASTE_MAX, Math.max(-CHEM_TASTE_MAX, c[k]));
   }
 }

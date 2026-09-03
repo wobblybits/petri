@@ -59,7 +59,11 @@ export interface Agent {
    * a net can evolve onto a channel pair nobody else answers.
    *
    * Aux ports still lay into channel 3 regardless, so that channel keeps its
-   * kind-independent "a free port is here" sense and the genome stays at eight.
+   * kind-independent "a free port is here" sense.
+   *
+   * Sixteen floats, not eight: each of emit and taste has a slope against the
+   * body's inner state as well as a base, so what it says and what it listens
+   * for can depend on how its neighbourhood is doing. See `chemState`.
    */
   chem: Float32Array;
   /**
@@ -233,9 +237,41 @@ export function portLocal(kind: AgentKind, slot: PortSlot): Vec2 {
   return { x: root.x - PORT_EXTRUDE, y: root.y };
 }
 
-/** `chem` layout: emit in 0..3, taste in 4..7. */
+/** `chem` layout: emit, taste, then each one's slope against inner state. */
 export const EMIT = 0;
 export const TASTE = 4;
+export const EMIT_SLOPE = 8;
+export const TASTE_SLOPE = 12;
+export const CHEM_LEN = 16;
+
+/**
+ * The inner state a body's chemistry is modulated by, normalised to [0, 1].
+ *
+ * `request` rather than `extra`, and the difference matters: request is
+ * already aggregated across the net by `spreadRequests`, which walks the wire
+ * adjacency and decays per hop. A body's request therefore reflects its
+ * *neighbourhood's* need, not its own hunger. Emitting it turns a gradient
+ * that only travels along wires into one that travels through space, so a
+ * starving net can call to a forager that is not attached to it — which is
+ * something the sim has no way to do at all otherwise.
+ *
+ * Hunger drives the cost instead; see `params.emitCost`.
+ */
+export function chemState(a: { request: number }): number {
+  const r = a.request;
+  return r <= 0 ? 0 : r >= 1 ? 1 : r;
+}
+
+/** Emit weight for one channel at this body's current state. Never negative. */
+export function effEmit(a: Agent, c: number): number {
+  const v = a.chem[EMIT + c] + chemState(a) * a.chem[EMIT_SLOPE + c];
+  return v > 0 ? v : 0;
+}
+
+/** Taste weight for one channel at this body's current state. May be negative. */
+export function effTaste(a: Agent, c: number): number {
+  return a.chem[TASTE + c] + chemState(a) * a.chem[TASTE_SLOPE + c];
+}
 
 /**
  * The hardcoded weights, written out as a genome.
@@ -251,7 +287,9 @@ export const TASTE = 4;
  * population starts, and breeding takes it from there.
  */
 export function seedChem(kind: AgentKind, params: Params): Float32Array {
-  const c = new Float32Array(8);
+  // Slopes start at zero, so a seeded body says the same thing however its
+  // net is doing and the whole modulation is inert until breeding moves it.
+  const c = new Float32Array(CHEM_LEN);
   const S = params.attractStrong;
   const M = params.attractMedium;
   if (kind === 'con') {

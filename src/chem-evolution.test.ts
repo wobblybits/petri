@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EMIT, TASTE, seedChem, type Agent } from './agents.ts';
+import { EMIT, EMIT_SLOPE, TASTE, TASTE_SLOPE, effEmit, effTaste, seedChem, type Agent } from './agents.ts';
 import { CHEM_TASTE_MAX } from './rewrite.ts';
 import { defaultParams } from './params.ts';
 import { loadPreset } from './presets.ts';
@@ -77,6 +77,57 @@ describe('scent genome', () => {
         );
       }
     }
+  });
+
+  it('modulates what a body says by how its neighbourhood is doing', () => {
+    const params = defaultParams();
+    const quiet = { chem: seedChem('con', params), request: 0 } as unknown as Agent;
+    const needy = { chem: seedChem('con', params), request: 1 } as unknown as Agent;
+    // Seeded, the slope is zero and state changes nothing at all.
+    expect(effEmit(needy, 0)).toBe(effEmit(quiet, 0));
+    expect(effTaste(needy, 1)).toBe(effTaste(quiet, 1));
+
+    // Give it something to say under pressure: quiet when fed, loud on
+    // channel 2 when its net is hungry. Channel 2 is the one nothing has ever
+    // listened to, which is exactly the free bandwidth a lineage can claim.
+    needy.chem[EMIT_SLOPE + 2] = 0.8;
+    needy.chem[TASTE_SLOPE + 2] = 2;
+    expect(effEmit(needy, 2), 'a needy body should be saying more').toBeGreaterThan(
+      effEmit(quiet, 2),
+    );
+    expect(effTaste(needy, 2), 'and listening harder').toBeGreaterThan(effTaste(quiet, 2));
+
+    // Half as needy, half the shift: the response is linear in state.
+    const half = { chem: Float32Array.from(needy.chem), request: 0.5 } as unknown as Agent;
+    expect(effEmit(half, 2)).toBeCloseTo((effEmit(quiet, 2) + effEmit(needy, 2)) / 2, 6);
+  });
+
+  it('never lets a modulated emit go negative', () => {
+    const params = defaultParams();
+    const a = { chem: seedChem('con', params), request: 1 } as unknown as Agent;
+    // A body that goes silent under pressure, pushed past silence.
+    a.chem[EMIT_SLOPE] = -5;
+    expect(effEmit(a, 0), 'emitting a negative amount is not a thing').toBe(0);
+  });
+
+  it('charges a body for the voice it uses', () => {
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.upkeep = 0;
+    params.ambientEnergy = 0;
+    params.rewriteDuration = 0;
+    const run = (cost: number): number => {
+      params.emitCost = cost;
+      const sim = new Sim(800, 600);
+      const a = sim.spawn('con', 400, 300, 0, params, true)!;
+      a.extra = 1;
+      for (let f = 0; f < 120; f++) sim.step(1 / 60, params);
+      return sim.agents.get(a.id)!.extra;
+    };
+    const free = run(0);
+    const paid = run(0.02);
+    expect(free, 'nothing else should be draining it').toBeCloseTo(1, 3);
+    expect(paid, `paid ${paid.toFixed(4)} vs free ${free.toFixed(4)}`).toBeLessThan(free - 0.01);
   });
 
   it('lets taste go negative, which the fixed weights never could', () => {

@@ -1,4 +1,4 @@
-import { boundRadius, ERA_RADIUS, portLocal, slotsFor, stemRoot, stemWorld, triangleLocal, wireCubic, type Agent, type AgentKind } from './agents.ts';
+import { boundRadius, ERA_RADIUS, portLocal, slotsFor, stemRoot, stemWorld, triangleLocal, wireCubic, type Agent, type AgentKind, CHEM_LEN} from './agents.ts';
 import { EXTRA_CAP, EXTRA_FLOOR, REQUEST_DECAY, REQUEST_FULL } from './energy.ts';
 import { WIRE_STROKE_PX, wiresDrawable } from './audio/lod.ts';
 import { clampPolylineToChord, WAVE_DISP_PX, wireBowBudget } from './geom.ts';
@@ -247,7 +247,7 @@ function ghostAsAgent(g: Ghost): Agent {
     csCos: 1,
     csSin: 0,
     // A ghost is drawn, never simulated, so it neither emits nor smells.
-    chem: new Float32Array(8),
+    chem: new Float32Array(CHEM_LEN),
     vx: 0,
     vy: 0,
     heading: g.heading,

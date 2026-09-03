@@ -118,6 +118,21 @@ export interface Params {
   /** Extra drained per second. 0 = off. Hitting −1 kills the agent. */
   upkeep: number;
   /**
+   * Energy per second a body pays for a full unit of voice. 0 = free.
+   *
+   * What makes a signal honest. Emission is otherwise costless, and a costless
+   * signal is cheap talk: there is no reason not to advertise whatever draws
+   * the most attention, so selection has nothing to grip and the weights drift
+   * without meaning. Charging for amplitude is the handicap — a body that
+   * cannot afford to shout does not, so loudness carries information about the
+   * body rather than only about what it wants.
+   *
+   * Off by default. Turning it on is a real change to the economy: emit is
+   * normalised to one unit at birth, so this is the per-second rent on saying
+   * anything at all, against an upkeep of 0.015.
+   */
+  emitCost: number;
+  /**
    * How full a body that has been in debt is fed back up to before it stops
    * asking. 0 restores the old behaviour, where a rescue stopped at break-even.
    *
@@ -238,6 +253,7 @@ export function defaultParams(): Params {
     energyCell: 40,
     ambientEnergy: 2,
     upkeep: 0.015,
+    emitCost: 0,
     rescueTo: 1,
     requestDecay: 0.95,
     transportRecoil: 50,
@@ -293,6 +309,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'energyCell', label: 'Energy cell', min: 16, max: 160, step: 1 },
   { key: 'ambientEnergy', label: 'Ambient energy', min: 0, max: 2, step: 0.05 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
+  { key: 'emitCost', label: 'Emit cost', min: 0, max: 0.05, step: 0.001 },
   { key: 'rescueTo', label: 'Rescue to', min: 0, max: 1.25, step: 0.05 },
   { key: 'requestDecay', label: 'Demand decay', min: 0.5, max: 0.98, step: 0.01 },
   { key: 'transportRecoil', label: 'Pump recoil', min: 0, max: 200, step: 5 },

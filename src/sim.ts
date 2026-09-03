@@ -8,8 +8,8 @@ import {
   slotsFor,
   stemRoot,
   stemOffset,
-  EMIT,
-  TASTE,
+  effEmit,
+  effTaste,
   stemOffsetInto,
   stemWorld,
   stemWorldInto,
@@ -101,8 +101,10 @@ export const SENSE_SPAN = 0.1;
  * Those rows are now the seed of a per-body genome (`seedChem`), so the switch
  * is a dot product and the weights can drift.
  */
-export function mixScent(chem: Float32Array, s0: number, s1: number, s2: number, s3: number): number {
-  return chem[TASTE] * s0 + chem[TASTE + 1] * s1 + chem[TASTE + 2] * s2 + chem[TASTE + 3] * s3;
+export function mixScent(a: Agent, s0: number, s1: number, s2: number, s3: number): number {
+  return (
+    effTaste(a, 0) * s0 + effTaste(a, 1) * s1 + effTaste(a, 2) * s2 + effTaste(a, 3) * s3
+  );
 }
 
 /** Cruise multiplier from local trail strength (1 = clear, →0 in dense scent). */
@@ -622,6 +624,24 @@ export class Sim {
     this.startRewrites(params);
     this.tickRewrites(params, t);
     Sim.phase('rewrites');
+    /*
+     * Rent on being heard, charged before rent on existing.
+     *
+     * A body pays for the voice it actually uses — the sum of its effective
+     * emit weights, which is one at birth and moves with both breeding and its
+     * neighbourhood's need. This is what stops emission being cheap talk: a
+     * signal nobody pays for carries no information about the signaller, only
+     * about what it would like you to do.
+     */
+    if (params.emitCost > 0) {
+      const rent = params.emitCost * t;
+      for (const a of this.agents.values()) {
+        if (a.locked) continue;
+        let voice = 0;
+        for (let c = 0; c < 4; c++) voice += effEmit(a, c);
+        if (voice > 0) a.extra -= rent * voice;
+      }
+    }
     for (const id of tickUpkeep(this.agents.values(), t, params.upkeep)) {
       this.kill(id);
     }
@@ -2196,7 +2216,6 @@ export class Sim {
     for (let i = 0; i < n; i++) {
       const a = list[i];
       if (a.locked) continue;
-      const c = a.chem;
       for (const slot of slotsFor(a.kind)) {
         if (!this.graph.isFreeAt(a.id, slot)) continue;
         const w = portWorld(a, slot, this.w, this.h);
@@ -2204,10 +2223,10 @@ export class Sim {
         dep[o] = w.x;
         dep[o + 1] = w.y;
         if (slot === 'p') {
-          dep[o + 4] = amt * c[EMIT];
-          dep[o + 5] = amt * c[EMIT + 1];
-          dep[o + 6] = amt * c[EMIT + 2];
-          dep[o + 7] = amt * c[EMIT + 3];
+          dep[o + 4] = amt * effEmit(a, 0);
+          dep[o + 5] = amt * effEmit(a, 1);
+          dep[o + 6] = amt * effEmit(a, 2);
+          dep[o + 7] = amt * effEmit(a, 3);
         } else {
           dep[o + 4] = 0;
           dep[o + 5] = 0;
@@ -2234,10 +2253,10 @@ export class Sim {
       pro[o + 3] = a.y + rs * sd;
       pro[o + 4] = a.x;
       pro[o + 5] = a.y;
-      pro[o + 8] = a.chem[TASTE];
-      pro[o + 9] = a.chem[TASTE + 1];
-      pro[o + 10] = a.chem[TASTE + 2];
-      pro[o + 11] = a.chem[TASTE + 3];
+      pro[o + 8] = effTaste(a, 0);
+      pro[o + 9] = effTaste(a, 1);
+      pro[o + 10] = effTaste(a, 2);
+      pro[o + 11] = effTaste(a, 3);
     }
 
     const ok = await fieldGpu.step(
@@ -2754,7 +2773,7 @@ export class Sim {
       bodies[o + FAR.locked] = a.locked ? 1 : 0;
       kinds[i] = this.kindCode(a.kind);
       sc[i] = a.scale;
-      emit.set(a.chem.subarray(EMIT, EMIT + 4), i * 4);
+      for (let c = 0; c < 4; c++) emit[i * 4 + c] = effEmit(a, c);
       if (!freeFresh) {
         let mask = 0;
         for (const slot of slotsFor(a.kind)) {
@@ -2780,10 +2799,10 @@ export class Sim {
         const p = portWorld(agent, slot, this.w, this.h);
         if (slot === 'p') {
           // A principal lays this body's own emit vector across all four
-          // channels; which channel that lands in is now a gene, not the kind.
-          const c = agent.chem;
+          // channels; which channel that lands in is now a gene, not the kind,
+          // and how loudly depends on how its neighbourhood is doing.
           for (let ch = 0; ch < 4; ch++) {
-            const w = c[EMIT + ch];
+            const w = effEmit(agent, ch);
             if (w !== 0) this.fields.deposit(ch, p.x, p.y, params.deposit * w);
           }
         } else {
@@ -2797,7 +2816,7 @@ export class Sim {
 
   private scentAt(agent: Agent, x: number, y: number, _params: Params): number {
     return mixScent(
-      agent.chem,
+      agent,
       this.fields.sample(0, x, y),
       this.fields.sample(1, x, y),
       this.fields.sample(2, x, y),
@@ -2847,7 +2866,7 @@ export class Sim {
           sc[i] = a.scale;
         }
         drive[i] = a.drive;
-        taste.set(a.chem.subarray(TASTE, TASTE + 4), i * 4);
+        for (let c = 0; c < 4; c++) taste[i * 4 + c] = effTaste(a, c);
         // Drawn host-side so a seeded run stays reproducible; the solver only
         // consumes them.
         noise[i * 3] = Math.random();
@@ -2869,7 +2888,7 @@ export class Sim {
           sc[i] = a.scale;
         }
         drive[i] = a.drive;
-        taste.set(a.chem.subarray(TASTE, TASTE + 4), i * 4);
+        for (let c = 0; c < 4; c++) taste[i * 4 + c] = effTaste(a, c);
         const pw = this.graph.wireAtSlot(a.id, 'p');
         let pj = -1;
         let pslot = 0;

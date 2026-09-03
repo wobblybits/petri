@@ -51,9 +51,13 @@ describe('scent steering', () => {
   it('does not mix an agent’s own principal channel', () => {
     const params = defaultParams();
     // Kind now only seeds the weights; a body senses through its own genome.
-    const dup = seedChem('dup', params);
-    const con = seedChem('con', params);
-    const era = seedChem('era', params);
+    // mixScent reads through the body, because the weights are modulated by
+    // its inner state; a bare genome is not enough to ask the question with.
+    const body = (kind: 'con' | 'dup' | 'era') =>
+      ({ chem: seedChem(kind, params), request: 0 }) as unknown as Parameters<typeof mixScent>[0];
+    const dup = body('dup');
+    const con = body('con');
+    const era = body('era');
     // A Dup ignores dup-scent and a Con ignores con-scent: each seeks the kind
     // that completes a redex with it, not its own.
     expect(mixScent(dup, 1, 50, 0, 3)).toBe(mixScent(dup, 1, 0, 0, 3));
