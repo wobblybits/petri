@@ -6,7 +6,9 @@ import { queryHit, SLOP } from './collide.ts';
 import { closestPointOnSegment, WIRE_RADIUS } from './geom.ts';
 import { applyTransportRecoil, mixScent, scentSlowFactor, scentTurnBoost, Sim } from './sim.ts';
 import {
+  EXTRA_CAP,
   flowCharges,
+  REQUEST_DECAY,
   resetRequests,
   seedRequest,
   type SlotBody,
@@ -1293,6 +1295,8 @@ describe('transport recoil', () => {
       extra: i === 5 ? 1.25 : 0,
       request: 0,
       recovering: false,
+      requestDecay: REQUEST_DECAY,
+      energyCap: EXTRA_CAP,
       locked: false,
       vx: 0,
       vy: 0,
@@ -1365,4 +1369,41 @@ describe('transport recoil', () => {
       Math.random = realRandom;
     }
   }, 30_000);
+});
+
+describe('per-agent transport traits', () => {
+  it("recoils by the sender's own transportRecoil and the receiver's own transportThrust", () => {
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.ambientEnergy = 0;
+    params.upkeep = 0;
+    params.rewriteDuration = 0;
+    params.snapRadius = 0;
+    params.stepSpeed = 0;
+    params.swimNoise = 0;
+    params.gravity = 0;
+    params.flockAlign = 0;
+    params.flockSep = 0;
+    params.deposit = 0;
+    const sim = new Sim(400, 300);
+    sim.energy.configure(params.energyCell, 0);
+    const a = sim.spawn('era', 100, 150, 0, params, true)!;
+    const b = sim.spawn('era', 140, 150, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    a.extra = 1.25;
+    b.extra = -0.5;
+    // The global sliders stay at their defaults; only the two bodies' own
+    // genes are set, and set the opposite of what the sliders say — if the
+    // sim were still reading params.transportRecoil/transportThrust, this
+    // would recoil weakly and split the kick instead of withholding it.
+    a.transportRecoil = 100;
+    b.transportRecoil = 0;
+    b.transportThrust = 1;
+    sim.step(1 / 60, params);
+    expect(Math.abs(a.vx), "the donor recoils on its own gene, not the slider").toBeGreaterThan(10);
+    expect(
+      Math.abs(b.vx),
+      "thrust 1 on the receiver: it keeps essentially none of the kick",
+    ).toBeLessThan(Math.abs(a.vx) * 0.05);
+  });
 });

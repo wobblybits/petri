@@ -24,6 +24,7 @@ import { loadPreset } from './presets.ts';
 import {
   applyRewrite,
   beginRewrite,
+  commitRewrite,
   leftoverOf,
   portsConnected,
   rewriteHandoffStems,
@@ -535,6 +536,76 @@ describe('commute birth layout', () => {
     );
     expect(box.h).toBeGreaterThanOrEqual(COMMUTE_ACROSS_MIN * 2 - 8);
     expect(wireCrossings(sim, true)).toBe(1);
+  });
+});
+
+describe('heritable traits', () => {
+  function oscillatorPair(): { sim: Sim; params: Params } {
+    const sim = new Sim(480, 320);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    loadPreset(sim, 'oscillator', params);
+    return { sim, params };
+  }
+
+  it('blends both parents into each commute child instead of copying either', () => {
+    const { sim, params } = oscillatorPair();
+    const dup = [...sim.agents.values()].find((a) => a.kind === 'dup')!;
+    const con = [...sim.agents.values()].find((a) => a.kind === 'con')!;
+    dup.requestDecay = 0.55;
+    con.requestDecay = 0.95;
+    dup.transportRecoil = 5;
+    con.transportRecoil = 180;
+
+    const before = new Set(sim.agents.keys());
+    const rw = beginRewrite(dup, con, sim.graph, sim.agents, sim.w, sim.h, 1);
+    sim.nextId = commitRewrite(
+      rw,
+      sim.agents,
+      sim.graph,
+      params,
+      sim.nextId,
+      sim.time,
+      sim.w,
+      sim.h,
+    );
+
+    const children = [...sim.agents.values()].filter((a) => !before.has(a.id));
+    expect(children).toHaveLength(4);
+    for (const c of children) {
+      expect(c.requestDecay).toBeGreaterThanOrEqual(0.5);
+      expect(c.requestDecay).toBeLessThanOrEqual(0.98);
+      expect(c.transportRecoil).toBeGreaterThanOrEqual(0);
+      expect(c.transportRecoil).toBeLessThanOrEqual(200);
+    }
+    // Neither parent's exact value survives untouched, and the four siblings
+    // do not all land on the same blend of the same two numbers.
+    const decays = new Set(children.map((c) => c.requestDecay));
+    expect(decays.size, 'siblings recombine independently').toBeGreaterThan(1);
+    expect(children.some((c) => c.requestDecay === dup.requestDecay)).toBe(false);
+    expect(children.some((c) => c.requestDecay === con.requestDecay)).toBe(false);
+  });
+
+  it('leaves a non-commute rewrite child at the slider default', () => {
+    const sim = new Sim(320, 240);
+    const params = defaultParams();
+    const era = sim.spawn('era', 100, 100, 0, params, true)!;
+    const bin = sim.spawn('con', 130, 100, Math.PI, params, true)!;
+    sim.wire(era.id, 'p', bin.id, 'p', params);
+    const rw = beginRewrite(era, bin, sim.graph, sim.agents, sim.w, sim.h, 1);
+    sim.nextId = commitRewrite(
+      rw,
+      sim.agents,
+      sim.graph,
+      params,
+      sim.nextId,
+      sim.time,
+      sim.w,
+      sim.h,
+    );
+    const spawned = [...sim.agents.values()].filter((a) => a.id !== era.id && a.id !== bin.id);
+    expect(spawned).toHaveLength(2);
+    for (const e of spawned) expect(e.requestDecay).toBe(params.requestDecay);
   });
 });
 

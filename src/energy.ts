@@ -48,7 +48,13 @@ export const EXTRA_CAP = 1.25;
  */
 export const ERA_CAP_RATIO = 2;
 
-/** The most this kind of body can hold. */
+/**
+ * What a fresh body of this kind can hold, before any breeding drifts it.
+ *
+ * A body's actual ceiling lives on it as `energyCap` — heritable, and blended
+ * across a Con+Dup commute's children rather than reset to this — so this is
+ * only the seed `createAgent` gives a body born outside a rewrite.
+ */
 export function extraCapFor(kind: AgentKind): number {
   return kind === 'era' ? EXTRA_CAP * ERA_CAP_RATIO : EXTRA_CAP;
 }
@@ -81,8 +87,10 @@ export const AGENT_VALUE: Record<AgentKind, number> = {
 };
 
 /**
- * How much of a neighbour's need reaches you, per hop. The default behind the
- * `requestDecay` slider; `spreadRequests` takes the live value.
+ * How much of a neighbour's need reaches you, per hop. The fallback for a
+ * body with no `requestDecay` of its own, and what the `requestDecay` slider
+ * seeds a fresh body's trait to; `spreadRequests` otherwise reads each
+ * body's own value.
  *
  * The field is `max(own need, best neighbour's field x decay)`, so need spreads
  * as a decaying scent rather than a hop count. Two consequences matter. Need
@@ -148,8 +156,8 @@ export function agentValue(kind: AgentKind): number {
 
 
 /** Holding as much as it can. Nothing more can be harvested or pumped in. */
-export function atCap(a: { extra: number; kind: AgentKind }): boolean {
-  return a.extra >= extraCapFor(a.kind) - EXTRA_FULL_EPS;
+export function atCap(a: { extra: number; energyCap: number }): boolean {
+  return a.extra >= a.energyCap - EXTRA_FULL_EPS;
 }
 
 /** Able to pay its side of a rewrite. Not the same as being full. */
@@ -291,7 +299,16 @@ export class EnergyGrid {
 
 export type SlotBody = Pick<
   Agent,
-  'id' | 'kind' | 'x' | 'y' | 'extra' | 'locked' | 'request' | 'recovering'
+  | 'id'
+  | 'kind'
+  | 'x'
+  | 'y'
+  | 'extra'
+  | 'locked'
+  | 'request'
+  | 'recovering'
+  | 'requestDecay'
+  | 'energyCap'
 >;
 
 /**
@@ -313,7 +330,7 @@ export function harvestSlots(agents: Iterable<SlotBody>, grid: EnergyGrid): void
   for (const [key, list] of hungry) {
     list.sort((a, b) => a.id - b.id);
     for (const a of list) {
-      const cap = extraCapFor(a.kind);
+      const cap = a.energyCap;
       const room = cap - a.extra;
       if (room <= EXTRA_FULL_EPS) continue;
       const got = grid.take(key, room);
@@ -340,7 +357,7 @@ export function tickUpkeep(agents: Iterable<SlotBody>, dt: number, rate: number)
     const r = upkeepRateFor(a.kind, rate);
     if (r === 0) continue;
     const was = a.extra;
-    a.extra = Math.min(extraCapFor(a.kind), Math.max(EXTRA_FLOOR, a.extra - r * dt));
+    a.extra = Math.min(a.energyCap, Math.max(EXTRA_FLOOR, a.extra - r * dt));
     if (was > EXTRA_FLOOR && a.extra <= EXTRA_FLOOR) dead.push(a.id);
   }
   return dead;
@@ -484,24 +501,24 @@ export function seedRequest(agent: SlotBody, amount: number): void {
 /**
  * Relax the need field over the wire graph until it stops improving.
  *
- * Every body ends up holding the largest need it can see, attenuated by
- * `decay` per hop — so the field is a potential whose gradient points
- * at whoever is neediest, weighted by how badly and discounted by how far.
- * A body can be improved more than once (a bigger need further away can beat
- * a small one next door), so this is a relaxation rather than one BFS sweep;
- * the decay bounds it, since a value below `REQUEST_FLOOR` stops travelling.
+ * Every body ends up holding the largest need it can see, attenuated per hop
+ * by whoever is relaying it — so the field is a potential whose gradient
+ * points at whoever is neediest, weighted by how badly and discounted by how
+ * far. A body can be improved more than once (a bigger need further away can
+ * beat a small one next door), so this is a relaxation rather than one BFS
+ * sweep; the decay bounds it, since a value below `REQUEST_FLOOR` stops
+ * travelling.
+ *
+ * `decay`, when passed, overrides every body's own `requestDecay` trait —
+ * useful for a test that wants one uniform rate. Left out, each body relays
+ * at its own rate, which is what lets `requestDecay` actually be heritable:
+ * a body that conducts demand efficiently ends up embedded in longer chains
+ * than one that muffles it.
  *
  * Locked bodies still conduct, so a rewrite in progress does not cut the net
  * in two.
  */
-export function spreadRequests(
-  list: SlotBody[],
-  adj: WireAdjacency,
-  decay = REQUEST_DECAY,
-): void {
-  // Clamped below 1 for the reason on REQUEST_DECAY: an undecayed field is
-  // flat, and a flat field moves nothing.
-  const keep = Math.min(0.99, Math.max(0, decay));
+export function spreadRequests(list: SlotBody[], adj: WireAdjacency, decay?: number): void {
   const { off, nei } = adj;
   // Indices throughout. Queueing the bodies themselves would need a lookup
   // back to their slot, and a Map keyed on the objects is the allocation this
@@ -514,7 +531,11 @@ export function spreadRequests(
   }
   while (head < tail) {
     const at = q[head++];
-    const next = list[at].request * keep;
+    const body = list[at];
+    // Clamped below 1 for the reason on REQUEST_DECAY: an undecayed field is
+    // flat, and a flat field moves nothing.
+    const keep = Math.min(0.99, Math.max(0, decay ?? body.requestDecay));
+    const next = body.request * keep;
     if (next <= REQUEST_FLOOR) continue;
     for (let k = off[at]; k < off[at + 1]; k++) {
       const ni = nei[k];
@@ -590,7 +611,7 @@ export function flowCharges(
     // Because the field decays per hop, a distant shortage is fed in smaller
     // increments than a near one. That is the intended shape: demand you can
     // barely see moves less energy than demand next door.
-    const give = Math.min(spareEnergy(d), best.request, extraCapFor(best.kind) - best.extra);
+    const give = Math.min(spareEnergy(d), best.request, best.energyCap - best.extra);
     if (give <= FLOW_EPS) continue;
     d.extra -= give;
     best.extra += give;
@@ -622,7 +643,7 @@ export function settlePool(
   let left = pool;
   for (const a of list) {
     if (left <= 0) break;
-    const room = extraCapFor(a.kind) - a.extra;
+    const room = a.energyCap - a.extra;
     if (room <= EXTRA_FULL_EPS) continue;
     const give = Math.min(left, room);
     a.extra += give;

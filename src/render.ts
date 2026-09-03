@@ -1,5 +1,5 @@
 import { boundRadius, ERA_RADIUS, portLocal, slotsFor, stemRoot, stemWorld, triangleLocal, wireCubic, type Agent, type AgentKind } from './agents.ts';
-import { EXTRA_CAP, EXTRA_FLOOR, REQUEST_FULL } from './energy.ts';
+import { EXTRA_CAP, EXTRA_FLOOR, REQUEST_DECAY, REQUEST_FULL } from './energy.ts';
 import { WIRE_STROKE_PX, wiresDrawable } from './audio/lod.ts';
 import { clampPolylineToChord, WAVE_DISP_PX, wireBowBudget } from './geom.ts';
 import type { WaveSnapshot } from './audio/types.ts';
@@ -266,6 +266,11 @@ function ghostAsAgent(g: Ghost): Agent {
     extra: 0,
     request: 0,
     recovering: false,
+    // A ghost is preview art, not a simulated body — never bred, never billed.
+    requestDecay: REQUEST_DECAY,
+    energyCap: EXTRA_CAP,
+    transportThrust: 0,
+    transportRecoil: 0,
   };
 }
 

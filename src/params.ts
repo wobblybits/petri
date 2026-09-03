@@ -132,6 +132,11 @@ export interface Params {
    * The slider stops short of 1 because an undecayed field is a flat one: every
    * body holds the same need, no neighbour is strictly needier, and transport
    * stops dead.
+   *
+   * Heritable: this only seeds a fresh body's own `requestDecay`. Once alive,
+   * a body relays demand at its own rate, and a Con+Dup commute blends the
+   * two parents' rates into each child — this slider just sets where a new
+   * population starts and what a mutation is centred near.
    */
   requestDecay: number;
   /**
@@ -142,6 +147,9 @@ export interface Params {
    * and only comes apart near 3000. The ceiling is low because the visible
    * events are one-off transfers of most of a unit, and 20 makes one of those
    * a ~56 px/s nudge on an Era against settled speeds around 50.
+   *
+   * Heritable, like `requestDecay` above: a pump's actual kick is its own
+   * `transportRecoil`, seeded from this slider and free to drift by breeding.
    */
   transportRecoil: number;
   /**
@@ -163,6 +171,11 @@ export interface Params {
    * seed noise. It reads on the events, and on a net actually holding a
    * gradient — drive one end full and the other hungry and the chain visibly
    * runs away from its own supply.
+   *
+   * Heritable, like the two above. A transfer reads the *sender's* own
+   * `transportRecoil` and the *receiver's* own `transportThrust`, so breeding
+   * a strong low-thrust pump against a high-thrust receiver can drift a
+   * net's stroke somewhere neither parent line swims alone.
    */
   transportThrust: number;
 }
@@ -212,7 +225,7 @@ export function defaultParams(): Params {
     soupCount: 2500,
     spawnInterval: 0.5,
     energyCell: 48,
-    ambientEnergy: 10,
+    ambientEnergy: 2,
     upkeep: 0.015,
     rescueTo: 1,
     requestDecay: 0.95,

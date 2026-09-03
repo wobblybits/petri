@@ -1,4 +1,5 @@
 import { createAgent, portWorld, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
+import { EXTRA_CAP } from './energy.ts';
 import { otherEnd, type Graph } from './graph.ts';
 import type { Params } from './params.ts';
 import { angleDelta, clamp, easeInOut, lerp, rotate, wrap, wrapDeltaVec, wrapMid } from './wrap.ts';
@@ -774,6 +775,41 @@ function snapshotTargets(
   ];
 }
 
+/** The heritable fields a Con+Dup commute recombines into its children. */
+const TRAIT_KEYS = ['requestDecay', 'energyCap', 'transportThrust', 'transportRecoil'] as const;
+type TraitKey = (typeof TRAIT_KEYS)[number];
+
+/**
+ * Bounds a bred trait is clamped to, and how far one generation's mutation
+ * can nudge it. Matches the corresponding slider's own range in params.ts,
+ * except `energyCap`, which has no slider — it is a multiple of `EXTRA_CAP`,
+ * the tank a fresh Con or Dup starts at, since commute parents are always
+ * one of each.
+ */
+const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: number }> = {
+  requestDecay: { min: 0.5, max: 0.98, mutate: 0.03 },
+  energyCap: { min: EXTRA_CAP * 0.5, max: EXTRA_CAP * 2, mutate: EXTRA_CAP * 0.1 },
+  transportThrust: { min: 0, max: 1, mutate: 0.08 },
+  transportRecoil: { min: 0, max: 200, mutate: 12 },
+};
+
+/**
+ * A commute child's traits are its own recombination of its two parents',
+ * not a copy of either: each trait picks an independent blend weight, so the
+ * four children of one commute do not all inherit the same mix, then a small
+ * mutation nudge so a lineage can drift past whatever range its ancestors
+ * already spanned. This is the only place traits change — a body created any
+ * other way just keeps whatever `createAgent` seeded it with.
+ */
+function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent): void {
+  for (const key of TRAIT_KEYS) {
+    const range = TRAIT_RANGE[key];
+    const blended = lerp(conParent[key], dupParent[key], Math.random());
+    const mutated = blended + (Math.random() * 2 - 1) * range.mutate;
+    child[key] = Math.min(range.max, Math.max(range.min, mutated));
+  }
+}
+
 export function commitRewrite(
   rw: Rewrite,
   agents: Map<number, Agent>,
@@ -786,12 +822,16 @@ export function commitRewrite(
 ): number {
   const result = applyRewrite(snapshotOf(agents, graph), rw.rule, rw.a, rw.b, nextId);
   const poses = spawnPoses(rw);
+  // Read before the parents are deleted below.
+  const conParent = rw.rule === 'commute' ? agents.get(rw.conId) : undefined;
+  const dupParent = rw.rule === 'commute' ? agents.get(rw.dupId) : undefined;
   for (const s of result.spawned) {
     const pose = poses[s.role];
     const ag = createAgent(s.id, s.kind, pose.x, pose.y, pose.heading, params);
     ag.vx = 0;
     ag.vy = 0;
     ag.stun = 0.45;
+    if (conParent && dupParent) inheritTraits(ag, conParent, dupParent);
     agents.set(s.id, ag);
   }
   inheritLeftoverWires(graph, result.net.wires, agents, w, h, time);

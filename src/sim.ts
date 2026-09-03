@@ -3246,28 +3246,24 @@ export class Sim {
     }
     const adj = this.wireAdj;
     adj.build(list.length, index, () => this.graph.wires.values());
-    spreadRequests(list, adj, params.requestDecay);
-    const recoil = params.transportRecoil;
-    const thrust = params.transportThrust;
-    flowCharges(
-      list,
-      adj,
-      recoil > 0
-        ? (from, to, amount) => this.recoil(from, to, amount, recoil, thrust)
-        : undefined,
-    );
+    spreadRequests(list, adj);
+    flowCharges(list, adj, (from, to, amount) => this.recoil(from, to, amount));
   }
 
-  private recoil(
-    from: { id: number },
-    to: { id: number },
-    amount: number,
-    gain: number,
-    thrust: number,
-  ): void {
+  /**
+   * The sender's own `transportRecoil` is the kick's size — it is the one
+   * doing the pumping — and the receiver's own `transportThrust` decides how
+   * much of that kick it keeps versus hands back down the wire. Both are
+   * heritable, so a lineage of strong, low-thrust pumps feeding a lineage of
+   * high-thrust receivers drifts a net's swimming stroke somewhere neither
+   * parent species swims alone.
+   */
+  private recoil(from: { id: number }, to: { id: number }, amount: number): void {
     const A = this.agents.get(from.id);
     const B = this.agents.get(to.id);
-    if (A && B) applyTransportRecoil(A, B, amount, gain, this.w, this.h, thrust);
+    if (A && B && A.transportRecoil > 0) {
+      applyTransportRecoil(A, B, amount, A.transportRecoil, this.w, this.h, B.transportThrust);
+    }
   }
 
   private startRewrites(params: Params): void {

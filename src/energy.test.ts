@@ -44,8 +44,10 @@ function body(
   request = 0,
   locked = false,
   kind: SlotBody['kind'] = 'con',
+  energyCap = extraCapFor(kind),
+  requestDecay = REQUEST_DECAY,
 ): SlotBody {
-  return { id, kind, x, y, extra, request, locked, recovering: false };
+  return { id, kind, x, y, extra, request, locked, recovering: false, energyCap, requestDecay };
 }
 
 
@@ -433,6 +435,30 @@ describe('request gradient', () => {
     expect(chain(0.9)).toBeGreaterThan(chain(0.8));
   });
 
+  it('lets each body relay demand at its own rate instead of one global decay', () => {
+    const agents = new Map(
+      Array.from({ length: 6 }, (_, i) => [i + 1, body(i + 1, i * 10, 0)] as const),
+    );
+    agents.get(1)!.request = 1;
+    for (const a of agents.values()) a.requestDecay = 0.9;
+    agents.get(3)!.requestDecay = 0.05;
+    const wires = Array.from({ length: 5 }, (_, i) => ({
+      a: { id: i + 1 },
+      b: { id: i + 2 },
+    }));
+    const { list, adj } = net(agents, wires);
+    spreadRequests(list, adj); // no override: each body's own field governs
+    expect(agents.get(2)!.request, 'upstream of the lossy relay is unaffected').toBeCloseTo(
+      0.9,
+      6,
+    );
+    expect(agents.get(4)!.request, 'the lossy relay chokes what crosses it').toBeCloseTo(
+      0.9 * 0.9 * 0.05,
+      6,
+    );
+    expect(agents.get(6)!.request).toBeLessThan(0.9 ** 5 * 0.1);
+  });
+
   it('never lets the field go flat', () => {
     // At decay 1 every body holds the same need, no neighbour is strictly
     // needier than its donor, and nothing moves at all.
@@ -688,6 +714,23 @@ describe('sim energy', () => {
     expect(atCap(era), 'a Con-sized tankful is only half an Era').toBe(false);
     era.extra = extraCapFor('era');
     expect(atCap(era)).toBe(true);
+  });
+
+  it('caps a body by its own energyCap, not by a flat per-kind number', () => {
+    // energyCap is heritable now — two Cons can carry different tanks — so the
+    // cap has to come from the body, and extraCapFor is only ever the seed a
+    // fresh one starts at.
+    const roomy = body(1, 0, 0, EXTRA_CAP, 0, false, 'con', EXTRA_CAP * 2);
+    const cramped = body(2, 0, 0, EXTRA_CAP * 0.5, 0, false, 'con', EXTRA_CAP * 0.5);
+    expect(atCap(roomy), 'a normal-sized tankful is not full for the bigger tank').toBe(false);
+    expect(atCap(cramped), 'but the smaller tank is already topped out at the same level').toBe(
+      true,
+    );
+    const grid = new EnergyGrid(10, 0);
+    grid.setCell(0, 0, 10);
+    harvestSlots([roomy, cramped], grid);
+    expect(roomy.extra).toBeCloseTo(roomy.energyCap, 6);
+    expect(cramped.extra, 'no room left to harvest into').toBeCloseTo(EXTRA_CAP * 0.5, 6);
   });
 
   it('fills an Era past a full Con from the ground and along a wire', () => {

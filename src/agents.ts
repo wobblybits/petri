@@ -1,3 +1,4 @@
+import { extraCapFor } from './energy.ts';
 import type { Params } from './params.ts';
 import { rotate, wrap, wrapAngle, wrapDeltaVec, angleDelta, type Vec2 } from './wrap.ts';
 
@@ -53,6 +54,21 @@ export interface Agent {
    * something it can act with instead of parking it on the line.
    */
   recovering: boolean;
+  /**
+   * Heritable traits. Seeded from the matching global slider when a body is
+   * created outside a rewrite, so a fresh soup starts homogeneous just as it
+   * did before these existed. A Con+Dup commute instead blends both parents'
+   * values into each child (see `inheritTraits` in rewrite.ts), which is the
+   * only place a population's traits can actually drift.
+   */
+  /** How much of this body's own demand survives one more hop outward. */
+  requestDecay: number;
+  /** The most this body can hold, in place of the flat per-kind cap. */
+  energyCap: number;
+  /** How much of a kick this body's own pumps hand off instead of keeping. */
+  transportThrust: number;
+  /** How hard this body recoils, per unit of energy it pumps to a neighbour. */
+  transportRecoil: number;
   /**
    * Memoized cosine and sine of `heading`, with the heading they were taken
    * at. Every port position in the sim goes through `stemOffsetInto`, which
@@ -233,6 +249,10 @@ export function createAgent(
     extra: 0,
     request: 0,
     recovering: false,
+    requestDecay: params.requestDecay,
+    energyCap: extraCapFor(kind),
+    transportThrust: params.transportThrust,
+    transportRecoil: params.transportRecoil,
   };
 }
 
