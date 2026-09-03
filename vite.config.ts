@@ -158,7 +158,17 @@ export default defineConfig({
     assetsInlineLimit: 0,
   },
   test: {
-    testTimeout: 60_000,
+    /*
+     * Raised from 60s for the minute-long soak tests in net-health, which
+     * simulate 3,600 frames of real soup and now spend most of that in the
+     * scent field. Making the field world-fixed at one wire length per cell
+     * took it from 14,400 cells to 1,048,576, and its two diffusion passes and
+     * a decay from 0.25ms a frame to 13.7ms — 49 seconds of diffusion alone
+     * across a minute of simulated pond. That is the designed cost of a grid
+     * fine enough to steer by, and the reason the field wants to be on the GPU;
+     * it is not a regression to tune away here.
+     */
+    testTimeout: 150_000,
     // Applied to both projects: seeds Math.random and resets the Sim statics
     // per test, so a file's result does not depend on which file ran before it.
     setupFiles: ['./src/test-setup.ts'],

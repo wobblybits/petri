@@ -17,10 +17,13 @@ import { Sim } from './sim.ts';
 
 function pond(): { sim: Sim; params: ReturnType<typeof defaultParams> } {
   const params = defaultParams();
-  params.soupCount = 400;
   params.spawnInterval = 0;
   const sim = new Sim(800, 600);
-  loadPreset(sim, 'soup', params);
+  // The oscillator, not a soup: it is built to rewrite, so births arrive in a
+  // second rather than half a minute. These tests need breeding, not a pond —
+  // and a 400-body soup run twice for thirty seconds each starved the rest of
+  // the suite badly enough to time other files out.
+  loadPreset(sim, 'oscillator', params);
   return { sim, params };
 }
 
@@ -31,14 +34,18 @@ function drift(a: Agent, params: ReturnType<typeof defaultParams>): number {
   return worst;
 }
 
+/** One run, both questions asked of it. */
+function bred(): { sim: Sim; params: ReturnType<typeof defaultParams>; born: number } {
+  const { sim, params } = pond();
+  const before = sim.nextId;
+  for (let f = 0; f < 900; f++) sim.step(1 / 60, params);
+  return { sim, params, born: sim.nextId - before };
+}
+
 describe('scent genome', () => {
   it('drifts away from its seed once bodies breed', () => {
-    const { sim, params } = pond();
-    const view = { x: 400, y: 300, zoom: 0.4, viewW: 1200, viewH: 800 };
-    const before = sim.nextId;
-    for (let f = 0; f < 1800; f++) sim.step(1 / 60, params, view);
-    const born = sim.nextId - before;
-    expect(born, 'nothing was born, so nothing could inherit').toBeGreaterThan(20);
+    const { sim, params, born } = bred();
+    expect(born, 'nothing was born, so nothing could inherit').toBeGreaterThan(4);
 
     let moved = 0;
     let worst = 0;
@@ -52,9 +59,7 @@ describe('scent genome', () => {
   });
 
   it('keeps every genome legal however far it drifts', () => {
-    const { sim, params } = pond();
-    const view = { x: 400, y: 300, zoom: 0.4, viewW: 1200, viewH: 800 };
-    for (let f = 0; f < 1800; f++) sim.step(1 / 60, params, view);
+    const { sim } = bred();
     for (const a of sim.agents.values()) {
       let sum = 0;
       for (let k = EMIT; k < EMIT + 4; k++) {
@@ -62,9 +67,9 @@ describe('scent genome', () => {
         expect(Number.isFinite(a.chem[k]), 'emit went non-finite').toBe(true);
         sum += a.chem[k];
       }
-      // One unit of voice, spent across four channels. A body that mutated
-      // its way to silence keeps it rather than being renormalised up out of
-      // noise, so the sum is either ~1 or ~0.
+      // One unit of voice, spent across four channels. A body that mutated its
+      // way to silence keeps it rather than being renormalised up out of noise,
+      // so the sum is either about one or about zero.
       expect(sum < 1e-5 || Math.abs(sum - 1) < 1e-3, `emit sums to ${sum}`).toBe(true);
       for (let k = TASTE; k < TASTE + 4; k++) {
         expect(Math.abs(a.chem[k]), `taste ${k} out of bounds`).toBeLessThanOrEqual(
