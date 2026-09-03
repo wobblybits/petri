@@ -1458,7 +1458,10 @@ uint8_t *solver_port_free(void) { return port_free; }
  * of the same pond, and every constant that reads a raw cell value (slow
  * factor, turn boost, the steering dead zone) would shift with resolution.
  */
-#define SCENT_REF_CELL 20.f
+/* Must equal Fields.REF_CELL, which is FIELD_CELL. The two normalisations
+ * are the same constant on both sides of the wall; when they drifted apart the
+ * solver deposited four times what the twin did. */
+#define SCENT_REF_CELL 10.f
 
 static void scent_add(int ch, float x, float y, float amount) {
   if (scent_cols <= 0 || scent_rows <= 0) return;

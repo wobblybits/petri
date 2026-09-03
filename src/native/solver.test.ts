@@ -166,12 +166,19 @@ describe('native WASM solver', () => {
   it('matches JS scent diffusion on a small stamp', async () => {
     const native = new NativeSolver();
     expect(await native.init(), native.lastError).toBe(true);
-    const js = new Fields();
+    /*
+     * A small grid on purpose. The solver's diffuse walks every cell and needs
+     * the field copied both ways to do it, so it declines the world grid — a
+     * million cells is 16 MB across and back for arithmetic the TS twin does
+     * over the live box alone. What is under test is the stencil agreeing, and
+     * that is the same stencil at any size.
+     */
+    const js = new Fields(128);
     js.deposit(0, 40, 40, 8);
-    const wa = new Fields();
+    const wa = new Fields(128);
     wa.data.set(js.data);
     js.diffuse(0.28);
-    expect(native.scentDiffuse(wa, 0.28)).toBe(true);
+    expect(native.scentDiffuse(wa, 0.28), 'the solver declined this grid').toBe(true);
     let maxDiff = 0;
     for (let i = 0; i < js.data.length; i++) {
       maxDiff = Math.max(maxDiff, Math.abs(js.data[i] - wa.data[i]));

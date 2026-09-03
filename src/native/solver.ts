@@ -201,6 +201,7 @@ export class NativeSolver {
       exp._initialize?.();
       const mem = exp.memory;
       this.fkSim = -1;
+      this.scentOwner = null;
       this.skSim = -1;
       this.staticBytes = exp.solver_static_bytes();
       this.heapBytes = mem.buffer.byteLength;
@@ -329,10 +330,29 @@ export class NativeSolver {
    * frame put together. The box is where the scent is, so the rows outside it
    * are zeros being copied back and forth.
    */
+  /** Which field the resident scent buffer currently mirrors. */
+  private scentOwner: Fields | null = null;
+
   loadScent(fields: Fields): boolean {
     if (!this.ready || !this.exp || !this.scent) return false;
     const n = fields.cols * fields.rows;
     if (n * 4 > this.scentCap) return false;
+    /*
+     * Only the box crosses, so everything outside it has to already agree —
+     * and for a field the module has not seen before, it does not: the buffer
+     * still holds whatever the last Sim left there, and `solver_deposit` and
+     * the steering samples read the whole array. That made a scenario depend
+     * on which sim ran before it, which the determinism harness caught as a
+     * run failing to reproduce itself.
+     *
+     * Zeroing on handover restores the invariant the box copy needs: outside
+     * the box both sides are zero. It costs one memset per owner change, and
+     * the owner changes when a Sim is constructed, not when a frame runs.
+     */
+    if (this.scentOwner !== fields) {
+      this.scent.fill(0);
+      this.scentOwner = fields;
+    }
     this.copyScentRows(fields, fields.data, this.scent);
     this.exp.solver_scent_frame(
       fields.cols,
