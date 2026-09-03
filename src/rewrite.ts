@@ -1,4 +1,4 @@
-import { createAgent, portWorld, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
+import { EMIT, TASTE, createAgent, portWorld, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
 import { EXTRA_CAP } from './energy.ts';
 import { otherEnd, type Graph } from './graph.ts';
 import type { Params } from './params.ts';
@@ -786,6 +786,11 @@ export type TraitKey = (typeof TRAIT_KEYS)[number];
  * the tank a fresh Con or Dup starts at, since commute parents are always
  * one of each.
  */
+/** How far one generation can nudge a single chemistry weight. */
+export const CHEM_MUTATE = 0.06;
+/** Ceiling on a taste weight, positive or negative. */
+export const CHEM_TASTE_MAX = 4;
+
 export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: number }> = {
   requestDecay: { min: 0.5, max: 0.98, mutate: 0.03 },
   energyCap: { min: EXTRA_CAP * 0.5, max: EXTRA_CAP * 2, mutate: EXTRA_CAP * 0.1 },
@@ -821,6 +826,41 @@ function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent): void {
       : lerp(conParent[key], dupParent[key], Math.random());
     const mutated = combined + (Math.random() * 2 - 1) * range.mutate;
     child[key] = Math.min(range.max, Math.max(range.min, mutated));
+  }
+  inheritChem(child, conParent, dupParent, assort);
+}
+
+/**
+ * The scent genome recombines the same way the scalar traits do — blended for
+ * a Con child, assorted whole for a Dup — but per *channel* rather than per
+ * vector, so a child can take what it says on one channel from one parent and
+ * on another from the other. That is what lets a lineage explore combinations
+ * instead of only the line between its two ancestors.
+ *
+ * Emit is clamped non-negative and to a unit sum: a body has one voice to
+ * spend across four channels, and choosing what to say is free while shouting
+ * is not. Without that, "louder" is a strictly better strategy and every
+ * lineage converges on it. Taste is left signed, because a negative weight is
+ * avoidance, and a body that flees what it can smell is a behaviour the fixed
+ * weights could never express.
+ */
+function inheritChem(child: Agent, con: Agent, dup: Agent, assort: boolean): void {
+  const c = child.chem;
+  for (let k = 0; k < 8; k++) {
+    const a = con.chem[k];
+    const b = dup.chem[k];
+    const combined = assort ? (Math.random() < 0.5 ? a : b) : lerp(a, b, Math.random());
+    c[k] = combined + (Math.random() * 2 - 1) * CHEM_MUTATE;
+  }
+  let sum = 0;
+  for (let k = EMIT; k < EMIT + 4; k++) {
+    if (c[k] < 0) c[k] = 0;
+    sum += c[k];
+  }
+  // A body with nothing left to say is mute, not amplified from noise.
+  if (sum > 1e-6) for (let k = EMIT; k < EMIT + 4; k++) c[k] /= sum;
+  for (let k = TASTE; k < TASTE + 4; k++) {
+    c[k] = Math.min(CHEM_TASTE_MAX, Math.max(-CHEM_TASTE_MAX, c[k]));
   }
 }
 
