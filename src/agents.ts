@@ -44,6 +44,20 @@ export interface Agent {
   /** Request gradient toward a hungry redex. 0 = quiet. */
   request: number;
   /**
+   * How much this body cares about matching its neighbours' heading and
+   * velocity, and how hard it pushes off them when they crowd. Heritable, so a
+   * lineage can become a shoal or a scatter — flocking was one number for the
+   * whole pond, which meant every net moved with the same temperament.
+   *
+   * A pair uses the mean of the two, not each body's own: the force is equal
+   * and opposite with mass weighting, and per-body gains would break the
+   * momentum conservation the settled-net tests check for. The mean still lets
+   * a high-align lineage shoal and a low-align one ignore its neighbours, and
+   * makes a mixed pair negotiate rather than one of them win.
+   */
+  flockAlign: number;
+  flockSep: number;
+  /**
    * Chemistry: what this body says, and what it listens for.
    *
    * Eight floats in one array — `emit` in 0..3, `taste` in 4..7 — because both
@@ -262,6 +276,21 @@ export function chemState(a: { request: number }): number {
   return r <= 0 ? 0 : r >= 1 ? 1 : r;
 }
 
+/**
+ * A flocking gain as the force sees it: never negative.
+ *
+ * The genes are allowed below zero so mutation has no reflecting barrier at
+ * the off position, but neither force survives a negative gain. Alignment
+ * pushes a body toward its neighbour's velocity, so a negative gain pushes it
+ * away and relative velocity grows without bound — negative damping.
+ * Separation only acts while a pair is closer than it wants to be, so a
+ * negative gain pulls them together with no equilibrium to stop at. Both blow
+ * up. Below zero simply means as off as off gets.
+ */
+export function flockGain(v: number): number {
+  return v > 0 ? v : 0;
+}
+
 /** Emit weight for one channel at this body's current state. Never negative. */
 export function effEmit(a: Agent, c: number): number {
   const v = a.chem[EMIT + c] + chemState(a) * a.chem[EMIT_SLOPE + c];
@@ -345,6 +374,8 @@ export function createAgent(
     chem: seedChem(kind, params),
     extra: 0,
     request: 0,
+    flockAlign: params.flockAlign,
+    flockSep: params.flockSep,
     recovering: false,
     requestDecay: params.requestDecay,
     energyCap: extraCapFor(kind),

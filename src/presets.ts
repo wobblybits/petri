@@ -31,8 +31,8 @@ export function loadPreset(sim: Sim, name: PresetName, params: Params): void {
       const kind = roll < 0.34 ? 'era' : roll < 0.67 ? 'dup' : 'con';
       sim.spawn(
         kind,
-        Math.random() * sim.w,
-        Math.random() * sim.h,
+        Math.random() * 2 * sim.w,
+        Math.random() * 2 * sim.h,
         Math.random() * Math.PI * 2,
         params,
         true,

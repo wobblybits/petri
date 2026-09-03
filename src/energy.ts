@@ -393,7 +393,12 @@ export function harvestSlots(agents: Iterable<SlotBody>, grid: EnergyGrid): void
  * other source. Returns the ids that reached the floor — a whole unit of
  * debt, which the caller treats as death rather than a detachment.
  */
-export function tickUpkeep(agents: Iterable<SlotBody>, dt: number, rate: number): number[] {
+export function tickUpkeep(
+  agents: Iterable<SlotBody>,
+  dt: number,
+  rate: number,
+  grid?: EnergyGrid,
+): number[] {
   if (!(dt > 0)) return [];
   const dead: number[] = [];
   for (const a of agents) {
@@ -401,7 +406,27 @@ export function tickUpkeep(agents: Iterable<SlotBody>, dt: number, rate: number)
     const r = upkeepRateFor(a.kind, rate);
     if (r === 0) continue;
     const was = a.extra;
-    a.extra = Math.min(a.energyCap, Math.max(EXTRA_FLOOR, a.extra - r * dt));
+    const next = a.extra - r * dt;
+    if (next > a.energyCap) {
+      /*
+       * A full producer spills onto the ground rather than into nothing.
+       *
+       * An Era's upkeep is negative — it makes energy instead of spending it —
+       * and it has a tank like anything else. Clamping at the cap quietly
+       * destroyed whatever it made past full, so a net's Eras stopped being
+       * worth anything the moment they topped up, and the conservation the
+       * rest of the economy is careful about had a hole in it.
+       *
+       * This is the only path that can overfill a body: harvest and transport
+       * are both bounded by the room the receiver actually has, and a rewrite's
+       * leftovers already go to the grid. If another producer ever appears it
+       * should come through here too.
+       */
+      if (grid) grid.addAt(a.x, a.y, next - a.energyCap);
+      a.extra = a.energyCap;
+    } else {
+      a.extra = Math.max(EXTRA_FLOOR, next);
+    }
     if (was > EXTRA_FLOOR && a.extra <= EXTRA_FLOOR) dead.push(a.id);
   }
   return dead;

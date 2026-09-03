@@ -78,6 +78,47 @@ export interface Params {
    */
   wireTaut: number;
   /**
+   * Live length / rest at which a wire tears loose. 0 = wires never break.
+   *
+   * Well above `wireTaut`, because the span constraint is compliant and a
+   * loaded wire legitimately stretches — a threshold near the taut ratio
+   * shreds a working net rather than relieving it. Measured over thirty
+   * seconds of a 400-body soup, against snapping switched off entirely:
+   *
+   *   off   281 wires, 340 bodies
+   *   4.0   283 wires, 344 bodies   never fires
+   *   3.0   277 wires, 338 bodies   fires, costs nothing in aggregate
+   *   2.2   205 wires, 260 bodies   a quarter of the pond gone
+   *   1.5   126 wires, 220 bodies   shredded
+   *
+   * 3.0 is the setting that relieves a strained net without dismantling a
+   * working one. Below about 2.5 this stops being a safety valve and becomes
+   * a second death rate.
+   *
+   * It closes a loop that already existed with nothing at the end of it:
+   * `wireShrink` pulls wired bodies together, and in a crowded net they cannot
+   * close the distance, so tension builds and simply stays. Now the most
+   * strained link lets go, the ports come free to latch elsewhere, and an
+   * over-packed net reconfigures instead of straining forever.
+   */
+  wireSnap: number;
+  /**
+   * Energy per second of penetration depth, charged to both bodies in a
+   * contact. 0 = collisions are free.
+   *
+   * Damage rather than death. One rule kills — `extra` reaching the floor —
+   * and everything lethal works through the economy, so a bad knock is
+   * survivable and a body can recover from it. A separate physics death path
+   * would also turn any numerical fault into an extinction: the pond flew
+   * apart once already this week from a constant that disagreed across the
+   * wasm wall, and that should stay a thing you can watch and diagnose.
+   *
+   * It is also what gives `flockSep` something to select on. Keeping your
+   * distance is now heritable and nothing rewarded it; a cost for crowding
+   * lets a lineage work out whether to space out or tolerate the scrum.
+   */
+  contactCost: number;
+  /**
    * Pull back toward home for a body outside the world bound, per world unit
    * of overshoot per second. 0 = off, and the pond is unbounded again.
    */
@@ -207,9 +248,9 @@ export interface Params {
 
 export function defaultParams(): Params {
   return {
-    deposit: 2.4,
-    diffuse: 0.28,
-    decay: 0.018,
+    deposit: 5,
+    diffuse: 0.9,
+    decay: 0.005,
     sense: 520,
     attractStrong: 1.45,
     attractMedium: 0.72,
@@ -222,7 +263,7 @@ export function defaultParams(): Params {
     springK: 12,
     springDamp: 45,
     auxSpread: 1.7,
-    declutter: 1,
+    declutter: 0,
     nearBudget: 0,
     uncross: 0,
     wireClear: 1,
@@ -231,8 +272,10 @@ export function defaultParams(): Params {
     wireShapeAge: 2,
     wireSpanAge: 10,
     wireTaut: 1.08,
+    wireSnap: 3,
+    contactCost: 0,
     edgePull: 0.35,
-    wireMinRest: 40,
+    wireMinRest: 48,
     wireShrink: 0.2,
     eraMass: 0.45,
     nodeMass: 1,
@@ -245,13 +288,13 @@ export function defaultParams(): Params {
     drag: 0.55,
     angDrag: 2.4,
     gravity: 0,
-    flockAlign: 5.5,
-    flockSep: 36,
+    flockAlign: 0.0,
+    flockSep: 48,
     maxAgents: 10000,
     soupCount: 2500,
     spawnInterval: 0.5,
     energyCell: 40,
-    ambientEnergy: 2,
+    ambientEnergy: 1,
     upkeep: 0.015,
     emitCost: 0,
     rescueTo: 1,
@@ -302,6 +345,8 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'wireShapeAge', label: 'Shape drop (s)', min: 0, max: 30, step: 0.1 },
   { key: 'wireSpanAge', label: 'Span-only (s)', min: 0, max: 60, step: 0.5 },
   { key: 'wireTaut', label: 'Taut ratio', min: 1, max: 1.5, step: 0.01 },
+  { key: 'wireSnap', label: 'Wire snap ratio', min: 0, max: 6, step: 0.1 },
+  { key: 'contactCost', label: 'Impact cost', min: 0, max: 0.2, step: 0.005 },
   { key: 'eraMass', label: 'Era mass', min: 0.15, max: 2, step: 0.05 },
   { key: 'nodeMass', label: 'Con/Dup mass', min: 0.3, max: 4, step: 0.05 },
   { key: 'maxAgents', label: 'Max agents', min: 8, max: 8000, step: 1 },

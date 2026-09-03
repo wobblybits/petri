@@ -776,7 +776,14 @@ function snapshotTargets(
 }
 
 /** The heritable fields a Con+Dup commute recombines into its children. */
-export const TRAIT_KEYS = ['requestDecay', 'energyCap', 'transportThrust', 'transportRecoil'] as const;
+export const TRAIT_KEYS = [
+  'requestDecay',
+  'energyCap',
+  'transportThrust',
+  'transportRecoil',
+  'flockAlign',
+  'flockSep',
+] as const;
 export type TraitKey = (typeof TRAIT_KEYS)[number];
 
 /**
@@ -799,6 +806,20 @@ export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: n
   energyCap: { min: EXTRA_CAP * 0.5, max: EXTRA_CAP * 2, mutate: EXTRA_CAP * 0.1 },
   transportThrust: { min: 0, max: 1, mutate: 0.08 },
   transportRecoil: { min: 0, max: 200, mutate: 12 },
+  /*
+   * These two float below zero on purpose, and are clamped where they are
+   * used rather than where they are bred — see `flockGain`.
+   *
+   * Clamping a trait at its own floor makes that floor reflect: a body sitting
+   * at zero has half its mutations absorbed and half moving up, so the trait
+   * drifts upward whether or not anything selects for it. `flockAlign` ships
+   * off precisely so that alignment has to emerge, and a reflecting barrier
+   * hands it to every lineage for free. Letting the gene go negative gives the
+   * random walk somewhere to go in both directions, so switched-off stays
+   * switched-off until something actually favours turning it on.
+   */
+  flockAlign: { min: -8, max: 16, mutate: 0.6 },
+  flockSep: { min: -60, max: 120, mutate: 5 },
 };
 
 /**

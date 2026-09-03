@@ -10,6 +10,7 @@ import {
   stemOffset,
   effEmit,
   effTaste,
+  flockGain,
   stemOffsetInto,
   stemWorld,
   stemWorldInto,
@@ -41,6 +42,7 @@ import {
   canPayShare,
   flowCharges,
   harvestSlots,
+  EXTRA_FLOOR,
   rescueNeed,
   redexNeed,
   resetRequests,
@@ -407,6 +409,7 @@ export class Sim {
     this.time = 0;
     this.nextId = 1;
     this.rosterVersion++;
+    this.worldPinned = false;
     this.spawnAcc = 0;
     this.home = null;
     this.contactAudioPrev.clear();
@@ -548,13 +551,28 @@ export class Sim {
     this.components = this.graph.componentIds(this.agents);
     this.trackHome(t);
     /*
-     * One centre for the whole world grid. `home` lags the true centre of mass
-     * by half a second, so neither the field nor the bound jumps when a rewrite
-     * deletes a pair — and because both take the same centre, "off the map"
-     * means one thing rather than two.
+     * One centre for the whole world grid, pinned once and never moved.
+     *
+     * It used to follow `home`, which is a habit left over from the field
+     * being a camera window. Two things were wrong with it. The field scrolled
+     * about a hundred times a minute, and on the GPU path only the CPU copy
+     * scrolled — the origin in the uniform moved while the buffer's contents
+     * did not, so the whole field slid through world space against home's
+     * drift and banked up along an edge. Eras found it first, being the only
+     * kind with `attractStrong`, and ended up clumped in the corners.
+     *
+     * The second is worse and applied to both paths: a bound that follows the
+     * pond can be towed by whatever is escaping it. Anchoring the bound means
+     * the restoring force has something to restore *to*.
+     *
+     * Pinned at the first centre of mass, so a preset still decides where its
+     * world is rather than inheriting an arbitrary origin.
      */
     const h = this.home;
-    if (h) {
+    if (h && !this.worldPinned) {
+      this.worldPinned = true;
+      this.worldX = h.x;
+      this.worldY = h.y;
       this.fields.cover(h.x, h.y);
       this.energy.setBounds(h.x, h.y, FIELD_HALF);
     }
@@ -601,6 +619,7 @@ export class Sim {
     Sim.phase('damp');
 
     this.graph.refreshLengths(this.agents, this.w, this.h, this.rewriteFrozen, this.wireDetailed);
+    this.snapTautWires(params);
     Sim.phase('refreshLengths');
     // Earn, distribute, spend, then pay rent. Energy that arrives to complete
     // a redex is spent in the same frame it lands, and a body that has just
@@ -642,7 +661,8 @@ export class Sim {
         if (voice > 0) a.extra -= rent * voice;
       }
     }
-    for (const id of tickUpkeep(this.agents.values(), t, params.upkeep)) {
+    for (const id of this.contactDamage(params, t)) this.kill(id);
+    for (const id of tickUpkeep(this.agents.values(), t, params.upkeep, this.energy)) {
       this.kill(id);
     }
     this.components = this.graph.componentIds(this.agents);
@@ -2164,6 +2184,12 @@ export class Sim {
   }
 
   /** Packed FAR pass on the GPU. True when the kernel ran. */
+  /** Where the world grid is anchored. Set once, from the first centre of
+   *  mass, and fixed for the life of the sim. */
+  private worldPinned = false;
+  worldX = 0;
+  worldY = 0;
+
   /** True once a device exists and the field has moved there for good. */
   private fieldOnGpu = false;
 
@@ -2691,6 +2717,65 @@ export class Sim {
     }
   }
 
+  /**
+   * Wires that have been stretched past `wireSnap` tear loose.
+   *
+   * Measured against the same live-length-over-rest ratio the rope coarsening
+   * uses, so a wire that is merely taut is left alone and one that is being
+   * pulled apart is not. A wire either end of which is mid-rewrite is spared:
+   * the rewrite is about to rebuild that neighbourhood anyway, and cutting one
+   * of its wires out from under it leaves the graph in a shape it did not
+   * expect.
+   */
+  private readonly snapping: number[] = [];
+
+  private snapTautWires(params: Params): void {
+    const limit = params.wireSnap;
+    if (limit <= 0) return;
+    const doomed = this.snapping;
+    doomed.length = 0;
+    for (const wire of this.graph.wires.values()) {
+      if (this.rewriteFrozen.has(wire.a.id) || this.rewriteFrozen.has(wire.b.id)) continue;
+      const rest = this.graph.restLength(wire, this.time, params);
+      if (!(rest > 0) || !Number.isFinite(wire.lastLen)) continue;
+      if (wire.lastLen / rest > limit) doomed.push(wire.id);
+    }
+    for (let i = 0; i < doomed.length; i++) this.graph.detach(doomed[i]);
+  }
+
+  /**
+   * Being hit costs energy, proportional to how deeply the pair interpenetrate.
+   *
+   * Damage, not death: it returns whoever it pushed past the floor so the
+   * caller kills them the same way starvation does, and every lethal thing in
+   * the sim keeps going through the one tank. Overlap is the severity proxy —
+   * a harder collision penetrates further before the solver can resolve it —
+   * and it is what `LiveContact` already carries for the audio.
+   */
+  private readonly bruised: number[] = [];
+
+  private contactDamage(params: Params, dt: number): number[] {
+    const k = params.contactCost;
+    const dead = this.bruised;
+    dead.length = 0;
+    if (k <= 0 || dt <= 0) return dead;
+    const hurt = k * dt;
+    for (const c of this.contacts.values()) {
+      const A = this.agents.get(c.agentA);
+      const B = this.agents.get(c.agentB);
+      const bite = hurt * c.overlap;
+      if (A && !A.locked && A.extra > EXTRA_FLOOR) {
+        A.extra -= bite;
+        if (A.extra <= EXTRA_FLOOR) dead.push(A.id);
+      }
+      if (B && !B.locked && B.extra > EXTRA_FLOOR) {
+        B.extra -= bite;
+        if (B.extra <= EXTRA_FLOOR) dead.push(B.id);
+      }
+    }
+    return dead;
+  }
+
   /** Drop a free forager near the flock every spawnInterval seconds. */
   private autoSpawn(params: Params, dt: number): void {
     const interval = params.spawnInterval;
@@ -3094,8 +3179,10 @@ export class Sim {
     const adjNei = nativeSolver.adjNei;
     const ids = nativeSolver.flockId;
     const mass = nativeSolver.flockMass;
+    const fa = nativeSolver.flockAlign;
+    const fs = nativeSolver.flockSep;
     const sw = nativeSolver.swim;
-    if (!bodies || !adjOff || !adjNei || !ids || !mass || !sw) return false;
+    if (!bodies || !adjOff || !adjNei || !ids || !mass || !sw || !fa || !fs) return false;
 
     // On a reuse frame the solver never reads the adjacency — it replays the
     // pair list it already built from it — so neither the fit check nor the
@@ -3128,6 +3215,8 @@ export class Sim {
       }
       ids[i] = a.id;
       mass[i] = a.mass;
+      fa[i] = flockGain(a.flockAlign);
+      fs[i] = flockGain(a.flockSep);
       sw[i] = swim[i];
     }
     if (
@@ -3149,8 +3238,21 @@ export class Sim {
    * toward neighbor centroids so wires straighten.
    */
   private flock(params: Params, dt: number): void {
-    const align = params.flockAlign;
-    const sep = params.flockSep;
+    /*
+     * The gains are per body now, so the params are only a gate: a pond whose
+     * sliders are both zero still has bodies carrying whatever their lineage
+     * bred, and the largest of those decides whether the pass runs at all.
+     * The values passed down are the maxima, used for nothing but that test —
+     * the force itself reads each pair's own mean.
+     */
+    let align = params.flockAlign;
+    let sep = params.flockSep;
+    for (const a of this.agents.values()) {
+      const ga = flockGain(a.flockAlign);
+      const gs = flockGain(a.flockSep);
+      if (ga > align) align = ga;
+      if (gs > sep) sep = gs;
+    }
     if ((align <= 0 && sep <= 0) || dt <= 0) return;
     const list = this.agentList;
     list.length = 0;
@@ -3250,18 +3352,21 @@ export class Sim {
           const nx = dx / gap;
           const ny = dy / gap;
 
-          if (align > 0) {
-            const kAlign = align * w * dt;
+          // The pair's mean of the clamped gains, matching the solver.
+          const pairAlign = 0.5 * (flockGain(A.flockAlign) + flockGain(B.flockAlign));
+          const pairSep = 0.5 * (flockGain(A.flockSep) + flockGain(B.flockSep));
+          if (pairAlign > 0) {
+            const kAlign = pairAlign * w * dt;
             const dvx = B.vx - A.vx;
             const dvy = B.vy - A.vy;
             this.netForce(A, dvx * kAlign * (mB / mSum), dvy * kAlign * (mB / mSum), 0);
             this.netForce(B, -dvx * kAlign * (mA / mSum), -dvy * kAlign * (mA / mSum), 0);
           }
 
-          if (sep > 0 && d > 1) {
+          if (pairSep > 0 && d > 1) {
             const want = 22 + (d - 1) * desired;
             if (gap < want) {
-              const mag = sep * w * (want - gap);
+              const mag = pairSep * w * (want - gap);
               const ax = nx * mag * dt;
               const ay = ny * mag * dt;
               const turn = turnRate * w * 0.25;

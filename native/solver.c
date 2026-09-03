@@ -184,6 +184,10 @@ static int32_t flock_dist[MAX_BODIES];
 static int32_t flock_q[MAX_BODIES];
 static int32_t flock_seen[MAX_BODIES];
 static float flock_mass[MAX_BODIES];
+/* Per-body flocking temperament; a pair uses the mean of the two so the force
+ * stays equal and opposite. See Agent.flockAlign. */
+static float flock_align[MAX_BODIES];
+static float flock_sep[MAX_BODIES];
 /*
  * Per-body chemistry, mirroring Agent.chem: emit weights then taste weights,
  * four channels each. Both sides of the field were fixed linear maps chosen by
@@ -1908,17 +1912,19 @@ static void flock_search(int n, float align, float sep, float dt, float turn_rat
         float gap = sqrtf(dx * dx + dy * dy);
         if (gap < 1e-6f) gap = 1e-6f;
         float nx = dx / gap, ny = dy / gap;
-        if (align > 0.f) {
-          float kAlign = align * w * dt;
+        float pairAlign = 0.5f * (flock_align[start] + flock_align[v]);
+        float pairSep = 0.5f * (flock_sep[start] + flock_sep[v]);
+        if (pairAlign > 0.f) {
+          float kAlign = pairAlign * w * dt;
           float dvx = B[FAR_VX] - A[FAR_VX];
           float dvy = B[FAR_VY] - A[FAR_VY];
           flock_force(start, dvx * kAlign * (mB / mSum), dvy * kAlign * (mB / mSum), 0.f);
           flock_force(v, -dvx * kAlign * (mA / mSum), -dvy * kAlign * (mA / mSum), 0.f);
         }
-        if (sep > 0.f && d > 1) {
+        if (pairSep > 0.f && d > 1) {
           float want = 22.f + (float)(d - 1) * desired;
           if (gap < want) {
-            float mag = sep * w * (want - gap);
+            float mag = pairSep * w * (want - gap);
             float ax = nx * mag * dt;
             float ay = ny * mag * dt;
             float turn = turn_rate * w * 0.25f;
@@ -2043,17 +2049,19 @@ static void flock_apply(int n, float align, float sep, float dt, float turn_rate
       float gap = sqrtf(dx * dx + dy * dy);
       if (gap < 1e-6f) gap = 1e-6f;
       float nx = dx / gap, ny = dy / gap;
-      if (align > 0.f) {
-        float kAlign = align * w * dt;
+      float pairAlign = 0.5f * (flock_align[start] + flock_align[v]);
+      float pairSep = 0.5f * (flock_sep[start] + flock_sep[v]);
+      if (pairAlign > 0.f) {
+        float kAlign = pairAlign * w * dt;
         float dvx = B[FAR_VX] - A[FAR_VX];
         float dvy = B[FAR_VY] - A[FAR_VY];
         flock_force(start, dvx * kAlign * (mB / mSum), dvy * kAlign * (mB / mSum), 0.f);
         flock_force(v, -dvx * kAlign * (mA / mSum), -dvy * kAlign * (mA / mSum), 0.f);
       }
-      if (sep > 0.f && d > 1) {
+      if (pairSep > 0.f && d > 1) {
         float want = 22.f + (float)(d - 1) * desired;
         if (gap < want) {
-          float mag = sep * w * (want - gap);
+          float mag = pairSep * w * (want - gap);
           float ax = nx * mag * dt;
           float ay = ny * mag * dt;
           float turn = turn_rate * w * 0.25f;
@@ -2178,6 +2186,8 @@ int32_t *solver_adj_off(void) { return adj_off; }
 int32_t *solver_adj_nei(void) { return adj_nei; }
 int32_t *solver_flock_id(void) { return flock_id; }
 float *solver_flock_mass(void) { return flock_mass; }
+float *solver_flock_align(void) { return flock_align; }
+float *solver_flock_sep(void) { return flock_sep; }
 float *solver_body_emit(void) { return body_emit; }
 float *solver_body_taste(void) { return body_taste; }
 float *solver_steer_samples(void) { return steer_samples; }

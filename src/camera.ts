@@ -6,7 +6,7 @@ export const CAMERA_MAX_ZOOM = 6;
 export class Camera {
   x = 0;
   y = 0;
-  zoom = 1;
+  zoom = .1;
   viewW = 800;
   viewH = 600;
 

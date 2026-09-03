@@ -248,6 +248,9 @@ function ghostAsAgent(g: Ghost): Agent {
     csSin: 0,
     // A ghost is drawn, never simulated, so it neither emits nor smells.
     chem: new Float32Array(CHEM_LEN),
+    // A ghost is drawn, never flocked.
+    flockAlign: 0,
+    flockSep: 0,
     vx: 0,
     vy: 0,
     heading: g.heading,

@@ -140,3 +140,58 @@ describe('scent genome', () => {
     expect(Math.min(...Array.from(c.subarray(TASTE, TASTE + 4)))).toBeLessThan(0);
   });
 });
+
+describe('heritable flocking', () => {
+  /**
+   * Sampled across the whole run, not at the end of it.
+   *
+   * The oscillator breeds well over a hundred bodies and leaves a handful
+   * alive, so reading the survivors is reading four samples of a population of
+   * a hundred and twenty — enough to miss a whole direction of drift by luck.
+   */
+  function survey(frames: number): {
+    born: number;
+    mean: number;
+    lo: number;
+    hi: number;
+    seen: number;
+  } {
+    const params = pond().params;
+    const sim = new Sim(800, 600);
+    loadPreset(sim, 'oscillator', params);
+    const before = sim.nextId;
+    let sum = 0;
+    let seen = 0;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let f = 0; f < frames; f++) {
+      sim.step(1 / 60, params);
+      if (f % 30 !== 0) continue;
+      for (const a of sim.agents.values()) {
+        sum += a.flockAlign;
+        seen++;
+        lo = Math.min(lo, a.flockAlign);
+        hi = Math.max(hi, a.flockAlign);
+      }
+    }
+    return { born: sim.nextId - before, mean: seen ? sum / seen : 0, lo, hi, seen };
+  }
+
+  it('lets an off trait move both ways, and does not ratchet it up', () => {
+    /*
+     * `flockAlign` ships at zero so alignment has to emerge rather than being
+     * given. Clamping the gene at zero would have handed it over regardless: a
+     * trait sitting on its own floor has half its mutations absorbed and half
+     * moving up, which is a reflecting barrier and drifts upward whether or not
+     * anything selects for it. Letting the gene go negative — and clamping only
+     * where the force reads it — removes the barrier.
+     */
+    const r = survey(1800);
+    expect(r.born, 'nothing bred, so nothing could drift').toBeGreaterThan(20);
+    expect(r.seen, 'no population to survey').toBeGreaterThan(50);
+    expect(r.lo, `lowest align seen ${r.lo.toFixed(3)}`).toBeLessThan(0);
+    expect(r.hi, `highest align seen ${r.hi.toFixed(3)}`).toBeGreaterThan(0);
+    // Unselected, it should sit near where it started rather than climbing.
+    expect(Math.abs(r.mean), `mean align ${r.mean.toFixed(3)}`).toBeLessThan(0.4);
+  });
+});

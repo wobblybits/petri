@@ -119,6 +119,8 @@ type Exp = {
   solver_adj_nei(): number;
   solver_flock_id(): number;
   solver_flock_mass(): number;
+  solver_flock_align(): number;
+  solver_flock_sep(): number;
   solver_body_emit(): number;
   solver_body_taste(): number;
   solver_steer_samples(): number;
@@ -186,6 +188,9 @@ export class NativeSolver {
   gravSat: Uint8Array | null = null;
   bodyMass: Float32Array | null = null;
   flockMass: Float32Array | null = null;
+  /** Per-body flocking temperament; a pair uses the mean. */
+  flockAlign: Float32Array | null = null;
+  flockSep: Float32Array | null = null;
   /** Per-body chemistry, mirroring Agent.chem. Four weights each. */
   bodyEmit: Float32Array | null = null;
   bodyTaste: Float32Array | null = null;
@@ -248,6 +253,8 @@ export class NativeSolver {
       this.gravSat = new Uint8Array(mem.buffer, exp.solver_grav_sat(), this.bodyCap);
       this.bodyMass = new Float32Array(mem.buffer, exp.solver_body_mass(), this.bodyCap);
       this.flockMass = new Float32Array(mem.buffer, exp.solver_flock_mass(), this.bodyCap);
+      this.flockAlign = new Float32Array(mem.buffer, exp.solver_flock_align(), this.bodyCap);
+      this.flockSep = new Float32Array(mem.buffer, exp.solver_flock_sep(), this.bodyCap);
       this.bodyEmit = new Float32Array(mem.buffer, exp.solver_body_emit(), this.bodyCap * 4);
       this.bodyTaste = new Float32Array(mem.buffer, exp.solver_body_taste(), this.bodyCap * 4);
       this.steerSamples = new Float32Array(mem.buffer, exp.solver_steer_samples(), this.bodyCap * 3);
