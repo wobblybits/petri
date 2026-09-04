@@ -2,6 +2,7 @@ import {
   boundRadius,
   discRadius,
   createAgent,
+  ERA_RADIUS,
   inSnapArc,
   momentOfInertia,
   portWorld,
@@ -1418,11 +1419,26 @@ export class Sim {
     // frame even when the answer is FAR, so the hysteresis in the selector has
     // the history it needs and a body sitting on a band edge does not flip
     // representation each time the wheel moves a notch.
+    //
+    // Every agent, every frame, unconditionally — the one loop here that
+    // can't be skipped even when the whole pond is FAR. Reads the store
+    // directly rather than through Agent's accessors: boundRadius's own
+    // formula is inlined against kindCode/scale for the same reason.
+    const store = this.agentStore;
+    const ID = store.id;
+    const KIND_CODE = store.kindCode;
+    const SCALE = store.scale;
+    const X = store.x;
+    const Y = store.y;
     for (const a of this.agents.values()) {
-      const size = boundRadius(a) * 2;
+      const s = a.slot;
+      // boundRadius's own formula, against kindCode instead of the string
+      // kind — era is 9px (agentSize), everything else 16px.
+      const size =
+        (KIND_CODE[s] === KIND_ERA ? ERA_RADIUS + 1.2 : 16 * 1.12) * SCALE[s] * 2;
       const px = apparentPx(size, view);
-      const vis = onScreen(a.x, a.y, size, view);
-      if (this.physLod.tier(agentKey(a.id), px, vis, AGENT_BAND) !== LOD_FAR) seeds.push(a.id);
+      const vis = onScreen(X[s], Y[s], size, view);
+      if (this.physLod.tier(agentKey(ID[s]), px, vis, AGENT_BAND) !== LOD_FAR) seeds.push(ID[s]);
     }
     // A grab needs a neighbourhood so a pointer drag does not punch through
     // the cheap path. In-flight rewrites deliberately do not get one: seeding
