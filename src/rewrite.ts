@@ -1,4 +1,4 @@
-import { CHEM_LEN, EMIT, EMIT_SLOPE, TASTE, TASTE_SLOPE, createAgent, portWorld, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
+import { CHEM_LEN, EMIT, EMIT_SLOPE, TASTE, TASTE_SLOPE, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
 import type { AgentStore } from './agent-store.ts';
 import { EXTRA_CAP } from './energy.ts';
 import { otherEnd, type Graph } from './graph.ts';
@@ -374,6 +374,55 @@ export function snapshotOf(
     agents: [...agents.values()].map((a) => ({ id: a.id, kind: a.kind })),
     wires: [...graph.wires.values()].map((w) => ({ a: w.a, b: w.b, id: w.id })),
   };
+}
+
+/**
+ * The part of the net a rewrite of `a` against `b` can actually see: the pair
+ * themselves, and every wire touching either of them.
+ *
+ * `applyRewrite` reads `net.agents` only to look up the kinds of `a` and `b`,
+ * and everything it does after that runs through `fuse` and `stripAgents`,
+ * both of which drop any wire not incident to a dying agent on the first pass.
+ * So a whole-pond snapshot hands it thousands of rows it will discard --
+ * `snapshotOf` was copying every agent and every wire into fresh objects for
+ * each completed rewrite, about 16,000 allocations a time and 80,000 a frame,
+ * which made it 1.65ms of the 1.7ms a commit cost and the largest single cost
+ * in the sim.
+ *
+ * An agent has at most three ports, so the wires that matter are six lookups
+ * rather than a scan. `snapshotOf` stays for `lambda.ts` and the tests, which
+ * build small nets and do read the whole thing back.
+ */
+export function localSnapshotOf(
+  agents: Map<number, Agent>,
+  graph: Graph,
+  a: number,
+  b: number,
+): NetSnapshot {
+  const outAgents: NetAgent[] = [];
+  const outWires: NetWire[] = [];
+  // The pair share a wire, so without this it is in the list twice and `fuse`
+  // unions it twice.
+  const seen = new Set<number>();
+  for (let i = 0; i < 2; i++) {
+    const id = i === 0 ? a : b;
+    const ag = agents.get(id);
+    if (!ag) continue;
+    outAgents.push({ id: ag.id, kind: ag.kind });
+    for (const slot of slotsFor(ag.kind)) {
+      const wire = graph.wireAtSlot(id, slot);
+      if (!wire || seen.has(wire.id)) continue;
+      seen.add(wire.id);
+      outWires.push({ a: wire.a, b: wire.b, id: wire.id });
+    }
+  }
+  // Ascending id, because `graph.wires` iterates in insertion order and that is
+  // what the whole-pond snapshot handed over. `fuse` unions in list order, so
+  // the order decides the union-find roots, and through them which end of a
+  // fused wire becomes `a`. Walking ports instead would build the same graph
+  // with some wires reversed, which is not the same sim.
+  outWires.sort((x, y) => (x.id ?? 0) - (y.id ?? 0));
+  return { agents: outAgents, wires: outWires };
 }
 
 function headingTo(
@@ -954,7 +1003,12 @@ export function commitRewrite(
   h: number,
   store: AgentStore,
 ): number {
-  const result = applyRewrite(snapshotOf(agents, graph), rw.rule, rw.a, rw.b, nextId);
+  // Local, not the whole pond: `commitRewrite` reads only `result.spawned` and
+  // the fused joins out of `result.net.wires`. Wires that were not incident to
+  // the pair come back untouched and are then skipped anyway -- they have no
+  // `sources` for `inheritLeftoverWires`, and their ports are still attached so
+  // the reconnect loop below leaves them alone.
+  const result = applyRewrite(localSnapshotOf(agents, graph, rw.a, rw.b), rw.rule, rw.a, rw.b, nextId);
   const poses = spawnPoses(rw);
   // Read before the parents are deleted below.
   const conParent = rw.rule === 'commute' ? agents.get(rw.conId) : undefined;
