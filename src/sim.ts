@@ -2785,11 +2785,17 @@ export class Sim {
   private dampVelocities(params: Params, dt: number): void {
     const linKeep = Math.exp(-Math.max(0, params.drag) * dt);
     const angKeep = Math.exp(-Math.max(0, params.angDrag) * dt);
+    const store = this.agentStore;
+    const LOCKED = store.locked;
+    const VX = store.vx;
+    const VY = store.vy;
+    const OMEGA = store.omega;
     for (const agent of this.agents.values()) {
-      if (agent.locked) continue;
-      agent.vx *= linKeep;
-      agent.vy *= linKeep;
-      agent.omega *= angKeep;
+      const s = agent.slot;
+      if (LOCKED[s]) continue;
+      VX[s] *= linKeep;
+      VY[s] *= linKeep;
+      OMEGA[s] *= angKeep;
     }
   }
 
@@ -3355,11 +3361,15 @@ export class Sim {
      */
     let align = params.flockAlign;
     let sep = params.flockSep;
-    for (const a of this.agents.values()) {
-      const ga = flockGain(a.flockAlign);
-      const gs = flockGain(a.flockSep);
-      if (ga > align) align = ga;
-      if (gs > sep) sep = gs;
+    {
+      const FLOCK_ALIGN = this.agentStore.flockAlign;
+      const FLOCK_SEP = this.agentStore.flockSep;
+      for (const a of this.agents.values()) {
+        const ga = flockGain(FLOCK_ALIGN[a.slot]);
+        const gs = flockGain(FLOCK_SEP[a.slot]);
+        if (ga > align) align = ga;
+        if (gs > sep) sep = gs;
+      }
     }
     if ((align <= 0 && sep <= 0) || dt <= 0) return;
     const list = this.agentList;

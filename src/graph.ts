@@ -510,7 +510,9 @@ export class Graph {
     type Cand = { pa: PortRef; pb: PortRef; dist: number; rank: number };
     const ports: { ref: PortRef; x: number; y: number; principal: boolean }[] = [];
     for (const agent of agents.values()) {
-      if (agent.locked || agent.stun > 0) continue;
+      const store = agent.store;
+      const s = agent.slot;
+      if (store.locked[s] || store.stun[s] > 0) continue;
       for (const slot of slotsFor(agent.kind)) {
         const ref: PortRef = { id: agent.id, slot };
         if (!this.isFree(ref)) continue;
