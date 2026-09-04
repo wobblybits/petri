@@ -143,6 +143,13 @@ export class Sim {
   /** Auto-spawn stays near the flock even when the camera cover is huge. */
   private static readonly SPAWN_REACH_CAP = 480;
 
+  /**
+   * How often the confinement loop runs its force when there is no thread
+   * pool to dispatch to. Matches `runConfineLoop`'s own dt clamp so the
+   * unthreaded path pulls at the same rate the threaded one does.
+   */
+  private static readonly CONFINE_SYNC_PERIOD_MS = 50;
+
   /** Repulsion in px/s² at exactly one wire's length; inverse-square inside that. */
   static DECLUTTER_FORCE = 200;
 
@@ -3568,8 +3575,26 @@ export class Sim {
         continue;
       }
       try {
-        const list = [...this.agents.values()];
-        await this.confinePool.runFromAgents(list, this.worldX, this.worldY, dt, FIELD_HALF, this.lastEdgePull);
+        if (this.confinePool.ready) {
+          const list = [...this.agents.values()];
+          await this.confinePool.runFromAgents(list, this.worldX, this.worldY, dt, FIELD_HALF, this.lastEdgePull);
+        } else {
+          /*
+           * No pool: either SharedArrayBuffer is missing or the page is not
+           * cross-origin isolated. Run the same force synchronously on the
+           * same cadence rather than not running it at all — confinement is
+           * what stops a drifting pond from leaving its own world, and this
+           * used to be the branch where a page served without COOP/COEP
+           * quietly had no world bound whatsoever.
+           *
+           * Paced by hand, because unlike a dispatch this has nothing to
+           * wait on and would otherwise spin the main thread. The period is
+           * the loop's own dt clamp, so the pull lands at the same rate the
+           * threaded path applies it rather than a fraction of it.
+           */
+          this.confineOnce(dt, this.lastEdgePull);
+          await new Promise((resolve) => setTimeout(resolve, Sim.CONFINE_SYNC_PERIOD_MS));
+        }
       } catch (err) {
         // A loose failsafe should not take itself out permanently over one
         // bad dispatch (a Worker hiccup, say) — log it and keep going.
@@ -3580,17 +3605,23 @@ export class Sim {
   }
 
   /**
-   * Best-effort: resolves false and leaves confinement on the synchronous
-   * path (confineOnce, called nowhere automatically) if SharedArrayBuffer or
-   * cross-origin isolation isn't available.
+   * Starts the confinement loop, threaded if it can be and synchronous if it
+   * cannot. Returns whether the *pool* came up — SharedArrayBuffer and a
+   * cross-origin-isolated page — not whether confinement is running, which
+   * it now is either way.
+   *
+   * The distinction used to be load-bearing in the wrong direction: a false
+   * here left the loop unstarted, and `confineOnce` is called nowhere
+   * automatically, so a page served without COOP/COEP had no world bound at
+   * all. Threading is an optimization for this pass, not the reason it
+   * exists.
    */
   async startBackgroundConfine(workerCount = 4): Promise<boolean> {
-    if (this.confineLoopActive) return true;
+    if (this.confineLoopActive) return this.confinePool.ready;
     const ok = await this.confinePool.init(workerCount);
-    if (!ok) return false;
     this.confineLoopActive = true;
     void this.runConfineLoop();
-    return true;
+    return ok;
   }
 
   stopBackgroundConfine(): void {
