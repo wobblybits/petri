@@ -77,6 +77,7 @@ import {
   WIRE_NEAR_STRIDE,
   WN,
 } from './native/solver.ts';
+import { ConfinePool } from './native/confine-pool.ts';
 import { angleDelta, clamp, wrapAngle, wrapDeltaVec } from './wrap.ts';
 
 /** Attraction-only chemotaxis. Own principal trails are a different channel and are ignored. */
@@ -137,14 +138,6 @@ export class Sim {
   /** Neighbourhood lifted onto the detailed physics path around a NEAR/MID body. */
   private static readonly PHYS_HOPS = 2;
 
-  /**
-   * Gravity only touches components this small, so a finished net does not
-   * fall into its own centre of mass. 1 = loners, 2 = a fresh latch.
-   */
-  private static readonly GRAV_MAX_COMP = 2;
-
-  /** Distance past which the gravity pull stops growing. */
-  private static readonly HOME_REACH = 320;
   /** Auto-spawn stays near the flock even when the camera cover is huge. */
   private static readonly SPAWN_REACH_CAP = 480;
 
@@ -193,9 +186,6 @@ export class Sim {
    * without this the agent keeps all of it and rockets away on release.
    */
   private static readonly GRAB_MAX_SPEED = 160;
-
-  /** Scratch: connected-component size per root, rebuilt in `gravitate`. */
-  private compSize = new Map<number, number>();
 
   w: number;
   h: number;
@@ -550,6 +540,7 @@ export class Sim {
     this.time += t;
     this.components = this.graph.componentIds(this.agents);
     this.trackHome(t);
+    this.lastEdgePull = params.edgePull;
     /*
      * One centre for the whole world grid, pinned once and never moved.
      *
@@ -599,8 +590,9 @@ export class Sim {
     Sim.phase('uncrossPrincipals');
     this.flock(params, t);
     Sim.phase('flock');
-    this.gravitate(params, t);
-    Sim.phase('gravitate');
+    // Confinement is not run here any more — it's a loose failsafe, not a
+    // per-frame-exact force, so it runs on its own cadence via the
+    // background thread pool instead (see runConfineLoop / confineOnce).
     // Left open on purpose. Nothing between here and the solver moves a body —
     // the LOD pass and the rope passes read positions and write wires — so the
     // solver can inherit the packed bodies instead of copying them in again.
@@ -1095,29 +1087,40 @@ export class Sim {
     return true;
   }
 
-  /** Gravitate in WASM. `declSat` carries "this body's net is small enough". */
-  private gravitateNative(
-    cx: number,
-    cy: number,
-    base: number,
-    cap: number,
-    dt: number,
-    edge: number,
-  ): boolean {
+  /**
+   * Confinement, synchronous and single-threaded — the underlying force
+   * step()/stepAsync() no longer call directly (see runConfineLoop). Public
+   * for tests that want confinement's exact behaviour on a specific frame
+   * rather than whatever the background thread pool happens to have applied
+   * by the time they look.
+   */
+  confineOnce(dt: number, edgePull: number): void {
+    if (edgePull <= 0 || dt <= 0 || !this.worldPinned) return;
+    const cx = this.worldX;
+    const cy = this.worldY;
+    if (this.confineNative(cx, cy, dt, edgePull)) return;
+    for (const agent of this.agents.values()) {
+      if (agent.locked) continue;
+      const dx = cx - agent.x;
+      const dy = cy - agent.y;
+      // Radial and saturating; see the C twin for why it is not per axis.
+      const dist = Math.hypot(dx, dy);
+      const over = Math.min(dist - FIELD_HALF, FIELD_HALF);
+      if (over > 0 && dist > 1e-6) {
+        const k = (over * edgePull * dt) / dist;
+        agent.vx += dx * k;
+        agent.vy += dy * k;
+      }
+    }
+  }
+
+  private confineNative(cx: number, cy: number, dt: number, edge: number): boolean {
     if (!Sim.nativeForces || !nativeSolver.ready) return false;
-    const sat = nativeSolver.gravSat;
-    if (!sat) return false;
     const list = this.forceList();
     const n = list.length;
     if (n === 0) return true;
     if (!this.forceBlock && !this.packPose(list)) return false;
-    const sizes = this.compSize;
-    for (let i = 0; i < n; i++) {
-      const a = list[i];
-      const root = this.components.get(a.id) ?? a.id;
-      sat[i] = (sizes.get(root) ?? 1) > cap ? 0 : 1;
-    }
-    nativeSolver.gravitate(n, cx, cy, base, Sim.HOME_REACH, cap, dt, FIELD_HALF, edge);
+    nativeSolver.confine(n, cx, cy, dt, FIELD_HALF, edge);
     if (!this.forceBlock) this.unpackDrift(list);
     return true;
   }
@@ -2189,6 +2192,12 @@ export class Sim {
   private worldPinned = false;
   worldX = 0;
   worldY = 0;
+
+  /** Confinement's own thread pool; see runConfineLoop. */
+  private confinePool = new ConfinePool();
+  private confineLoopActive = false;
+  /** The last frame's edgePull, for runConfineLoop to read on its own cadence. */
+  private lastEdgePull = 0;
 
   /** True once a device exists and the field has moved there for good. */
   private fieldOnGpu = false;
@@ -3405,56 +3414,63 @@ export class Sim {
   }
 
   /**
-   * Two pulls toward home, with different jobs.
+   * Runs confineOnce on its own cadence via the WASM thread pool, decoupled
+   * from step()/stepAsync() entirely. Confinement is a loose failsafe for a
+   * body that has drifted outside the world bound — it doesn't need to run
+   * in lockstep with the frame, and a threaded dispatch can't: there is no
+   * legal blocking wait on the main thread, and beginFrame is synchronous
+   * and shared with step()'s ~40 synchronous test call sites. Dispatch, wait
+   * for the workers, apply whatever result lands (velocities only — nothing
+   * else reads or writes them between dispatches), redispatch.
    *
-   * Cohesion (`gravity`) is for loners and tiny latches only. Larger nets keep
-   * the shape the wires gave them — a pull toward their own centre of mass is
-   * what used to crumple machines into a ball.
-   *
-   * Confinement (`edgePull`) applies to everything, and only outside the world
-   * bound. Past that edge there is no world: no scent to steer by and no energy
-   * to harvest, so a body that drifts out would otherwise never come back and
-   * would starve wherever it stopped. The pull grows with the overshoot, so it
-   * is nothing at the boundary and firm a long way out — a soft basin, not a
-   * wall, and a net that wanders off gets walked home rather than snapped back.
+   * Started once, from the app entry point, via startBackgroundConfine.
+   * Never started at all in tests, which call confineOnce directly instead
+   * when they need confinement's exact behaviour on a specific frame.
    */
-  private gravitate(params: Params, dt: number): void {
-    const base = params.gravity;
-    const edge = params.edgePull;
-    if ((base <= 0 && edge <= 0) || dt <= 0) return;
-    const com = this.home ?? this.centerOfMass();
-    if (!com) return;
-    const sizes = this.compSize;
-    sizes.clear();
-    for (const root of this.components.values()) {
-      sizes.set(root, (sizes.get(root) ?? 0) + 1);
-    }
-    const cap = Sim.GRAV_MAX_COMP;
-    if (this.gravitateNative(com.x, com.y, base, cap, dt, edge)) return;
-    const confine = edge > 0;
-    for (const agent of this.agents.values()) {
-      if (agent.locked) continue;
-      const dx = com.x - agent.x;
-      const dy = com.y - agent.y;
-      if (confine) {
-        // Radial and saturating; see the C twin for why it is not per axis.
-        const dist = Math.hypot(dx, dy);
-        const over = Math.min(dist - FIELD_HALF, FIELD_HALF);
-        if (over > 0 && dist > 1e-6) {
-          const k = (over * edge * dt) / dist;
-          agent.vx += dx * k;
-          agent.vy += dy * k;
-        }
+  private async runConfineLoop(): Promise<void> {
+    let last = performance.now();
+    while (this.confineLoopActive) {
+      if (!this.worldPinned || this.lastEdgePull <= 0 || this.agents.size === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        last = performance.now();
+        continue;
       }
-      if (base <= 0) continue;
-      const root = this.components.get(agent.id) ?? agent.id;
-      if ((sizes.get(root) ?? 1) > cap) continue;
-      const dist = Math.hypot(dx, dy);
-      if (dist < 1e-6) continue;
-      const pull = (base * Math.min(dist, Sim.HOME_REACH)) / dist;
-      agent.vx += dx * pull * dt;
-      agent.vy += dy * pull * dt;
+      const now = performance.now();
+      const dt = Math.min(0.05, Math.max(0, (now - last) / 1000));
+      last = now;
+      if (dt <= 0) {
+        await new Promise((resolve) => setTimeout(resolve, 4));
+        continue;
+      }
+      try {
+        const list = [...this.agents.values()];
+        await this.confinePool.runFromAgents(list, this.worldX, this.worldY, dt, FIELD_HALF, this.lastEdgePull);
+      } catch (err) {
+        // A loose failsafe should not take itself out permanently over one
+        // bad dispatch (a Worker hiccup, say) — log it and keep going.
+        console.error('confine loop dispatch failed, will keep retrying:', err);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
     }
+  }
+
+  /**
+   * Best-effort: resolves false and leaves confinement on the synchronous
+   * path (confineOnce, called nowhere automatically) if SharedArrayBuffer or
+   * cross-origin isolation isn't available.
+   */
+  async startBackgroundConfine(workerCount = 4): Promise<boolean> {
+    if (this.confineLoopActive) return true;
+    const ok = await this.confinePool.init(workerCount);
+    if (!ok) return false;
+    this.confineLoopActive = true;
+    void this.runConfineLoop();
+    return true;
+  }
+
+  stopBackgroundConfine(): void {
+    this.confineLoopActive = false;
+    this.confinePool.dispose();
   }
 
   momentum(): { px: number; py: number; L: number } {

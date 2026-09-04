@@ -7,7 +7,6 @@ import { Sim } from './sim.ts';
 function liveLatchParams() {
   const params = defaultParams();
   params.spawnInterval = 0;
-  params.gravity = 0.12;
   params.flockAlign = 5.5;
   params.flockSep = 36;
   params.wireShrink = 0.9;

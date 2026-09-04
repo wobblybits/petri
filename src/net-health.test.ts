@@ -19,17 +19,15 @@ function liveParams(): Params {
   p.snapWell = 0;
   p.rewriteDuration = 0;
   p.spawnInterval = 0;
-  p.gravity = 0.12;
   p.upkeep = 0;
   return p;
 }
 
-/** Constraints and contacts only — no motors, flocking, gravity or scent. */
+/** Constraints and contacts only — no motors, flocking or scent. */
 function passiveParams(): Params {
   const p = liveParams();
   p.stepSpeed = 0;
   p.faceAttract = 0;
-  p.gravity = 0;
   p.flockAlign = 0;
   p.flockSep = 0;
   p.deposit = 0;

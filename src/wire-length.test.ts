@@ -25,7 +25,6 @@ function quietParams() {
   const params = defaultParams();
   params.snapRadius = 0;
   params.stepSpeed = 0;
-  params.gravity = 0;
   params.flockAlign = 0;
   params.flockSep = 0;
   params.declutter = 0;

@@ -451,4 +451,5 @@ sizeCanvas();
 applyPreset('soup');
 void nativeSolver.init();
 void farGpu.init();
+void sim.startBackgroundConfine();
 requestAnimationFrame(frame);

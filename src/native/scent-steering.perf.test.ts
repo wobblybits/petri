@@ -27,7 +27,6 @@ function climb(frames = 600): { closed: number; meanEnd: number } {
   params.rewriteDuration = 0;
   params.snapRadius = 0;
   params.deposit = 0; // no self-trail: this measures gradient following alone
-  params.gravity = 0;
 
   const sim = new Sim(4000, 4000);
   const ids: number[] = [];

@@ -139,7 +139,6 @@ export interface Params {
   swimNoise: number;
   drag: number;
   angDrag: number;
-  gravity: number;
   flockAlign: number;
   flockSep: number;
   maxAgents: number;
@@ -250,7 +249,7 @@ export interface Params {
 
 export function defaultParams(): Params {
   return {
-    deposit: 50,
+    deposit: 5,
     diffuse: 0.6,
     decay: 0.01,
     sense: 520,
@@ -289,11 +288,10 @@ export function defaultParams(): Params {
     swimNoise: 0.35,
     drag: 0.55,
     angDrag: 2.4,
-    gravity: 0,
     flockAlign: 0.0,
     flockSep: 48,
     maxAgents: 10000,
-    soupCount: 2500,
+    soupCount: 1000,
     spawnInterval: 0.5,
     energyCell: 40,
     ambientEnergy: 1,
@@ -325,7 +323,6 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'stepSpeed', label: 'Step speed', min: 10, max: 180, step: 1 },
   { key: 'swimTau', label: 'Swim persistence', min: 0.1, max: 4, step: 0.05 },
   { key: 'swimNoise', label: 'Swim noise', min: 0, max: 2, step: 0.05 },
-  { key: 'gravity', label: 'Gravity', min: 0, max: 0.8, step: 0.01 },
   { key: 'drag', label: 'Fluid drag', min: 0, max: 4, step: 0.05 },
   { key: 'angDrag', label: 'Spin damp', min: 0, max: 8, step: 0.05 },
   { key: 'flockAlign', label: 'Flock align', min: 0, max: 16, step: 0.1 },

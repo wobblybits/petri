@@ -101,22 +101,37 @@ describe('energy grid bound', () => {
 });
 
 describe('edge pull', () => {
+  type Params0 = ReturnType<typeof defaultParams>;
+
   function loner(sim: Sim, params: Params0, x: number, y: number): number {
     const a = sim.spawn('dup', x, y, 0, params, true)!;
     return a.id;
   }
-  type Params0 = ReturnType<typeof defaultParams>;
 
   function settle(): Params0 {
     const p = defaultParams();
     p.maxAgents = 100;
     p.spawnInterval = 0;
-    p.gravity = 0;
     p.upkeep = 0;
     p.stepSpeed = 0;
     p.swimNoise = 0;
     p.ambientEnergy = 0;
     return p;
+  }
+
+  /*
+   * Confinement no longer runs inside step() — it's a loose failsafe driven
+   * by its own background thread pool on its own cadence (Sim.runConfineLoop),
+   * not a per-frame-exact force, and a threaded dispatch can't fit inside
+   * step()'s synchronous frame. These tests want confinement's exact
+   * behaviour on a specific frame, so they call the underlying synchronous
+   * confineOnce directly instead of relying on it happening automatically.
+   */
+  function stepWithConfine(sim: Sim, params: Params0, frames: number): void {
+    for (let f = 0; f < frames; f++) {
+      sim.step(1 / 60, params, VIEW);
+      sim.confineOnce(1 / 60, params.edgePull);
+    }
   }
 
   it('leaves a body inside the bound alone', async () => {
@@ -126,7 +141,7 @@ describe('edge pull', () => {
     // A cluster at the origin so home lands there, plus one body well inside.
     for (let i = 0; i < 8; i++) loner(sim, params, 600 + i * 60, 400);
     const id = loner(sim, params, 600 + FIELD_HALF * 0.5, 400);
-    for (let f = 0; f < 60; f++) sim.step(1 / 60, params, VIEW);
+    stepWithConfine(sim, params, 60);
     const a = sim.agents.get(id)!;
     // No pull means no systematic drift back toward the cluster.
     expect(Math.abs(a.vx), `vx ${a.vx}`).toBeLessThan(5);
@@ -139,7 +154,7 @@ describe('edge pull', () => {
     for (let i = 0; i < 8; i++) loner(sim, params, 600 + i * 60, 400);
     const startX = 600 + FIELD_HALF * 2;
     const id = loner(sim, params, startX, 400);
-    for (let f = 0; f < 120; f++) sim.step(1 / 60, params, VIEW);
+    stepWithConfine(sim, params, 120);
     const a = sim.agents.get(id)!;
     expect(a.x, `moved from ${startX} to ${a.x}`).toBeLessThan(startX);
     expect(a.vx, 'should be heading home, i.e. negative x').toBeLessThan(0);
@@ -159,7 +174,7 @@ describe('edge pull', () => {
         loner(sim, params, 600 + (i % 8) * 60, 400 + ((i / 8) | 0) * 60);
       }
       const id = loner(sim, params, 600 + FIELD_HALF * (1 + over), 400);
-      for (let f = 0; f < 30; f++) sim.step(1 / 60, params, VIEW);
+      stepWithConfine(sim, params, 30);
       speeds.push(-sim.agents.get(id)!.vx);
     }
     expect(speeds[0], `near-edge pull ${speeds[0]}`).toBeGreaterThan(0);
@@ -174,7 +189,7 @@ describe('edge pull', () => {
     for (let i = 0; i < 8; i++) loner(sim, params, 600 + i * 60, 400);
     const startX = 600 + FIELD_HALF * 2;
     const id = loner(sim, params, startX, 400);
-    for (let f = 0; f < 120; f++) sim.step(1 / 60, params, VIEW);
+    stepWithConfine(sim, params, 120);
     const a = sim.agents.get(id)!;
     expect(Math.abs(a.x - startX), 'should have stayed put').toBeLessThan(50);
   });

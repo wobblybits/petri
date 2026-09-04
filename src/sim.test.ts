@@ -29,7 +29,6 @@ function fastParams() {
   params.wireMinRest = 40;
   params.rewriteDuration = 0.12;
   params.springK = 90;
-  params.gravity = 0;
   params.spawnInterval = 0;
   params.upkeep = 0;
   return params;
@@ -75,7 +74,6 @@ describe('scent steering', () => {
       params.faceAttract = 0;
       params.snapWell = 0;
       params.snapRadius = 0;
-      params.gravity = 0;
       params.deposit = 0;
       // The swimming kick is coloured noise off Math.random, and it moves the
       // agent, which moves where it lays scent, which is what the two sensors
@@ -114,7 +112,6 @@ describe('scent steering', () => {
       params.faceAttract = 0;
       params.snapWell = 0;
       params.snapRadius = 0;
-      params.gravity = 0;
       params.swimNoise = 0;
       const start = 0.4;
       const agent = sim.spawn(kind, 120, 80, start, params, true)!;
@@ -143,7 +140,6 @@ describe('scent steering', () => {
   it('does not self-propel when the principal port is latched', () => {
     const sim = new Sim(320, 200);
     const params = defaultParams();
-    params.gravity = 0;
     params.flockAlign = 0;
     params.flockSep = 0;
     params.snapRadius = 0;
@@ -193,7 +189,6 @@ describe('scent steering', () => {
     params.faceAttract = 0;
     params.snapWell = 0;
     params.stepSpeed = 0;
-    params.gravity = 0;
     const a = sim.spawn('con', 100, 80, 0, params, true)!;
     const b = sim.spawn('con', 118, 80, Math.PI, params, true)!;
     a.vx = 60;
@@ -207,7 +202,6 @@ describe('scent steering', () => {
     const params = defaultParams();
     params.snapRadius = 0;
     params.stepSpeed = 0;
-    params.gravity = 0;
     params.flockAlign = 0;
     params.flockSep = 0;
     params.declutter = 0;
@@ -496,7 +490,6 @@ describe('simulation presets', () => {
 describe('conservative mechanics', () => {
   function passiveParams() {
     const params = defaultParams();
-    params.gravity = 0;
     params.stepSpeed = 0;
     params.turnRate = 0;
     params.snapRadius = 0;
@@ -529,31 +522,6 @@ describe('conservative mechanics', () => {
     expect(sim.kineticEnergy()).toBeLessThan(e0 * 1.35);
     expect(sim.kineticEnergy()).toBeGreaterThan(e0 * 0.45);
     expect(b.id).toBeGreaterThan(0);
-  });
-
-  it('gravity does not move the center of mass', () => {
-    const sim = new Sim(240, 160);
-    const params = passiveParams();
-    params.gravity = 0.4;
-    sim.spawn('era', 40, 40, 0, params, true);
-    sim.spawn('con', 180, 120, 1, params, true);
-    const com0 = sim.centerOfMass()!;
-    step(sim, params, 30);
-    const com1 = sim.centerOfMass()!;
-    expect(com1.x).toBeCloseTo(com0.x, 3);
-    expect(com1.y).toBeCloseTo(com0.y, 3);
-  });
-
-  it('gravity does not crumple a net toward its own centre', () => {
-    const sim = new Sim(480, 240);
-    const params = passiveParams();
-    params.gravity = 0.4;
-    params.wireShrink = 30;
-    const nodes = [80, 160, 240, 320].map((x) => sim.spawn('con', x, 120, 0, params, true)!);
-    for (let i = 0; i < 3; i++) sim.wire(nodes[i].id, 'r', nodes[i + 1].id, 'l', params);
-    const width0 = nodes[3].x - nodes[0].x;
-    step(sim, params, 90);
-    expect(nodes[3].x - nodes[0].x).toBeGreaterThan(width0 * 0.85);
   });
 
   it('does not latch through an intervening wire', () => {
@@ -599,7 +567,6 @@ describe('conservative mechanics', () => {
 
 function quietParams() {
   const params = defaultParams();
-  params.gravity = 0;
   params.flockAlign = 0;
   params.flockSep = 0;
   params.snapRadius = 0;
@@ -976,7 +943,6 @@ describe('physics lod', () => {
     params.flockAlign = 0;
     params.flockSep = 0;
     params.declutter = 0;
-    params.gravity = 0;
     const a = sim.spawn('con', 100, 80, 0, params, true)!;
     const b = sim.spawn('con', 122, 80, 0, params, true)!;
     sim.wire(a.id, 'r', b.id, 'l', params);
@@ -1424,7 +1390,6 @@ describe('per-agent transport traits', () => {
     params.snapRadius = 0;
     params.stepSpeed = 0;
     params.swimNoise = 0;
-    params.gravity = 0;
     params.flockAlign = 0;
     params.flockSep = 0;
     params.deposit = 0;

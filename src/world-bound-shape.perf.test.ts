@@ -41,7 +41,13 @@ describe('world bound shape', () => {
       const body = sim.spawn('era', hx + Math.cos(a) * r, hy + Math.sin(a) * r, a, params, true)!;
       ids.push(body.id);
     }
-    for (let f = 0; f < 3600; f++) sim.step(1 / 60, params);
+    // Confinement no longer runs inside step() — it's a background-pool
+    // failsafe now (Sim.runConfineLoop) — so it's driven explicitly here via
+    // the same synchronous confineOnce the pool wraps.
+    for (let f = 0; f < 3600; f++) {
+      sim.step(1 / 60, params);
+      sim.confineOnce(1 / 60, params.edgePull);
+    }
 
     let cornerish = 0;
     let edgeish = 0;

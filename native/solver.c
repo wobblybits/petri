@@ -171,13 +171,6 @@ static float sparams[32];
 static int scent_cols = 0, scent_rows = 0;
 static float scent_ox = 0.f, scent_oy = 0.f, scent_ww = 1.f, scent_wh = 1.f;
 static uint8_t decl_sat[MAX_BODIES];
-/*
- * Gravitate's own "component is small enough" flag. It used to borrow
- * decl_sat, which was harmless while both were rewritten every frame but
- * blocks caching either: gravitate runs after declutter, so a cached decl_sat
- * would be read back as gravitate's flags on the following frame.
- */
-static uint8_t grav_sat[MAX_BODIES];
 static float body_mass[MAX_BODIES];
 static int32_t flock_id[MAX_BODIES];
 static int32_t flock_dist[MAX_BODIES];
@@ -1735,104 +1728,76 @@ void solver_declutter(int n, float reach, float at_reach, float cutoff,
   }
 }
 
-/**
- * Pull toward the flock's eased centre of mass, for small components only.
- * Mirrors Sim.gravitate: `decl_comp` carries the component root and
- * `comp_size` how many bodies share it, so a large net is left alone.
- */
 /*
- * Two pulls toward home, with different jobs.
+ * Confinement: a soft pull back toward home for a body outside the world
+ * bound. Outside `half` there is no world — no scent to steer by, no energy
+ * to harvest — so a body that drifts past the edge would otherwise never
+ * come back and simply starve where it stopped. The pull scales with how far
+ * outside it is, so it is nothing at the boundary and firm a long way out: a
+ * soft basin rather than a wall, and a net that wanders off gets walked home
+ * instead of teleported.
  *
- * `base` is cohesion, and it is deliberately only for loners and tiny latches
- * (`grav_sat`): pulling a large net toward its own centre is what used to
- * crumple machines into a ball.
+ * Used to also carry a cohesion pull (loners and tiny latches drawn toward
+ * the flock's centre of mass), removed once measurement showed the default
+ * left it permanently at 0 — a slider nothing used. Confinement is the part
+ * that actually runs.
  *
- * `edge` is confinement, and it applies to everything. Outside `half` there is
- * no world — no scent to steer by, no energy to harvest — so a body that drifts
- * past the edge would otherwise never come back and simply starve where it
- * stopped. The pull scales with how far outside it is, so it is nothing at the
- * boundary and firm a long way out: a soft basin rather than a wall, and a net
- * that wanders off gets walked home instead of teleported.
- *
- * Square, not circular, because the bound has to be the field's bound and the
- * field is a square grid. A circular pull would leave the corners unreachable
- * in one sense and unprotected in the other.
- */
-/*
- * Split from `solver_gravitate` so a caller can hand out disjoint body
+ * Split into a `_range` entry point so a caller can hand out disjoint body
  * ranges to worker threads. Safe to do: every body here only ever reads its
- * own slot of `bodies` plus the shared (cx, cy, ...) target and only ever
- * writes its own velocity, so two ranges never touch the same memory and the
- * result does not depend on how the ranges are scheduled. Not every pass in
- * this file has that shape — `flock_apply` and `near_contacts` mutate both
- * ends of a pair per iteration, so splitting those needs a different scheme
- * (per-thread accumulators, reduced afterward), not this one.
+ * own slot of `bodies` plus the shared (cx, cy) target and only ever writes
+ * its own velocity, so two ranges never touch the same memory and the result
+ * does not depend on how the ranges are scheduled. Not every pass in this
+ * file has that shape — `flock_apply` and `near_contacts` mutate both ends
+ * of a pair per iteration, so splitting those needs a different scheme
+ * (per-thread accumulators, reduced afterward), not this one. See
+ * confine-pool.ts for where this one actually gets split.
  */
-void solver_gravitate_range(int start, int end, float cx, float cy, float base,
-                            float reach, int max_comp, float dt, float half, float edge) {
-  if (dt <= 0.f) return;
-  if (base <= 0.f && edge <= 0.f) return;
+void solver_confine_range(int start, int end, float cx, float cy, float dt, float half, float edge) {
+  if (dt <= 0.f || edge <= 0.f || half <= 0.f) return;
   if (start < 0) start = 0;
   if (end > MAX_BODIES) end = MAX_BODIES;
   if (end <= start) return;
-  int confine = edge > 0.f && half > 0.f;
   for (int i = start; i < end; i++) {
     float *p = bodies + i * STRIDE;
     if (p[FAR_LOCKED] >= 0.5f) continue;
     float dx = cx - p[FAR_X];
     float dy = cy - p[FAR_Y];
-    if (confine) {
-      /* Overshoot per axis, so a body far out on one axis is not dragged
-       * diagonally by an axis it is already inside. */
-      /*
-       * Radial, not per axis. A square bound has four corners, and a corner is
-       * an attractor: on an edge one velocity component is cancelled and the
-       * body slides along the other, but in a corner both are cancelled and it
-       * is wedged. Measured, 21 of 60 free bodies released on a square boundary
-       * were sitting in corners a minute later and none had come back inside —
-       * which is exactly the Eras piling into the corners of the field.
-       *
-       * A circle of this radius is inscribed in the square grid, so nothing
-       * confined by it can leave the field, and a body pressed outward by its
-       * own swimming slides around the rim forever instead of collecting at
-       * four points.
-       *
-       * Saturating, not linear. The pull grows with the overshoot so it is
-       * nothing at the boundary, but a body a long way out should be walked
-       * home rather than fired there: unclamped, one 108,000 units past the
-       * edge was handed 38,000 px/s, which reads as the whole pond convulsing.
-       */
-      float dist = sqrtf(dx * dx + dy * dy);
-      float over = dist - half;
-      if (over > 0.f && dist > 1e-6f) {
-        if (over > half) over = half;
-        float k = (over * edge * dt) / dist;
-        p[FAR_VX] += dx * k;
-        p[FAR_VY] += dy * k;
-      }
-    }
-    if (base <= 0.f) continue;
-    /* The host knows component sizes already; packing a byte beats
-     * rebuilding them here. */
-    if (!grav_sat[i]) continue;
-    (void)max_comp;
+    /*
+     * Radial, not per axis. A square bound has four corners, and a corner is
+     * an attractor: on an edge one velocity component is cancelled and the
+     * body slides along the other, but in a corner both are cancelled and it
+     * is wedged. Measured, 21 of 60 free bodies released on a square boundary
+     * were sitting in corners a minute later and none had come back inside —
+     * which is exactly the Eras piling into the corners of the field.
+     *
+     * A circle of this radius is inscribed in the square grid, so nothing
+     * confined by it can leave the field, and a body pressed outward by its
+     * own swimming slides around the rim forever instead of collecting at
+     * four points.
+     *
+     * Saturating, not linear. The pull grows with the overshoot so it is
+     * nothing at the boundary, but a body a long way out should be walked
+     * home rather than fired there: unclamped, one 108,000 units past the
+     * edge was handed 38,000 px/s, which reads as the whole pond convulsing.
+     */
     float dist = sqrtf(dx * dx + dy * dy);
-    if (dist < 1e-6f) continue;
-    float pull = (base * (dist < reach ? dist : reach)) / dist;
-    p[FAR_VX] += dx * pull * dt;
-    p[FAR_VY] += dy * pull * dt;
+    float over = dist - half;
+    if (over > 0.f && dist > 1e-6f) {
+      if (over > half) over = half;
+      float k = (over * edge * dt) / dist;
+      p[FAR_VX] += dx * k;
+      p[FAR_VY] += dy * k;
+    }
   }
 }
 
-void solver_gravitate(int n, float cx, float cy, float base, float reach,
-                      int max_comp, float dt, float half, float edge) {
+void solver_confine(int n, float cx, float cy, float dt, float half, float edge) {
   if (n > MAX_BODIES) n = MAX_BODIES;
-  solver_gravitate_range(0, n, cx, cy, base, reach, max_comp, dt, half, edge);
+  solver_confine_range(0, n, cx, cy, dt, half, edge);
 }
 
 int32_t *solver_decl_comp(void) { return decl_comp; }
 uint8_t *solver_decl_sat(void) { return decl_sat; }
-uint8_t *solver_grav_sat(void) { return grav_sat; }
 float *solver_body_mass(void) { return body_mass; }
 
 void solver_port_torques(int n, int n_wires, float gain, float splay, float dt) {

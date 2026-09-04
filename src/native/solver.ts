@@ -95,10 +95,9 @@ type Exp = {
   solver_deposit(n: number, amount: number): void;
   solver_port_free(): number;
   solver_declutter(n: number, reach: number, atReach: number, cutoff: number, floorFrac: number, dt: number): void;
-  solver_gravitate(n: number, cx: number, cy: number, base: number, reach: number, maxComp: number, dt: number, half: number, edge: number): void;
+  solver_confine(n: number, cx: number, cy: number, dt: number, half: number, edge: number): void;
   solver_decl_comp(): number;
   solver_decl_sat(): number;
-  solver_grav_sat(): number;
   solver_body_mass(): number;
   solver_step_near(
     n: number,
@@ -185,7 +184,6 @@ export class NativeSolver {
   bodyDrive: Float32Array | null = null;
   bodyTrail: Float32Array | null = null;
   declSat: Uint8Array | null = null;
-  gravSat: Uint8Array | null = null;
   bodyMass: Float32Array | null = null;
   flockMass: Float32Array | null = null;
   /** Per-body flocking temperament; a pair uses the mean. */
@@ -250,7 +248,6 @@ export class NativeSolver {
       this.bodyDrive = new Float32Array(mem.buffer, exp.solver_body_drive(), this.bodyCap);
       this.bodyTrail = new Float32Array(mem.buffer, exp.solver_body_trail(), this.bodyCap);
       this.declSat = new Uint8Array(mem.buffer, exp.solver_decl_sat(), this.bodyCap);
-      this.gravSat = new Uint8Array(mem.buffer, exp.solver_grav_sat(), this.bodyCap);
       this.bodyMass = new Float32Array(mem.buffer, exp.solver_body_mass(), this.bodyCap);
       this.flockMass = new Float32Array(mem.buffer, exp.solver_flock_mass(), this.bodyCap);
       this.flockAlign = new Float32Array(mem.buffer, exp.solver_flock_align(), this.bodyCap);
@@ -416,11 +413,8 @@ export class NativeSolver {
     this.exp?.solver_declutter(n, reach, atReach, cutoff, floorFrac, dt);
   }
 
-  gravitate(
-    n: number, cx: number, cy: number, base: number, reach: number,
-    maxComp: number, dt: number, half: number, edge: number,
-  ): void {
-    this.exp?.solver_gravitate(n, cx, cy, base, reach, maxComp, dt, half, edge);
+  confine(n: number, cx: number, cy: number, dt: number, half: number, edge: number): void {
+    this.exp?.solver_confine(n, cx, cy, dt, half, edge);
   }
 
   /** Standalone contact pass. `nWires` lets it skip wired pairs the way

@@ -28,7 +28,6 @@ describe('wire meridian alignment', () => {
   const baseParams = () => {
     const params = defaultParams();
     params.spawnInterval = 0;
-    params.gravity = 0;
     params.flockAlign = 5.5;
     params.flockSep = 36;
     params.stepSpeed = 0;

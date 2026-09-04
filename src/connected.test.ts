@@ -19,7 +19,6 @@ function frozenPassive(): Params {
   const params = frozenLive();
   params.stepSpeed = 0;
   params.faceAttract = 0;
-  params.gravity = 0;
   params.flockAlign = 0;
   params.flockSep = 0;
   params.deposit = 0;

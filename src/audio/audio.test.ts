@@ -434,9 +434,6 @@ describe('audio presets', () => {
     expect(bowSpeed(-40)).toBeCloseTo(-bowSpeed(40));
   });
 
-  it('gravity is off by default', () => {
-    expect(defaultParams().gravity).toBe(0);
-  });
 });
 
 describe('sim latch integration', () => {
@@ -462,7 +459,6 @@ describe('sim latch integration', () => {
     params.faceAttract = 0;
     params.snapWell = 0;
     params.stepSpeed = 0;
-    params.gravity = 0;
     params.flockAlign = 0;
     params.flockSep = 0;
     params.spawnInterval = 0;

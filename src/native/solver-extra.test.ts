@@ -544,7 +544,6 @@ describe('force passes: WASM against the JS reference', () => {
     params.snapRadius = 0;
     params.stepSpeed = 0;
     params.sense = 0;
-    params.gravity = 0;
     params.flockAlign = 0;
     params.flockSep = 0;
     params.declutter = 0;
@@ -628,7 +627,6 @@ describe('every ported force pass against its JS reference', () => {
     params.uncross = 0;
     // The passes under test, all on.
     params.declutter = 1.4;
-    params.gravity = 8;
     params.flockAlign = 0.6;
     params.flockSep = 0.6;
     params.portStiff = 1;
