@@ -1,5 +1,3 @@
-import type { Vec2 } from './wrap.ts';
-
 export const WIRE_RADIUS = 2.5;
 /** World px of string displacement at waveguide |sample| = 1 after AGC. */
 export const WAVE_DISP_PX = 16;
@@ -136,38 +134,6 @@ export function segmentsInterfere(
   const dist = Math.hypot(c.bx - c.ax, c.by - c.ay);
   return dist < minDist;
 }
-
-export function polylineInterfere(
-  a: Vec2[],
-  b: Vec2[],
-  minDist: number,
-  skipA: (i: number) => boolean = () => false,
-  skipB: (i: number) => boolean = () => false,
-): boolean {
-  for (let i = 0; i < a.length - 1; i++) {
-    if (skipA(i)) continue;
-    for (let j = 0; j < b.length - 1; j++) {
-      if (skipB(j)) continue;
-      if (
-        segmentsInterfere(
-          a[i].x,
-          a[i].y,
-          a[i + 1].x,
-          a[i + 1].y,
-          b[j].x,
-          b[j].y,
-          b[j + 1].x,
-          b[j + 1].y,
-          minDist,
-        )
-      ) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 
 /**
  * How far a live rope may sit off its stem–stem chord. A body-sized bow is

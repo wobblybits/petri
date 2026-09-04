@@ -89,15 +89,6 @@ export function unwrapPoints(pts: Vec2[], w: number, h: number): Vec2[] {
   return out;
 }
 
-export function polylineLength(pts: Vec2[], w: number, h: number): number {
-  let len = 0;
-  for (let i = 1; i < pts.length; i++) {
-    const d = wrapDeltaVec(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y, w, h);
-    len += Math.hypot(d.x, d.y);
-  }
-  return len;
-}
-
 export function catmullSegment(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2): Cubic {
   const h1x = (p2.x - p0.x) / 6;
   const h1y = (p2.y - p0.y) / 6;

@@ -527,21 +527,6 @@ export function stemOffset(agent: Agent, slot: PortSlot): Vec2 {
  * and the result — and the FAR pack calls it twice per wire, which on a pond
  * of 14000 wires is most of a hundred thousand short-lived objects a frame.
  */
-/**
- * Cosine and sine of the agent's heading, computed at most once per heading.
- *
- * Exact, not approximate: `Math.cos` is deterministic for a given input, so a
- * hit returns the identical bits the call would have. The guard is a float
- * compare against the heading the memo was taken at.
- */
-export function poseSinCos(agent: Agent): void {
-  if (agent.csHeading !== agent.heading) {
-    agent.csHeading = agent.heading;
-    agent.csCos = Math.cos(agent.heading);
-    agent.csSin = Math.sin(agent.heading);
-  }
-}
-
 /*
  * Flattened on purpose. This is the single hottest geometric routine in the
  * sim — every port position in every pass comes through it, twice per wire —

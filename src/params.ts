@@ -1,3 +1,5 @@
+import { FIELD_CELL } from './fields.ts';
+
 export interface Params {
   deposit: number;
   diffuse: number;
@@ -22,13 +24,6 @@ export interface Params {
    */
   declutter: number;
   /**
-   * How hard a wire crossing a principal connection reels its own ends
-   * together. Off by default: measured over three minutes of soup it made
-   * crossings, clumping and rewrite throughput all slightly worse once
-   * `declutter` was in, which already removes the crossings a local force
-   * can plausibly undo. Kept as a knob because the detection is the cheap part.
-   */
-  /**
    * Activity LOD budget. Settled taut islands run the cheap disc+span path
    * even when they are on screen and close up; 0 turns the whole thing off.
    * Live ropes, loners, grabs, rewrites and fresh latches stay NEAR whatever
@@ -51,6 +46,13 @@ export interface Params {
    * again, this is already here and already tested.
    */
   nearBudget: number;
+  /**
+   * How hard a wire crossing a principal connection reels its own ends
+   * together. Off by default: measured over three minutes of soup it made
+   * crossings, clumping and rewrite throughput all slightly worse once
+   * `declutter` was in, which already removes the crossings a local force
+   * can plausibly undo. Kept as a knob because the detection is the cheap part.
+   */
   uncross: number;
   /**
    * How hard a rope pushes off other ropes and off bodies it is not attached
@@ -248,9 +250,9 @@ export interface Params {
 
 export function defaultParams(): Params {
   return {
-    deposit: 5,
+    deposit: 50,
     diffuse: 0.6,
-    decay: 0.00001,
+    decay: 0.01,
     sense: 520,
     attractStrong: 1.45,
     attractMedium: 0.72,
@@ -351,7 +353,9 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'nodeMass', label: 'Con/Dup mass', min: 0.3, max: 4, step: 0.05 },
   { key: 'maxAgents', label: 'Max agents', min: 8, max: 8000, step: 1 },
   { key: 'spawnInterval', label: 'Auto spawn (s)', min: 0, max: 30, step: 0.5 },
-  { key: 'energyCell', label: 'Energy cell', min: 16, max: 160, step: 1 },
+  // Step is a whole FIELD_CELL: an energy cell has to stay a multiple of the
+  // scent field's cell for the two grids to line up (see EnergyGrid).
+  { key: 'energyCell', label: 'Energy cell', min: FIELD_CELL, max: 160, step: FIELD_CELL },
   { key: 'ambientEnergy', label: 'Ambient energy', min: 0, max: 2, step: 0.05 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
   { key: 'emitCost', label: 'Emit cost', min: 0, max: 0.05, step: 0.001 },

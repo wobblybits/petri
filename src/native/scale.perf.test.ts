@@ -223,6 +223,5 @@ describe('NEAR densely connected growth', () => {
       const p50 = percentile(samples, 0.5);
       console.log(`576 NEAR ${v.name}: p50=${p50.toFixed(2)}ms  wires=${mesh.wires}`);
     }
-    expect(true).toBe(true);
   }, 120_000);
 });

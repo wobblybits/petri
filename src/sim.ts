@@ -574,7 +574,7 @@ export class Sim {
       this.worldX = h.x;
       this.worldY = h.y;
       this.fields.cover(h.x, h.y);
-      this.energy.setBounds(h.x, h.y, FIELD_HALF);
+      this.energy.setBounds(h.x, h.y, FIELD_HALF, this.fields.originX, this.fields.originY);
     }
     this.contactAudioNow.clear();
     this.contacts.clear();
@@ -3380,8 +3380,16 @@ export class Sim {
     }
   }
 
-  /** Ease the home point toward the live centre of mass. */
+  /**
+   * Ease the home point toward the live centre of mass, until the world is
+   * pinned. After that, home is the fixed anchor the scent field, the energy
+   * grid, and the pull back home are all cut against — letting it keep
+   * easing toward the crowd would slide the pond off its own grid, one
+   * easing step at a time, which is exactly the drift pinning was meant to
+   * end.
+   */
   private trackHome(dt: number): void {
+    if (this.worldPinned) return;
     const com = this.centerOfMass();
     if (!com) return;
     if (!this.home) {
@@ -3429,8 +3437,6 @@ export class Sim {
       const dx = com.x - agent.x;
       const dy = com.y - agent.y;
       if (confine) {
-        // Per axis, so a body far out on one axis is not dragged diagonally
-        // by an axis it is already inside.
         // Radial and saturating; see the C twin for why it is not per axis.
         const dist = Math.hypot(dx, dy);
         const over = Math.min(dist - FIELD_HALF, FIELD_HALF);

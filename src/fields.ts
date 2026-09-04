@@ -348,14 +348,6 @@ export class Fields {
     return a * (1 - tx) * (1 - ty) + b * tx * (1 - ty) + c * (1 - tx) * ty + d * tx * ty;
   }
 
-  gradient(ch: number, x: number, y: number): { x: number; y: number } {
-    const epsX = this.worldW / this.cols;
-    const epsY = this.worldH / this.rows;
-    const dx = this.sample(ch, x + epsX, y) - this.sample(ch, x - epsX, y);
-    const dy = this.sample(ch, x, y + epsY) - this.sample(ch, x, y - epsY);
-    return { x: dx / (2 * epsX), y: dy / (2 * epsY) };
-  }
-
   peak(): number {
     let m = 0;
     const d = this.data;

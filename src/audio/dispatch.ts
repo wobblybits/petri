@@ -218,10 +218,3 @@ export function planRewriteMessages(
     },
   ];
 }
-
-export function planTopologyMessage(
-  graph: Graph,
-  agents: Map<number, Agent>,
-): { type: 'topology'; topo: NetTopology } {
-  return { type: 'topology', topo: buildTopology(graph, agents) };
-}

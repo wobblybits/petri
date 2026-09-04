@@ -74,12 +74,13 @@ describe('PairGrid', () => {
   it('handles a wildly spread swarm without allocating a huge grid', () => {
     const { xs, ys } = scatter(200, 4_000_000, 4_000_000, 11);
     const grid = new PairGrid();
+    const t0 = Date.now();
     grid.build(xs, ys, xs.length, 8);
     let visited = 0;
     grid.forEachPair(() => visited++);
     // Coarsening kicks in; the point is that it returns rather than trying to
     // allocate 250 billion cells.
-    expect(visited).toBeGreaterThanOrEqual(0);
+    expect(Date.now() - t0).toBeLessThan(100);
   });
 
   it('finds neighbours within a radius', () => {
@@ -114,6 +115,5 @@ describe('PairGrid', () => {
     let visited = 0;
     grid.forEachPair(() => visited++);
     expect(Date.now() - t0).toBeLessThan(100);
-    expect(visited).toBeGreaterThanOrEqual(0);
   });
 });

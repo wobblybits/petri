@@ -4,7 +4,6 @@ import {
   atCap,
   BODY_VALUE,
   bodyDelta,
-  canLatch,
   canPayShare,
   deathYield,
   EnergyGrid,
@@ -169,7 +168,7 @@ describe('EnergyGrid', () => {
   it('reads ambient until a cell is touched, then keeps the remainder', () => {
     const g = new EnergyGrid(10, 0.1);
     expect(g.getAt(3, 3)).toBeCloseTo(0.1);
-    expect(g.take('0,0', 1)).toBeCloseTo(0.1);
+    expect(g.take(g.index(3, 3).key, 1)).toBeCloseTo(0.1);
     expect(g.getAt(3, 3)).toBe(0);
     expect(g.getAt(15, 3)).toBeCloseTo(0.1);
     g.addAt(3, 3, 2);
@@ -184,8 +183,6 @@ describe('harvest slots', () => {
     harvestSlots([a], grid);
     expect(a.extra).toBeCloseTo(0.1);
     expect(canPayShare(a)).toBe(false);
-    expect(canLatch(a)).toBe(true);
-    expect(canLatch({ extra: -0.5 })).toBe(true);
     expect(grid.getAt(2, 2)).toBe(0);
   });
 

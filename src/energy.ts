@@ -166,16 +166,6 @@ export function canPayShare(a: { extra: number }): boolean {
   return a.extra >= REWRITE_SHARE - EXTRA_FULL_EPS;
 }
 
-/** New latches (snap / drag-wire) only. Rewrite leftovers ignore this. */
-export function canLatch(_a: { extra: number }): boolean {
-  return true;
-}
-
-/** Metabolic debt. At −1 the body dies. */
-export function isStarving(a: { extra: number }): boolean {
-  return a.extra < 0;
-}
-
 export function extrasOf(a: { extra: number }, b: { extra: number }): number {
   return (canPayShare(a) ? 1 : 0) + (canPayShare(b) ? 1 : 0);
 }
@@ -219,8 +209,23 @@ export function rewriteYield(rule: Rule): number {
   return d > 0 ? d * BODY_VALUE : 0;
 }
 
-function cellKey(i: number, j: number): string {
-  return `${i},${j}`;
+/*
+ * Packed into one integer rather than a `"${i},${j}"` string. This runs once
+ * per agent per frame in `harvestSlots` plus every render and every rewrite
+ * settlement, and a template-literal string allocates and then costs a
+ * string hash on every `Map` lookup; a number does neither. `CELL_KEY_OFFSET`
+ * shifts i/j positive before packing (a `Map` key needs a total order, not a
+ * sign), and `CELL_KEY_WIDTH` is `2 * CELL_KEY_OFFSET`, so the shifted value
+ * fills it exactly with no overlap between rows. The product tops out under
+ * 2^52, comfortably inside float64's 2^53 safe-integer range, and the offset
+ * covers cell indices out past ±33 million — thousands of pond-widths in
+ * either direction — so nothing this sim does can wrap it.
+ */
+const CELL_KEY_OFFSET = 1 << 25;
+const CELL_KEY_WIDTH = CELL_KEY_OFFSET * 2;
+
+function cellKey(i: number, j: number): number {
+  return (i + CELL_KEY_OFFSET) * CELL_KEY_WIDTH + (j + CELL_KEY_OFFSET);
 }
 
 /**
@@ -231,7 +236,7 @@ function cellKey(i: number, j: number): string {
 export class EnergyGrid {
   cellSize: number;
   ambient: number;
-  private readonly cells = new Map<string, number>();
+  private readonly cells = new Map<number, number>();
 
   /*
    * The world bound, tracked to `home`. Outside it there is no ground: nothing
@@ -254,8 +259,13 @@ export class EnergyGrid {
    * It used to index from the world origin while the field indexed from its
    * own, so the two grids were offset by whatever fraction of a cell the pond
    * happened to sit at — two rasters of the same world that never lined up.
-   * Taking the field's origin makes an energy cell an exact block of scent
-   * cells, provided `energyCell` stays a whole multiple of `FIELD_CELL`.
+   * Taking the field's own (already cell-snapped) origin, rather than
+   * recomputing one from the raw pin point, makes an energy cell an exact
+   * block of scent cells, provided `energyCell` stays a whole multiple of
+   * `FIELD_CELL`. Deriving it independently from `cx - half` looked the same
+   * but wasn't: the field snaps its origin to a whole cell and this didn't,
+   * so the two lattices agreed only when the pin point happened to land on
+   * one already.
    *
    * Set once, when the world is pinned. Moving it later would re-key every
    * stored cell, which is why `setBounds` is not called per frame any more.
@@ -268,13 +278,23 @@ export class EnergyGrid {
     this.ambient = Math.max(0, ambient);
   }
 
-  /** Centre and half-extent of the live world, in world units. */
-  setBounds(cx: number, cy: number, half: number): void {
+  get lattice(): { x: number; y: number } {
+    return { x: this.originX, y: this.originY };
+  }
+
+  /**
+   * Centre and half-extent of the live world, in world units, plus the
+   * shared lattice origin this grid's cells are cut against — pass the scent
+   * field's own `originX`/`originY` (already snapped to a whole field cell)
+   * so the two line up. Defaults to the unsnapped `cx - half`/`cy - half` for
+   * callers that only care about the bound, not alignment with the field.
+   */
+  setBounds(cx: number, cy: number, half: number, originX = cx - half, originY = cy - half): void {
     this.boundX = cx;
     this.boundY = cy;
     this.boundHalf = half;
-    this.originX = cx - half;
-    this.originY = cy - half;
+    this.originX = originX;
+    this.originY = originY;
   }
 
   /** Square, to match the field grid it shares geometry with. */
@@ -302,7 +322,7 @@ export class EnergyGrid {
    * world coordinates: a body at a given place always reads the same energy
    * cell, however the field's window has scrolled.
    */
-  index(x: number, y: number): { i: number; j: number; key: string } {
+  index(x: number, y: number): { i: number; j: number; key: number } {
     const i = Math.floor((x - this.originX) / this.cellSize);
     const j = Math.floor((y - this.originY) / this.cellSize);
     return { i, j, key: cellKey(i, j) };
@@ -320,7 +340,7 @@ export class EnergyGrid {
   }
 
   /** Take up to `n` from a cell and return how much was taken. */
-  take(key: string, n: number): number {
+  take(key: number, n: number): number {
     const want = Math.max(0, n);
     const have = this.cells.has(key) ? (this.cells.get(key) ?? 0) : this.ambient;
     const got = Math.min(have, want);
@@ -349,8 +369,9 @@ export class EnergyGrid {
   /** Touched cells only — the implicit ambient field is not stored. */
   forEachStored(fn: (i: number, j: number, e: number) => void): void {
     for (const [key, e] of this.cells) {
-      const c = key.indexOf(',');
-      fn(+key.slice(0, c), +key.slice(c + 1), e);
+      const i = Math.floor(key / CELL_KEY_WIDTH) - CELL_KEY_OFFSET;
+      const j = (key - (i + CELL_KEY_OFFSET) * CELL_KEY_WIDTH) - CELL_KEY_OFFSET;
+      fn(i, j, e);
     }
   }
 }
@@ -374,7 +395,7 @@ export type SlotBody = Pick<
  * they still have room for. Ambient 0.1 therefore takes ten cells to fill.
  */
 export function harvestSlots(agents: Iterable<SlotBody>, grid: EnergyGrid): void {
-  const hungry = new Map<string, SlotBody[]>();
+  const hungry = new Map<number, SlotBody[]>();
   for (const a of agents) {
     if (a.locked || atCap(a)) continue;
     // Off the map is barren, not merely empty: no ambient either.

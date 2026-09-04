@@ -252,10 +252,6 @@ export type WorkletInMessage =
       wires: { id: number; length: number; damp?: number; loss?: number; bend?: number }[];
     };
 
-export type WorkletOutMessage =
-  | { type: 'waves'; packed: Float32Array }
-  | { type: 'error'; message: string };
-
 /** Latest traveling-wave snapshot from the worklet. `index` maps wireId → record offset. */
 export interface WaveSnapshot {
   packed: Float32Array;

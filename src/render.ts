@@ -92,16 +92,20 @@ export function render(
 function drawEnergyGrid(ctx: CanvasRenderingContext2D, sim: Sim, camera: Camera): void {
   const grid = sim.energy;
   const size = grid.cellSize;
+  const { x: originX, y: originY } = grid.lattice;
   const ambient = Math.max(0.001, grid.ambient);
   const pad = size;
   const left = camera.x - camera.coverWidth() * 0.5 - pad;
   const top = camera.y - camera.coverHeight() * 0.5 - pad;
   const right = camera.x + camera.coverWidth() * 0.5 + pad;
   const bottom = camera.y + camera.coverHeight() * 0.5 + pad;
-  const i0 = Math.floor(left / size);
-  const i1 = Math.ceil(right / size);
-  const j0 = Math.floor(top / size);
-  const j1 = Math.ceil(bottom / size);
+  // Cell (i, j) covers world space [originX + i*size, ...), not [i*size, ...)
+  // — the grid's lattice is anchored to the scent field's origin, not to the
+  // world origin, so the cull window and the draw position both need it.
+  const i0 = Math.floor((left - originX) / size);
+  const i1 = Math.ceil((right - originX) / size);
+  const j0 = Math.floor((top - originY) / size);
+  const j1 = Math.ceil((bottom - originY) / size);
   const gold = (e: number): string => {
     const a = Math.min(0.28, 0.06 + 0.12 * (e / ambient));
     return `rgba(232, 196, 88, ${a})`;
@@ -112,14 +116,16 @@ function drawEnergyGrid(ctx: CanvasRenderingContext2D, sim: Sim, camera: Camera)
   ctx.fillRect(left, top, right - left, bottom - top);
   grid.forEachStored((i, j, e) => {
     if (i < i0 || i >= i1 || j < j0 || j >= j1) return;
+    const x = originX + i * size;
+    const y = originY + j * size;
     if (e <= 0) {
       ctx.fillStyle = '#0c0d10';
-      ctx.fillRect(i * size, j * size, size, size);
+      ctx.fillRect(x, y, size, size);
       return;
     }
     if (Math.abs(e - grid.ambient) < 1e-6) return;
     ctx.fillStyle = gold(e);
-    ctx.fillRect(i * size, j * size, size, size);
+    ctx.fillRect(x, y, size, size);
   });
 }
 
