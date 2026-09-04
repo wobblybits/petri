@@ -146,6 +146,29 @@ export class Graph {
    */
   sealed = new Set<number>();
 
+  /**
+   * Whether a latch is refused for crossing an existing wire.
+   *
+   * A switch because the check is `O(candidates x every wire in the graph)` and
+   * is most of what `snap` costs once a pond is large: measured at ~6,000
+   * agents and 7,000 wires it was 70% of the pass, and in a churning 9,000-body
+   * soup 9.35 of snap's 9.72ms, from four calls a frame.
+   *
+   * What it buys is less clear than the price. Turning it off for 1,400 frames
+   * in a settled soup left the crossing rate flat -- 0.94 to 1.03 per thousand
+   * wire pairs, against 0.96 with it on, which is noise. Crossings in a pond
+   * that size come from bodies drifting after they latch, not from the latch
+   * itself, and `uncrossPrincipals` is not catching them either since
+   * `params.uncross` defaults to 0.
+   *
+   * That is one regime, and the cost curve runs backwards to the value: the
+   * loop is over every wire, so it is dear in a big soup where it changes
+   * nothing and nearly free in a small deliberate net -- a preset, a hand-built
+   * term -- where one wrong latch across a chord is structural and obvious.
+   * So it stays on, and this is here to measure with, not to leave off.
+   */
+  checkLatchCrossings = true;
+
   /** Broad phase for latching: ports only ever pair up within snapRadius. */
   private portGrid = new PairGrid();
   private portX: number[] = [];
@@ -581,7 +604,7 @@ export class Graph {
       const kb = portKey(c.pb);
       if (taken.has(ka) || taken.has(kb)) continue;
       if (!this.isFree(c.pa) || !this.isFree(c.pb)) continue;
-      if (this.latchCrosses(agents, c.pa, c.pb, w, h)) continue;
+      if (this.checkLatchCrossings && this.latchCrosses(agents, c.pa, c.pb, w, h)) continue;
       if (this.connect(agents, c.pa, c.pb, w, h, params, time)) {
         taken.add(ka);
         taken.add(kb);
