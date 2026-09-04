@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>FAR GPU vs CPU</title>
+    <style>
+      body { font: 13px ui-monospace, Menlo, monospace; background: #0c0d10; color: #ddd; padding: 20px; }
+      .ok { color: #7ec87e; }
+      .bad { color: #e86a6a; }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h1>FAR solve: WebGPU vs CPU twin</h1>
+    <pre id="out">running…</pre>
+    <script type="module">
+      import { runGpuCheck, runDriftCheck } from '/src/gpu/far-gpu-check.ts';
+      const out = document.getElementById('out');
+      try {
+        const report = await runGpuCheck();
+        window.__gpuCheck = report;
+        const lines = [];
+        lines.push(`gpuAvailable: ${report.gpuAvailable}`);
+        if (report.initError) lines.push(`initError: ${report.initError}`);
+        for (const r of report.results) {
+          lines.push('');
+          lines.push(`${r.name}  (n=${r.n}, wires=${r.nWires})`);
+          lines.push(`  gpu actually ran: ${r.gpuActuallyRan}`);
+          lines.push(`  non-finite: cpu=${r.cpuNonFinite} gpu=${r.gpuNonFinite}`);
+          for (const f of r.perField) {
+            if (f.maxAbs === 0) continue;
+            lines.push(
+              `  ${f.field.padEnd(12)} maxAbs=${f.maxAbs.toExponential(3)}  @${f.atIndex}  cpu=${f.cpu}  gpu=${f.gpu}`,
+            );
+          }
+        }
+        out.textContent = lines.join('\n') + '\n\nrunning drift check…';
+        if (report.gpuAvailable) {
+          const drift = await runDriftCheck();
+          window.__gpuDrift = drift;
+          lines.push('', '300-frame drift, 200 bodies + 100 wires:');
+          for (const d of drift) {
+            lines.push(
+              `  f${String(d.frame).padStart(3)}  posDiff=${d.maxPosDiff.toExponential(3)}` +
+                `  maxSpeed cpu=${d.cpuMaxSpeed.toFixed(1)} gpu=${d.gpuMaxSpeed.toFixed(1)}` +
+                `  nonFinite=${d.cpuNonFinite}/${d.gpuNonFinite}`,
+            );
+          }
+          out.textContent = lines.join('\n');
+        }
+        window.__gpuCheckDone = true;
+      } catch (err) {
+        out.textContent = 'threw: ' + (err && err.stack ? err.stack : String(err));
+        window.__gpuCheckError = String(err);
+        window.__gpuCheckDone = true;
+      }
+    </script>
+  </body>
+</html>
