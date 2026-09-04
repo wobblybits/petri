@@ -23,6 +23,27 @@ export function wrapDeltaVec(
   return { x: bx - ax, y: by - ay };
 }
 
+/**
+ * `wrapDeltaVec` writing into a caller's vector instead of minting one.
+ *
+ * The same trade `stemWorldInto` and `bezierPointInto` already make. A delta
+ * inside a per-frame loop over everything is not somewhere to be allocating:
+ * `advanceRewrite` alone was churning thousands of these a frame.
+ */
+export function wrapDeltaVecInto(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  _w: number,
+  _h: number,
+  out: Vec2,
+): Vec2 {
+  out.x = bx - ax;
+  out.y = by - ay;
+  return out;
+}
+
 export function wrapDist(
   ax: number,
   ay: number,
