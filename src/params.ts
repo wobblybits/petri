@@ -291,7 +291,7 @@ export function defaultParams(): Params {
     flockAlign: 0.0,
     flockSep: 48,
     maxAgents: 10000,
-    soupCount: 1000,
+    soupCount: 5000,
     spawnInterval: 0.5,
     energyCell: 40,
     ambientEnergy: 1,

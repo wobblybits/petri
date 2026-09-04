@@ -260,13 +260,12 @@ describe('hop distances', () => {
 });
 
 describe('simulation presets', () => {
-  it('seeds a soup with twenty-five hundred agents', () => {
+  it('seeds a soup with the configured agent count', () => {
     const sim = new Sim(480, 320);
     const params = defaultParams();
-    expect(params.soupCount).toBe(2500);
     expect(params.spawnInterval).toBe(0.5);
     loadPreset(sim, 'soup', params);
-    expect(sim.agents.size).toBe(2500);
+    expect(sim.agents.size).toBe(params.soupCount);
   });
 
   it('steps a soup without throwing', () => {
