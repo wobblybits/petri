@@ -2,14 +2,14 @@
  * Runs the WebGPU FAR solve against its CPU twin and reports where they
  * disagree. Not a vitest file on purpose: there is no WebGPU under Node,
  * so `farGpu.ready` is false there and every comparison would silently be
- * the twin against itself. This is the check `Sim.gpuFirst` says is
+ * the twin against itself. This is the check `Sim.farGpuMode` says is
  * missing, and it has to run in a browser.
  *
  *   npm run dev, then open /gpu-check.html
  *
  * `runGpuCheck` does single frames over scenes chosen to isolate parts of
  * the kernel; `runDriftCheck` runs one scene for hundreds of frames, which
- * is the question that actually gates `gpuFirst` — not whether the two
+ * is the question that actually gates `farGpuMode` — not whether the two
  * agree exactly (they cannot: far-kernel.ts solves spans sequentially and
  * the shader solves them in parallel, Gauss-Seidel against Jacobi) but
  * whether the difference stays bounded or compounds.
@@ -21,7 +21,7 @@
  * (about one lattice cell) rather than growing. Note what that does *not*
  * cover: this drives `farGpu.step` directly, so it exercises the kernel
  * and not `packFar` — which is where the bug that actually sent wires to
- * infinite length lived. Turning `gpuFirst` on still wants an end-to-end
+ * infinite length lived. Forcing `farGpuMode` on still wants an end-to-end
  * run in a browser, and on more than one vendor's GPU.
  */
 import { farGpu } from './far-gpu.ts';
@@ -265,7 +265,7 @@ export interface DriftSample {
 }
 
 /**
- * The question `Sim.gpuFirst` actually hangs on.
+ * The question `Sim.farGpuMode` actually hangs on.
  *
  * A per-frame difference between Jacobi and Gauss-Seidel is expected and
  * documented (see far-span-jacobi.test.ts). What matters is whether it

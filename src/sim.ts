@@ -240,22 +240,38 @@ export class Sim {
    * machine's own drift, several milliseconds on a frame this size.
    */
   /**
-   * Prefer the WebGPU FAR solve over the wasm one when both can take a frame.
+   * Which FAR solver to prefer when both can take a frame. 'auto' picks on body
+   * count; 'on' and 'off' force it either way, which is how the kernel gets
+   * exercised deliberately rather than only at the one zoom that happens to put
+   * every body on the FAR tier.
    *
-   * Off, and it needs to stay off until the GPU kernel is verified against the
-   * others. Turning it on is what broke the pond: the order used to be wasm
-   * first, and since the wasm module loads on every machine, `solveFarGpu` had
-   * never once executed in production. Preferring it ran it for the first time
-   * — and it runs precisely when `canFarGpu` allows, which is when the LOD has
-   * put every body on the FAR tier, i.e. at one particular zoom level. Wires
-   * went to infinite length and the view jittered as the camera chased bodies
-   * that had been flung apart.
-   *
-   * No test caught it and none can: there is no WebGPU under Node, so
-   * `farGpu.ready` is false and the path is skipped in the whole suite. It
-   * needs verifying in a browser before this becomes the default.
+   * It stayed off for a long time and needed to: preferring the GPU ran
+   * `solveFarGpu` in production for the first time and sent wires to infinite
+   * length. No test caught it and none can -- there is no WebGPU under Node, so
+   * `farGpu.ready` is false and the path is skipped in the whole suite. It is
+   * verified in a browser now, against the twin, which is what earns 'auto'.
    */
-  static gpuFirst = false;
+  static farGpuMode: 'auto' | 'on' | 'off' = 'auto';
+
+  /**
+   * Bodies at which 'auto' switches to the GPU, and back off again. Measured
+   * against wasm on identical packs: wasm is linear at roughly 0.85us a body
+   * while the GPU is flat near 1.4ms, being almost all round trip, so they
+   * cross around 2,000 and the GPU only pulls away from there (8.9x at 16k).
+   *
+   * The two numbers differ on purpose. A pond sitting on one threshold would
+   * change solver every frame, and the two do not agree to the digit -- span is
+   * Jacobi on the GPU and Gauss-Seidel in the twin -- so flapping would show as
+   * a shimmer. Crossing costs a frame of disagreement; the gap makes it rare.
+   *
+   * The crossing point is a property of this machine's GPU against this
+   * machine's CPU, so it is a field rather than a constant.
+   */
+  static farGpuOn = 2400;
+  static farGpuOff = 1800;
+
+  /** Which side of the hysteresis band 'auto' is currently latched to. */
+  private farGpuLatched = false;
 
   static profile: Map<string, number> | null = null;
   private static profileMark = 0;
@@ -540,25 +556,21 @@ export class Sim {
     this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
     /*
-     * WASM, then the GPU, then the TS twin — with `Sim.gpuFirst` able to put
-     * the GPU in front once its kernel has been verified. See the flag.
+     * The GPU when `wantFarGpu` says it is worth the round trip, then wasm,
+     * then the GPU again for the frames wasm turned down, then the TS twin.
      *
-     * `canFarGpu` declines a frame that needs the NEAR tier whichever order is
-     * used, and that is a capability limit rather than a preference: the kernel
-     * implements the FAR solve only, so a body on ropes and SAT would get the
-     * wrong physics rather than slower physics.
+     * The third branch is not redundant with the first: wasm declines any pack
+     * over its body cap (MAX_BODIES, 32768), and above that the GPU is the only
+     * real solver left -- the twin below it is brute force and would take
+     * minutes. That branch used to be reachable only on a machine with no wasm
+     * module at all, which is why its kernel went unexercised for so long.
      */
-    if (Sim.gpuFirst && this.canFarGpu() && (await this.solveFarGpu(params, t))) {
-      this.lastFarPath = 'gpu';
+    if (this.wantFarGpu() && (await this.solveFarGpu(params, t))) {
       this.finishIntegrate(t);
     } else if (this.solveFarNative(params, t)) {
       this.lastFarPath = 'wasm';
       this.finishIntegrate(t);
-    } else if (this.canFarGpu()) {
-      // Exactly as it was: this branch only runs when the wasm module is
-      // missing, which is why the kernel below it has never been exercised.
-      await this.solveFarGpu(params, t);
-      this.lastFarPath = 'gpu';
+    } else if (this.canFarGpu() && (await this.solveFarGpu(params, t))) {
       this.finishIntegrate(t);
     } else {
       this.lastFarPath = 'js';
@@ -2099,6 +2111,29 @@ export class Sim {
     return farGpu.ready && this.canFarPacked() && this.agents.size >= 8;
   }
 
+  /**
+   * Whether to put the GPU in front of wasm this frame. Capability first: the
+   * kernel is the FAR solve only, so a frame needing the NEAR tier is declined
+   * whatever the mode says -- that is wrong physics, not slower physics.
+   */
+  private wantFarGpu(): boolean {
+    if (!this.canFarGpu()) {
+      this.farGpuLatched = false;
+      return false;
+    }
+    if (Sim.farGpuMode !== 'auto') {
+      this.farGpuLatched = Sim.farGpuMode === 'on';
+      return this.farGpuLatched;
+    }
+    const n = this.agents.size;
+    if (this.farGpuLatched) {
+      if (n < Sim.farGpuOff) this.farGpuLatched = false;
+    } else if (n >= Sim.farGpuOn) {
+      this.farGpuLatched = true;
+    }
+    return this.farGpuLatched;
+  }
+
   private packFar(params: Params): {
     list: Agent[];
     data: Float32Array;
@@ -2428,9 +2463,16 @@ export class Sim {
   private async solveFarGpu(params: Params, dt: number): Promise<boolean> {
     this.syncForces();
     const packed = this.packFar(params);
-    if (!packed) return true;
-    await farGpu.step(packed.data, packed.list.length, packed.wires, packed.nWires, dt);
+    if (!packed) {
+      this.lastFarPath = 'none';
+      return true;
+    }
+    // False means the device was lost or a pass threw and `farGpu` quietly ran
+    // its own twin, which is a different solver at a very different speed. Say
+    // which one actually took the frame rather than which one was asked.
+    const onGpu = await farGpu.step(packed.data, packed.list.length, packed.wires, packed.nWires, dt);
     this.unpackFar(packed.list, packed.data);
+    this.lastFarPath = onGpu ? 'gpu' : 'js';
     return true;
   }
 
@@ -3676,7 +3718,7 @@ export class Sim {
    * Which solver actually took the last frame. There are four ways a frame
    * can be integrated and no way to tell from the outside which one ran,
    * which matters most for the GPU path: it is gated on the whole pond
-   * being FAR tier, so ticking `gpuFirst` on while zoomed in changes
+   * being FAR tier, so forcing `farGpuMode` on while zoomed in changes
    * nothing and looks identical to a path that is broken.
    */
   lastFarPath: 'gpu' | 'wasm' | 'js' | 'none' = 'none';

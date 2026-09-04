@@ -37,8 +37,14 @@ app.innerHTML = `
     <label class="check"><input type="checkbox" id="kind-colors" checked /> Kind colors</label>
     <label class="check"><input type="checkbox" id="energy-grid" /> Energy grid</label>
     <label class="check"><input type="checkbox" id="sound" /> Sound</label>
-    <label class="check" id="gpu-far-label"><input type="checkbox" id="gpu-far" /> GPU FAR solve</label>
-    <p class="hint" id="gpu-far-hint">Only engages zoomed out far enough that no body is detailed — watch the solver readout below.</p>
+    <label class="check" id="gpu-far-label">GPU FAR solve
+      <select id="gpu-far">
+        <option value="auto" selected>auto</option>
+        <option value="on">always</option>
+        <option value="off">never</option>
+      </select>
+    </label>
+    <p class="hint" id="gpu-far-hint">Auto switches to the GPU past ~2,400 bodies, where it starts beating wasm. Either way it only engages zoomed out far enough that no body is detailed — watch the solver readout below.</p>
     <p class="hint sound-hint" id="sound-hint">Tick Sound to start the synth.</p>
     <label class="slider">
       <span>Wave speed</span>
@@ -243,7 +249,7 @@ document.querySelector('#energy-grid')!.addEventListener('change', (ev) => {
  * the fault was the one time this ran and sent wires to infinite length.
  */
 document.querySelector('#gpu-far')!.addEventListener('change', (ev) => {
-  Sim.gpuFirst = (ev.target as HTMLInputElement).checked;
+  Sim.farGpuMode = (ev.target as HTMLSelectElement).value as 'auto' | 'on' | 'off';
 });
 soundCheck.addEventListener('change', () => {
   // Booting builds the whole synthesis graph, so a pond nobody is listening to
@@ -408,7 +414,11 @@ function paint(): void {
   // Which solver took the frame, and the pond's fastest body. Both are here
   // for the GPU FAR switch above: the first says whether it engaged at all,
   // the second is where "flung apart" shows up first.
-  solverEl.textContent = `solver: ${sim.lastFarPath} · peak speed ${sim.peakSpeed().toFixed(1)}`;
+  // Body count sits next to the path because it is what 'auto' switches on,
+  // so a surprising path reads as a threshold question rather than a mystery.
+  solverEl.textContent =
+    `solver: ${sim.lastFarPath} · ${sim.agents.size} bodies` +
+    ` · peak speed ${sim.peakSpeed().toFixed(1)}`;
   if (lambdaRoot) {
     const value = readChurch(sim.agents, sim.graph, lambdaRoot);
     if (value !== null) lambdaOut.textContent = `${lambdaLabel} = ${value}`;
@@ -490,10 +500,11 @@ void nativeSolver.init();
  */
 void farGpu.init().then((ok) => {
   if (ok) return;
-  const box = document.querySelector<HTMLInputElement>('#gpu-far')!;
+  const box = document.querySelector<HTMLSelectElement>('#gpu-far')!;
   box.disabled = true;
-  document.querySelector('#gpu-far-hint')!.textContent =
-    'No WebGPU in this browser — the FAR solve stays on wasm.';
+  document.querySelector('#gpu-far-hint')!.textContent = farGpu.initError
+    ? `far.wgsl did not compile — the FAR solve stays on wasm. ${farGpu.initError}`
+    : 'No WebGPU in this browser — the FAR solve stays on wasm.';
 });
 void agentsGpu.init(gpuCanvas);
 void sim.startBackgroundConfine();
@@ -504,7 +515,7 @@ void sim.startBackgroundConfine();
  * Not a debug leftover: the GPU FAR path can only be judged on real
  * hardware against a real pond, and importing './sim.ts' from the console
  * hands back a second copy of the module with its own statics — so
- * `Sim.gpuFirst` set that way is set on a class the app has never heard
+ * `Sim.farGpuMode` set that way is set on a class the app has never heard
  * of. This is the handle that reaches the instance actually running.
  */
 Object.assign(window as unknown as Record<string, unknown>, { sim, Sim, params, camera });
