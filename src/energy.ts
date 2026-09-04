@@ -1,4 +1,6 @@
 import type { Agent, AgentKind } from './agents.ts';
+import type { AgentStore } from './agent-store.ts';
+import { KIND_ERA } from './native/solver.ts';
 import type { Rule } from './rewrite.ts';
 
 /**
@@ -422,6 +424,55 @@ export function harvestSlots(agents: Iterable<SlotBody>, grid: EnergyGrid): void
 }
 
 /**
+ * Store-based twin of `harvestSlots`, for sim.ts's per-frame hot path.
+ * Identical behavior, reading and writing `AgentStore`'s arrays directly by
+ * slot instead of through `Agent`'s accessors.
+ *
+ * Not just `harvestSlots` sped up in place: `energy.test.ts` builds
+ * `SlotBody`-shaped plain object literals directly (not real `Agent`
+ * instances) to exercise this logic in isolation, so `harvestSlots` keeps
+ * its `Iterable<SlotBody>` signature for that and any other caller that
+ * doesn't have a store to hand. `sim.ts` does, every frame, for every
+ * agent, which is what makes the accessor overhead worth cutting here.
+ */
+export function harvestSlotsFast(agents: Iterable<Agent>, store: AgentStore, grid: EnergyGrid): void {
+  const LOCKED = store.locked;
+  const EXTRA = store.extra;
+  const CAP = store.energyCap;
+  const X = store.x;
+  const Y = store.y;
+  const ID = store.id;
+  const hungry = new Map<number, number[]>();
+  for (const a of agents) {
+    const s = a.slot;
+    if (LOCKED[s]) continue;
+    if (EXTRA[s] >= CAP[s] - EXTRA_FULL_EPS) continue;
+    const x = X[s];
+    const y = Y[s];
+    // Off the map is barren, not merely empty: no ambient either.
+    if (!grid.inBounds(x, y)) continue;
+    const { key } = grid.index(x, y);
+    let list = hungry.get(key);
+    if (!list) {
+      list = [];
+      hungry.set(key, list);
+    }
+    list.push(s);
+  }
+  for (const [key, list] of hungry) {
+    list.sort((a, b) => ID[a] - ID[b]);
+    for (const s of list) {
+      const cap = CAP[s];
+      const room = cap - EXTRA[s];
+      if (room <= EXTRA_FULL_EPS) continue;
+      const got = grid.take(key, room);
+      if (got <= 0) break;
+      EXTRA[s] = Math.min(cap, EXTRA[s] + got);
+    }
+  }
+}
+
+/**
  * Bill every body continuously. `rate` is energy per second, per kind via
  * `upkeepRateFor`, so a full body has `1/rate` seconds of life in hand and
  * slides smoothly into debt after that.
@@ -465,6 +516,44 @@ export function tickUpkeep(
       a.extra = Math.max(EXTRA_FLOOR, next);
     }
     if (was > EXTRA_FLOOR && a.extra <= EXTRA_FLOOR) dead.push(a.id);
+  }
+  return dead;
+}
+
+/** Store-based twin of `tickUpkeep` — see `harvestSlotsFast`'s note. */
+export function tickUpkeepFast(
+  agents: Iterable<Agent>,
+  store: AgentStore,
+  dt: number,
+  rate: number,
+  grid?: EnergyGrid,
+): number[] {
+  if (!(dt > 0)) return [];
+  const LOCKED = store.locked;
+  const KIND_CODE = store.kindCode;
+  const EXTRA = store.extra;
+  const CAP = store.energyCap;
+  const X = store.x;
+  const Y = store.y;
+  const ID = store.id;
+  const dead: number[] = [];
+  for (const a of agents) {
+    const s = a.slot;
+    if (LOCKED[s]) continue;
+    const r = KIND_CODE[s] === KIND_ERA ? rate * ERA_UPKEEP_RATIO : rate;
+    if (r === 0) continue;
+    const was = EXTRA[s];
+    const next = was - r * dt;
+    const cap = CAP[s];
+    if (next > cap) {
+      // See tickUpkeep's own comment: a full producer spills onto the
+      // ground rather than into nothing.
+      if (grid) grid.addAt(X[s], Y[s], next - cap);
+      EXTRA[s] = cap;
+    } else {
+      EXTRA[s] = Math.max(EXTRA_FLOOR, next);
+    }
+    if (was > EXTRA_FLOOR && EXTRA[s] <= EXTRA_FLOOR) dead.push(ID[s]);
   }
   return dead;
 }
@@ -599,6 +688,12 @@ export function resetRequests(agents: Iterable<SlotBody>): void {
   for (const a of agents) a.request = 0;
 }
 
+/** Store-based twin of `resetRequests` — see `harvestSlotsFast`'s note. */
+export function resetRequestsFast(agents: Iterable<Agent>, store: AgentStore): void {
+  const REQUEST = store.request;
+  for (const a of agents) REQUEST[a.slot] = 0;
+}
+
 /** Raise a body's own need. The field never lowers what is already there. */
 export function seedRequest(agent: SlotBody, amount: number): void {
   if (amount > agent.request) agent.request = amount;
@@ -648,6 +743,41 @@ export function spreadRequests(list: SlotBody[], adj: WireAdjacency, decay?: num
       const n = list[ni];
       if (!n || n.request >= next) continue;
       n.request = next;
+      if (tail >= q.length) return;
+      q[tail++] = ni;
+    }
+  }
+}
+
+/** Store-based twin of `spreadRequests` — see `harvestSlotsFast`'s note. */
+export function spreadRequestsFast(
+  list: Agent[],
+  store: AgentStore,
+  adj: WireAdjacency,
+  decay?: number,
+): void {
+  const { off, nei } = adj;
+  const q = adj.queue(list.length);
+  const REQUEST = store.request;
+  const REQUEST_DECAY = store.requestDecay;
+  let head = 0;
+  let tail = 0;
+  for (let i = 0; i < list.length; i++) {
+    if (REQUEST[list[i].slot] > REQUEST_FLOOR) q[tail++] = i;
+  }
+  while (head < tail) {
+    const at = q[head++];
+    const sAt = list[at].slot;
+    const keep = Math.min(0.99, Math.max(0, decay ?? REQUEST_DECAY[sAt]));
+    const next = REQUEST[sAt] * keep;
+    if (next <= REQUEST_FLOOR) continue;
+    for (let k = off[at]; k < off[at + 1]; k++) {
+      const ni = nei[k];
+      const other = list[ni];
+      if (!other) continue;
+      const sNi = other.slot;
+      if (REQUEST[sNi] >= next) continue;
+      REQUEST[sNi] = next;
       if (tail >= q.length) return;
       q[tail++] = ni;
     }
@@ -724,6 +854,66 @@ export function flowCharges(
     taken.add(bestSlot);
     moved += give;
     onMoved?.(d, best, give);
+  }
+  return moved;
+}
+
+/** Store-based twin of `flowCharges` — see `harvestSlotsFast`'s note. */
+export function flowChargesFast(
+  list: Agent[],
+  store: AgentStore,
+  adj: WireAdjacency,
+  onMoved?: (from: Agent, to: Agent, amount: number) => void,
+): number {
+  const { off, nei } = adj;
+  const LOCKED = store.locked;
+  const REQUEST = store.request;
+  const EXTRA = store.extra;
+  const CAP = store.energyCap;
+  const ID = store.id;
+  const donors: number[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i].slot;
+    if (LOCKED[s]) continue;
+    // spareEnergy(a) > FLOW_EPS, inlined: spareEnergy is `extra > 0 ? extra
+    // : 0`, and FLOW_EPS > 0, so the comparison is equivalent to extra
+    // itself exceeding FLOW_EPS.
+    if (EXTRA[s] > FLOW_EPS) donors.push(i);
+  }
+  // Neediest donor first, so a body that is itself being fed passes on what it
+  // does not need in the same frame rather than sitting on it.
+  donors.sort(
+    (p, q) => REQUEST[list[q].slot] - REQUEST[list[p].slot] || ID[list[p].slot] - ID[list[q].slot],
+  );
+  const taken = new Set<number>();
+  let moved = 0;
+  for (const di of donors) {
+    const ds = list[di].slot;
+    let bestIdx = -1;
+    let bestSlot = -1;
+    let bestR = REQUEST[ds];
+    for (let k = off[di]; k < off[di + 1]; k++) {
+      const ni = nei[k];
+      if (taken.has(ni)) continue;
+      const other = list[ni];
+      if (!other) continue;
+      const os = other.slot;
+      if (LOCKED[os]) continue;
+      if (REQUEST[os] > bestR) {
+        bestIdx = ni;
+        bestSlot = os;
+        bestR = REQUEST[os];
+      }
+    }
+    if (bestIdx < 0) continue;
+    const spareD = EXTRA[ds] > 0 ? EXTRA[ds] : 0;
+    const give = Math.min(spareD, REQUEST[bestSlot], CAP[bestSlot] - EXTRA[bestSlot]);
+    if (give <= FLOW_EPS) continue;
+    EXTRA[ds] -= give;
+    EXTRA[bestSlot] += give;
+    taken.add(bestIdx);
+    moved += give;
+    onMoved?.(list[di], list[bestIdx], give);
   }
   return moved;
 }

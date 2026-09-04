@@ -42,19 +42,19 @@ import {
   EnergyGrid,
   extrasOf,
   canPayShare,
-  flowCharges,
-  harvestSlots,
+  flowChargesFast,
+  harvestSlotsFast,
   EXTRA_FLOOR,
   rescueNeed,
   redexNeed,
-  resetRequests,
+  resetRequestsFast,
   rewriteCost,
   rewriteYield,
   seedRequest,
   settlePool,
   spendExtra,
-  spreadRequests,
-  tickUpkeep,
+  spreadRequestsFast,
+  tickUpkeepFast,
   WireAdjacency,
 } from './energy.ts';
 import { audio } from './audio/engine.ts';
@@ -645,7 +645,7 @@ export class Sim {
     // Rent-last is only safe *because* of the headroom: at cap == share it
     // leaves every body a hair in debt the moment it commutes.
     this.energy.configure(params.energyCell, params.ambientEnergy);
-    harvestSlots(this.agents.values(), this.energy);
+    harvestSlotsFast(this.agents.values(), this.agentStore, this.energy);
     Sim.phase('harvestSlots');
     this.graph.snap(this.agents, this.w, this.h, params, this.time);
     Sim.phase('snap');
@@ -674,7 +674,7 @@ export class Sim {
       }
     }
     for (const id of this.contactDamage(params, t)) this.kill(id);
-    for (const id of tickUpkeep(this.agents.values(), t, params.upkeep, this.energy)) {
+    for (const id of tickUpkeepFast(this.agents.values(), this.agentStore, t, params.upkeep, this.energy)) {
       this.kill(id);
     }
     this.components = this.graph.componentIds(this.agents);
@@ -3694,7 +3694,7 @@ export class Sim {
    * the other end by following the gradient a wire at a time.
    */
   private pulseRequests(params: Params): void {
-    resetRequests(this.agents.values());
+    resetRequestsFast(this.agents.values(), this.agentStore);
     const need = this.needOf;
     need.clear();
 
@@ -3736,8 +3736,8 @@ export class Sim {
     }
     const adj = this.wireAdj;
     adj.build(list.length, index, () => this.graph.wires.values());
-    spreadRequests(list, adj);
-    flowCharges(list, adj, (from, to, amount) => this.recoil(from, to, amount));
+    spreadRequestsFast(list, this.agentStore, adj);
+    flowChargesFast(list, this.agentStore, adj, (from, to, amount) => this.recoil(from, to, amount));
   }
 
   /**
