@@ -519,8 +519,13 @@ export class Sim {
     Sim.phase('applyRopePaths');
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
     Sim.phase('syncRopeShape');
-    if (this.solveFarNative(params, t)) this.finishIntegrate(t);
-    else this.solve(params, t);
+    if (this.solveFarNative(params, t)) {
+      this.lastFarPath = 'wasm';
+      this.finishIntegrate(t);
+    } else {
+      this.lastFarPath = 'js';
+      this.solve(params, t);
+    }
     Sim.phase('solve');
     this.endFrame(params, t);
   }
@@ -544,15 +549,19 @@ export class Sim {
      * wrong physics rather than slower physics.
      */
     if (Sim.gpuFirst && this.canFarGpu() && (await this.solveFarGpu(params, t))) {
+      this.lastFarPath = 'gpu';
       this.finishIntegrate(t);
     } else if (this.solveFarNative(params, t)) {
+      this.lastFarPath = 'wasm';
       this.finishIntegrate(t);
     } else if (this.canFarGpu()) {
       // Exactly as it was: this branch only runs when the wasm module is
       // missing, which is why the kernel below it has never been exercised.
       await this.solveFarGpu(params, t);
+      this.lastFarPath = 'gpu';
       this.finishIntegrate(t);
     } else {
+      this.lastFarPath = 'js';
       this.solve(params, t);
     }
     this.endFrame(params, t);
@@ -3661,6 +3670,34 @@ export class Sim {
       }
     }
     return e;
+  }
+
+  /**
+   * Which solver actually took the last frame. There are four ways a frame
+   * can be integrated and no way to tell from the outside which one ran,
+   * which matters most for the GPU path: it is gated on the whole pond
+   * being FAR tier, so ticking `gpuFirst` on while zoomed in changes
+   * nothing and looks identical to a path that is broken.
+   */
+  lastFarPath: 'gpu' | 'wasm' | 'js' | 'none' = 'none';
+
+  /**
+   * Fastest body in the pond. A health signal rather than a statistic: the
+   * failure the GPU FAR path showed the one time it ran was bodies being
+   * flung apart, and that shows up here long before it is legible on
+   * screen at a zoom far enough out for the path to engage at all.
+   */
+  peakSpeed(): number {
+    const store = this.agentStore;
+    const VX = store.vx;
+    const VY = store.vy;
+    let peak = 0;
+    for (const a of this.agents.values()) {
+      const s = a.slot;
+      const v = VX[s] * VX[s] + VY[s] * VY[s];
+      if (v > peak) peak = v;
+    }
+    return Math.sqrt(peak);
   }
 
   totalFree(): number {

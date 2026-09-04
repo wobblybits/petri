@@ -124,6 +124,36 @@ function scenes(): Scene[] {
   }
 
   {
+    /*
+     * Three wires between the *same* pair, which the graph allows: a Con and
+     * a Dup have three ports each, so two bodies can be joined more than
+     * once, and packFar does not collapse them.
+     *
+     * This is the case a mesh does not cover. Solved in sequence the second
+     * wire sees the first one's correction and only has to nudge; summed in
+     * parallel all three compute the full correction against the same start
+     * pose and the pair gets pulled three times as far as any one of them
+     * asked for. Found in a live pond — body 168 wired to body 756 three
+     * times, rests 46.3 / 47.8 / 47.0 — where it took the GPU path from
+     * 2,720 to 6.7 million peak speed in a single frame.
+     */
+    const data = new Float32Array(2 * FAR_STRIDE);
+    particle(data, 0, 0, 0, 10);
+    particle(data, 1, 100, 0, 10);
+    out.push({
+      name: 'THREE wires between the same pair',
+      data,
+      n: 2,
+      wires: wiresOf([
+        [0, 1, 46.335],
+        [0, 1, 47.769],
+        [0, 1, 46.975],
+      ]),
+      nWires: 3,
+    });
+  }
+
+  {
     // A chain: several wires sharing bodies, which is where a Jacobi-style
     // GPU pass and a sequential CPU pass are most likely to part ways.
     const n = 12;

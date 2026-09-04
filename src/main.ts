@@ -37,6 +37,8 @@ app.innerHTML = `
     <label class="check"><input type="checkbox" id="kind-colors" checked /> Kind colors</label>
     <label class="check"><input type="checkbox" id="energy-grid" /> Energy grid</label>
     <label class="check"><input type="checkbox" id="sound" /> Sound</label>
+    <label class="check" id="gpu-far-label"><input type="checkbox" id="gpu-far" /> GPU FAR solve</label>
+    <p class="hint" id="gpu-far-hint">Only engages zoomed out far enough that no body is detailed — watch the solver readout below.</p>
     <p class="hint sound-hint" id="sound-hint">Tick Sound to start the synth.</p>
     <label class="slider">
       <span>Wave speed</span>
@@ -70,6 +72,7 @@ app.innerHTML = `
     </div>
     <p class="hint">Click empty space to spawn, drag it to pan. Drag a body to move it; drag from one free port to another to wire them. Eraser: click and drag to remove bodies under the cursor. Scroll to zoom. Keys E / D / C select type, X toggles the eraser. Space pauses.</p>
     <p class="stats" id="stats"></p>
+    <p class="stats" id="solver"></p>
     <div id="sliders"></div>
   </aside>
 `;
@@ -94,6 +97,7 @@ let snapCamera = true;
 const pauseBtn = document.querySelector<HTMLButtonElement>('#pause')!;
 const eraserBtn = document.querySelector<HTMLButtonElement>('#eraser')!;
 const statsEl = document.querySelector<HTMLParagraphElement>('#stats')!;
+const solverEl = document.querySelector<HTMLParagraphElement>('#solver')!;
 const sliderRoot = document.querySelector<HTMLDivElement>('#sliders')!;
 const soundHint = document.querySelector<HTMLParagraphElement>('#sound-hint')!;
 const soundCheck = document.querySelector<HTMLInputElement>('#sound')!;
@@ -229,6 +233,17 @@ document.querySelector('#kind-colors')!.addEventListener('change', (ev) => {
 });
 document.querySelector('#energy-grid')!.addEventListener('change', (ev) => {
   view.energyGrid = (ev.target as HTMLInputElement).checked;
+});
+/*
+ * The WebGPU FAR solve, off by default and behind a switch rather than a
+ * rebuild, because the thing it needs is somebody watching a real pond on
+ * real hardware. See src/gpu/far-gpu-check.ts for the kernel-level
+ * comparison this cannot replace: that one pins the shader against the CPU
+ * twin, this one exercises the whole path including packFar, which is where
+ * the fault was the one time this ran and sent wires to infinite length.
+ */
+document.querySelector('#gpu-far')!.addEventListener('change', (ev) => {
+  Sim.gpuFirst = (ev.target as HTMLInputElement).checked;
 });
 soundCheck.addEventListener('change', () => {
   // Booting builds the whole synthesis graph, so a pond nobody is listening to
@@ -390,6 +405,10 @@ function paint(): void {
   render(ctx, sim, camera, view, audio.waves);
   drawGesture();
   statsEl.textContent = `${sim.agents.size} agents · ${sim.graph.wires.size} wires · ${sim.rewrites.length} rewrites · ${format(sim.totalFree())} extra / ${sim.totalBound()} bound`;
+  // Which solver took the frame, and the pond's fastest body. Both are here
+  // for the GPU FAR switch above: the first says whether it engaged at all,
+  // the second is where "flung apart" shows up first.
+  solverEl.textContent = `solver: ${sim.lastFarPath} · peak speed ${sim.peakSpeed().toFixed(1)}`;
   if (lambdaRoot) {
     const value = readChurch(sim.agents, sim.graph, lambdaRoot);
     if (value !== null) lambdaOut.textContent = `${lambdaLabel} = ${value}`;
@@ -465,7 +484,28 @@ function frame(now: number): void {
 sizeCanvas();
 applyPreset('soup');
 void nativeSolver.init();
-void farGpu.init();
+/*
+ * The GPU FAR switch is only meaningful if WebGPU actually came up, so
+ * say so in the label rather than leaving a tickbox that does nothing.
+ */
+void farGpu.init().then((ok) => {
+  if (ok) return;
+  const box = document.querySelector<HTMLInputElement>('#gpu-far')!;
+  box.disabled = true;
+  document.querySelector('#gpu-far-hint')!.textContent =
+    'No WebGPU in this browser — the FAR solve stays on wasm.';
+});
 void agentsGpu.init(gpuCanvas);
 void sim.startBackgroundConfine();
+
+/*
+ * The live pond and its class, on the console.
+ *
+ * Not a debug leftover: the GPU FAR path can only be judged on real
+ * hardware against a real pond, and importing './sim.ts' from the console
+ * hands back a second copy of the module with its own statics — so
+ * `Sim.gpuFirst` set that way is set on a class the app has never heard
+ * of. This is the handle that reaches the instance actually running.
+ */
+Object.assign(window as unknown as Record<string, unknown>, { sim, Sim, params, camera });
 requestAnimationFrame(frame);
