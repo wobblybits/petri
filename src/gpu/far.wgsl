@@ -48,6 +48,20 @@ struct Wire {
 
 const PI: f32 = 3.14159265;
 const TAU: f32 = 6.2831853;
+// Exactly the largest finite f32. Spelled in hex because the decimal form
+// rounds up and is rejected as unrepresentable.
+const F32_MAX: f32 = 0x1.fffffep+127;
+
+/**
+ * `Number.isFinite`, which the twin leans on in several places and WGSL has no
+ * builtin for. Written as a magnitude test rather than the usual `x - x == 0`
+ * because that identity is exactly what a shader compiler is free to fold to
+ * `true`. A comparison cannot be folded, and NaN fails every comparison, so
+ * this rejects NaN and both infinities.
+ */
+fn isFinite(x: f32) -> bool {
+  return abs(x) <= F32_MAX;
+}
 
 fn wrapAngle(a: f32) -> f32 {
   if (a != a) { return 0.0; }
@@ -89,13 +103,21 @@ fn disc(@builtin(global_invocation_id) gid: vec3u) {
   var n1: u32 = 0xffffffffu;
   var n2: u32 = 0xffffffffu;
   var k: u32 = 0u;
+  let si = i32(i);
+  let sn = i32(params.n);
   for (var w = 0u; w < params.nWires; w++) {
     let wire = wires[w];
-    let ia = u32(wire.a);
-    let ib = u32(wire.b);
+    // Same validity gate `fillDiscNeighbours` applies. Guarding span but not
+    // this would be worse than guarding neither: a malformed wire would be
+    // skipped by the chord and still mark a body wired here, which is how a
+    // pair silently loses its contact.
+    if (!isFinite(wire.a) || !isFinite(wire.b)) { continue; }
+    let ia = i32(wire.a);
+    let ib = i32(wire.b);
+    if (ia < 0 || ib < 0 || ia >= sn || ib >= sn || ia == ib) { continue; }
     var other: u32 = 0xffffffffu;
-    if (ia == i) { other = ib; }
-    else if (ib == i) { other = ia; }
+    if (ia == si) { other = u32(ib); }
+    else if (ib == si) { other = u32(ia); }
     else { continue; }
     if (k == 0u) { n0 = other; }
     else if (k == 1u) { n1 = other; }
@@ -134,28 +156,42 @@ fn span(@builtin(global_invocation_id) gid: vec3u) {
   let pi = parts[i];
   if (pi.locked >= 0.5 || pi.invMass <= 0.0) { return; }
   var push = vec2f(0.0, 0.0);
+  var count = 0u;
+  let si = i32(i);
+  let sn = i32(params.n);
   for (var w = 0u; w < params.nWires; w++) {
     let wire = wires[w];
-    let ia = u32(wire.a);
-    let ib = u32(wire.b);
+    // The twin's guards, which this had been missing. A rest that is negative
+    // or non-finite makes C meaningless, and an endpoint outside the pack
+    // reads a body that is not there -- indeterminate here rather than merely
+    // wrong, since a float that far out of range converts to whatever the
+    // hardware does with it.
+    if (!(wire.rest >= 0.0) || !isFinite(wire.rest)) { continue; }
+    if (!isFinite(wire.a) || !isFinite(wire.b)) { continue; }
+    let ia = i32(wire.a);
+    let ib = i32(wire.b);
+    if (ia < 0 || ib < 0 || ia >= sn || ib >= sn || ia == ib) { continue; }
     var j: u32;
     var oix: f32;
     var oiy: f32;
     var ojx: f32;
     var ojy: f32;
-    if (ia == i) {
-      j = ib;
+    if (ia == si) {
+      j = u32(ib);
       oix = wire.oax; oiy = wire.oay;
       ojx = wire.obx; ojy = wire.oby;
-    } else if (ib == i) {
-      j = ia;
+    } else if (ib == si) {
+      j = u32(ia);
       oix = wire.obx; oiy = wire.oby;
       ojx = wire.oax; ojy = wire.oay;
     } else { continue; }
     let pj = parts[j];
     var d = vec2f(pj.x + ojx - (pi.x + oix), pj.y + ojy - (pi.y + oiy));
     var dist = length(d);
-    if (dist != dist) { continue; }
+    // Was `dist != dist`, which is only the NaN half of the twin's
+    // `Number.isFinite`. A body far enough out overflows the length to +inf,
+    // and inf/inf is a NaN normal that poisons the whole sum.
+    if (!isFinite(dist)) { continue; }
     if (dist < 1e-6) {
       d = vec2f(select(-1.0, 1.0, i < j), 0.0);
       dist = 1.0;
@@ -170,7 +206,19 @@ fn span(@builtin(global_invocation_id) gid: vec3u) {
     let lam = -C / denom;
     // n from i toward j. A (i) is pushed with -n * lambda.
     push += -nrm * (lam * pi.invMass);
+    count = count + 1u;
   }
+  // The twin solves wires in sequence, so each one sees the last one's
+  // result. One thread per body cannot: every wire here is solved against
+  // the same start pose, so k wires on a body each correct the whole error
+  // and the sum overshoots k-fold. Three wires between one pair -- legal,
+  // Con and Dup have three ports each -- diverged outright.
+  //
+  // Averaging is the standard Jacobi fix and cannot move where the net
+  // settles: at rest every correction is zero, and zero averages to zero.
+  // It only walks there in smaller steps, which is why this tier gets
+  // FAR_SUBSTEPS passes at it.
+  if (count > 1u) { push /= f32(count); }
   delta[i] = push;
 }
 

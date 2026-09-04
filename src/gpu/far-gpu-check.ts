@@ -339,6 +339,11 @@ export async function runGpuCheck(): Promise<{
   let initError = '';
   try {
     gpuAvailable = await farGpu.init();
+    // A shader that fails to compile still yields a pipeline, so every scene
+    // below would report `gpuActuallyRan` and then compare the untouched pack
+    // against a solved one -- a page full of loud differences whose real cause
+    // is one line of WGSL. Say so instead.
+    if (!gpuAvailable && farGpu.initError) initError = farGpu.initError;
   } catch (err) {
     initError = String(err);
   }

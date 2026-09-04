@@ -34,6 +34,8 @@ export class FarGpu {
   private readback: GPUBuffer | null = null;
   private cpuData = new Float32Array(0);
   private cpuWires = new Float32Array(0);
+  /** Why `init` returned false, when the reason was the shader itself. */
+  initError = '';
 
   async init(): Promise<boolean> {
     const nav = navigator as Navigator & { gpu?: GPU };
@@ -48,6 +50,21 @@ export class FarGpu {
       });
       this.device = device;
       this.module = device.createShaderModule({ code: shader });
+      // A WGSL error does not throw here, and the pipeline built from it comes
+      // back invalid rather than failing, so every dispatch is quietly dropped
+      // and the pack reads back exactly as it went in. That is indistinguishable
+      // from a solver that ran and had nothing to do -- it cost an afternoon
+      // once. Ask the module directly, and fall back to wasm if it is broken.
+      const info = await this.module.getCompilationInfo?.();
+      const errors = info ? info.messages.filter((m) => m.type === 'error') : [];
+      if (errors.length > 0) {
+        this.initError = errors
+          .map((m) => `far.wgsl:${m.lineNum}:${m.linePos}: ${m.message}`)
+          .join('\n');
+        this.ready = false;
+        this.device = null;
+        return false;
+      }
       this.bindLayout = device.createBindGroupLayout({
         entries: [
           { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
