@@ -6,6 +6,15 @@ import { AgentStore, KIND_CODE, CODE_KIND } from './agent-store.ts';
 export type AgentKind = 'era' | 'dup' | 'con';
 export type PortSlot = 'p' | 'l' | 'r';
 
+/** Names of AgentStore's Float64Array fields — see the `num` accessor factory below. */
+type NumKey = {
+  [K in keyof AgentStore]: AgentStore[K] extends Float64Array ? K : never;
+}[keyof AgentStore];
+/** Names of AgentStore's Uint8Array (boolean) fields — see the `bool` accessor factory below. */
+type BoolKey = {
+  [K in keyof AgentStore]: AgentStore[K] extends Uint8Array ? K : never;
+}[keyof AgentStore];
+
 export interface PortRef {
   id: number;
   slot: PortSlot;
@@ -167,29 +176,31 @@ export class Agent {
     this.slot = slot;
     const s = slot;
     /*
-     * Takes a getter for the backing array, not the array itself: capacity
+     * Takes the *name* of the backing array, not the array itself: capacity
      * growth (`AgentStore.growTo`) reallocates every field array and
      * reassigns it onto `store`, so an accessor that closed over the array
-     * *value* at construction time would keep reading and writing an
+     * value at construction time would keep reading and writing an
      * abandoned buffer forever after the first grow — silently, since the
      * old array is still perfectly valid memory, just no longer the one
-     * anything else looks at. Closing over `store` (which never itself gets
-     * replaced) and indexing `store.x` etc. fresh on every access is what
-     * `id`/`kind`/`chem` already did; this makes every other field do the
-     * same.
+     * anything else looks at. Indexing `store[key]` fresh on every access
+     * is what `id`/`kind`/`chem` already did; this makes every other field
+     * do the same, through one property lookup on the stable `store`
+     * object rather than a closure call — every unconverted `agent.field`
+     * read/write in the whole codebase pays this, so the extra indirection
+     * a getter-function parameter would add is not free here.
      */
-    const num = (arrOf: () => Float64Array): PropertyDescriptor => ({
-      get: () => arrOf()[s],
+    const num = (key: NumKey): PropertyDescriptor => ({
+      get: () => store[key][s],
       set: (v: number) => {
-        arrOf()[s] = v;
+        store[key][s] = v;
       },
       enumerable: true,
       configurable: true,
     });
-    const bool = (arrOf: () => Uint8Array): PropertyDescriptor => ({
-      get: () => arrOf()[s] !== 0,
+    const bool = (key: BoolKey): PropertyDescriptor => ({
+      get: () => store[key][s] !== 0,
       set: (v: boolean) => {
-        arrOf()[s] = v ? 1 : 0;
+        store[key][s] = v ? 1 : 0;
       },
       enumerable: true,
       configurable: true,
@@ -211,29 +222,29 @@ export class Agent {
         enumerable: true,
         configurable: true,
       },
-      x: num(() => store.x),
-      y: num(() => store.y),
-      vx: num(() => store.vx),
-      vy: num(() => store.vy),
-      heading: num(() => store.heading),
-      omega: num(() => store.omega),
-      mass: num(() => store.mass),
-      alpha: num(() => store.alpha),
-      scale: num(() => store.scale),
-      locked: bool(() => store.locked),
-      stun: num(() => store.stun),
-      drive: num(() => store.drive),
-      trail: num(() => store.trail),
-      prevX: num(() => store.prevX),
-      prevY: num(() => store.prevY),
-      prevHeading: num(() => store.prevHeading),
-      integVx: num(() => store.integVx),
-      integVy: num(() => store.integVy),
-      integOmega: num(() => store.integOmega),
-      extra: num(() => store.extra),
-      request: num(() => store.request),
-      flockAlign: num(() => store.flockAlign),
-      flockSep: num(() => store.flockSep),
+      x: num('x'),
+      y: num('y'),
+      vx: num('vx'),
+      vy: num('vy'),
+      heading: num('heading'),
+      omega: num('omega'),
+      mass: num('mass'),
+      alpha: num('alpha'),
+      scale: num('scale'),
+      locked: bool('locked'),
+      stun: num('stun'),
+      drive: num('drive'),
+      trail: num('trail'),
+      prevX: num('prevX'),
+      prevY: num('prevY'),
+      prevHeading: num('prevHeading'),
+      integVx: num('integVx'),
+      integVy: num('integVy'),
+      integOmega: num('integOmega'),
+      extra: num('extra'),
+      request: num('request'),
+      flockAlign: num('flockAlign'),
+      flockSep: num('flockSep'),
       chem: {
         get: () => {
           if (this._chemGen !== store.generation) {
@@ -245,14 +256,14 @@ export class Agent {
         enumerable: true,
         configurable: true,
       },
-      recovering: bool(() => store.recovering),
-      requestDecay: num(() => store.requestDecay),
-      energyCap: num(() => store.energyCap),
-      transportThrust: num(() => store.transportThrust),
-      transportRecoil: num(() => store.transportRecoil),
-      csHeading: num(() => store.csHeading),
-      csCos: num(() => store.csCos),
-      csSin: num(() => store.csSin),
+      recovering: bool('recovering'),
+      requestDecay: num('requestDecay'),
+      energyCap: num('energyCap'),
+      transportThrust: num('transportThrust'),
+      transportRecoil: num('transportRecoil'),
+      csHeading: num('csHeading'),
+      csCos: num('csCos'),
+      csSin: num('csSin'),
     });
   }
 }
