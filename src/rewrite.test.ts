@@ -571,6 +571,7 @@ describe('heritable traits', () => {
       sim.time,
       sim.w,
       sim.h,
+      sim.agentStore,
     );
 
     const children = [...sim.agents.values()].filter((a) => !before.has(a.id));
@@ -617,6 +618,7 @@ describe('heritable traits', () => {
       sim.time,
       sim.w,
       sim.h,
+      sim.agentStore,
     );
 
     const children = [...sim.agents.values()].filter((a) => !before.has(a.id));
@@ -665,6 +667,7 @@ describe('heritable traits', () => {
       sim.time,
       sim.w,
       sim.h,
+      sim.agentStore,
     );
     const spawned = [...sim.agents.values()].filter((a) => a.id !== era.id && a.id !== bin.id);
     expect(spawned).toHaveLength(2);

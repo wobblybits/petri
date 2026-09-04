@@ -18,6 +18,7 @@ import {
   type AgentKind,
   type PortSlot,
 } from './agents.ts';
+import { AgentStore } from './agent-store.ts';
 import { queryHit, queryDiscHit, SLOP, type Hit } from './collide.ts';
 import { closestTOnSegment, segmentsIntersect, WIRE_RADIUS, wireBowBudget } from './geom.ts';
 import { PairGrid } from './grid.ts';
@@ -266,6 +267,7 @@ export class Sim {
   }
   spawnAcc = 0;
   agents = new Map<number, Agent>();
+  agentStore = new AgentStore();
   graph = new Graph();
   fields: Fields;
   rewrites: Rewrite[] = [];
@@ -404,6 +406,7 @@ export class Sim {
 
   clear(): void {
     this.agents.clear();
+    this.agentStore = new AgentStore();
     this.graph.clear();
     this.rewrites = [];
     this.fields.clear();
@@ -448,6 +451,7 @@ export class Sim {
       y,
       heading,
       params,
+      this.agentStore,
     );
     this.agents.set(a.id, a);
     this.rosterVersion++;
@@ -473,6 +477,7 @@ export class Sim {
     this.energy.addAt(agent.x, agent.y, deathYield(agent));
     this.graph.detachAgent(id);
     this.agents.delete(id);
+    this.agentStore.release(id);
     this.rosterVersion++;
     if (this.grabbed?.id === id) this.grabbed = null;
   }
@@ -3866,6 +3871,7 @@ export class Sim {
         this.time,
         this.w,
         this.h,
+        this.agentStore,
       );
       // It writes into the agents Map itself, so nothing else knows the roster
       // moved. Anything keyed on it — the body list, the flocking pair list,

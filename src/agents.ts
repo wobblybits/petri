@@ -1,6 +1,7 @@
 import { extraCapFor } from './energy.ts';
 import type { Params } from './params.ts';
 import { rotate, wrap, wrapAngle, wrapDeltaVec, angleDelta, type Vec2 } from './wrap.ts';
+import { AgentStore, KIND_CODE, CODE_KIND } from './agent-store.ts';
 
 export type AgentKind = 'era' | 'dup' | 'con';
 export type PortSlot = 'p' | 'l' | 'r';
@@ -10,39 +11,60 @@ export interface PortRef {
   slot: PortSlot;
 }
 
-export interface Agent {
-  id: number;
-  kind: AgentKind;
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  heading: number;
-  omega: number;
-  mass: number;
-  alpha: number;
-  scale: number;
-  locked: boolean;
-  stun: number;
+/*
+ * A flyweight over AgentStore: every field is a getter/setter pair reading
+ * and writing one slot of a shared set of typed arrays, not data the
+ * instance itself holds. See agent-store.ts for why (the AoS-vs-SoA
+ * rewrite) and for the field-by-field storage layout.
+ *
+ * The accessors are installed as *own instance* properties in the
+ * constructor (`Object.defineProperties(this, ...)`), not on the
+ * prototype. This is deliberate, not a style choice: `{ ...agent }` (used
+ * by native/solver.test.ts and native/solver-extra.test.ts to snapshot an
+ * agent for parity comparisons) only copies own enumerable properties —
+ * prototype accessors would make every such spread silently produce an
+ * object with none of the real fields. Own-instance accessors make spread,
+ * `Object.assign`, `for...in`, and `JSON.stringify` behave exactly as they
+ * did when Agent was a plain object.
+ *
+ * `declare` fields below carry no runtime code (compatible with
+ * erasableSyntaxOnly) — they exist purely so TypeScript knows this shape,
+ * since the actual properties are defined dynamically, not as ordinary
+ * class fields.
+ */
+export class Agent {
+  declare id: number;
+  declare kind: AgentKind;
+  declare x: number;
+  declare y: number;
+  declare vx: number;
+  declare vy: number;
+  declare heading: number;
+  declare omega: number;
+  declare mass: number;
+  declare alpha: number;
+  declare scale: number;
+  declare locked: boolean;
+  declare stun: number;
   /** Ornstein-Uhlenbeck self-propulsion magnitude along the heading. */
-  drive: number;
+  declare drive: number;
   /** Trail sampled for steering. */
-  trail: number;
+  declare trail: number;
   /** Pose at the start of the current integrate step (for XPBD velocity writeback). */
-  prevX: number;
-  prevY: number;
-  prevHeading: number;
-  integVx: number;
-  integVy: number;
-  integOmega: number;
+  declare prevX: number;
+  declare prevY: number;
+  declare prevHeading: number;
+  declare integVx: number;
+  declare integVy: number;
+  declare integOmega: number;
   /**
    * Energy on top of existence, in [−1, 1]. Positive is stock it can spend or
    * pass on, negative is debt it must settle before it can do either, and −1
    * is death. Upkeep decrements this directly.
    */
-  extra: number;
+  declare extra: number;
   /** Request gradient toward a hungry redex. 0 = quiet. */
-  request: number;
+  declare request: number;
   /**
    * How much this body cares about matching its neighbours' heading and
    * velocity, and how hard it pushes off them when they crowd. Heritable, so a
@@ -55,8 +77,8 @@ export interface Agent {
    * a high-align lineage shoal and a low-align one ignore its neighbours, and
    * makes a mixed pair negotiate rather than one of them win.
    */
-  flockAlign: number;
-  flockSep: number;
+  declare flockAlign: number;
+  declare flockSep: number;
   /**
    * Chemistry: what this body says, and what it listens for.
    *
@@ -78,8 +100,12 @@ export interface Agent {
    * Sixteen floats, not eight: each of emit and taste has a slope against the
    * body's inner state as well as a base, so what it says and what it listens
    * for can depend on how its neighbourhood is doing. See `chemState`.
+   *
+   * A live view into AgentStore.chemAll, cached and re-sliced only when the
+   * store's `generation` changes (a growth reallocation) — see the getter.
+   * Always index-written (`agent.chem[k] = ...`), never reassigned.
    */
-  chem: Float32Array;
+  declare chem: Float32Array;
   /**
    * Set when the body falls into debt, cleared when it is back on its feet.
    *
@@ -90,7 +116,7 @@ export interface Agent {
    * the body keeps asking up to `rescueTo`, so a rescue tops it back up to
    * something it can act with instead of parking it on the line.
    */
-  recovering: boolean;
+  declare recovering: boolean;
   /**
    * Heritable traits. Seeded from the matching global slider when a body is
    * created outside a rewrite, so a fresh soup starts homogeneous just as it
@@ -100,13 +126,13 @@ export interface Agent {
    * rewrite.ts) — which is the only place a population's traits can drift.
    */
   /** How much of this body's own demand survives one more hop outward. */
-  requestDecay: number;
+  declare requestDecay: number;
   /** The most this body can hold, in place of the flat per-kind cap. */
-  energyCap: number;
+  declare energyCap: number;
   /** How much of a kick this body's own pumps hand off instead of keeping. */
-  transportThrust: number;
+  declare transportThrust: number;
   /** How hard this body recoils, per unit of energy it pumps to a neighbour. */
-  transportRecoil: number;
+  declare transportRecoil: number;
   /**
    * Memoized cosine and sine of `heading`, with the heading they were taken
    * at. Every port position in the sim goes through `stemOffsetInto`, which
@@ -119,9 +145,104 @@ export interface Agent {
    * guard is exact and self-invalidating: heading moves, the memo misses. NaN
    * starts it cold and keeps it cold if a heading ever goes bad.
    */
-  csHeading: number;
-  csCos: number;
-  csSin: number;
+  declare csHeading: number;
+  declare csCos: number;
+  declare csSin: number;
+
+  readonly store: AgentStore;
+  readonly slot: number;
+  /**
+   * Not TS-`private`: a `private`/`protected` field brands the class
+   * nominally, which breaks `{ ...agent }` — the object-spread cloning
+   * native/solver.test.ts and native/solver-extra.test.ts rely on produces a
+   * plain object type that can never satisfy a nominally-branded `Agent`
+   * type, even though the runtime data is all there. Leading-underscore is
+   * scope-by-convention only, which keeps spread structural.
+   */
+  _chem: Float32Array | null = null;
+  _chemGen = -1;
+
+  constructor(store: AgentStore, slot: number) {
+    this.store = store;
+    this.slot = slot;
+    const s = slot;
+    const num = (arr: Float64Array): PropertyDescriptor => ({
+      get: () => arr[s],
+      set: (v: number) => {
+        arr[s] = v;
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    const bool = (arr: Uint8Array): PropertyDescriptor => ({
+      get: () => arr[s] !== 0,
+      set: (v: boolean) => {
+        arr[s] = v ? 1 : 0;
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    Object.defineProperties(this, {
+      id: {
+        get: () => store.id[s],
+        set: (v: number) => {
+          store.id[s] = v;
+        },
+        enumerable: true,
+        configurable: true,
+      },
+      kind: {
+        get: () => CODE_KIND[store.kindCode[s]],
+        set: (v: AgentKind) => {
+          store.kindCode[s] = KIND_CODE[v];
+        },
+        enumerable: true,
+        configurable: true,
+      },
+      x: num(store.x),
+      y: num(store.y),
+      vx: num(store.vx),
+      vy: num(store.vy),
+      heading: num(store.heading),
+      omega: num(store.omega),
+      mass: num(store.mass),
+      alpha: num(store.alpha),
+      scale: num(store.scale),
+      locked: bool(store.locked),
+      stun: num(store.stun),
+      drive: num(store.drive),
+      trail: num(store.trail),
+      prevX: num(store.prevX),
+      prevY: num(store.prevY),
+      prevHeading: num(store.prevHeading),
+      integVx: num(store.integVx),
+      integVy: num(store.integVy),
+      integOmega: num(store.integOmega),
+      extra: num(store.extra),
+      request: num(store.request),
+      flockAlign: num(store.flockAlign),
+      flockSep: num(store.flockSep),
+      chem: {
+        get: () => {
+          if (this._chemGen !== store.generation) {
+            this._chem = store.chemAll.subarray(s * CHEM_LEN, s * CHEM_LEN + CHEM_LEN);
+            this._chemGen = store.generation;
+          }
+          return this._chem!;
+        },
+        enumerable: true,
+        configurable: true,
+      },
+      recovering: bool(store.recovering),
+      requestDecay: num(store.requestDecay),
+      energyCap: num(store.energyCap),
+      transportThrust: num(store.transportThrust),
+      transportRecoil: num(store.transportRecoil),
+      csHeading: num(store.csHeading),
+      csCos: num(store.csCos),
+      csSin: num(store.csSin),
+    });
+  }
 }
 
 /** Slot as a small integer: principal 0, left 1, right 2. */
@@ -338,6 +459,14 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
   return c;
 }
 
+/**
+ * `store` defaults to a fresh, private, single-agent `AgentStore` when
+ * omitted — every one of this project's ~386 test-side `createAgent` calls
+ * (and the few production call sites that don't yet thread a shared store,
+ * e.g. render.ts's ghosts) keeps working exactly as it did when `Agent` was
+ * a plain object, just with one small typed-array table backing it instead
+ * of none. `Sim` and `commitRewrite` pass their own shared store explicitly.
+ */
 export function createAgent(
   id: number,
   kind: AgentKind,
@@ -345,43 +474,44 @@ export function createAgent(
   y: number,
   heading: number,
   params: Params,
+  store: AgentStore = new AgentStore(1),
 ): Agent {
-  return {
-    id,
-    kind,
-    x,
-    y,
-    vx: 0,
-    vy: 0,
-    heading,
-    omega: 0,
-    mass: massFor(kind, params),
-    alpha: 1,
-    scale: 1,
-    locked: false,
-    stun: 0,
-    drive: params.stepSpeed,
-    trail: 0,
-    prevX: x,
-    prevY: y,
-    prevHeading: heading,
-    integVx: 0,
-    integVy: 0,
-    integOmega: 0,
-    csHeading: NaN,
-    csCos: 1,
-    csSin: 0,
-    chem: seedChem(kind, params),
-    extra: 0,
-    request: 0,
-    flockAlign: params.flockAlign,
-    flockSep: params.flockSep,
-    recovering: false,
-    requestDecay: params.requestDecay,
-    energyCap: extraCapFor(kind),
-    transportThrust: params.transportThrust,
-    transportRecoil: params.transportRecoil,
-  };
+  const slot = store.allocate(id);
+  const agent = new Agent(store, slot);
+  agent.kind = kind;
+  agent.x = x;
+  agent.y = y;
+  agent.vx = 0;
+  agent.vy = 0;
+  agent.heading = heading;
+  agent.omega = 0;
+  agent.mass = massFor(kind, params);
+  agent.alpha = 1;
+  agent.scale = 1;
+  agent.locked = false;
+  agent.stun = 0;
+  agent.drive = params.stepSpeed;
+  agent.trail = 0;
+  agent.prevX = x;
+  agent.prevY = y;
+  agent.prevHeading = heading;
+  agent.integVx = 0;
+  agent.integVy = 0;
+  agent.integOmega = 0;
+  agent.csHeading = NaN;
+  agent.csCos = 1;
+  agent.csSin = 0;
+  agent.chem.set(seedChem(kind, params));
+  agent.extra = 0;
+  agent.request = 0;
+  agent.flockAlign = params.flockAlign;
+  agent.flockSep = params.flockSep;
+  agent.recovering = false;
+  agent.requestDecay = params.requestDecay;
+  agent.energyCap = extraCapFor(kind);
+  agent.transportThrust = params.transportThrust;
+  agent.transportRecoil = params.transportRecoil;
+  return agent;
 }
 
 export function portAxis(agent: Agent, slot: PortSlot): Vec2 {

@@ -1,4 +1,5 @@
 import { CHEM_LEN, EMIT, EMIT_SLOPE, TASTE, TASTE_SLOPE, createAgent, portWorld, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
+import type { AgentStore } from './agent-store.ts';
 import { EXTRA_CAP } from './energy.ts';
 import { otherEnd, type Graph } from './graph.ts';
 import type { Params } from './params.ts';
@@ -910,6 +911,7 @@ export function commitRewrite(
   time: number,
   w: number,
   h: number,
+  store: AgentStore,
 ): number {
   const result = applyRewrite(snapshotOf(agents, graph), rw.rule, rw.a, rw.b, nextId);
   const poses = spawnPoses(rw);
@@ -918,7 +920,7 @@ export function commitRewrite(
   const dupParent = rw.rule === 'commute' ? agents.get(rw.dupId) : undefined;
   for (const s of result.spawned) {
     const pose = poses[s.role];
-    const ag = createAgent(s.id, s.kind, pose.x, pose.y, pose.heading, params);
+    const ag = createAgent(s.id, s.kind, pose.x, pose.y, pose.heading, params, store);
     ag.vx = 0;
     ag.vy = 0;
     ag.stun = 0.45;
@@ -930,6 +932,8 @@ export function commitRewrite(
   graph.detachAgent(rw.b);
   agents.delete(rw.a);
   agents.delete(rw.b);
+  store.release(rw.a);
+  store.release(rw.b);
   for (const wire of result.net.wires) {
     if (!agents.has(wire.a.id) || !agents.has(wire.b.id)) continue;
     if (graph.isFree(wire.a) && graph.isFree(wire.b)) {

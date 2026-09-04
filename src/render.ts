@@ -1,4 +1,5 @@
-import { boundRadius, ERA_RADIUS, portLocal, slotsFor, stemRoot, stemWorld, triangleLocal, wireCubic, type Agent, type AgentKind, CHEM_LEN} from './agents.ts';
+import { boundRadius, ERA_RADIUS, portLocal, slotsFor, stemRoot, stemWorld, triangleLocal, wireCubic, Agent, type AgentKind } from './agents.ts';
+import { AgentStore } from './agent-store.ts';
 import { EXTRA_CAP, EXTRA_FLOOR, REQUEST_DECAY, REQUEST_FULL } from './energy.ts';
 import { WIRE_STROKE_PX, wiresDrawable } from './audio/lod.ts';
 import { clampPolylineToChord, WAVE_DISP_PX, wireBowBudget } from './geom.ts';
@@ -301,47 +302,56 @@ export function kindChroma(kind: AgentKind, extra: number): number {
   return chroma(kindFillRgb(kind, extra));
 }
 
+/**
+ * One scratch slot reused for every ghost, rather than a fresh `AgentStore`
+ * per call — a ghost is drawn and discarded within the same expression
+ * (`drawAgent(ctx, ghostAsAgent(g), ...)`, never stashed), so there is
+ * nothing to isolate between calls, and reusing the slot avoids allocating
+ * a whole typed-array table per preview frame.
+ */
+const ghostStore = new AgentStore(1);
+const ghostAgent = new Agent(ghostStore, ghostStore.allocate(-1));
+
 function ghostAsAgent(g: Ghost): Agent {
-  return {
-    id: -1,
-    kind: g.kind,
-    x: g.x,
-    y: g.y,
-    // Cold: a ghost is built fresh each time, so there is nothing to reuse.
-    csHeading: NaN,
-    csCos: 1,
-    csSin: 0,
-    // A ghost is drawn, never simulated, so it neither emits nor smells.
-    chem: new Float32Array(CHEM_LEN),
-    // A ghost is drawn, never flocked.
-    flockAlign: 0,
-    flockSep: 0,
-    vx: 0,
-    vy: 0,
-    heading: g.heading,
-    omega: 0,
-    mass: 1,
-    alpha: g.alpha,
-    scale: g.scale,
-    locked: true,
-    stun: 0,
-    drive: 0,
-    trail: 0,
-    prevX: g.x,
-    prevY: g.y,
-    prevHeading: g.heading,
-    integVx: 0,
-    integVy: 0,
-    integOmega: 0,
-    extra: 0,
-    request: 0,
-    recovering: false,
-    // A ghost is preview art, not a simulated body — never bred, never billed.
-    requestDecay: REQUEST_DECAY,
-    energyCap: EXTRA_CAP,
-    transportThrust: 0,
-    transportRecoil: 0,
-  };
+  const a = ghostAgent;
+  a.kind = g.kind;
+  a.x = g.x;
+  a.y = g.y;
+  // Cold: a ghost is built fresh each time, so there is nothing to reuse.
+  a.csHeading = NaN;
+  a.csCos = 1;
+  a.csSin = 0;
+  // A ghost is drawn, never simulated, so it neither emits nor smells.
+  a.chem.fill(0);
+  // A ghost is drawn, never flocked.
+  a.flockAlign = 0;
+  a.flockSep = 0;
+  a.vx = 0;
+  a.vy = 0;
+  a.heading = g.heading;
+  a.omega = 0;
+  a.mass = 1;
+  a.alpha = g.alpha;
+  a.scale = g.scale;
+  a.locked = true;
+  a.stun = 0;
+  a.drive = 0;
+  a.trail = 0;
+  a.prevX = g.x;
+  a.prevY = g.y;
+  a.prevHeading = g.heading;
+  a.integVx = 0;
+  a.integVy = 0;
+  a.integOmega = 0;
+  a.extra = 0;
+  a.request = 0;
+  a.recovering = false;
+  // A ghost is preview art, not a simulated body — never bred, never billed.
+  a.requestDecay = REQUEST_DECAY;
+  a.energyCap = EXTRA_CAP;
+  a.transportThrust = 0;
+  a.transportRecoil = 0;
+  return a;
 }
 
 /** World-space px of displacement at |sample/env| = 1 after AGC. */
