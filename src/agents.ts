@@ -166,18 +166,30 @@ export class Agent {
     this.store = store;
     this.slot = slot;
     const s = slot;
-    const num = (arr: Float64Array): PropertyDescriptor => ({
-      get: () => arr[s],
+    /*
+     * Takes a getter for the backing array, not the array itself: capacity
+     * growth (`AgentStore.growTo`) reallocates every field array and
+     * reassigns it onto `store`, so an accessor that closed over the array
+     * *value* at construction time would keep reading and writing an
+     * abandoned buffer forever after the first grow — silently, since the
+     * old array is still perfectly valid memory, just no longer the one
+     * anything else looks at. Closing over `store` (which never itself gets
+     * replaced) and indexing `store.x` etc. fresh on every access is what
+     * `id`/`kind`/`chem` already did; this makes every other field do the
+     * same.
+     */
+    const num = (arrOf: () => Float64Array): PropertyDescriptor => ({
+      get: () => arrOf()[s],
       set: (v: number) => {
-        arr[s] = v;
+        arrOf()[s] = v;
       },
       enumerable: true,
       configurable: true,
     });
-    const bool = (arr: Uint8Array): PropertyDescriptor => ({
-      get: () => arr[s] !== 0,
+    const bool = (arrOf: () => Uint8Array): PropertyDescriptor => ({
+      get: () => arrOf()[s] !== 0,
       set: (v: boolean) => {
-        arr[s] = v ? 1 : 0;
+        arrOf()[s] = v ? 1 : 0;
       },
       enumerable: true,
       configurable: true,
@@ -199,29 +211,29 @@ export class Agent {
         enumerable: true,
         configurable: true,
       },
-      x: num(store.x),
-      y: num(store.y),
-      vx: num(store.vx),
-      vy: num(store.vy),
-      heading: num(store.heading),
-      omega: num(store.omega),
-      mass: num(store.mass),
-      alpha: num(store.alpha),
-      scale: num(store.scale),
-      locked: bool(store.locked),
-      stun: num(store.stun),
-      drive: num(store.drive),
-      trail: num(store.trail),
-      prevX: num(store.prevX),
-      prevY: num(store.prevY),
-      prevHeading: num(store.prevHeading),
-      integVx: num(store.integVx),
-      integVy: num(store.integVy),
-      integOmega: num(store.integOmega),
-      extra: num(store.extra),
-      request: num(store.request),
-      flockAlign: num(store.flockAlign),
-      flockSep: num(store.flockSep),
+      x: num(() => store.x),
+      y: num(() => store.y),
+      vx: num(() => store.vx),
+      vy: num(() => store.vy),
+      heading: num(() => store.heading),
+      omega: num(() => store.omega),
+      mass: num(() => store.mass),
+      alpha: num(() => store.alpha),
+      scale: num(() => store.scale),
+      locked: bool(() => store.locked),
+      stun: num(() => store.stun),
+      drive: num(() => store.drive),
+      trail: num(() => store.trail),
+      prevX: num(() => store.prevX),
+      prevY: num(() => store.prevY),
+      prevHeading: num(() => store.prevHeading),
+      integVx: num(() => store.integVx),
+      integVy: num(() => store.integVy),
+      integOmega: num(() => store.integOmega),
+      extra: num(() => store.extra),
+      request: num(() => store.request),
+      flockAlign: num(() => store.flockAlign),
+      flockSep: num(() => store.flockSep),
       chem: {
         get: () => {
           if (this._chemGen !== store.generation) {
@@ -233,14 +245,14 @@ export class Agent {
         enumerable: true,
         configurable: true,
       },
-      recovering: bool(store.recovering),
-      requestDecay: num(store.requestDecay),
-      energyCap: num(store.energyCap),
-      transportThrust: num(store.transportThrust),
-      transportRecoil: num(store.transportRecoil),
-      csHeading: num(store.csHeading),
-      csCos: num(store.csCos),
-      csSin: num(store.csSin),
+      recovering: bool(() => store.recovering),
+      requestDecay: num(() => store.requestDecay),
+      energyCap: num(() => store.energyCap),
+      transportThrust: num(() => store.transportThrust),
+      transportRecoil: num(() => store.transportRecoil),
+      csHeading: num(() => store.csHeading),
+      csCos: num(() => store.csCos),
+      csSin: num(() => store.csSin),
     });
   }
 }
