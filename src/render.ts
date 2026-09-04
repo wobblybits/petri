@@ -6,7 +6,7 @@ import { clampPolylineToChord, WAVE_DISP_PX, wireBowBudget } from './geom.ts';
 import type { WaveSnapshot } from './audio/types.ts';
 import type { Camera } from './camera.ts';
 import { catmullSegment, unwrapPoints } from './chain.ts';
-import { bezierPoint } from './curve.ts';
+import { bezierPoint, bezierPointInto } from './curve.ts';
 import type { Fields } from './fields.ts';
 import type { Graph, Wire } from './graph.ts';
 import {
@@ -401,37 +401,59 @@ export function waveDisplace(fwd: number, back: number, env: number, pin: number
   return a * WAVE_SCALE * pin * fade;
 }
 
+/**
+ * Every wire in one path, stroked once.
+ *
+ * They all share the same white stroke, so per-wire `beginPath`/`stroke` was
+ * buying nothing and costing a draw call each: at ~5,500 wires that is 5,500
+ * strokes a frame, which is the same ceiling the GPU dot layer exists to get
+ * the population off. Subpaths are what `moveTo` starts, so one path holds
+ * them all and the caps and joins come out identical.
+ */
+const dyingScratch = new Set<number>();
+
 function drawWires(ctx: CanvasRenderingContext2D, sim: Sim, waves: WaveSnapshot | null): void {
   ctx.lineWidth = WIRE_STROKE_PX;
   ctx.strokeStyle = '#ffffff';
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
+  ctx.beginPath();
   const graph = sim.graph;
   const agents = sim.agents;
   const w = sim.w;
   const h = sim.h;
   const rewrites = sim.rewrites;
+  // A handoff only exists for a wire touching an agent a rewrite is consuming,
+  // so collect those ids once instead of asking every rewrite about every wire.
+  // That inner loop was the whole cross product -- 5,500 wires against 30
+  // rewrites is 165,000 calls a frame to answer "no" 164,900 times.
+  dyingScratch.clear();
+  for (const rw of rewrites) {
+    dyingScratch.add(rw.a);
+    dyingScratch.add(rw.b);
+  }
   for (const wire of graph.wires.values()) {
     const A = agents.get(wire.a.id);
     const B = agents.get(wire.b.id);
     if (!A || !B) continue;
     let stemA: { x: number; y: number } | undefined;
     let stemB: { x: number; y: number } | undefined;
-    for (const rw of rewrites) {
-      const handoff = rewriteHandoffStems(rw, wire, agents, w, h);
-      if (!handoff) continue;
-      stemA = { x: handoff.ax, y: handoff.ay };
-      stemB = { x: handoff.bx, y: handoff.by };
-      break;
+    if (dyingScratch.has(wire.a.id) || dyingScratch.has(wire.b.id)) {
+      for (const rw of rewrites) {
+        const handoff = rewriteHandoffStems(rw, wire, agents, w, h);
+        if (!handoff) continue;
+        stemA = { x: handoff.ax, y: handoff.ay };
+        stemB = { x: handoff.bx, y: handoff.by };
+        break;
+      }
     }
-    ctx.beginPath();
     const rec = waves?.index.get(wire.id);
     const rope = sim.wireSimulatesRope(wire);
     if (!(rec !== undefined && strokeOffsetWire(ctx, A, B, wire, w, h, waves!.packed, rec, stemA, stemB, rope))) {
       strokeWire(ctx, A, B, wire, w, h, stemA, stemB, rope);
     }
-    ctx.stroke();
   }
+  ctx.stroke();
 }
 
 function drawCommuteGhostWires(
@@ -462,6 +484,39 @@ function drawCommuteGhostWires(
   ctx.restore();
 }
 
+/** Samples a chord wire is cut into. Matches `wireControlPoints`. */
+const CHORD_STEPS = 16;
+
+/**
+ * Reused sample buffer for the chord case, which is every wire that is not
+ * running a live rope -- i.e. the whole FAR-tier pond.
+ *
+ * `wireControlPoints` builds that polyline with `push` and a fresh point per
+ * sample: seventeen objects per wire per frame, ~93,000 a frame at 5,500
+ * wires, all of it discarded before the next one. The length never varies
+ * here, so one buffer serves every wire and the objects are written through.
+ */
+const chordScratch: { x: number; y: number }[] = [];
+
+function chordPolyline(
+  A: Agent,
+  B: Agent,
+  wire: Wire,
+  w: number,
+  h: number,
+): { x: number; y: number }[] {
+  while (chordScratch.length <= CHORD_STEPS) chordScratch.push({ x: 0, y: 0 });
+  const c = wireCubic(A, wire.a.slot, B, wire.b.slot, w, h, wire.rest);
+  for (let i = 0; i <= CHORD_STEPS; i++) {
+    bezierPointInto(c.p0, c.p1, c.p2, c.p3, i / CHORD_STEPS, chordScratch[i]);
+  }
+  const last = chordScratch[CHORD_STEPS];
+  const first = chordScratch[0];
+  const span = Math.hypot(last.x - first.x, last.y - first.y);
+  clampPolylineToChord(chordScratch, wireBowBudget(span, wire.rest));
+  return chordScratch;
+}
+
 function strokeWire(
   ctx: CanvasRenderingContext2D,
   A: Agent,
@@ -473,7 +528,12 @@ function strokeWire(
   stemB?: { x: number; y: number },
   rope = true,
 ): void {
-  const pts = wireStrokePoints(A, B, wire, w, h, stemA, stemB, rope);
+  // The chord case ignores the stems anyway -- `wireControlPoints` reads the
+  // ports off the bodies -- so the pooled path is the same geometry.
+  const pts =
+    !rope || wire.nodes.length === 0
+      ? chordPolyline(A, B, wire, w, h)
+      : wireStrokePoints(A, B, wire, w, h, stemA, stemB, rope);
   if (pts.length === 0) return;
   ctx.moveTo(pts[0].x, pts[0].y);
   for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
