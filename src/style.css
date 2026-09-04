@@ -188,3 +188,89 @@ button.on {
   color: #7ef0c8;
   font-variant-numeric: tabular-nums;
 }
+
+#app.demo {
+  display: block;
+}
+
+#app.demo #about {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 3;
+  max-width: min(280px, calc(100% - 200px));
+  padding: 0;
+  pointer-events: none;
+}
+
+#app.demo #about h1 {
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+
+#app.demo #about p {
+  margin: 0 0 8px;
+  color: #8b8d96;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+#app.demo #about a {
+  color: #c8c8c8;
+  pointer-events: auto;
+}
+
+#app.demo #hud {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 3;
+}
+
+#app.demo .hud-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#app.demo .hud-count input {
+  width: 72px;
+  appearance: textfield;
+  background: #1b1c22;
+  border: 1px solid #2e3038;
+  color: #e6e6e6;
+  padding: 7px 8px;
+  border-radius: 4px;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+#app.demo .icon-btn {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+
+#app.demo .icon-btn svg {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#app.demo .icon-btn svg [fill='currentColor'] {
+  fill: currentColor;
+}
+
+#app.demo #chart {
+  inset: auto 0 0 0;
+  height: 72px;
+  width: 100%;
+  pointer-events: none;
+  z-index: 2;
+}

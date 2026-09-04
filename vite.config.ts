@@ -145,8 +145,23 @@ function audioWorklet(): Plugin {
   };
 }
 
+const isDemo = process.env.VITE_APP === 'demo';
+
+/** Pages serves index.html; Vite's demo input is demo.html. */
+function demoAsIndex(): Plugin {
+  return {
+    name: 'demo-as-index',
+    closeBundle() {
+      const from = path.resolve(root, 'dist/demo.html');
+      const to = path.resolve(root, 'dist/index.html');
+      if (fs.existsSync(from)) fs.renameSync(from, to);
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [audioWorklet()],
+  base: process.env.BASE_PATH || '/',
+  plugins: isDemo ? [audioWorklet(), demoAsIndex()] : [audioWorklet()],
   // SharedArrayBuffer (and the worker ring) only exist on a cross-origin
   // isolated page. Both headers have to be on the document; CORP on the
   // responses lets the isolated page load its own worklet and workers.
@@ -156,6 +171,7 @@ export default defineConfig({
   build: {
     // Worklet must be a real file URL — never inline raw source as a data: URL.
     assetsInlineLimit: 0,
+    rollupOptions: isDemo ? { input: path.resolve(root, 'demo.html') } : undefined,
   },
   test: {
     /*

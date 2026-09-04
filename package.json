@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "demo": "vite --open /demo.html",
     "wasm": "native/build.sh",
     "build": "tsc && vite build",
+    "build:demo": "tsc && VITE_APP=demo vite build",
     "preview": "vite preview",
     "test": "vitest run --project suite",
     "bench": "vitest run --project bench"

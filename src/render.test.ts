@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { kindChroma, kindFillRgb, waveDisplace } from './render.ts';
+import {
+  agentFillRgb,
+  buildFarInstances,
+  FAR_INSTANCE_STRIDE,
+  KIND_BW_RGB,
+  kindChroma,
+  kindFillRgb,
+  waveDisplace,
+} from './render.ts';
 import { EXTRA_CAP, EXTRA_FLOOR } from './energy.ts';
 import { WAVE_DISP_PX } from './geom.ts';
+import { defaultParams } from './params.ts';
+import { Sim } from './sim.ts';
 
 describe('waveDisplace', () => {
   it('is silent below the envelope floor', () => {
@@ -42,5 +52,29 @@ describe('kind colors', () => {
     expect(kindChroma('dup', EXTRA_CAP)).toBeGreaterThan(kindChroma('dup', 0));
     expect(kindChroma('con', EXTRA_CAP)).toBeGreaterThan(kindChroma('con', 0));
     expect(kindChroma('era', EXTRA_CAP)).toBeGreaterThan(kindChroma('era', 0));
+  });
+
+  it('grayscale fills match Canvas2D, not kind hues', () => {
+    expect(agentFillRgb('dup', EXTRA_CAP, false)).toEqual(KIND_BW_RGB.dup);
+    expect(agentFillRgb('con', EXTRA_CAP, false)).toEqual(KIND_BW_RGB.con);
+    expect(agentFillRgb('era', EXTRA_CAP, false)).toEqual(KIND_BW_RGB.era);
+    expect(agentFillRgb('dup', EXTRA_CAP, true)).toEqual([255, 0, 0]);
+  });
+});
+
+describe('buildFarInstances', () => {
+  it('packs kind hues when color is on and grayscale fills when off', () => {
+    const sim = new Sim(800, 600);
+    const params = defaultParams();
+    const dup = sim.spawn('dup', 100, 100, 0, params, true)!;
+    dup.extra = EXTRA_CAP;
+    sim.isFarTier = () => true;
+    const out = new Float32Array(FAR_INSTANCE_STRIDE);
+    buildFarInstances(sim, out, true);
+    expect([out[5], out[6], out[7]]).toEqual([1, 0, 0]);
+    buildFarInstances(sim, out, false);
+    expect(out[5]).toBeCloseTo(KIND_BW_RGB.dup[0] / 255);
+    expect(out[6]).toBeCloseTo(KIND_BW_RGB.dup[1] / 255);
+    expect(out[7]).toBeCloseTo(KIND_BW_RGB.dup[2] / 255);
   });
 });

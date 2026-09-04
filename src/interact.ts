@@ -20,12 +20,19 @@ const ERASE_BRUSH = 10;
 /** Pointer travel past which a press stops counting as a click. */
 const CLICK_SLOP = 4;
 
+/** Energy added to a cell the first time a paint stroke covers it. */
+export const PAINT_DEPOSIT = 1;
+
+export type Tool = 'none' | 'erase' | 'paint' | 'splat';
+
 export type Gesture =
   | { kind: 'none' }
   | { kind: 'pan'; lastX: number; lastY: number; moved: number }
   | { kind: 'drag'; id: number }
   | { kind: 'wire'; from: PortRef; x: number; y: number; over: PortRef | null }
-  | { kind: 'erase'; x: number; y: number };
+  | { kind: 'erase'; x: number; y: number }
+  | { kind: 'paint'; x: number; y: number; visited: Set<number> }
+  | { kind: 'splat' };
 
 /** Free port nearest the pointer, if one is close enough to mean it. */
 export function pickPort(sim: Sim, x: number, y: number, zoom: number): PortRef | null {
@@ -68,17 +75,28 @@ export function pickAgent(sim: Sim, x: number, y: number): Agent | null {
  * than by a mode switch: a free port starts a wire, a body drags it, and empty
  * space pans. A press that never really moves is still a click, so spawning
  * keeps working.
+ *
+ * `tool` overrides that pick: erase and paint are strokes, splat is one drop
+ * per press (the caller supplies `onSplat`).
  */
 export class Interaction {
   gesture: Gesture = { kind: 'none' };
   /** True once the user has panned; the camera stops chasing the flock. */
   freeCamera = false;
+  tool: Tool = 'none';
+  /** Fired once on pointer-down while the splat tool is selected. */
+  onSplat: ((x: number, y: number) => void) | null = null;
+
   /**
-   * While set, a press starts an erase stroke instead of the usual
-   * port/body/pan pick — the whole point being that dragging over a body
-   * removes it rather than moving it.
+   * Lab checkbox compatibility. Setting false always returns to the default
+   * pick, even if paint/splat was active — the lab only ever toggles erase.
    */
-  eraserMode = false;
+  get eraserMode(): boolean {
+    return this.tool === 'erase';
+  }
+  set eraserMode(on: boolean) {
+    this.tool = on ? 'erase' : 'none';
+  }
 
   private sim: Sim;
   private camera: Camera;
@@ -89,9 +107,20 @@ export class Interaction {
   }
 
   begin(wx: number, wy: number, sx: number, sy: number): void {
-    if (this.eraserMode) {
+    if (this.tool === 'erase') {
       this.eraseAlong(wx, wy, wx, wy);
       this.gesture = { kind: 'erase', x: wx, y: wy };
+      return;
+    }
+    if (this.tool === 'paint') {
+      const visited = new Set<number>();
+      this.paintAlong(wx, wy, wx, wy, visited);
+      this.gesture = { kind: 'paint', x: wx, y: wy, visited };
+      return;
+    }
+    if (this.tool === 'splat') {
+      this.onSplat?.(wx, wy);
+      this.gesture = { kind: 'splat' };
       return;
     }
     const port = pickPort(this.sim, wx, wy, this.camera.zoom);
@@ -116,6 +145,13 @@ export class Interaction {
       g.y = wy;
       return;
     }
+    if (g.kind === 'paint') {
+      this.paintAlong(g.x, g.y, wx, wy, g.visited);
+      g.x = wx;
+      g.y = wy;
+      return;
+    }
+    if (g.kind === 'splat') return;
     if (g.kind === 'pan') {
       const dx = sx - g.lastX;
       const dy = sy - g.lastY;
@@ -180,9 +216,48 @@ export class Interaction {
     for (const id of dead) this.sim.kill(id);
   }
 
+  /**
+   * Deposit `PAINT_DEPOSIT` into every energy cell whose centre is within one
+   * cell of the stroke. `visited` is the stroke's own set — hovering the same
+   * cell does not stack, a new press does.
+   */
+  private paintAlong(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    visited: Set<number>,
+  ): void {
+    const grid = this.sim.energy;
+    const size = grid.cellSize;
+    const radius = size;
+    const { x: ox, y: oy } = grid.lattice;
+    const pad = radius + size;
+    const minX = Math.min(x0, x1) - pad;
+    const maxX = Math.max(x0, x1) + pad;
+    const minY = Math.min(y0, y1) - pad;
+    const maxY = Math.max(y0, y1) + pad;
+    const i0 = Math.floor((minX - ox) / size);
+    const i1 = Math.ceil((maxX - ox) / size);
+    const j0 = Math.floor((minY - oy) / size);
+    const j1 = Math.ceil((maxY - oy) / size);
+    for (let i = i0; i < i1; i++) {
+      for (let j = j0; j < j1; j++) {
+        const cx = ox + (i + 0.5) * size;
+        const cy = oy + (j + 0.5) * size;
+        const p = closestPointOnSegment(cx, cy, x0, y0, x1, y1);
+        if (Math.hypot(cx - p.x, cy - p.y) > radius) continue;
+        const { key } = grid.index(cx, cy);
+        if (visited.has(key)) continue;
+        visited.add(key);
+        grid.addAt(cx, cy, PAINT_DEPOSIT);
+      }
+    }
+  }
+
   /** Cursor hint for the current hover. */
   cursorFor(wx: number, wy: number): string {
-    if (this.eraserMode) return 'crosshair';
+    if (this.tool !== 'none') return 'crosshair';
     if (this.gesture.kind === 'pan') return 'grabbing';
     if (this.gesture.kind !== 'none') return 'grabbing';
     if (pickPort(this.sim, wx, wy, this.camera.zoom)) return 'crosshair';

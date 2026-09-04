@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { portWorld } from './agents.ts';
 import { Camera } from './camera.ts';
-import { Interaction, pickAgent, pickPort } from './interact.ts';
+import { Interaction, PAINT_DEPOSIT, pickAgent, pickPort } from './interact.ts';
 import { defaultParams } from './params.ts';
+import { SPLATTER_COUNT, SPLATTER_RADIUS, splatter } from './presets.ts';
 import { Sim } from './sim.ts';
 
 function scene() {
@@ -12,6 +13,7 @@ function scene() {
   const sim = new Sim(800, 600);
   const camera = new Camera();
   camera.setView(800, 600);
+  camera.zoom = 1;
   camera.snap(400, 300);
   return { sim, camera, params, ui: new Interaction(sim, camera) };
 }
@@ -147,5 +149,98 @@ describe('eraser', () => {
     ui.begin(400, 300, 400, 300);
     expect(ui.gesture.kind).toBe('drag');
     expect(sim.agents.has(con.id)).toBe(true);
+  });
+});
+
+describe('paint', () => {
+  it('deposits energy on a click and does not spawn', () => {
+    const { sim, ui } = scene();
+    const before = sim.energy.getAt(24, 24);
+    ui.tool = 'paint';
+    ui.begin(24, 24, 24, 24);
+    expect(sim.energy.getAt(24, 24)).toBeCloseTo(before + PAINT_DEPOSIT);
+    expect(ui.end(24, 24, () => {})).toBeNull();
+  });
+
+  it('covers cells along the drag, not just the endpoints', () => {
+    const { sim, ui } = scene();
+    const size = sim.energy.cellSize;
+    ui.tool = 'paint';
+    ui.begin(size * 0.5, size * 0.5, 0, 0);
+    ui.move(size * 4.5, size * 0.5, 0, 0);
+    expect(sim.energy.getAt(size * 2.5, size * 0.5)).toBeGreaterThan(sim.energy.ambient);
+  });
+
+  it('does not restack a cell during one stroke', () => {
+    const { sim, ui } = scene();
+    ui.tool = 'paint';
+    ui.begin(24, 24, 0, 0);
+    const once = sim.energy.getAt(24, 24);
+    ui.move(25, 24, 0, 0);
+    expect(sim.energy.getAt(24, 24)).toBe(once);
+  });
+
+  it('paints instead of wiring, even over a free port', () => {
+    const { sim, params, ui } = scene();
+    const con = sim.spawn('con', 400, 300, 0, params, true)!;
+    const pc = portWorld(con, 'p', sim.w, sim.h);
+    ui.tool = 'paint';
+    ui.begin(pc.x, pc.y, 0, 0);
+    expect(ui.gesture.kind).toBe('paint');
+    expect(sim.agents.has(con.id)).toBe(true);
+    expect(sim.grabbed).toBeNull();
+  });
+});
+
+describe('splat', () => {
+  it('fires onSplat once per press, not per move', () => {
+    const { ui } = scene();
+    const hits: Array<[number, number]> = [];
+    ui.tool = 'splat';
+    ui.onSplat = (x, y) => hits.push([x, y]);
+    ui.begin(400, 300, 400, 300);
+    ui.move(500, 300, 500, 300);
+    ui.end(500, 300, () => {});
+    expect(hits).toEqual([[400, 300]]);
+    expect(ui.gesture.kind).toBe('none');
+  });
+
+  it('does not start a wire or a pan', () => {
+    const { sim, params, ui } = scene();
+    const con = sim.spawn('con', 400, 300, 0, params, true)!;
+    const pc = portWorld(con, 'p', sim.w, sim.h);
+    ui.tool = 'splat';
+    ui.begin(pc.x, pc.y, 0, 0);
+    expect(ui.gesture.kind).toBe('splat');
+    expect(sim.grabbed).toBeNull();
+  });
+});
+
+describe('splatter', () => {
+  it('drops about fifty mixed agents in a disk', () => {
+    const { sim, params } = scene();
+    const n = splatter(sim, 400, 300, params);
+    expect(n).toBe(SPLATTER_COUNT);
+    expect(sim.agents.size).toBe(SPLATTER_COUNT);
+    let era = 0;
+    let dup = 0;
+    let con = 0;
+    for (const a of sim.agents.values()) {
+      const d = Math.hypot(a.x - 400, a.y - 300);
+      expect(d).toBeLessThanOrEqual(SPLATTER_RADIUS + 1e-6);
+      if (a.kind === 'era') era++;
+      else if (a.kind === 'dup') dup++;
+      else con++;
+    }
+    expect(era).toBeGreaterThan(0);
+    expect(dup).toBeGreaterThan(0);
+    expect(con).toBeGreaterThan(0);
+  });
+
+  it('stops at maxAgents', () => {
+    const { sim, params } = scene();
+    params.maxAgents = 10;
+    expect(splatter(sim, 400, 300, params, 50)).toBe(10);
+    expect(splatter(sim, 400, 300, params, 50)).toBe(0);
   });
 });

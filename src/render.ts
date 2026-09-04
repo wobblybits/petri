@@ -68,7 +68,7 @@ export function buildFarInstances(sim: Sim, out: Float32Array, kindColors: boole
     const slot = agent.slot;
     const kind = agent.kind;
     const extra = store.extra[slot];
-    const rgb = kindColors ? kindFillRgb(kind, extra) : KIND_RGB[kind];
+    const rgb = agentFillRgb(kind, extra, kindColors);
     out[base + 0] = store.x[slot];
     out[base + 1] = store.y[slot];
     out[base + 2] = boundRadius(agent);
@@ -233,6 +233,23 @@ const KIND_RGB: Record<AgentKind, Rgb> = {
   con: [0, 0, 255],
   era: [255, 255, 0],
 };
+
+/**
+ * Canvas2D's un-tinted fills when kind colors are off. GPU FAR dots have to
+ * pack the same RGB — they used to fall through to KIND_RGB, so unchecking
+ * kind colors only greyscaled the NEAR-tier Canvas2D bodies and left the
+ * zoomed-out population in full hue.
+ */
+export const KIND_BW_RGB: Record<AgentKind, Rgb> = {
+  dup: [0x11, 0x12, 0x13],
+  era: [0xf3, 0xf3, 0xf3],
+  con: [0xf4, 0xf4, 0xf4],
+};
+
+/** Kind hue (energy as saturation) or the grayscale fill, matching drawAgent. */
+export function agentFillRgb(kind: AgentKind, extra: number, kindColors: boolean): Rgb {
+  return kindColors ? kindFillRgb(kind, extra) : KIND_BW_RGB[kind];
+}
 
 const KIND_HSL: Record<AgentKind, Hsl> = {
   dup: rgbToHsl(...KIND_RGB.dup),
