@@ -191,13 +191,29 @@ button.on {
 
 #app.demo {
   display: block;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app.demo .demo-chrome {
+  position: absolute;
+  top: max(12px, env(safe-area-inset-top));
+  right: max(12px, env(safe-area-inset-right));
+  left: max(12px, env(safe-area-inset-left));
+  z-index: 3;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  pointer-events: none;
+}
+
+#app.demo .demo-chrome > * {
+  pointer-events: auto;
+  touch-action: manipulation;
 }
 
 #app.demo #about {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  z-index: 3;
   max-width: min(320px, calc(100% - 220px));
   padding: 0;
   pointer-events: none;
@@ -205,22 +221,37 @@ button.on {
 
 #app.demo #about .logo {
   display: block;
-  width: 100%;
+  width: min(280px, 42vw);
   height: auto;
   margin: 0;
 }
 
 #app.demo #hud {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 3;
+  flex: 0 0 auto;
 }
 
 #app.demo .hud-tools {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 6px;
+}
+
+@media (max-width: 720px) {
+  #app.demo .demo-chrome {
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+  }
+
+  #app.demo #about {
+    max-width: none;
+  }
+
+  #app.demo #about .logo {
+    width: min(180px, 48vw);
+  }
 }
 
 #app.demo .hud-count input {
@@ -233,6 +264,9 @@ button.on {
   border-radius: 4px;
   font: inherit;
   font-variant-numeric: tabular-nums;
+  touch-action: manipulation;
+  user-select: auto;
+  -webkit-user-select: auto;
 }
 
 #app.demo .icon-btn {

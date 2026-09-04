@@ -1,6 +1,6 @@
 import { clamp } from './wrap.ts';
 
-export const CAMERA_MIN_ZOOM = 0.05;
+export const CAMERA_MIN_ZOOM = 0.02;
 export const CAMERA_MAX_ZOOM = 6;
 
 export class Camera {
@@ -43,6 +43,23 @@ export class Camera {
 
   zoomBy(factor: number): void {
     this.zoom = clamp(this.zoom * factor, CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
+  }
+
+  /** Keep the world point under `(sx, sy)` fixed while the zoom changes. */
+  zoomAt(factor: number, sx: number, sy: number): void {
+    const before = this.worldFromScreen(sx, sy);
+    this.zoomBy(factor);
+    const after = this.worldFromScreen(sx, sy);
+    this.x += before.x - after.x;
+    this.y += before.y - after.y;
+  }
+
+  /** Frame a disk of `radius` so its diameter fills the shorter viewport edge. */
+  fitDisk(radius: number): void {
+    const span = 2 * radius;
+    if (!(span > 0)) return;
+    const minDim = Math.min(this.viewW, this.viewH);
+    this.zoom = clamp(minDim / span, CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
   }
 
   apply(ctx: CanvasRenderingContext2D): void {

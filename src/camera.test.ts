@@ -15,3 +15,33 @@ describe('Camera.zoomBy', () => {
     expect(cam.zoom).toBe(CAMERA_MAX_ZOOM);
   });
 });
+
+describe('Camera.fitDisk', () => {
+  it('fills the shorter viewport edge with the disk diameter', () => {
+    const cam = new Camera();
+    cam.setView(800, 600);
+    cam.fitDisk(400);
+    expect(cam.zoom).toBeCloseTo(600 / 800, 10);
+
+    cam.setView(400, 800);
+    cam.fitDisk(400);
+    expect(cam.zoom).toBeCloseTo(400 / 800, 10);
+  });
+});
+
+describe('Camera.zoomAt', () => {
+  it('keeps the world point under the cursor fixed', () => {
+    const cam = new Camera();
+    cam.setView(800, 600);
+    cam.zoom = 1;
+    cam.snap(100, 50);
+    const sx = 600;
+    const sy = 200;
+    const before = cam.worldFromScreen(sx, sy);
+    cam.zoomAt(2, sx, sy);
+    const after = cam.worldFromScreen(sx, sy);
+    expect(after.x).toBeCloseTo(before.x, 10);
+    expect(after.y).toBeCloseTo(before.y, 10);
+    expect(cam.zoom).toBe(2);
+  });
+});
