@@ -226,6 +226,9 @@ export class FieldGpu {
       f32[8] = mix2;
       f32[9] = keep;
       f32[10] = FIXED_SCALE;
+      f32[12] = fields.boundX;
+      f32[13] = fields.boundY;
+      f32[14] = fields.boundR;
       device.queue.writeBuffer(this.uniform!, 0, u);
       if (nDeposit > 0) {
         device.queue.writeBuffer(

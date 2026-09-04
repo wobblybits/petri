@@ -144,6 +144,37 @@ export function wireBowBudget(span: number, rest: number): number {
 }
 
 /**
+ * Inelastic bounce off a disk of radius `maxDist` around `(cx, cy)`.
+ * Projects the point onto the rim and kills outward radial velocity; tangential
+ * sliding is kept. No-op when already inside or `maxDist` is not finite.
+ */
+export function bounceOffDisk(
+  x: number,
+  y: number,
+  vx: number,
+  vy: number,
+  cx: number,
+  cy: number,
+  maxDist: number,
+): { x: number; y: number; vx: number; vy: number } {
+  if (!(maxDist >= 0) || !Number.isFinite(maxDist)) return { x, y, vx, vy };
+  const dx = x - cx;
+  const dy = y - cy;
+  const dist = Math.hypot(dx, dy);
+  if (dist <= maxDist || dist < 1e-6) return { x, y, vx, vy };
+  const inv = 1 / dist;
+  const ux = dx * inv;
+  const uy = dy * inv;
+  const vn = vx * ux + vy * uy;
+  return {
+    x: cx + ux * maxDist,
+    y: cy + uy * maxDist,
+    vx: vn > 0 ? vx - vn * ux : vx,
+    vy: vn > 0 ? vy - vn * uy : vy,
+  };
+}
+
+/**
  * Pull interior points onto a tube around the chord through the ends. The
  * endpoints stay put — those are the stems.
  */

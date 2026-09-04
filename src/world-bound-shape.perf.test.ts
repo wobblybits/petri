@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { FIELD_HALF } from './fields.ts';
 import { defaultParams } from './params.ts';
 import { Sim } from './sim.ts';
 
@@ -14,9 +13,9 @@ import { Sim } from './sim.ts';
  * had come back inside — which is what a pond looks like when its Eras keep
  * collecting in the corners of the field.
  *
- * Radially it is 0 of 60. A circle of this radius is inscribed in the square
- * grid, so nothing confined by it can leave the field, and a body pressed
- * outward by its own swimming slides around the rim rather than wedging.
+ * Radially it is 0 of 60. A disk inscribed in the square grid, so nothing
+ * colliding with it can leave the field, and a body pressed outward by its
+ * own swimming slides around the rim rather than wedging.
  */
 describe('world bound shape', () => {
   it('does not collect free bodies in corners', () => {
@@ -28,25 +27,20 @@ describe('world bound shape', () => {
     params.snapRadius = 0;
     params.rewriteDuration = 0;
     const sim = new Sim(800, 600);
-    // A heavy anchor at the middle so `home` pins there, plus free Eras
-    // scattered around the boundary heading outward.
+    sim.pinWorld(400, 300);
     for (let i = 0; i < 20; i++) sim.spawn('con', 400 + (i % 5) * 40, 300 + ((i / 5) | 0) * 40, 0, params, true);
-    sim.step(1 / 60, params);
     const hx = sim.worldX;
     const hy = sim.worldY;
+    const R = sim.worldR;
     const ids: number[] = [];
     for (let k = 0; k < 60; k++) {
       const a = (k / 60) * Math.PI * 2;
-      const r = FIELD_HALF * 0.98;
+      const r = R * 0.98;
       const body = sim.spawn('era', hx + Math.cos(a) * r, hy + Math.sin(a) * r, a, params, true)!;
       ids.push(body.id);
     }
-    // Confinement no longer runs inside step() — it's a background-pool
-    // failsafe now (Sim.runConfineLoop) — so it's driven explicitly here via
-    // the same synchronous confineOnce the pool wraps.
     for (let f = 0; f < 3600; f++) {
       sim.step(1 / 60, params);
-      sim.confineOnce(1 / 60, params.edgePull);
     }
 
     let cornerish = 0;
@@ -56,8 +50,8 @@ describe('world bound shape', () => {
     for (const id of ids) {
       const a = sim.agents.get(id);
       if (!a) continue;
-      const ax = Math.abs(a.x - hx) / FIELD_HALF;
-      const ay = Math.abs(a.y - hy) / FIELD_HALF;
+      const ax = Math.abs(a.x - hx) / R;
+      const ay = Math.abs(a.y - hy) / R;
       maxR = Math.max(maxR, Math.hypot(ax, ay));
       if (ax > 0.9 && ay > 0.9) cornerish++;
       else if (ax > 0.9 || ay > 0.9) edgeish++;
@@ -71,10 +65,7 @@ describe('world bound shape', () => {
         `  furthest normalised radius:        ${maxR.toFixed(2)}\n`,
     );
     expect(cornerish + edgeish + inside, 'nothing survived to measure').toBeGreaterThan(30);
-    // The diagonal is the tell: a body on a circle of radius r sits at
-    // normalised (0.71, 0.71) at 45 degrees, so both axes past 90% means it is
-    // out at the square's corner and nowhere a circle would have let it go.
     expect(cornerish, `${cornerish} bodies wedged in corners`).toBe(0);
-    expect(maxR, `furthest body at ${maxR.toFixed(2)} of the bound`).toBeLessThan(1.3);
+    expect(maxR, `furthest body at ${maxR.toFixed(2)} of the bound`).toBeLessThan(1.05);
   }, 300_000);
 });

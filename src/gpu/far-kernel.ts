@@ -260,6 +260,30 @@ export function farFinalize(data: Float32Array, n: number, h: number): void {
   }
 }
 
+function farWall(data: Float32Array, n: number, cx: number, cy: number, boundR: number): void {
+  if (!(boundR > 0)) return;
+  for (let i = 0; i < n; i++) {
+    const o = i * FAR_STRIDE;
+    if (data[o + FAR.locked] >= 0.5) continue;
+    let maxr = boundR - data[o + FAR.radius];
+    if (maxr < 0) maxr = 0;
+    const dx = data[o + FAR.x] - cx;
+    const dy = data[o + FAR.y] - cy;
+    const dist = Math.hypot(dx, dy);
+    if (dist <= maxr || dist < 1e-6) continue;
+    const inv = 1 / dist;
+    const ux = dx * inv;
+    const uy = dy * inv;
+    data[o + FAR.x] = cx + ux * maxr;
+    data[o + FAR.y] = cy + uy * maxr;
+    const vn = data[o + FAR.vx] * ux + data[o + FAR.vy] * uy;
+    if (vn > 0) {
+      data[o + FAR.vx] -= vn * ux;
+      data[o + FAR.vy] -= vn * uy;
+    }
+  }
+}
+
 /** One frame of FAR physics. `wires` is `[a, b, rest, pad, oax, oay, obx, oby] * nWires`. */
 export function stepFarKernel(
   data: Float32Array,
@@ -268,6 +292,9 @@ export function stepFarKernel(
   nWires: number,
   dt: number,
   substeps = FAR_SUBSTEPS,
+  cx = 0,
+  cy = 0,
+  boundR = 0,
 ): void {
   if (n <= 0 || dt <= 0) return;
   const h = dt / substeps;
@@ -279,5 +306,6 @@ export function stepFarKernel(
     farApply(data, n, delta);
     if (nWires > 0) farSpan(data, n, h, wires, nWires, delta);
     farFinalize(data, n, h);
+    farWall(data, n, cx, cy, boundR);
   }
 }

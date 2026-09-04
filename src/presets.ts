@@ -35,13 +35,17 @@ export function loadPreset(sim: Sim, name: PresetName, params: Params): void {
   const cx = sim.w * 0.5;
   const cy = sim.h * 0.5;
   if (name === 'soup') {
+    sim.pinWorld(cx, cy);
     const n = Math.min(params.soupCount, params.maxAgents);
+    const radius = Math.max(0, sim.worldR - 24);
     for (let i = 0; i < n; i++) {
       const kind = soupKind();
+      const theta = Math.random() * Math.PI * 2;
+      const r = radius * Math.sqrt(Math.random());
       sim.spawn(
         kind,
-        Math.random() * 2 * sim.w,
-        Math.random() * 2 * sim.h,
+        cx + Math.cos(theta) * r,
+        cy + Math.sin(theta) * r,
         Math.random() * Math.PI * 2,
         params,
         true,

@@ -61,8 +61,14 @@ export const ERA_CAP_RATIO = 2;
 export function extraCapFor(kind: AgentKind): number {
   return kind === 'era' ? EXTRA_CAP * ERA_CAP_RATIO : EXTRA_CAP;
 }
-/** A whole unit of debt. The body dies. */
+/**
+ * Default death floor: a whole unit of debt. A body's own `debtCap` takes
+ * over once it is alive — this is only the seed, and the sign lock: a debt
+ * cap is never allowed to reach break-even, or the rescue latch never fires.
+ */
 export const EXTRA_FLOOR = -1;
+/** Closest to zero a heritable `debtCap` may sit. Strictly negative. */
+export const DEBT_CAP_MAX = -0.05;
 const EXTRA_FULL_EPS = 1e-6;
 
 /**
@@ -241,16 +247,15 @@ export class EnergyGrid {
   private readonly cells = new Map<number, number>();
 
   /*
-   * The world bound, tracked to `home`. Outside it there is no ground: nothing
-   * can be harvested and nothing deposited, so a body that drifts past the edge
-   * starves on whatever it was carrying. That is the intended pressure — the
-   * pull back toward home is weak, not a wall — and it is the same bound the
-   * scent field uses, so "off the map" means one thing rather than two.
+   * The world bound, a disk tracked to `home`. Outside it there is no ground:
+   * nothing can be harvested and nothing deposited, so a body that drifts past
+   * the edge starves on whatever it was carrying. The same disk is the scent
+   * mask and the hard wall, so "off the map" means one thing rather than two.
    *
    * Stored cells outside the bound are kept rather than pruned. The bound
-   * moves with home, and a cell that falls outside today can fall back inside
-   * tomorrow with its contents intact; dropping them would quietly destroy
-   * energy and the economy is supposed to conserve it.
+   * used to move with home, and a cell that falls outside today can fall back
+   * inside tomorrow with its contents intact; dropping them would quietly
+   * destroy energy and the economy is supposed to conserve it.
    */
   private boundX = 0;
   private boundY = 0;
@@ -285,26 +290,25 @@ export class EnergyGrid {
   }
 
   /**
-   * Centre and half-extent of the live world, in world units, plus the
-   * shared lattice origin this grid's cells are cut against — pass the scent
-   * field's own `originX`/`originY` (already snapped to a whole field cell)
-   * so the two line up. Defaults to the unsnapped `cx - half`/`cy - half` for
-   * callers that only care about the bound, not alignment with the field.
+   * Centre and radius of the live disk, in world units, plus the shared
+   * lattice origin this grid's cells are cut against — pass the scent field's
+   * own `originX`/`originY` (already snapped to a whole field cell) so the two
+   * line up. Defaults to the unsnapped `cx - radius`/`cy - radius` for callers
+   * that only care about the bound, not alignment with the field.
    */
-  setBounds(cx: number, cy: number, half: number, originX = cx - half, originY = cy - half): void {
+  setBounds(cx: number, cy: number, radius: number, originX = cx - radius, originY = cy - radius): void {
     this.boundX = cx;
     this.boundY = cy;
-    this.boundHalf = half;
+    this.boundHalf = radius;
     this.originX = originX;
     this.originY = originY;
   }
 
-  /** Square, to match the field grid it shares geometry with. */
+  /** Disk of radius `boundHalf` around the pinned centre. */
   inBounds(x: number, y: number): boolean {
-    return (
-      Math.abs(x - this.boundX) <= this.boundHalf &&
-      Math.abs(y - this.boundY) <= this.boundHalf
-    );
+    const dx = x - this.boundX;
+    const dy = y - this.boundY;
+    return dx * dx + dy * dy <= this.boundHalf * this.boundHalf;
   }
 
   clear(): void {
@@ -390,6 +394,8 @@ export type SlotBody = Pick<
   | 'recovering'
   | 'requestDecay'
   | 'energyCap'
+  | 'debtCap'
+  | 'rescueTo'
 >;
 
 /**
@@ -478,8 +484,8 @@ export function harvestSlotsFast(agents: Iterable<Agent>, store: AgentStore, gri
  * slides smoothly into debt after that.
  *
  * A negative rate pays the body instead, capped at a full extra like every
- * other source. Returns the ids that reached the floor — a whole unit of
- * debt, which the caller treats as death rather than a detachment.
+ * other source. Returns the ids that reached their own `debtCap` — death
+ * rather than a detachment.
  */
 export function tickUpkeep(
   agents: Iterable<SlotBody>,
@@ -513,9 +519,9 @@ export function tickUpkeep(
       if (grid) grid.addAt(a.x, a.y, next - a.energyCap);
       a.extra = a.energyCap;
     } else {
-      a.extra = Math.max(EXTRA_FLOOR, next);
+      a.extra = Math.max(a.debtCap, next);
     }
-    if (was > EXTRA_FLOOR && a.extra <= EXTRA_FLOOR) dead.push(a.id);
+    if (was > a.debtCap && a.extra <= a.debtCap) dead.push(a.id);
   }
   return dead;
 }
@@ -533,6 +539,7 @@ export function tickUpkeepFast(
   const KIND_CODE = store.kindCode;
   const EXTRA = store.extra;
   const CAP = store.energyCap;
+  const FLOOR = store.debtCap;
   const X = store.x;
   const Y = store.y;
   const ID = store.id;
@@ -545,31 +552,51 @@ export function tickUpkeepFast(
     const was = EXTRA[s];
     const next = was - r * dt;
     const cap = CAP[s];
+    const floor = FLOOR[s];
     if (next > cap) {
       // See tickUpkeep's own comment: a full producer spills onto the
       // ground rather than into nothing.
       if (grid) grid.addAt(X[s], Y[s], next - cap);
       EXTRA[s] = cap;
     } else {
-      EXTRA[s] = Math.max(EXTRA_FLOOR, next);
+      EXTRA[s] = Math.max(floor, next);
     }
-    if (was > EXTRA_FLOOR && EXTRA[s] <= EXTRA_FLOOR) dead.push(ID[s]);
+    if (was > floor && EXTRA[s] <= floor) dead.push(ID[s]);
   }
   return dead;
 }
 
 /**
  * How much energy this body is in debt by, and therefore how badly it wants
- * some. Zero for anything at or above break-even; one at the point of death.
+ * some. Zero at break-even; at the point of death this is `-debtCap`.
  */
 export function hungerNeed(a: SlotBody): number {
   return a.extra < 0 ? -a.extra : 0;
 }
 
 /**
+ * Where on this body's own tank a rescue aims, from `debtCap` at 0 to
+ * `energyCap` at 1. Always between the two, so a small tank cannot ask past
+ * full and a deep-debt body cannot set a target above its ceiling.
+ */
+export function rescueTarget(a: {
+  debtCap: number;
+  energyCap: number;
+  rescueTo: number;
+}): number {
+  const lo = a.debtCap;
+  const hi = a.energyCap;
+  const span = hi - lo;
+  if (!(span > 0)) return lo;
+  const t = a.rescueTo;
+  const pct = t <= 0 ? 0 : t >= 1 ? 1 : t;
+  return lo + pct * span;
+}
+
+/**
  * How much a body asks for once it has been in debt, and until it is standing
- * again. Returns what it is short of `target`, and latches `recovering` on the
- * way past zero in both directions.
+ * again. Returns what it is short of `rescueTarget`, and latches `recovering`
+ * on the way past zero in both directions.
  *
  * `hungerNeed` alone is an ambulance that stops at the kerb: it goes silent
  * the instant `extra` reaches 0, so a rescued body sat at exactly break-even
@@ -583,7 +610,8 @@ export function hungerNeed(a: SlotBody): number {
  * poor stays quiet, so a well-fed net does not turn into a diffusion pond
  * where every stock levels out and nobody can concentrate enough to act.
  */
-export function rescueNeed(a: SlotBody, target: number): number {
+export function rescueNeed(a: SlotBody): number {
+  const target = rescueTarget(a);
   if (a.extra < 0) a.recovering = true;
   else if (a.extra >= target - EXTRA_FULL_EPS) a.recovering = false;
   const hunger = hungerNeed(a);

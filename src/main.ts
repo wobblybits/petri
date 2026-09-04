@@ -524,7 +524,6 @@ void farGpu.init().then((ok) => {
     : 'No WebGPU in this browser — the FAR solve stays on wasm.';
 });
 void agentsGpu.init(gpuCanvas);
-void sim.startBackgroundConfine();
 
 /*
  * The live pond and its class, on the console.

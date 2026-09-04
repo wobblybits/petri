@@ -281,7 +281,7 @@ export class Agent {
    * which left a rescued body pinned at exactly 0 — alive, one frame of upkeep
    * from dying again, and permanently unable to afford the share a rewrite
    * costs. The latch is what lets the ask outlive the debt: while it is set,
-   * the body keeps asking up to `rescueTo`, so a rescue tops it back up to
+   * the body keeps asking up to its own `rescueTo` fill, so a rescue tops it back up to
    * something it can act with instead of parking it on the line.
    */
   get recovering(): boolean {
@@ -313,6 +313,28 @@ export class Agent {
   }
   set energyCap(v: number) {
     this.store.energyCap[this.slot] = v;
+  }
+
+  /**
+   * Extra at which this body dies. Always negative — a debt depth, never a
+   * second positive cap. Seeded from the slider, then inherited.
+   */
+  get debtCap(): number {
+    return this.store.debtCap[this.slot];
+  }
+  set debtCap(v: number) {
+    this.store.debtCap[this.slot] = v;
+  }
+
+  /**
+   * How far up this body's own tank a rescue fills, 0 at `debtCap` to 1 at
+   * `energyCap`. The absolute target is `debtCap + rescueTo * (energyCap - debtCap)`.
+   */
+  get rescueTo(): number {
+    return this.store.rescueTo[this.slot];
+  }
+  set rescueTo(v: number) {
+    this.store.rescueTo[this.slot] = v;
   }
 
   /** How much of a kick this body's own pumps hand off instead of keeping. */
@@ -407,6 +429,8 @@ export function cloneAgent(a: Agent): Agent {
   clone.recovering = a.recovering;
   clone.requestDecay = a.requestDecay;
   clone.energyCap = a.energyCap;
+  clone.debtCap = a.debtCap;
+  clone.rescueTo = a.rescueTo;
   clone.transportThrust = a.transportThrust;
   clone.transportRecoil = a.transportRecoil;
   clone.csHeading = a.csHeading;
@@ -679,6 +703,8 @@ export function createAgent(
   agent.recovering = false;
   agent.requestDecay = params.requestDecay;
   agent.energyCap = extraCapFor(kind);
+  agent.debtCap = params.debtCap;
+  agent.rescueTo = params.rescueTo;
   agent.transportThrust = params.transportThrust;
   agent.transportRecoil = params.transportRecoil;
   return agent;

@@ -22,6 +22,10 @@ struct FieldParams {
   keep: f32,
   fixedScale: f32,
   pad0: f32,
+  worldX: f32,
+  worldY: f32,
+  boundR: f32,
+  pad1: f32,
 }
 
 // A world position and what to add there, per channel.
@@ -64,6 +68,16 @@ fn clearAcc(@builtin(global_invocation_id) gid: vec3u) {
 
 // Bilinear splat, matching Fields.deposit: the four cells around the point,
 // weighted by the fractional part.
+fn cellOut(i: i32, j: i32) -> bool {
+  if (P.boundR <= 0.0) { return false; }
+  let cs = P.extent / f32(P.cols);
+  let x = P.originX + (f32(i) + 0.5) * cs;
+  let y = P.originY + (f32(j) + 0.5) * cs;
+  let dx = x - P.worldX;
+  let dy = y - P.worldY;
+  return dx * dx + dy * dy > P.boundR * P.boundR;
+}
+
 @compute @workgroup_size(64)
 fn scatter(@builtin(global_invocation_id) gid: vec3u) {
   let k = gid.x;
@@ -79,6 +93,7 @@ fn scatter(@builtin(global_invocation_id) gid: vec3u) {
       let i = i0 + di;
       let j = j0 + dj;
       if (i < 0 || j < 0 || i >= i32(P.cols) || j >= i32(P.rows)) { continue; }
+      if (cellOut(i, j)) { continue; }
       var wx = 1.0 - tx;
       if (di == 1) { wx = tx; }
       var wy = 1.0 - ty;
@@ -112,22 +127,37 @@ fn applyAcc(@builtin(global_invocation_id) gid: vec3u) {
   src[i] += add;
 }
 
-// One diffusion pass, src into dst. -1 in the CPU twin means "reflect off the
-// edge": a boundary cell falls back to its own value, so the edge neither
-// absorbs scent nor invents it.
+// One diffusion pass, src into dst. With no bound, a missing neighbour falls
+// back to this cell (Neumann). With a disk bound, cells whose centres sit
+// outside are zero and so are their contributions (Dirichlet).
 fn diffuseAt(idx: u32, m: f32) {
-  let i = idx % P.cols;
-  let j = idx / P.cols;
-  // `self` is a reserved keyword in WGSL, hence `here`.
+  let i = i32(idx % P.cols);
+  let j = i32(idx / P.cols);
+  if (cellOut(i, j)) {
+    dst[idx] = vec4f(0.0);
+    return;
+  }
   let here = src[idx];
+  let dirichlet = P.boundR > 0.0;
   var a = here;
   var b = here;
   var c = here;
   var e = here;
-  if (i > 0u) { a = src[idx - 1u]; }
-  if (i + 1u < P.cols) { b = src[idx + 1u]; }
-  if (j > 0u) { c = src[idx - P.cols]; }
-  if (j + 1u < P.rows) { e = src[idx + P.cols]; }
+  if (dirichlet) {
+    a = vec4f(0.0);
+    b = vec4f(0.0);
+    c = vec4f(0.0);
+    e = vec4f(0.0);
+    if (i > 0 && !cellOut(i - 1, j)) { a = src[idx - 1u]; }
+    if (i + 1 < i32(P.cols) && !cellOut(i + 1, j)) { b = src[idx + 1u]; }
+    if (j > 0 && !cellOut(i, j - 1)) { c = src[idx - P.cols]; }
+    if (j + 1 < i32(P.rows) && !cellOut(i, j + 1)) { e = src[idx + P.cols]; }
+  } else {
+    if (i > 0) { a = src[idx - 1u]; }
+    if (i + 1 < i32(P.cols)) { b = src[idx + 1u]; }
+    if (j > 0) { c = src[idx - P.cols]; }
+    if (j + 1 < i32(P.rows)) { e = src[idx + P.cols]; }
+  }
   dst[idx] = (1.0 - m) * here + m * (a + b + c + e) * 0.25;
 }
 
@@ -151,6 +181,12 @@ fn diffuse2(@builtin(global_invocation_id) gid: vec3u) {
 fn decay(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
   if (i >= P.cols * P.rows) { return; }
+  let ci = i32(i % P.cols);
+  let cj = i32(i / P.cols);
+  if (cellOut(ci, cj)) {
+    src[i] = vec4f(0.0);
+    return;
+  }
   src[i] *= P.keep;
 }
 

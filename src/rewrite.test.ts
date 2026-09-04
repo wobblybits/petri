@@ -651,12 +651,17 @@ describe('heritable traits', () => {
     }
   });
 
-  it('leaves a non-commute rewrite child at the slider default', () => {
+  it('clones an Era through erase, with a mutation nudge', () => {
     const sim = new Sim(320, 240);
     const params = defaultParams();
     const era = sim.spawn('era', 100, 100, 0, params, true)!;
     const bin = sim.spawn('con', 130, 100, Math.PI, params, true)!;
     sim.wire(era.id, 'p', bin.id, 'p', params);
+    era.requestDecay = 0.55;
+    era.debtCap = -1.8;
+    era.rescueTo = 0.2;
+    era.energyCap = EXTRA_CAP * 1.6;
+    const parentDecay = era.requestDecay;
     const rw = beginRewrite(era, bin, sim.graph, sim.agents, sim.w, sim.h, 1);
     sim.nextId = commitRewrite(
       rw,
@@ -669,9 +674,19 @@ describe('heritable traits', () => {
       sim.h,
       sim.agentStore,
     );
-    const spawned = [...sim.agents.values()].filter((a) => a.id !== era.id && a.id !== bin.id);
+    const spawned = [...sim.agents.values()].filter((a) => a.kind === 'era');
     expect(spawned).toHaveLength(2);
-    for (const e of spawned) expect(e.requestDecay).toBe(params.requestDecay);
+    for (const e of spawned) {
+      expect(e.debtCap).toBeLessThan(0);
+      expect(e.rescueTo).toBeGreaterThanOrEqual(0);
+      expect(e.rescueTo).toBeLessThanOrEqual(1);
+      // Near the Era parent, not the slider default, on every trait that
+      // parent had moved off the seed.
+      const decayRange = TRAIT_RANGE.requestDecay;
+      expect(e.requestDecay).toBeGreaterThanOrEqual(parentDecay - decayRange.mutate - 1e-9);
+      expect(e.requestDecay).toBeLessThanOrEqual(parentDecay + decayRange.mutate + 1e-9);
+      expect(e.requestDecay, 'must not reset to the slider').not.toBe(params.requestDecay);
+    }
   });
 });
 

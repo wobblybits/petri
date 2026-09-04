@@ -120,11 +120,6 @@ export interface Params {
    * lets a lineage work out whether to space out or tolerate the scrum.
    */
   contactCost: number;
-  /**
-   * Pull back toward home for a body outside the world bound, per world unit
-   * of overshoot per second. 0 = off, and the pond is unbounded again.
-   */
-  edgePull: number;
   wireMinRest: number;
   wireShrink: number;
   eraMass: number;
@@ -175,17 +170,30 @@ export interface Params {
    */
   emitCost: number;
   /**
-   * How full a body that has been in debt is fed back up to before it stops
-   * asking. 0 restores the old behaviour, where a rescue stopped at break-even.
+   * Fraction of this body's own tank a rescue fills, from `debtCap` at 0 to
+   * `energyCap` at 1. The absolute extra it asks up to is
+   * `debtCap + rescueTo * (energyCap - debtCap)`, so it cannot land outside
+   * the tank.
    *
-   * At the default — one whole share — a rescue is a refill: the body comes out
-   * of it able to pay for a rewrite, which is what makes a surplus at one end
-   * of a net actually drain toward a starving end instead of trickling out the
-   * few hundredths needed to keep it at exactly zero. Above `REWRITE_SHARE` it
-   * eats into the headroom too and a starving neighbourhood will strip a
-   * reservoir bare; below it the patient is discharged unable to act.
+   * 0 is the old ambulance that stops at break-even once extra is no longer
+   * negative. 1 strips the neighbourhood to top the patient off. The seed is
+   * a little under a full tank, so a default Con comes out of rescue able to
+   * pay a rewrite share without emptying every reservoir it can reach.
+   *
+   * Heritable: this slider only seeds a fresh body. A commute recombines the
+   * two parents' fills; an erase clones the Era's fill with a mutation nudge.
    */
   rescueTo: number;
+  /**
+   * Extra at which a fresh body dies. Always negative — a debt depth, never
+   * a second positive cap. The live value lives on the body as `debtCap` and
+   * drifts by breeding; this is only the seed.
+   *
+   * Deeper debt is more time for a rescue and a louder hunger, and a corpse
+   * that can leave nothing. Shallower debt dies sooner and leaves more on
+   * the ground.
+   */
+  debtCap: number;
   /**
    * How much of a body's demand its neighbour hears, per wire. 1 = no decay.
    *
@@ -275,7 +283,6 @@ export function defaultParams(): Params {
     wireTaut: 1.08,
     wireSnap: 3,
     contactCost: 0,
-    edgePull: 0.35,
     wireMinRest: 48,
     wireShrink: 0.2,
     eraMass: 0.45,
@@ -290,17 +297,18 @@ export function defaultParams(): Params {
     angDrag: 2.4,
     flockAlign: 0.0,
     flockSep: 48,
-    maxAgents: 10000,
-    soupCount: 5000,
+    maxAgents: 100000,
+    soupCount: 10000,
     spawnInterval: 0.5,
     energyCell: 40,
     ambientEnergy: 1,
     upkeep: 0.015,
     emitCost: 0,
-    rescueTo: 1,
+    rescueTo: 0.9,
+    debtCap: -1,
     requestDecay: 0.95,
-    transportRecoil: 50,
-    transportThrust: 0.5,
+    transportRecoil: 100,
+    transportThrust: 1.0,
   };
 }
 
@@ -330,7 +338,6 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'snapRadius', label: 'Snap reach', min: 4, max: 48, step: 1 },
   { key: 'snapArc', label: 'Snap arc', min: 0.08, max: 1.2, step: 0.02 },
   { key: 'wireShrink', label: 'Wire shrink', min: 0.1, max: 3, step: 0.05 },
-  { key: 'edgePull', label: 'Edge pull', min: 0, max: 2, step: 0.05 },
   { key: 'wireMinRest', label: 'Wire min length', min: 8, max: 48, step: 1 },
   { key: 'springK', label: 'Spring stiffness', min: 0, max: 80, step: 0.5 },
   { key: 'springDamp', label: 'Rope damp', min: 0, max: 120, step: 1 },
@@ -356,7 +363,8 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'ambientEnergy', label: 'Ambient energy', min: 0, max: 2, step: 0.05 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
   { key: 'emitCost', label: 'Emit cost', min: 0, max: 0.05, step: 0.001 },
-  { key: 'rescueTo', label: 'Rescue to', min: 0, max: 1.25, step: 0.05 },
+  { key: 'rescueTo', label: 'Rescue fill', min: 0, max: 1, step: 0.05 },
+  { key: 'debtCap', label: 'Debt cap', min: -2.5, max: -0.05, step: 0.05 },
   { key: 'requestDecay', label: 'Demand decay', min: 0.5, max: 0.98, step: 0.01 },
   { key: 'transportRecoil', label: 'Pump recoil', min: 0, max: 200, step: 5 },
   { key: 'transportThrust', label: 'Pump thrust', min: 0, max: 1, step: 0.05 },

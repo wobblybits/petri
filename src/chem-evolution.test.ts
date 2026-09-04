@@ -192,6 +192,8 @@ describe('heritable flocking', () => {
     expect(r.lo, `lowest align seen ${r.lo.toFixed(3)}`).toBeLessThan(0);
     expect(r.hi, `highest align seen ${r.hi.toFixed(3)}`).toBeGreaterThan(0);
     // Unselected, it should sit near where it started rather than climbing.
-    expect(Math.abs(r.mean), `mean align ${r.mean.toFixed(3)}`).toBeLessThan(0.4);
+    // Erase now clones Eras with a mutation nudge too, which adds walks of
+    // the same unselected gene, so the mean is noisier than commute-only.
+    expect(Math.abs(r.mean), `mean align ${r.mean.toFixed(3)}`).toBeLessThan(1);
   });
 });

@@ -91,11 +91,12 @@ type Exp = {
   solver_steer_noise(): number;
   solver_body_drive(): number;
   solver_body_trail(): number;
-  solver_scent_frame(cols: number, rows: number, ox: number, oy: number, ww: number, wh: number): void;
+  solver_scent_frame(cols: number, rows: number, ox: number, oy: number, ww: number, wh: number, cx: number, cy: number, r: number): void;
   solver_deposit(n: number, amount: number): void;
   solver_port_free(): number;
   solver_declutter(n: number, reach: number, atReach: number, cutoff: number, floorFrac: number, dt: number): void;
   solver_confine(n: number, cx: number, cy: number, dt: number, half: number, edge: number): void;
+  solver_world_bound(cx: number, cy: number, r: number): void;
   solver_decl_comp(): number;
   solver_decl_sat(): number;
   solver_body_mass(): number;
@@ -284,15 +285,19 @@ export class NativeSolver {
     nWires: number,
     dt: number,
     substeps = FAR_SUBSTEPS,
+    cx = 0,
+    cy = 0,
+    r = 0,
   ): boolean {
     if (n <= 0 || dt <= 0) return true;
     const exp = this.exp;
     if (!this.ready || !exp || !this.bodies || !this.wires || n > this.bodyCap || nWires > this.wireCap) {
-      stepFarKernel(data, n, wires, nWires, dt, substeps);
+      stepFarKernel(data, n, wires, nWires, dt, substeps, cx, cy, r);
       return false;
     }
     this.bodies.set(data.subarray(0, n * FAR_STRIDE));
     if (nWires > 0) this.wires.set(wires.subarray(0, nWires * FAR_WIRE_STRIDE));
+    exp.solver_world_bound(cx, cy, r);
     exp.solver_step_far(n, nWires, dt, substeps);
     data.set(this.bodies.subarray(0, n * FAR_STRIDE));
     return true;
@@ -303,10 +308,11 @@ export class NativeSolver {
    * `bodies` and `wires`. Saves a copy of the whole scene in and another out;
    * `stepFar` above stays for the GPU path, which packs into its own array.
    */
-  stepFarInPlace(n: number, nWires: number, dt: number, substeps = FAR_SUBSTEPS): boolean {
+  stepFarInPlace(n: number, nWires: number, dt: number, substeps = FAR_SUBSTEPS, cx = 0, cy = 0, r = 0): boolean {
     const exp = this.exp;
     if (!this.ready || !exp || !this.bodies || !this.wires) return false;
     if (n > this.bodyCap || nWires > this.wireCap) return false;
+    exp.solver_world_bound(cx, cy, r);
     exp.solver_step_far(n, nWires, dt, substeps);
     return true;
   }
@@ -371,14 +377,7 @@ export class NativeSolver {
       this.scentOwner = fields;
     }
     this.copyScentRows(fields, fields.data, this.scent);
-    this.exp.solver_scent_frame(
-      fields.cols,
-      fields.rows,
-      fields.originX,
-      fields.originY,
-      fields.worldW,
-      fields.worldH,
-    );
+    this.setScentFrame(fields);
     return true;
   }
 
@@ -417,6 +416,24 @@ export class NativeSolver {
     this.exp?.solver_confine(n, cx, cy, dt, half, edge);
   }
 
+  worldBound(cx: number, cy: number, r: number): void {
+    this.exp?.solver_world_bound(cx, cy, r);
+  }
+
+  private setScentFrame(fields: Fields): void {
+    this.exp?.solver_scent_frame(
+      fields.cols,
+      fields.rows,
+      fields.originX,
+      fields.originY,
+      fields.worldW,
+      fields.worldH,
+      fields.boundX,
+      fields.boundY,
+      fields.boundR,
+    );
+  }
+
   /** Standalone contact pass. `nWires` lets it skip wired pairs the way
    *  `stepNear` does; pass 0 for a scene with no wires packed. */
   nearContacts(n: number, nWires: number, h: number): number {
@@ -437,9 +454,13 @@ export class NativeSolver {
     grabMax: number,
     gx: number,
     gy: number,
+    cx = 0,
+    cy = 0,
+    r = 0,
   ): boolean {
     const exp = this.exp;
     if (!this.ready || !exp || n <= 0 || dt <= 0) return false;
+    exp.solver_world_bound(cx, cy, r);
     exp.solver_step_near(n, nWires, dt, substeps, ropeKeep, held, grabMax, gx, gy);
     return true;
   }
@@ -580,6 +601,7 @@ export class NativeSolver {
     if (n > 65_536) return false;
     if (n * 4 > this.scentCap) return false;
     this.scent.set(fields.data.subarray(0, n * 4));
+    this.setScentFrame(fields);
     exp.solver_scent_diffuse(fields.cols, fields.rows, mix);
     fields.data.set(this.scent.subarray(0, n * 4));
     return true;
@@ -592,6 +614,7 @@ export class NativeSolver {
     const n = fields.cols * fields.rows * 4;
     if (n > this.scentCap) return false;
     this.scent.set(fields.data.subarray(0, n));
+    this.setScentFrame(fields);
     exp.solver_scent_decay(n, keep);
     fields.data.set(this.scent.subarray(0, n));
     return true;

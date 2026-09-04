@@ -17,6 +17,7 @@ import {
   hungerNeed,
   redexNeed,
   rescueNeed,
+  rescueTarget,
   REQUEST_DECAY,
   resetRequests,
   REWRITE_SHARE,
@@ -45,8 +46,13 @@ function body(
   kind: SlotBody['kind'] = 'con',
   energyCap = extraCapFor(kind),
   requestDecay = REQUEST_DECAY,
+  debtCap = EXTRA_FLOOR,
+  rescueTo = 0.9,
 ): SlotBody {
-  return { id, kind, x, y, extra, request, locked, recovering: false, energyCap, requestDecay };
+  return {
+    id, kind, x, y, extra, request, locked, recovering: false,
+    energyCap, requestDecay, debtCap, rescueTo,
+  };
 }
 
 
@@ -235,7 +241,7 @@ describe('harvest slots', () => {
 });
 
 describe('upkeep', () => {
-  it('drains extra continuously and reports death at a whole unit of debt', () => {
+  it("drains extra continuously and reports death at the body's own debt cap", () => {
     const a = body(1, 0, 0, 1);
     expect(tickUpkeep([a], 0.5, 1)).toEqual([]);
     expect(a.extra, 'half a second at one a second').toBeCloseTo(0.5, 6);
@@ -245,6 +251,17 @@ describe('upkeep', () => {
     expect(a.extra).toBe(EXTRA_FLOOR);
     expect(tickUpkeep([a], 1, 1), 'reported once, not every frame after').toEqual([]);
     expect(a.extra, 'and never falls past it').toBe(EXTRA_FLOOR);
+  });
+
+  it('kills a shallow-debt body before a deep-debt one', () => {
+    const shallow = body(1, 0, 0, 0);
+    shallow.debtCap = -0.2;
+    const deep = body(2, 0, 0, 0);
+    deep.debtCap = -2;
+    expect(tickUpkeep([shallow, deep], 0.3, 1)).toEqual([1]);
+    expect(shallow.extra).toBeCloseTo(-0.2, 6);
+    expect(deep.extra).toBeCloseTo(-0.3, 6);
+    expect(deep.extra, 'still alive, still in debt').toBeGreaterThan(deep.debtCap);
   });
 
   it('skips locked agents', () => {
@@ -470,36 +487,53 @@ describe('request gradient', () => {
   });
 
   it('keeps a rescued body asking until it can act again', () => {
-    // The ambulance used to stop at the kerb: hunger goes quiet at 0, so a
-    // rescued body sat at exactly break-even beside a full neighbour, unable
-    // to ask for the share a rewrite costs.
+    // Fill fraction 1 on a tank whose cap is a rewrite share: rescue aims at
+    // extra=1, which is what used to be the global absolute target.
     const a = body(1, 0, 0, -0.4);
-    expect(rescueNeed(a, 1), 'in debt: still short of a whole share').toBeCloseTo(1.4, 6);
+    a.energyCap = 1;
+    a.debtCap = -1;
+    a.rescueTo = 1;
+    expect(rescueNeed(a), 'in debt: still short of a whole share').toBeCloseTo(1.4, 6);
     expect(a.recovering).toBe(true);
     a.extra = 0;
-    expect(rescueNeed(a, 1), 'out of debt but not yet standing').toBeCloseTo(1, 6);
+    expect(rescueNeed(a), 'out of debt but not yet standing').toBeCloseTo(1, 6);
     a.extra = 0.6;
-    expect(rescueNeed(a, 1)).toBeCloseTo(0.4, 6);
+    expect(rescueNeed(a)).toBeCloseTo(0.4, 6);
     a.extra = 1;
-    expect(rescueNeed(a, 1), 'discharged').toBe(0);
+    expect(rescueNeed(a), 'discharged').toBe(0);
     expect(a.recovering).toBe(false);
     a.extra = 0.2;
-    expect(rescueNeed(a, 1), 'and it does not start asking again on its own').toBe(0);
+    expect(rescueNeed(a), 'and it does not start asking again on its own').toBe(0);
   });
 
   it('leaves a body that has never been in debt quiet', () => {
-    // Otherwise every stock in the net levels out and nobody can concentrate
-    // enough energy to pay for anything.
     const poor = body(1, 0, 0, 0.05);
-    expect(rescueNeed(poor, 1)).toBe(0);
+    expect(rescueNeed(poor)).toBe(0);
     expect(poor.recovering).toBe(false);
   });
 
-  it('rescues only to break-even at target 0, as it used to', () => {
+  it('rescues only to break-even at fill 0, as it used to', () => {
     const a = body(1, 0, 0, -0.4);
-    expect(rescueNeed(a, 0)).toBeCloseTo(0.4, 6);
+    a.rescueTo = 0;
+    expect(rescueNeed(a)).toBeCloseTo(0.4, 6);
     a.extra = 0;
-    expect(rescueNeed(a, 0)).toBe(0);
+    expect(rescueNeed(a)).toBe(0);
+  });
+
+  it("aims a rescue between the body's own floor and cap", () => {
+    const a = body(1, 0, 0);
+    a.debtCap = -0.5;
+    a.energyCap = 2;
+    a.rescueTo = 0.5;
+    expect(rescueTarget(a)).toBeCloseTo(0.75, 6);
+    a.rescueTo = 0;
+    expect(rescueTarget(a)).toBe(a.debtCap);
+    a.rescueTo = 1;
+    expect(rescueTarget(a)).toBe(a.energyCap);
+    a.rescueTo = 1.4;
+    expect(rescueTarget(a), 'cannot overshoot the cap').toBe(a.energyCap);
+    a.rescueTo = -0.2;
+    expect(rescueTarget(a), 'cannot undershoot the floor').toBe(a.debtCap);
   });
 
   it('measures a stalled redex end by what it is short of a full extra', () => {
@@ -595,7 +629,10 @@ describe('sim energy', () => {
       ids.slice(n - 3).reduce((t, id) => t + (sim.agents.get(id)?.extra ?? 0), 0);
     const held = reservoir();
     for (let f = 0; f < 120; f++) sim.step(1 / 60, params);
-    expect(dying.extra, 'fed up to a share, not parked on the line').toBeCloseTo(1, 2);
+    expect(dying.extra, 'fed up toward its rescue fill, not parked on the line').toBeCloseTo(
+      rescueTarget(dying),
+      2,
+    );
     expect(held - reservoir(), 'and it came from nine hops away').toBeGreaterThan(1);
   });
 

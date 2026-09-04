@@ -7,6 +7,7 @@ import { closestPointOnSegment, WIRE_RADIUS } from './geom.ts';
 import { applyTransportRecoil, mixScent, scentSlowFactor, scentTurnBoost, Sim } from './sim.ts';
 import {
   EXTRA_CAP,
+  EXTRA_FLOOR,
   flowCharges,
   REQUEST_DECAY,
   resetRequests,
@@ -1352,6 +1353,8 @@ describe('transport recoil', () => {
       recovering: false,
       requestDecay: REQUEST_DECAY,
       energyCap: EXTRA_CAP,
+      debtCap: EXTRA_FLOOR,
+      rescueTo: 0.9,
       locked: false,
       vx: 0,
       vy: 0,

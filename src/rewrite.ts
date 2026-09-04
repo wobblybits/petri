@@ -1,6 +1,6 @@
 import { CHEM_LEN, EMIT, EMIT_SLOPE, TASTE, TASTE_SLOPE, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
 import type { AgentStore } from './agent-store.ts';
-import { EXTRA_CAP } from './energy.ts';
+import { DEBT_CAP_MAX, EXTRA_CAP } from './energy.ts';
 import { otherEnd, type Graph } from './graph.ts';
 import type { Params } from './params.ts';
 import {
@@ -874,6 +874,8 @@ export const TRAIT_KEYS = [
   'transportRecoil',
   'flockAlign',
   'flockSep',
+  'debtCap',
+  'rescueTo',
 ] as const;
 export type TraitKey = (typeof TRAIT_KEYS)[number];
 
@@ -895,6 +897,13 @@ export const CHEM_SLOPE_MAX = 1;
 export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: number }> = {
   requestDecay: { min: 0.5, max: 0.98, mutate: 0.03 },
   energyCap: { min: EXTRA_CAP * 0.5, max: EXTRA_CAP * 2, mutate: EXTRA_CAP * 0.1 },
+  /*
+   * Strictly negative. A reflecting barrier at zero would let the gene sit
+   * at break-even, and then the rescue latch never fires — extra never goes
+   * under, recovering never sets. The clamp is the sign lock.
+   */
+  debtCap: { min: -2.5, max: DEBT_CAP_MAX, mutate: 0.12 },
+  rescueTo: { min: 0, max: 1, mutate: 0.06 },
   transportThrust: { min: 0, max: 1, mutate: 0.08 },
   transportRecoil: { min: 0, max: 200, mutate: 12 },
   /*
@@ -916,11 +925,16 @@ export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: n
 /**
  * A commute child's traits are its own recombination of its two parents',
  * not a copy of either, then a small mutation nudge so a lineage can drift
- * past whatever range its ancestors already spanned. This is the only place
- * traits change — a body created any other way just keeps whatever
- * `createAgent` seeded it with.
+ * past whatever range its ancestors already spanned.
  *
- * The two child kinds recombine differently, matching what each node
+ * Erase is the other birth: two new Eras, clones of the Era that met the
+ * binary, each nudged. That is what the rule does — the eraser continues
+ * down both leftover ports — so there is no second parent to blend with.
+ *
+ * A body created any other way just keeps whatever `createAgent` seeded it
+ * with.
+ *
+ * The two commute child kinds recombine differently, matching what each node
  * actually does in the calculus. A Con child blends: each trait picks its
  * own independent weight between the two parents, so it can land anywhere
  * on the line between them. A Dup child instead assorts: each trait is
@@ -930,6 +944,11 @@ export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: n
  * the four children of one commute end up with four different profiles
  * instead of two blends and two copies.
  */
+function nudgeTrait(value: number, range: { min: number; max: number; mutate: number }): number {
+  const mutated = value + (Math.random() * 2 - 1) * range.mutate;
+  return Math.min(range.max, Math.max(range.min, mutated));
+}
+
 function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent): void {
   const assort = child.kind === 'dup';
   for (const key of TRAIT_KEYS) {
@@ -939,10 +958,17 @@ function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent): void {
         ? conParent[key]
         : dupParent[key]
       : lerp(conParent[key], dupParent[key], Math.random());
-    const mutated = combined + (Math.random() * 2 - 1) * range.mutate;
-    child[key] = Math.min(range.max, Math.max(range.min, mutated));
+    child[key] = nudgeTrait(combined, range);
   }
   inheritChem(child, conParent, dupParent, assort);
+}
+
+/** Copy one parent onto the child, then the same mutation nudge commute uses. */
+function inheritFromClone(child: Agent, parent: Agent): void {
+  for (const key of TRAIT_KEYS) {
+    child[key] = nudgeTrait(parent[key], TRAIT_RANGE[key]);
+  }
+  inheritChem(child, parent, parent, true);
 }
 
 /**
@@ -1013,6 +1039,7 @@ export function commitRewrite(
   // Read before the parents are deleted below.
   const conParent = rw.rule === 'commute' ? agents.get(rw.conId) : undefined;
   const dupParent = rw.rule === 'commute' ? agents.get(rw.dupId) : undefined;
+  const eraParent = rw.rule === 'erase' ? agents.get(rw.eraId) : undefined;
   for (const s of result.spawned) {
     const pose = poses[s.role];
     const ag = createAgent(s.id, s.kind, pose.x, pose.y, pose.heading, params, store);
@@ -1020,6 +1047,7 @@ export function commitRewrite(
     ag.vy = 0;
     ag.stun = 0.45;
     if (conParent && dupParent) inheritTraits(ag, conParent, dupParent);
+    else if (eraParent) inheritFromClone(ag, eraParent);
     agents.set(s.id, ag);
   }
   inheritLeftoverWires(graph, result.net.wires, agents, w, h, time);

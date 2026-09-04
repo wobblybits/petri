@@ -170,6 +170,10 @@ static float body_trail[MAX_BODIES];
 static float sparams[32];
 static int scent_cols = 0, scent_rows = 0;
 static float scent_ox = 0.f, scent_oy = 0.f, scent_ww = 1.f, scent_wh = 1.f;
+static float scent_bx = 0.f, scent_by = 0.f, scent_br = 0.f;
+/* Live disk for the hard rim. Separate from the scent mask so a field pass
+ * cannot retarget the wall (they share this module, including across tests). */
+static float world_cx = 0.f, world_cy = 0.f, world_r = 0.f;
 static uint8_t decl_sat[MAX_BODIES];
 static float body_mass[MAX_BODIES];
 static int32_t flock_id[MAX_BODIES];
@@ -509,6 +513,69 @@ static void finalize(int n, float h) {
     p[FAR_VY] = (p[FAR_Y] - p[FAR_PREVY]) * invh;
     p[FAR_OMEGA] = wrap_angle(p[FAR_HEADING] - p[FAR_PREVHEAD]) * invh;
   }
+}
+
+void solver_world_bound(float cx, float cy, float r) {
+  world_cx = cx;
+  world_cy = cy;
+  world_r = r > 0.f ? r : 0.f;
+}
+
+/* Inelastic disk wall: project onto the rim and kill outward radial speed. */
+static void wall_point(float *x, float *y, float *vx, float *vy, float rad) {
+  if (world_r <= 0.f) return;
+  float maxr = world_r - rad;
+  if (maxr < 0.f) maxr = 0.f;
+  float dx = *x - world_cx;
+  float dy = *y - world_cy;
+  float dist = sqrtf(dx * dx + dy * dy);
+  if (dist <= maxr || dist < 1e-6f) return;
+  float inv = 1.f / dist;
+  float ux = dx * inv, uy = dy * inv;
+  *x = world_cx + ux * maxr;
+  *y = world_cy + uy * maxr;
+  float vn = *vx * ux + *vy * uy;
+  if (vn > 0.f) {
+    *vx -= vn * ux;
+    *vy -= vn * uy;
+  }
+}
+
+static void wall_bodies(int n) {
+  if (world_r <= 0.f) return;
+  for (int i = 0; i < n; i++) {
+    float *p = bodies + i * STRIDE;
+    if (p[FAR_LOCKED] >= 0.5f) continue;
+    wall_point(&p[FAR_X], &p[FAR_Y], &p[FAR_VX], &p[FAR_VY], p[FAR_RADIUS]);
+  }
+}
+
+static void wall_nodes(int n_wires) {
+  if (world_r <= 0.f || n_wires <= 0) return;
+  for (int w = 0; w < n_wires; w++) {
+    float *W = wires + w * WIRE_NEAR;
+    int flags = (int)W[WN_FLAGS];
+    if (!(flags & WF_FULL)) continue;
+    int n0 = (int)W[WN_NODE0];
+    int nn = (int)W[WN_NNODES];
+    if (n0 < 0 || nn <= 0) continue;
+    if (n0 + nn > MAX_NODES) nn = MAX_NODES - n0;
+    for (int k = 0; k < nn; k++) {
+      float *nd = nodes + (n0 + k) * NODE_STRIDE;
+      wall_point(&nd[ND_X], &nd[ND_Y], &nd[ND_VX], &nd[ND_VY], 0.f);
+    }
+  }
+}
+
+static int scent_cell_out(int i, int j) {
+  if (scent_br <= 0.f) return 0;
+  if (i < 0 || j < 0 || i >= scent_cols || j >= scent_rows) return 1;
+  float cw = scent_ww / (float)scent_cols;
+  float ch = scent_wh / (float)scent_rows;
+  float x = scent_ox + ((float)i + 0.5f) * cw;
+  float y = scent_oy + ((float)j + 0.5f) * ch;
+  float dx = x - scent_bx, dy = y - scent_by;
+  return dx * dx + dy * dy > scent_br * scent_br;
 }
 
 static void stem_local(uint8_t k, int slot, float sc, float *lx, float *ly) {
@@ -1393,13 +1460,17 @@ float *solver_steer_noise(void) { return steer_noise; }
 float *solver_body_drive(void) { return body_drive; }
 float *solver_body_trail(void) { return body_trail; }
 
-void solver_scent_frame(int cols, int rows, float ox, float oy, float ww, float wh) {
+void solver_scent_frame(int cols, int rows, float ox, float oy, float ww, float wh,
+                         float cx, float cy, float r) {
   scent_cols = cols;
   scent_rows = rows;
   scent_ox = ox;
   scent_oy = oy;
   scent_ww = ww <= 0.f ? 1.f : ww;
   scent_wh = wh <= 0.f ? 1.f : wh;
+  scent_bx = cx;
+  scent_by = cy;
+  scent_br = r > 0.f ? r : 0.f;
 }
 
 /** Kind-weighted blend of the channels an agent can smell. Mirrors mixScent. */
@@ -1499,6 +1570,7 @@ static void scent_add(int ch, float x, float y, float amount) {
     for (int di = 0; di < 2; di++) {
       int i = i0 + di, j = j0 + dj;
       if (i < 0 || j < 0 || i >= scent_cols || j >= scent_rows) continue;
+      if (scent_cell_out(i, j)) continue;
       float wx = di ? tx : 1.f - tx;
       float wy = dj ? ty : 1.f - ty;
       scent[(j * scent_cols + i) * CHANNELS + ch] += amount * wx * wy;
@@ -2179,6 +2251,7 @@ void solver_step_far(int n, int n_wires, float dt, int substeps) {
     apply(n);
     if (n_wires > 0) span(n, n_wires, h);
     finalize(n, h);
+    wall_bodies(n);
   }
 }
 
@@ -2251,6 +2324,8 @@ void solver_near_finalize(int n, int n_wires, float h, float rope_keep, int held
   finalize(n, h);
   grab_cap(n, held, grab_max);
   finalize_nodes(n_wires, h, rope_keep);
+  wall_bodies(n);
+  wall_nodes(n_wires);
 }
 
 int solver_near_contacts(int n, int n_wires, float h) {
@@ -2278,6 +2353,8 @@ void solver_step_near(int n, int n_wires, float dt, int substeps,
     finalize(n, h);
     grab_cap(n, held, grab_max);
     finalize_nodes(n_wires, h, rope_keep);
+    wall_bodies(n);
+    wall_nodes(n_wires);
   }
 }
 
@@ -2299,17 +2376,27 @@ void solver_scent_diffuse(int cols, int rows, float mix) {
     int has_down = j < rows - 1;
     for (int i = 0; i < cols; i++) {
       int base = (j * cols + i) * CHANNELS;
-      /* -1 reflects off the edge: the boundary neither absorbs nor invents. */
-      int left = (i > 0) ? base - CHANNELS : -1;
-      int right = (i < cols - 1) ? base + CHANNELS : -1;
-      int up = has_up ? base - row_stride : -1;
-      int down = has_down ? base + row_stride : -1;
+      if (scent_cell_out(i, j)) {
+#if HAVE_SIMD
+        wasm_v128_store(dst + base, wasm_f32x4_splat(0.f));
+#else
+        dst[base] = dst[base + 1] = dst[base + 2] = dst[base + 3] = 0.f;
+#endif
+        continue;
+      }
+      int dirichlet = scent_br > 0.f;
+      int left = (i > 0 && !(dirichlet && scent_cell_out(i - 1, j))) ? base - CHANNELS : -1;
+      int right = (i < cols - 1 && !(dirichlet && scent_cell_out(i + 1, j))) ? base + CHANNELS : -1;
+      int up = (has_up && !(dirichlet && scent_cell_out(i, j - 1))) ? base - row_stride : -1;
+      int down = (has_down && !(dirichlet && scent_cell_out(i, j + 1))) ? base + row_stride : -1;
 #if HAVE_SIMD
       v128 self = wasm_v128_load(src + base);
-      v128 a = left >= 0 ? wasm_v128_load(src + left) : self;
-      v128 b = right >= 0 ? wasm_v128_load(src + right) : self;
-      v128 c = up >= 0 ? wasm_v128_load(src + up) : self;
-      v128 e = down >= 0 ? wasm_v128_load(src + down) : self;
+      v128 z = wasm_f32x4_splat(0.f);
+      v128 miss = dirichlet ? z : self;
+      v128 a = left >= 0 ? wasm_v128_load(src + left) : miss;
+      v128 b = right >= 0 ? wasm_v128_load(src + right) : miss;
+      v128 c = up >= 0 ? wasm_v128_load(src + up) : miss;
+      v128 e = down >= 0 ? wasm_v128_load(src + down) : miss;
       v128 sum = wasm_f32x4_add(wasm_f32x4_add(a, b), wasm_f32x4_add(c, e));
       v128 out = wasm_f32x4_add(wasm_f32x4_mul(wasm_f32x4_splat(keep), self),
                                 wasm_f32x4_mul(wasm_f32x4_splat(m * 0.25f), sum));
@@ -2318,10 +2405,11 @@ void solver_scent_diffuse(int cols, int rows, float mix) {
       for (int ch = 0; ch < CHANNELS; ch++) {
         int k = base + ch;
         float self = src[k];
-        float a = left >= 0 ? src[left + ch] : self;
-        float b = right >= 0 ? src[right + ch] : self;
-        float c = up >= 0 ? src[up + ch] : self;
-        float e = down >= 0 ? src[down + ch] : self;
+        float miss = dirichlet ? 0.f : self;
+        float a = left >= 0 ? src[left + ch] : miss;
+        float b = right >= 0 ? src[right + ch] : miss;
+        float c = up >= 0 ? src[up + ch] : miss;
+        float e = down >= 0 ? src[down + ch] : miss;
         dst[k] = keep * self + m * (a + b + c + e) * 0.25f;
       }
 #endif
@@ -2348,4 +2436,13 @@ void solver_scent_decay(int n, float keep) {
 #else
   for (int i = 0; i < n; i++) scent[i] *= keep;
 #endif
+  if (scent_br > 0.f && scent_cols > 0 && scent_rows > 0) {
+    for (int j = 0; j < scent_rows; j++) {
+      for (int i = 0; i < scent_cols; i++) {
+        if (!scent_cell_out(i, j)) continue;
+        float *c = scent + (size_t)(j * scent_cols + i) * CHANNELS;
+        c[0] = c[1] = c[2] = c[3] = 0.f;
+      }
+    }
+  }
 }

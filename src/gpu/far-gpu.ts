@@ -39,6 +39,7 @@ type GpuEntry =
   | 'span'
   | 'apply'
   | 'finalize'
+  | 'wall'
   | 'clearGrid'
   | 'binBodies'
   | 'clearNei'
@@ -118,6 +119,7 @@ export class FarGpu {
         'span',
         'apply',
         'finalize',
+        'wall',
         'clearGrid',
         'binBodies',
         'clearNei',
@@ -156,11 +158,14 @@ export class FarGpu {
     nWires: number,
     dt: number,
     substeps = FAR_SUBSTEPS,
+    cx = 0,
+    cy = 0,
+    boundR = 0,
   ): Promise<boolean> {
     if (n <= 0 || dt <= 0) return true;
     const device = this.device;
     if (!this.ready || !device || !this.bindLayout) {
-      stepFarKernel(data, n, wires, nWires, dt, substeps);
+      stepFarKernel(data, n, wires, nWires, dt, substeps, cx, cy, boundR);
       return false;
     }
     try {
@@ -181,6 +186,9 @@ export class FarGpu {
       f32[8] = grid.minX;
       f32[9] = grid.minY;
       f32[10] = grid.invCell;
+      f32[12] = cx;
+      f32[13] = cy;
+      f32[14] = boundR;
       device.queue.writeBuffer(this.uniform!, 0, uniform);
       device.queue.writeBuffer(this.particles!, 0, data.buffer, data.byteOffset, n * PARTICLE_BYTES);
       if (nWires > 0) {
@@ -228,6 +236,7 @@ export class FarGpu {
           pass('apply');
         }
         pass('finalize');
+        pass('wall');
       }
       encoder.copyBufferToBuffer(this.particles!, 0, this.readback!, 0, n * PARTICLE_BYTES);
       device.queue.submit([encoder.finish()]);
@@ -236,7 +245,7 @@ export class FarGpu {
       this.readback!.unmap();
       return true;
     } catch {
-      stepFarKernel(data, n, wires, nWires, dt, substeps);
+      stepFarKernel(data, n, wires, nWires, dt, substeps, cx, cy, boundR);
       return false;
     }
   }

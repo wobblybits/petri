@@ -16,6 +16,10 @@ struct SimParams {
   gridMinY: f32,
   invCell: f32,
   pad0: f32,
+  worldX: f32,
+  worldY: f32,
+  boundR: f32,
+  pad1: f32,
 }
 
 struct Particle {
@@ -323,6 +327,32 @@ fn finalize(@builtin(global_invocation_id) gid: vec3u) {
     p.vx = (p.x - p.prevX) * invH;
     p.vy = (p.y - p.prevY) * invH;
     p.omega = wrapAngle(p.heading - p.prevHeading) * invH;
+  }
+  parts[i] = p;
+}
+
+@compute @workgroup_size(64)
+fn wall(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= params.n) { return; }
+  if (params.boundR <= 0.0) { return; }
+  var p = parts[i];
+  if (p.locked >= 0.5) { return; }
+  var maxr = params.boundR - p.radius;
+  if (maxr < 0.0) { maxr = 0.0; }
+  let dx = p.x - params.worldX;
+  let dy = p.y - params.worldY;
+  let dist = sqrt(dx * dx + dy * dy);
+  if (dist <= maxr || dist < 1e-6) { return; }
+  let inv = 1.0 / dist;
+  let ux = dx * inv;
+  let uy = dy * inv;
+  p.x = params.worldX + ux * maxr;
+  p.y = params.worldY + uy * maxr;
+  let vn = p.vx * ux + p.vy * uy;
+  if (vn > 0.0) {
+    p.vx -= vn * ux;
+    p.vy -= vn * uy;
   }
   parts[i] = p;
 }

@@ -178,6 +178,12 @@ function drawEnergyGrid(ctx: CanvasRenderingContext2D, sim: Sim, camera: Camera)
     const a = Math.min(0.28, 0.06 + 0.12 * (e / ambient));
     return `rgba(232, 196, 88, ${a})`;
   };
+  ctx.save();
+  if (sim.worldR > 0) {
+    ctx.beginPath();
+    ctx.arc(sim.worldX, sim.worldY, sim.worldR, 0, Math.PI * 2);
+    ctx.clip();
+  }
   // Uniform ambient as one fill — walking every cell in a far-zoom cover is
   // hundreds of thousands of fillRects and freezes the tab.
   ctx.fillStyle = gold(grid.ambient);
@@ -195,6 +201,7 @@ function drawEnergyGrid(ctx: CanvasRenderingContext2D, sim: Sim, camera: Camera)
     ctx.fillStyle = gold(e);
     ctx.fillRect(x, y, size, size);
   });
+  ctx.restore();
 }
 
 function drawEnergySlot(ctx: CanvasRenderingContext2D, agent: Agent): void {
@@ -307,20 +314,32 @@ function chroma(rgb: Rgb): number {
   return Math.max(rgb[0], rgb[1], rgb[2]) - Math.min(rgb[0], rgb[1], rgb[2]);
 }
 
-function energySat(extra: number): number {
-  return Math.max(0, Math.min(1, (extra - EXTRA_FLOOR) / (EXTRA_CAP - EXTRA_FLOOR)));
+function energySat(extra: number, floor = EXTRA_FLOOR, cap = EXTRA_CAP): number {
+  const span = cap - floor;
+  if (!(span > 0)) return extra >= cap ? 1 : 0;
+  return Math.max(0, Math.min(1, (extra - floor) / span));
 }
 
 /** Kind fill with energy as saturation. Full tank is the named hue; empty is gray. */
-export function kindFillRgb(kind: AgentKind, extra: number): Rgb {
-  const t = energySat(extra);
+export function kindFillRgb(
+  kind: AgentKind,
+  extra: number,
+  floor = EXTRA_FLOOR,
+  cap = EXTRA_CAP,
+): Rgb {
+  const t = energySat(extra, floor, cap);
   if (t >= 1) return KIND_RGB[kind];
   const { h, s, l } = KIND_HSL[kind];
   return hslToRgb(h, s * t, l);
 }
 
-export function kindFillCss(kind: AgentKind, extra: number): string {
-  return cssRgb(kindFillRgb(kind, extra));
+export function kindFillCss(
+  kind: AgentKind,
+  extra: number,
+  floor = EXTRA_FLOOR,
+  cap = EXTRA_CAP,
+): string {
+  return cssRgb(kindFillRgb(kind, extra, floor, cap));
 }
 
 export function kindChroma(kind: AgentKind, extra: number): number {
@@ -374,6 +393,8 @@ function ghostAsAgent(g: Ghost): Agent {
   // A ghost is preview art, not a simulated body — never bred, never billed.
   a.requestDecay = REQUEST_DECAY;
   a.energyCap = EXTRA_CAP;
+  a.debtCap = EXTRA_FLOOR;
+  a.rescueTo = 0.9;
   a.transportThrust = 0;
   a.transportRecoil = 0;
   return a;
@@ -717,7 +738,7 @@ function drawAgent(
   ctx.rotate(agent.heading);
   ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
   ctx.scale(agent.scale, agent.scale);
-  const fill = kindColors ? kindFillCss(agent.kind, agent.extra) : undefined;
+  const fill = kindColors ? kindFillCss(agent.kind, agent.extra, agent.debtCap, agent.energyCap) : undefined;
   if (agent.kind === 'era') drawEra(ctx, fill);
   else drawTriangle(ctx, agent.kind, fill);
   drawPortStems(ctx, agent, graph, fill);

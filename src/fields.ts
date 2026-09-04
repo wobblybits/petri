@@ -42,6 +42,30 @@ export const FIELD_CELLS = 1024;
 export const FIELD_CELL = 10;
 export const FIELD_EXTENT = FIELD_CELLS * FIELD_CELL;
 export const FIELD_HALF = FIELD_EXTENT / 2;
+/**
+ * One scent cell of padding so the live disk sits inside the snapped field
+ * rectangle. Body radius is subtracted again at the wall, so glyphs do not
+ * clip through the rim into a cell the field does not own.
+ */
+export const WORLD_BOUND_INSET = FIELD_CELL;
+
+/**
+ * Radius of the largest disk centred on `(cx, cy)` that sits inside the field
+ * window `[origin, origin + FIELD_EXTENT)` by `WORLD_BOUND_INSET`.
+ *
+ * `Fields.cover` snaps the origin to a whole cell, so a circle of radius
+ * `FIELD_HALF` can poke up to half a cell past the tight edge. This is the
+ * number the wall, the scent mask, the energy bound, and soup spawn share.
+ */
+export function worldBoundRadius(cx: number, cy: number, originX: number, originY: number): number {
+  const inscribed = Math.min(
+    cx - originX,
+    originX + FIELD_EXTENT - cx,
+    cy - originY,
+    originY + FIELD_EXTENT - cy,
+  );
+  return Math.max(0, inscribed - WORLD_BOUND_INSET);
+}
 
 export class Fields {
   cols: number;
@@ -50,6 +74,11 @@ export class Fields {
   worldH: number;
   originX = 0;
   originY = 0;
+  /** Live-disk centre; unused until `setWorldBound`. */
+  boundX = 0;
+  boundY = 0;
+  /** Live-disk radius. `<= 0` means no Dirichlet mask and no wall. */
+  boundR = 0;
   data: Float32Array;
   tmp: Float32Array;
 
@@ -132,6 +161,27 @@ export class Fields {
     this.hiJ = -1;
     this.loI = 0;
     this.loJ = 0;
+    this.boundR = 0;
+  }
+
+  /**
+   * Dirichlet disk: cell centres outside this radius read and write as 0, so
+   * scent decays toward the rim rather than reflecting off it. `r <= 0` turns
+   * the mask off (Neumann at the square grid edge, the old behaviour).
+   */
+  setWorldBound(cx: number, cy: number, r: number): void {
+    this.boundX = cx;
+    this.boundY = cy;
+    this.boundR = r > 0 ? r : 0;
+  }
+
+  /** True when this cell's centre sits outside the live disk. */
+  cellOut(i: number, j: number): boolean {
+    if (this.boundR <= 0) return false;
+    const cs = this.cellSize;
+    const dx = this.originX + (i + 0.5) * cs - this.boundX;
+    const dy = this.originY + (j + 0.5) * cs - this.boundY;
+    return dx * dx + dy * dy > this.boundR * this.boundR;
   }
 
   private shiftCells(di: number, dj: number): void {
@@ -243,6 +293,7 @@ export class Fields {
   }
 
   private add(i: number, j: number, ch: number, amount: number): void {
+    if (this.cellOut(i, j)) return;
     const idx = this.cell(i, j, ch);
     if (idx >= 0) this.data[idx] += amount;
   }
@@ -295,19 +346,27 @@ export class Fields {
       const hasDown = j < rows - 1;
       let base = (j * cols + this.loI) * CHANNELS;
       for (let i = this.loI; i <= this.hiI; i++, base += CHANNELS) {
-        // -1 means "reflect off the edge": fall back to this cell's own value,
-        // so the boundary neither absorbs scent nor invents it.
-        const left = i > 0 ? base - CHANNELS : -1;
-        const right = i < cols - 1 ? base + CHANNELS : -1;
-        const up = hasUp ? base - rowStride : -1;
-        const down = hasDown ? base + rowStride : -1;
+        if (this.cellOut(i, j)) {
+          dst[base] = 0;
+          dst[base + 1] = 0;
+          dst[base + 2] = 0;
+          dst[base + 3] = 0;
+          continue;
+        }
+        // No bound: -1 reflects off the square edge (neither absorbs nor invents).
+        // Bound set: a neighbour outside the disk is 0, so scent leaks into the rim.
+        const dirichlet = this.boundR > 0;
+        const left = i > 0 && !(dirichlet && this.cellOut(i - 1, j)) ? base - CHANNELS : -1;
+        const right = i < cols - 1 && !(dirichlet && this.cellOut(i + 1, j)) ? base + CHANNELS : -1;
+        const up = hasUp && !(dirichlet && this.cellOut(i, j - 1)) ? base - rowStride : -1;
+        const down = hasDown && !(dirichlet && this.cellOut(i, j + 1)) ? base + rowStride : -1;
         for (let ch = 0; ch < CHANNELS; ch++) {
           const k = base + ch;
           const self = src[k];
-          const a = left >= 0 ? src[left + ch] : self;
-          const b = right >= 0 ? src[right + ch] : self;
-          const c = up >= 0 ? src[up + ch] : self;
-          const e = down >= 0 ? src[down + ch] : self;
+          const a = left >= 0 ? src[left + ch] : dirichlet ? 0 : self;
+          const b = right >= 0 ? src[right + ch] : dirichlet ? 0 : self;
+          const c = up >= 0 ? src[up + ch] : dirichlet ? 0 : self;
+          const e = down >= 0 ? src[down + ch] : dirichlet ? 0 : self;
           dst[k] = keep * self + m * (a + b + c + e) * 0.25;
         }
       }
@@ -327,6 +386,13 @@ export class Fields {
       const row = j * cols;
       for (let i = this.loI; i <= this.hiI; i++) {
         const base = (row + i) * CHANNELS;
+        if (this.cellOut(i, j)) {
+          d[base] = 0;
+          d[base + 1] = 0;
+          d[base + 2] = 0;
+          d[base + 3] = 0;
+          continue;
+        }
         d[base] *= k;
         d[base + 1] *= k;
         d[base + 2] *= k;

@@ -21,10 +21,10 @@ import {
 } from './agents.ts';
 import { AgentStore } from './agent-store.ts';
 import { queryHit, queryDiscHit, SLOP, type Hit } from './collide.ts';
-import { closestTOnSegment, segmentsIntersect, WIRE_RADIUS, wireBowBudget } from './geom.ts';
+import { closestTOnSegment, segmentsIntersect, WIRE_RADIUS, wireBowBudget, bounceOffDisk } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
-import { CH, Fields, FIELD_HALF } from './fields.ts';
+import { CH, Fields, worldBoundRadius } from './fields.ts';
 import { Graph, ropeIsLive, wrapPos, type Wire } from './graph.ts';
 import type { Params } from './params.ts';
 import {
@@ -44,7 +44,6 @@ import {
   canPayShare,
   flowChargesFast,
   harvestSlotsFast,
-  EXTRA_FLOOR,
   rescueNeed,
   redexNeed,
   resetRequestsFast,
@@ -79,7 +78,6 @@ import {
   WIRE_NEAR_STRIDE,
   WN,
 } from './native/solver.ts';
-import { ConfinePool } from './native/confine-pool.ts';
 import { angleDelta, clamp, wrapAngle, wrapDeltaVec } from './wrap.ts';
 
 /** Attraction-only chemotaxis. Own principal trails are a different channel and are ignored. */
@@ -142,13 +140,6 @@ export class Sim {
 
   /** Auto-spawn stays near the flock even when the camera cover is huge. */
   private static readonly SPAWN_REACH_CAP = 480;
-
-  /**
-   * How often the confinement loop runs its force when there is no thread
-   * pool to dispatch to. Matches `runConfineLoop`'s own dt clamp so the
-   * unthreaded path pulls at the same rate the threaded one does.
-   */
-  private static readonly CONFINE_SYNC_PERIOD_MS = 50;
 
   /** Repulsion in px/s² at exactly one wire's length; inverse-square inside that. */
   static DECLUTTER_FORCE = 200;
@@ -435,6 +426,7 @@ export class Sim {
     this.nextId = 1;
     this.rosterVersion++;
     this.worldPinned = false;
+    this.worldR = 0;
     this.spawnAcc = 0;
     this.home = null;
     this.contactAudioPrev.clear();
@@ -582,7 +574,6 @@ export class Sim {
     this.time += t;
     this.components = this.graph.componentIds(this.agents);
     this.trackHome(t);
-    this.lastEdgePull = params.edgePull;
     /*
      * One centre for the whole world grid, pinned once and never moved.
      *
@@ -596,19 +587,14 @@ export class Sim {
      *
      * The second is worse and applied to both paths: a bound that follows the
      * pond can be towed by whatever is escaping it. Anchoring the bound means
-     * the restoring force has something to restore *to*.
+     * the wall has something to bounce *off*.
      *
-     * Pinned at the first centre of mass, so a preset still decides where its
-     * world is rather than inheriting an arbitrary origin.
+     * Pinned at the first centre of mass unless a preset already pinned, so a
+     * preset still decides where its world is rather than inheriting an
+     * arbitrary origin.
      */
     const h = this.home;
-    if (h && !this.worldPinned) {
-      this.worldPinned = true;
-      this.worldX = h.x;
-      this.worldY = h.y;
-      this.fields.cover(h.x, h.y);
-      this.energy.setBounds(h.x, h.y, FIELD_HALF, this.fields.originX, this.fields.originY);
-    }
+    if (h && !this.worldPinned) this.pinWorld(h.x, h.y);
     this.contactAudioNow.clear();
     this.contacts.clear();
     this.radiated.clear();
@@ -632,13 +618,12 @@ export class Sim {
     Sim.phase('uncrossPrincipals');
     this.flock(params, t);
     Sim.phase('flock');
-    // Confinement is not run here any more — it's a loose failsafe, not a
-    // per-frame-exact force, so it runs on its own cadence via the
-    // background thread pool instead (see runConfineLoop / confineOnce).
-    // Left open on purpose. Nothing between here and the solver moves a body —
-    // the LOD pass and the rope passes read positions and write wires — so the
-    // solver can inherit the packed bodies instead of copying them in again.
-    // Whoever consumes them closes it; `syncForces` is the backstop.
+    // The hard rim lives inside the integrator (JS solve / native step /
+    // FAR GPU), not as a background failsafe. Left open on purpose. Nothing
+    // between here and the solver moves a body — the LOD pass and the rope
+    // passes read positions and write wires — so the solver can inherit the
+    // packed bodies instead of copying them in again. Whoever consumes them
+    // closes it; `syncForces` is the backstop.
     void block;
     return t;
   }
@@ -1125,44 +1110,6 @@ export class Sim {
       }
     }
     nativeSolver.declutter(n, reach, atReach, cutoff, Sim.DECLUTTER_FLOOR, dt);
-    if (!this.forceBlock) this.unpackDrift(list);
-    return true;
-  }
-
-  /**
-   * Confinement, synchronous and single-threaded — the underlying force
-   * step()/stepAsync() no longer call directly (see runConfineLoop). Public
-   * for tests that want confinement's exact behaviour on a specific frame
-   * rather than whatever the background thread pool happens to have applied
-   * by the time they look.
-   */
-  confineOnce(dt: number, edgePull: number): void {
-    if (edgePull <= 0 || dt <= 0 || !this.worldPinned) return;
-    const cx = this.worldX;
-    const cy = this.worldY;
-    if (this.confineNative(cx, cy, dt, edgePull)) return;
-    for (const agent of this.agents.values()) {
-      if (agent.locked) continue;
-      const dx = cx - agent.x;
-      const dy = cy - agent.y;
-      // Radial and saturating; see the C twin for why it is not per axis.
-      const dist = Math.hypot(dx, dy);
-      const over = Math.min(dist - FIELD_HALF, FIELD_HALF);
-      if (over > 0 && dist > 1e-6) {
-        const k = (over * edgePull * dt) / dist;
-        agent.vx += dx * k;
-        agent.vy += dy * k;
-      }
-    }
-  }
-
-  private confineNative(cx: number, cy: number, dt: number, edge: number): boolean {
-    if (!Sim.nativeForces || !nativeSolver.ready) return false;
-    const list = this.forceList();
-    const n = list.length;
-    if (n === 0) return true;
-    if (!this.forceBlock && !this.packPose(list)) return false;
-    nativeSolver.confine(n, cx, cy, dt, FIELD_HALF, edge);
     if (!this.forceBlock) this.unpackDrift(list);
     return true;
   }
@@ -2028,11 +1975,38 @@ export class Sim {
           }
         }
       }
+      if (this.worldR > 0) {
+        const cx = this.worldX;
+        const cy = this.worldY;
+        const R = this.worldR;
+        for (let i = 0; i < n; i++) {
+          const a = list[i];
+          const s = a.slot;
+          if (LOCKED[s]) continue;
+          let maxr = R - discRadius(a);
+          if (maxr < 0) maxr = 0;
+          const hit = bounceOffDisk(X[s], Y[s], VX[s], VY[s], cx, cy, maxr);
+          X[s] = hit.x;
+          Y[s] = hit.y;
+          VX[s] = hit.vx;
+          VY[s] = hit.vy;
+        }
+      }
       for (const wire of this.graph.wires.values()) {
         if (!this.wireSimulatesRope(wire)) continue;
         for (const node of wire.nodes) {
           node.vx = (node.x - node.prevX) * invH * ropeKeep;
           node.vy = (node.y - node.prevY) * invH * ropeKeep;
+          if (this.worldR > 0) {
+            const hit = bounceOffDisk(
+              node.x, node.y, node.vx, node.vy,
+              this.worldX, this.worldY, this.worldR,
+            );
+            node.x = hit.x;
+            node.y = hit.y;
+            node.vx = hit.vx;
+            node.vy = hit.vy;
+          }
         }
       }
     }
@@ -2318,7 +2292,7 @@ export class Sim {
         soft,
       );
     }
-    if (!nativeSolver.stepFarInPlace(n, wireList.length, dt)) return false;
+    if (!nativeSolver.stepFarInPlace(n, wireList.length, dt, undefined, this.worldX, this.worldY, this.worldR)) return false;
     this.unpackFar(list, data);
     this.releaseForceBlock();
     return true;
@@ -2326,16 +2300,29 @@ export class Sim {
 
   /** Packed FAR pass on the GPU. True when the kernel ran. */
   /** Where the world grid is anchored. Set once, from the first centre of
-   *  mass, and fixed for the life of the sim. */
+   *  mass (or a preset), and fixed for the life of the sim. */
   private worldPinned = false;
   worldX = 0;
   worldY = 0;
+  /** Live-disk radius. `0` until `pinWorld`. Shared by the wall, scent, energy, spawn. */
+  worldR = 0;
 
-  /** Confinement's own thread pool; see runConfineLoop. */
-  private confinePool = new ConfinePool();
-  private confineLoopActive = false;
-  /** The last frame's edgePull, for runConfineLoop to read on its own cadence. */
-  private lastEdgePull = 0;
+  /**
+   * Anchor the field, energy grid, scent mask, and hard rim on `(cx, cy)`.
+   * Cover snaps the field origin to a whole cell; the radius is the largest
+   * disk that then sits inside that window.
+   */
+  pinWorld(cx: number, cy: number): void {
+    if (this.worldPinned) return;
+    this.worldPinned = true;
+    this.worldX = cx;
+    this.worldY = cy;
+    this.home = { x: cx, y: cy };
+    this.fields.cover(cx, cy);
+    this.worldR = worldBoundRadius(cx, cy, this.fields.originX, this.fields.originY);
+    this.fields.setWorldBound(cx, cy, this.worldR);
+    this.energy.setBounds(cx, cy, this.worldR, this.fields.originX, this.fields.originY);
+  }
 
   /** True once a device exists and the field has moved there for good. */
   private fieldOnGpu = false;
@@ -2490,7 +2477,17 @@ export class Sim {
     // False means the device was lost or a pass threw and `farGpu` quietly ran
     // its own twin, which is a different solver at a very different speed. Say
     // which one actually took the frame rather than which one was asked.
-    const onGpu = await farGpu.step(packed.data, packed.list.length, packed.wires, packed.nWires, dt);
+    const onGpu = await farGpu.step(
+      packed.data,
+      packed.list.length,
+      packed.wires,
+      packed.nWires,
+      dt,
+      undefined,
+      this.worldX,
+      this.worldY,
+      this.worldR,
+    );
     this.unpackFar(packed.list, packed.data);
     this.lastFarPath = onGpu ? 'gpu' : 'js';
     return true;
@@ -2536,7 +2533,10 @@ export class Sim {
     const heldIndex = heldId < 0 ? -1 : (index.get(heldId) ?? -1);
     const gx = this.grabbed?.x ?? 0;
     const gy = this.grabbed?.y ?? 0;
-    if (!nativeSolver.stepNear(n, nWires, dt, Sim.SUBSTEPS, ropeKeep, heldIndex, Sim.GRAB_MAX_SPEED, gx, gy)) {
+    if (!nativeSolver.stepNear(
+      n, nWires, dt, Sim.SUBSTEPS, ropeKeep, heldIndex, Sim.GRAB_MAX_SPEED, gx, gy,
+      this.worldX, this.worldY, this.worldR,
+    )) {
       return false;
     }
     this.unpackNearState(list, wireList);
@@ -2924,13 +2924,13 @@ export class Sim {
       const A = this.agents.get(c.agentA);
       const B = this.agents.get(c.agentB);
       const bite = hurt * c.overlap;
-      if (A && !A.locked && A.extra > EXTRA_FLOOR) {
+      if (A && !A.locked && A.extra > A.debtCap) {
         A.extra -= bite;
-        if (A.extra <= EXTRA_FLOOR) dead.push(A.id);
+        if (A.extra <= A.debtCap) dead.push(A.id);
       }
-      if (B && !B.locked && B.extra > EXTRA_FLOOR) {
+      if (B && !B.locked && B.extra > B.debtCap) {
         B.extra -= bite;
-        if (B.extra <= EXTRA_FLOOR) dead.push(B.id);
+        if (B.extra <= B.debtCap) dead.push(B.id);
       }
     }
     return dead;
@@ -2952,13 +2952,14 @@ export class Sim {
       );
       const r = 36 + Math.random() * Math.max(40, reach);
       const a = Math.random() * Math.PI * 2;
-      this.spawn(
-        kind,
-        com.x + Math.cos(a) * r,
-        com.y + Math.sin(a) * r,
-        Math.random() * Math.PI * 2,
-        params,
-      );
+      const px = com.x + Math.cos(a) * r;
+      const py = com.y + Math.sin(a) * r;
+      if (this.worldR > 0) {
+        const dx = px - this.worldX;
+        const dy = py - this.worldY;
+        if (dx * dx + dy * dy > this.worldR * this.worldR) continue;
+      }
+      this.spawn(kind, px, py, Math.random() * Math.PI * 2, params);
     }
   }
 
@@ -3616,90 +3617,6 @@ export class Sim {
     this.home.y += (com.y - this.home.y) * k;
   }
 
-  /**
-   * Runs confineOnce on its own cadence via the WASM thread pool, decoupled
-   * from step()/stepAsync() entirely. Confinement is a loose failsafe for a
-   * body that has drifted outside the world bound — it doesn't need to run
-   * in lockstep with the frame, and a threaded dispatch can't: there is no
-   * legal blocking wait on the main thread, and beginFrame is synchronous
-   * and shared with step()'s ~40 synchronous test call sites. Dispatch, wait
-   * for the workers, apply whatever result lands (velocities only — nothing
-   * else reads or writes them between dispatches), redispatch.
-   *
-   * Started once, from the app entry point, via startBackgroundConfine.
-   * Never started at all in tests, which call confineOnce directly instead
-   * when they need confinement's exact behaviour on a specific frame.
-   */
-  private async runConfineLoop(): Promise<void> {
-    let last = performance.now();
-    while (this.confineLoopActive) {
-      if (!this.worldPinned || this.lastEdgePull <= 0 || this.agents.size === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        last = performance.now();
-        continue;
-      }
-      const now = performance.now();
-      const dt = Math.min(0.05, Math.max(0, (now - last) / 1000));
-      last = now;
-      if (dt <= 0) {
-        await new Promise((resolve) => setTimeout(resolve, 4));
-        continue;
-      }
-      try {
-        if (this.confinePool.ready) {
-          const list = [...this.agents.values()];
-          await this.confinePool.runFromAgents(list, this.worldX, this.worldY, dt, FIELD_HALF, this.lastEdgePull);
-        } else {
-          /*
-           * No pool: either SharedArrayBuffer is missing or the page is not
-           * cross-origin isolated. Run the same force synchronously on the
-           * same cadence rather than not running it at all — confinement is
-           * what stops a drifting pond from leaving its own world, and this
-           * used to be the branch where a page served without COOP/COEP
-           * quietly had no world bound whatsoever.
-           *
-           * Paced by hand, because unlike a dispatch this has nothing to
-           * wait on and would otherwise spin the main thread. The period is
-           * the loop's own dt clamp, so the pull lands at the same rate the
-           * threaded path applies it rather than a fraction of it.
-           */
-          this.confineOnce(dt, this.lastEdgePull);
-          await new Promise((resolve) => setTimeout(resolve, Sim.CONFINE_SYNC_PERIOD_MS));
-        }
-      } catch (err) {
-        // A loose failsafe should not take itself out permanently over one
-        // bad dispatch (a Worker hiccup, say) — log it and keep going.
-        console.error('confine loop dispatch failed, will keep retrying:', err);
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    }
-  }
-
-  /**
-   * Starts the confinement loop, threaded if it can be and synchronous if it
-   * cannot. Returns whether the *pool* came up — SharedArrayBuffer and a
-   * cross-origin-isolated page — not whether confinement is running, which
-   * it now is either way.
-   *
-   * The distinction used to be load-bearing in the wrong direction: a false
-   * here left the loop unstarted, and `confineOnce` is called nowhere
-   * automatically, so a page served without COOP/COEP had no world bound at
-   * all. Threading is an optimization for this pass, not the reason it
-   * exists.
-   */
-  async startBackgroundConfine(workerCount = 4): Promise<boolean> {
-    if (this.confineLoopActive) return this.confinePool.ready;
-    const ok = await this.confinePool.init(workerCount);
-    this.confineLoopActive = true;
-    void this.runConfineLoop();
-    return ok;
-  }
-
-  stopBackgroundConfine(): void {
-    this.confineLoopActive = false;
-    this.confinePool.dispose();
-  }
-
   momentum(): { px: number; py: number; L: number } {
     const com = this.centerOfMass() ?? { x: 0, y: 0 };
     let px = 0;
@@ -3812,11 +3729,11 @@ export class Sim {
    * The net's demand for energy, as one field, and one hop of flow along it.
    *
    * Two things want energy and they compete on the same scale. A body that has
-   * fallen into debt asks until it is back on its feet — up to `rescueTo`, not
-   * merely up to zero, which is the difference between an ambulance and a
-   * refill and the reason a surplus at one end of a net drains toward a
-   * starving end at all. A stalled redex needs whatever each end is short of a
-   * full extra.
+   * fallen into debt asks until it is back on its feet — up to its own
+   * rescue fill, not merely up to zero, which is the difference between an
+   * ambulance and a refill and the reason a surplus at one end of a net drains
+   * toward a starving end at all. A stalled redex needs whatever each end is
+   * short of a full extra.
    *
    * Both are magnitudes in the same units, so nothing has to be ranked by
    * policy: a body two hops away and 0.9 short outpulls a redex next door
@@ -3830,7 +3747,7 @@ export class Sim {
 
     for (const a of this.agents.values()) {
       if (a.locked) continue;
-      const h = rescueNeed(a, params.rescueTo);
+      const h = rescueNeed(a);
       if (h > 0) need.set(a.id, h);
     }
 
