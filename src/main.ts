@@ -2,7 +2,7 @@ import './style.css';
 import { Camera } from './camera.ts';
 import { defaultParams, SLIDERS, type Params } from './params.ts';
 import { loadPreset, type PresetName } from './presets.ts';
-import { render } from './render.ts';
+import { render, buildFarInstances, FAR_INSTANCE_STRIDE } from './render.ts';
 import { Interaction } from './interact.ts';
 import { ap, church, injectTerm, readChurch, PLUS, type Term } from './lambda.ts';
 import type { PortRef } from './agents.ts';
@@ -12,13 +12,17 @@ import type { AgentKind } from './agents.ts';
 import { audio } from './audio/engine.ts';
 import { getWaveSpeed, setWaveSpeed } from './audio/presets.ts';
 import { farGpu } from './gpu/far-gpu.ts';
+import { agentsGpu } from './gpu/agents-gpu.ts';
 import { nativeSolver } from './native/solver.ts';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('missing #app');
 
 app.innerHTML = `
-  <canvas id="view"></canvas>
+  <div id="viewport">
+    <canvas id="view-gpu"></canvas>
+    <canvas id="view"></canvas>
+  </div>
   <aside id="panel">
     <h1>Interaction nets</h1>
     <p class="lede">Era, Dup, and Con forage on an energy grid, latch ports, and rewrite like Lafont combinators. Annihilation releases energy; a Con–Dup commute spends it.</p>
@@ -74,12 +78,14 @@ const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
 const maybeCtx = canvas.getContext('2d');
 if (!maybeCtx) throw new Error('no 2d context');
 const ctx: CanvasRenderingContext2D = maybeCtx;
+const gpuCanvas = document.querySelector<HTMLCanvasElement>('#view-gpu')!;
+let farInstances = new Float32Array(0);
 
 const params: Params = defaultParams();
 const sim = new Sim(800, 600);
 const camera = new Camera();
 const interaction = new Interaction(sim, camera);
-const view = { overlay: false, energyGrid: false, energyCircles: false, kindColors: true };
+const view = { overlay: false, energyGrid: false, energyCircles: false, kindColors: true, gpuAgents: false };
 let paused = false;
 let spawnKind: AgentKind = 'era';
 let currentPreset: PresetName = 'soup';
@@ -142,6 +148,8 @@ function sizeCanvas(): void {
   canvas.width = Math.max(1, Math.floor(w * dpr));
   canvas.height = Math.max(1, Math.floor(h * dpr));
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  gpuCanvas.width = canvas.width;
+  gpuCanvas.height = canvas.height;
   sim.resize(w, h);
   camera.setView(w, h);
 }
@@ -372,6 +380,13 @@ function drawGesture(): void {
 }
 
 function paint(): void {
+  view.gpuAgents = agentsGpu.ready;
+  if (view.gpuAgents) {
+    const need = sim.agents.size * FAR_INSTANCE_STRIDE;
+    if (farInstances.length < need) farInstances = new Float32Array(need);
+    const count = buildFarInstances(sim, farInstances, view.kindColors);
+    agentsGpu.render(farInstances, count, camera);
+  }
   render(ctx, sim, camera, view, audio.waves);
   drawGesture();
   statsEl.textContent = `${sim.agents.size} agents · ${sim.graph.wires.size} wires · ${sim.rewrites.length} rewrites · ${format(sim.totalFree())} extra / ${sim.totalBound()} bound`;
@@ -451,5 +466,6 @@ sizeCanvas();
 applyPreset('soup');
 void nativeSolver.init();
 void farGpu.init();
+void agentsGpu.init(gpuCanvas);
 void sim.startBackgroundConfine();
 requestAnimationFrame(frame);

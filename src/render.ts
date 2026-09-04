@@ -24,6 +24,51 @@ export interface ViewOpts {
   energyCircles: boolean;
   /** Kind hues with energy as saturation, instead of a ring around each body. */
   kindColors: boolean;
+  /**
+   * When true, FAR-tier agents are skipped here entirely — the caller is
+   * expected to have already drawn them as instanced dots on a WebGPU
+   * canvas layered underneath (see buildFarInstances / AgentsGpu), which is
+   * one draw call regardless of count instead of one drawAgent() call per
+   * agent. False draws everyone here, exactly as before the GPU layer
+   * existed — the safe default when that layer isn't ready.
+   */
+  gpuAgents: boolean;
+}
+
+/** Floats per instance in the GPU layer's buffer — see agents.wgsl. */
+export const FAR_INSTANCE_STRIDE = 9;
+
+/** Era is round; Con and Dup get the same triangle drawTriangle() draws. */
+function shapeFor(kind: AgentKind): number {
+  return kind === 'era' ? 0 : 1;
+}
+
+/**
+ * Fills `out` with one FAR_INSTANCE_STRIDE-float record per FAR-tier agent
+ * and returns how many were written. `out` must be at least
+ * `sim.agents.size * FAR_INSTANCE_STRIDE` long; the caller owns growing it
+ * (main.ts keeps one reusable buffer, matching the pattern GravitatePool's
+ * scratch array already uses).
+ */
+export function buildFarInstances(sim: Sim, out: Float32Array, kindColors: boolean): number {
+  let n = 0;
+  for (const agent of sim.agents.values()) {
+    if (!sim.isFarTier(agent.id)) continue;
+    const base = n * FAR_INSTANCE_STRIDE;
+    if (base + FAR_INSTANCE_STRIDE > out.length) break;
+    const rgb = kindColors ? kindFillRgb(agent.kind, agent.extra) : KIND_RGB[agent.kind];
+    out[base + 0] = agent.x;
+    out[base + 1] = agent.y;
+    out[base + 2] = boundRadius(agent);
+    out[base + 3] = agent.heading;
+    out[base + 4] = shapeFor(agent.kind);
+    out[base + 5] = rgb[0] / 255;
+    out[base + 6] = rgb[1] / 255;
+    out[base + 7] = rgb[2] / 255;
+    out[base + 8] = agent.alpha;
+    n++;
+  }
+  return n;
 }
 
 let overlayCanvas: HTMLCanvasElement | null = null;
@@ -47,8 +92,18 @@ export function render(
   waves: WaveSnapshot | null = null,
 ): void {
   ctx.save();
-  ctx.fillStyle = '#0c0d10';
-  ctx.fillRect(0, 0, camera.viewW, camera.viewH);
+  if (opts.gpuAgents) {
+    // The GPU dot layer owns the background when it's active, so this
+    // canvas has to stay transparent for it to show through — but it still
+    // has to clear every frame, or it just keeps accumulating draws forever
+    // (Canvas2D never clears itself; the opaque fillRect below was quietly
+    // doing that job too, and dropping it outright rather than swapping in
+    // an actual clear left both layers smearing).
+    ctx.clearRect(0, 0, camera.viewW, camera.viewH);
+  } else {
+    ctx.fillStyle = '#0c0d10';
+    ctx.fillRect(0, 0, camera.viewW, camera.viewH);
+  }
 
   ctx.save();
   camera.apply(ctx);
@@ -82,6 +137,7 @@ export function render(
     for (const g of rw.ghosts) drawAgent(ctx, ghostAsAgent(g), 1, undefined, opts.kindColors);
   }
   for (const agent of sim.agents.values()) {
+    if (opts.gpuAgents && sim.isFarTier(agent.id)) continue;
     if (opts.energyCircles && !opts.kindColors) drawEnergySlot(ctx, agent);
     drawAgent(ctx, agent, agent.alpha, sim.graph, opts.kindColors);
   }

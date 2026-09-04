@@ -327,6 +327,18 @@ export class Sim {
   private readonly physLod = new LodSelector();
   private readonly detailedAgents = new Set<number>();
 
+  /**
+   * Whichever physics LOD tier this agent last settled into. A pure read —
+   * `LodSelector.peek` does not re-tier, unlike `tier()` itself, which also
+   * feeds the hysteresis that keeps a body on a band edge from flapping.
+   * Calling `tier()` again from here with different inputs would corrupt
+   * that. Undefined (never tiered — LOD inactive, or the agent is new this
+   * frame) reads as NEAR: full detail is the safe default, not FAR.
+   */
+  isFarTier(agentId: number): boolean {
+    return this.physLod.peek(agentKey(agentId)) === LOD_FAR;
+  }
+
   /*
    * Activity LOD — dual-rate islands.
    *
