@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createAgent, momentOfInertia, boundRadius, type Agent } from '../agents.ts';
+import { createAgent, momentOfInertia, boundRadius, cloneAgent, type Agent } from '../agents.ts';
 import { solveContact, solveWire, solveWireSpan, contactMechanics, type ChainNode } from '../chain.ts';
 import { queryHit, SLOP } from '../collide.ts';
 import { Fields } from '../fields.ts';
@@ -35,10 +35,6 @@ function particle(
   data[o + FAR.invMass] = 1 / mass;
   data[o + FAR.radius] = radius;
   data[o + FAR.locked] = 0;
-}
-
-function cloneAgent(a: Agent): Agent {
-  return { ...a };
 }
 
 function cloneNodes(nodes: ChainNode[]): ChainNode[] {

@@ -6,15 +6,6 @@ import { AgentStore, KIND_CODE, CODE_KIND } from './agent-store.ts';
 export type AgentKind = 'era' | 'dup' | 'con';
 export type PortSlot = 'p' | 'l' | 'r';
 
-/** Names of AgentStore's Float64Array fields — see the `num` accessor factory below. */
-type NumKey = {
-  [K in keyof AgentStore]: AgentStore[K] extends Float64Array ? K : never;
-}[keyof AgentStore];
-/** Names of AgentStore's Uint8Array (boolean) fields — see the `bool` accessor factory below. */
-type BoolKey = {
-  [K in keyof AgentStore]: AgentStore[K] extends Uint8Array ? K : never;
-}[keyof AgentStore];
-
 export interface PortRef {
   id: number;
   slot: PortSlot;
@@ -26,54 +17,202 @@ export interface PortRef {
  * instance itself holds. See agent-store.ts for why (the AoS-vs-SoA
  * rewrite) and for the field-by-field storage layout.
  *
- * The accessors are installed as *own instance* properties in the
- * constructor (`Object.defineProperties(this, ...)`), not on the
- * prototype. This is deliberate, not a style choice: `{ ...agent }` (used
- * by native/solver.test.ts and native/solver-extra.test.ts to snapshot an
- * agent for parity comparisons) only copies own enumerable properties —
- * prototype accessors would make every such spread silently produce an
- * object with none of the real fields. Own-instance accessors make spread,
- * `Object.assign`, `for...in`, and `JSON.stringify` behave exactly as they
- * did when Agent was a plain object.
- *
- * `declare` fields below carry no runtime code (compatible with
- * erasableSyntaxOnly) — they exist purely so TypeScript knows this shape,
- * since the actual properties are defined dynamically, not as ordinary
- * class fields.
+ * The accessors live on `Agent.prototype` — ordinary `get`/`set` class
+ * members, shared by every instance — not installed per instance. That
+ * used to be the other way around (`Object.defineProperties(this, ...)`
+ * in the constructor), specifically so `{ ...agent }` would copy real
+ * data instead of nothing: prototype accessors are not *own* enumerable
+ * properties, so a spread only ever sees the plain instance fields
+ * (`store`, `slot`). What that design didn't account for is V8: an object
+ * whose *own* shape includes accessor properties (not just its
+ * prototype's) gets pushed into dictionary-mode property storage, which
+ * measured 8x slower than a plain field for `slot` — a field that isn't
+ * even an accessor — sitting right next to them. Prototype accessors keep
+ * every instance on one fast, shared hidden class instead; `store`/`slot`
+ * read at plain-object speed, and the accessors themselves came out ~3x
+ * faster too. See `cloneAgent` below for how spread got replaced.
  */
 export class Agent {
-  declare id: number;
-  declare kind: AgentKind;
-  declare x: number;
-  declare y: number;
-  declare vx: number;
-  declare vy: number;
-  declare heading: number;
-  declare omega: number;
-  declare mass: number;
-  declare alpha: number;
-  declare scale: number;
-  declare locked: boolean;
-  declare stun: number;
+  readonly store: AgentStore;
+  readonly slot: number;
+  private _chem: Float32Array | null = null;
+  private _chemGen = -1;
+
+  constructor(store: AgentStore, slot: number) {
+    this.store = store;
+    this.slot = slot;
+  }
+
+  get id(): number {
+    return this.store.id[this.slot];
+  }
+  set id(v: number) {
+    this.store.id[this.slot] = v;
+  }
+
+  get kind(): AgentKind {
+    return CODE_KIND[this.store.kindCode[this.slot]];
+  }
+  set kind(v: AgentKind) {
+    this.store.kindCode[this.slot] = KIND_CODE[v];
+  }
+
+  get x(): number {
+    return this.store.x[this.slot];
+  }
+  set x(v: number) {
+    this.store.x[this.slot] = v;
+  }
+
+  get y(): number {
+    return this.store.y[this.slot];
+  }
+  set y(v: number) {
+    this.store.y[this.slot] = v;
+  }
+
+  get vx(): number {
+    return this.store.vx[this.slot];
+  }
+  set vx(v: number) {
+    this.store.vx[this.slot] = v;
+  }
+
+  get vy(): number {
+    return this.store.vy[this.slot];
+  }
+  set vy(v: number) {
+    this.store.vy[this.slot] = v;
+  }
+
+  get heading(): number {
+    return this.store.heading[this.slot];
+  }
+  set heading(v: number) {
+    this.store.heading[this.slot] = v;
+  }
+
+  get omega(): number {
+    return this.store.omega[this.slot];
+  }
+  set omega(v: number) {
+    this.store.omega[this.slot] = v;
+  }
+
+  get mass(): number {
+    return this.store.mass[this.slot];
+  }
+  set mass(v: number) {
+    this.store.mass[this.slot] = v;
+  }
+
+  get alpha(): number {
+    return this.store.alpha[this.slot];
+  }
+  set alpha(v: number) {
+    this.store.alpha[this.slot] = v;
+  }
+
+  get scale(): number {
+    return this.store.scale[this.slot];
+  }
+  set scale(v: number) {
+    this.store.scale[this.slot] = v;
+  }
+
+  get locked(): boolean {
+    return this.store.locked[this.slot] !== 0;
+  }
+  set locked(v: boolean) {
+    this.store.locked[this.slot] = v ? 1 : 0;
+  }
+
+  get stun(): number {
+    return this.store.stun[this.slot];
+  }
+  set stun(v: number) {
+    this.store.stun[this.slot] = v;
+  }
+
   /** Ornstein-Uhlenbeck self-propulsion magnitude along the heading. */
-  declare drive: number;
+  get drive(): number {
+    return this.store.drive[this.slot];
+  }
+  set drive(v: number) {
+    this.store.drive[this.slot] = v;
+  }
+
   /** Trail sampled for steering. */
-  declare trail: number;
+  get trail(): number {
+    return this.store.trail[this.slot];
+  }
+  set trail(v: number) {
+    this.store.trail[this.slot] = v;
+  }
+
   /** Pose at the start of the current integrate step (for XPBD velocity writeback). */
-  declare prevX: number;
-  declare prevY: number;
-  declare prevHeading: number;
-  declare integVx: number;
-  declare integVy: number;
-  declare integOmega: number;
+  get prevX(): number {
+    return this.store.prevX[this.slot];
+  }
+  set prevX(v: number) {
+    this.store.prevX[this.slot] = v;
+  }
+
+  get prevY(): number {
+    return this.store.prevY[this.slot];
+  }
+  set prevY(v: number) {
+    this.store.prevY[this.slot] = v;
+  }
+
+  get prevHeading(): number {
+    return this.store.prevHeading[this.slot];
+  }
+  set prevHeading(v: number) {
+    this.store.prevHeading[this.slot] = v;
+  }
+
+  get integVx(): number {
+    return this.store.integVx[this.slot];
+  }
+  set integVx(v: number) {
+    this.store.integVx[this.slot] = v;
+  }
+
+  get integVy(): number {
+    return this.store.integVy[this.slot];
+  }
+  set integVy(v: number) {
+    this.store.integVy[this.slot] = v;
+  }
+
+  get integOmega(): number {
+    return this.store.integOmega[this.slot];
+  }
+  set integOmega(v: number) {
+    this.store.integOmega[this.slot] = v;
+  }
+
   /**
    * Energy on top of existence, in [−1, 1]. Positive is stock it can spend or
    * pass on, negative is debt it must settle before it can do either, and −1
    * is death. Upkeep decrements this directly.
    */
-  declare extra: number;
+  get extra(): number {
+    return this.store.extra[this.slot];
+  }
+  set extra(v: number) {
+    this.store.extra[this.slot] = v;
+  }
+
   /** Request gradient toward a hungry redex. 0 = quiet. */
-  declare request: number;
+  get request(): number {
+    return this.store.request[this.slot];
+  }
+  set request(v: number) {
+    this.store.request[this.slot] = v;
+  }
+
   /**
    * How much this body cares about matching its neighbours' heading and
    * velocity, and how hard it pushes off them when they crowd. Heritable, so a
@@ -86,8 +225,20 @@ export class Agent {
    * a high-align lineage shoal and a low-align one ignore its neighbours, and
    * makes a mixed pair negotiate rather than one of them win.
    */
-  declare flockAlign: number;
-  declare flockSep: number;
+  get flockAlign(): number {
+    return this.store.flockAlign[this.slot];
+  }
+  set flockAlign(v: number) {
+    this.store.flockAlign[this.slot] = v;
+  }
+
+  get flockSep(): number {
+    return this.store.flockSep[this.slot];
+  }
+  set flockSep(v: number) {
+    this.store.flockSep[this.slot] = v;
+  }
+
   /**
    * Chemistry: what this body says, and what it listens for.
    *
@@ -111,10 +262,18 @@ export class Agent {
    * for can depend on how its neighbourhood is doing. See `chemState`.
    *
    * A live view into AgentStore.chemAll, cached and re-sliced only when the
-   * store's `generation` changes (a growth reallocation) — see the getter.
-   * Always index-written (`agent.chem[k] = ...`), never reassigned.
+   * store's `generation` changes (a growth reallocation). Always
+   * index-written (`agent.chem[k] = ...`), never reassigned.
    */
-  declare chem: Float32Array;
+  get chem(): Float32Array {
+    const store = this.store;
+    if (this._chemGen !== store.generation) {
+      this._chem = store.chemAll.subarray(this.slot * CHEM_LEN, this.slot * CHEM_LEN + CHEM_LEN);
+      this._chemGen = store.generation;
+    }
+    return this._chem!;
+  }
+
   /**
    * Set when the body falls into debt, cleared when it is back on its feet.
    *
@@ -125,7 +284,13 @@ export class Agent {
    * the body keeps asking up to `rescueTo`, so a rescue tops it back up to
    * something it can act with instead of parking it on the line.
    */
-  declare recovering: boolean;
+  get recovering(): boolean {
+    return this.store.recovering[this.slot] !== 0;
+  }
+  set recovering(v: boolean) {
+    this.store.recovering[this.slot] = v ? 1 : 0;
+  }
+
   /**
    * Heritable traits. Seeded from the matching global slider when a body is
    * created outside a rewrite, so a fresh soup starts homogeneous just as it
@@ -135,13 +300,37 @@ export class Agent {
    * rewrite.ts) — which is the only place a population's traits can drift.
    */
   /** How much of this body's own demand survives one more hop outward. */
-  declare requestDecay: number;
+  get requestDecay(): number {
+    return this.store.requestDecay[this.slot];
+  }
+  set requestDecay(v: number) {
+    this.store.requestDecay[this.slot] = v;
+  }
+
   /** The most this body can hold, in place of the flat per-kind cap. */
-  declare energyCap: number;
+  get energyCap(): number {
+    return this.store.energyCap[this.slot];
+  }
+  set energyCap(v: number) {
+    this.store.energyCap[this.slot] = v;
+  }
+
   /** How much of a kick this body's own pumps hand off instead of keeping. */
-  declare transportThrust: number;
+  get transportThrust(): number {
+    return this.store.transportThrust[this.slot];
+  }
+  set transportThrust(v: number) {
+    this.store.transportThrust[this.slot] = v;
+  }
+
   /** How hard this body recoils, per unit of energy it pumps to a neighbour. */
-  declare transportRecoil: number;
+  get transportRecoil(): number {
+    return this.store.transportRecoil[this.slot];
+  }
+  set transportRecoil(v: number) {
+    this.store.transportRecoil[this.slot] = v;
+  }
+
   /**
    * Memoized cosine and sine of `heading`, with the heading they were taken
    * at. Every port position in the sim goes through `stemOffsetInto`, which
@@ -154,118 +343,76 @@ export class Agent {
    * guard is exact and self-invalidating: heading moves, the memo misses. NaN
    * starts it cold and keeps it cold if a heading ever goes bad.
    */
-  declare csHeading: number;
-  declare csCos: number;
-  declare csSin: number;
-
-  readonly store: AgentStore;
-  readonly slot: number;
-  /**
-   * Not TS-`private`: a `private`/`protected` field brands the class
-   * nominally, which breaks `{ ...agent }` — the object-spread cloning
-   * native/solver.test.ts and native/solver-extra.test.ts rely on produces a
-   * plain object type that can never satisfy a nominally-branded `Agent`
-   * type, even though the runtime data is all there. Leading-underscore is
-   * scope-by-convention only, which keeps spread structural.
-   */
-  _chem: Float32Array | null = null;
-  _chemGen = -1;
-
-  constructor(store: AgentStore, slot: number) {
-    this.store = store;
-    this.slot = slot;
-    const s = slot;
-    /*
-     * Takes the *name* of the backing array, not the array itself: capacity
-     * growth (`AgentStore.growTo`) reallocates every field array and
-     * reassigns it onto `store`, so an accessor that closed over the array
-     * value at construction time would keep reading and writing an
-     * abandoned buffer forever after the first grow — silently, since the
-     * old array is still perfectly valid memory, just no longer the one
-     * anything else looks at. Indexing `store[key]` fresh on every access
-     * is what `id`/`kind`/`chem` already did; this makes every other field
-     * do the same, through one property lookup on the stable `store`
-     * object rather than a closure call — every unconverted `agent.field`
-     * read/write in the whole codebase pays this, so the extra indirection
-     * a getter-function parameter would add is not free here.
-     */
-    const num = (key: NumKey): PropertyDescriptor => ({
-      get: () => store[key][s],
-      set: (v: number) => {
-        store[key][s] = v;
-      },
-      enumerable: true,
-      configurable: true,
-    });
-    const bool = (key: BoolKey): PropertyDescriptor => ({
-      get: () => store[key][s] !== 0,
-      set: (v: boolean) => {
-        store[key][s] = v ? 1 : 0;
-      },
-      enumerable: true,
-      configurable: true,
-    });
-    Object.defineProperties(this, {
-      id: {
-        get: () => store.id[s],
-        set: (v: number) => {
-          store.id[s] = v;
-        },
-        enumerable: true,
-        configurable: true,
-      },
-      kind: {
-        get: () => CODE_KIND[store.kindCode[s]],
-        set: (v: AgentKind) => {
-          store.kindCode[s] = KIND_CODE[v];
-        },
-        enumerable: true,
-        configurable: true,
-      },
-      x: num('x'),
-      y: num('y'),
-      vx: num('vx'),
-      vy: num('vy'),
-      heading: num('heading'),
-      omega: num('omega'),
-      mass: num('mass'),
-      alpha: num('alpha'),
-      scale: num('scale'),
-      locked: bool('locked'),
-      stun: num('stun'),
-      drive: num('drive'),
-      trail: num('trail'),
-      prevX: num('prevX'),
-      prevY: num('prevY'),
-      prevHeading: num('prevHeading'),
-      integVx: num('integVx'),
-      integVy: num('integVy'),
-      integOmega: num('integOmega'),
-      extra: num('extra'),
-      request: num('request'),
-      flockAlign: num('flockAlign'),
-      flockSep: num('flockSep'),
-      chem: {
-        get: () => {
-          if (this._chemGen !== store.generation) {
-            this._chem = store.chemAll.subarray(s * CHEM_LEN, s * CHEM_LEN + CHEM_LEN);
-            this._chemGen = store.generation;
-          }
-          return this._chem!;
-        },
-        enumerable: true,
-        configurable: true,
-      },
-      recovering: bool('recovering'),
-      requestDecay: num('requestDecay'),
-      energyCap: num('energyCap'),
-      transportThrust: num('transportThrust'),
-      transportRecoil: num('transportRecoil'),
-      csHeading: num('csHeading'),
-      csCos: num('csCos'),
-      csSin: num('csSin'),
-    });
+  get csHeading(): number {
+    return this.store.csHeading[this.slot];
   }
+  set csHeading(v: number) {
+    this.store.csHeading[this.slot] = v;
+  }
+
+  get csCos(): number {
+    return this.store.csCos[this.slot];
+  }
+  set csCos(v: number) {
+    this.store.csCos[this.slot] = v;
+  }
+
+  get csSin(): number {
+    return this.store.csSin[this.slot];
+  }
+  set csSin(v: number) {
+    this.store.csSin[this.slot] = v;
+  }
+}
+
+/**
+ * An independent copy: same field values, own private single-agent store.
+ *
+ * Prototype accessors read `this.store`/`this.slot`, not a value captured
+ * at construction, so a shallow `{ ...agent }` spread would copy those
+ * live — aliasing straight back into the original's slot instead of
+ * producing a real snapshot. This builds a genuinely separate `Agent`.
+ * Exists mainly for native/solver.test.ts and native/solver-extra.test.ts,
+ * which snapshot an agent before handing it to the JS reference path, so
+ * the WASM-vs-JS comparison has something the solver hasn't already moved.
+ */
+export function cloneAgent(a: Agent): Agent {
+  const store = new AgentStore(1);
+  const clone = new Agent(store, store.allocate(a.id));
+  clone.kind = a.kind;
+  clone.x = a.x;
+  clone.y = a.y;
+  clone.vx = a.vx;
+  clone.vy = a.vy;
+  clone.heading = a.heading;
+  clone.omega = a.omega;
+  clone.mass = a.mass;
+  clone.alpha = a.alpha;
+  clone.scale = a.scale;
+  clone.locked = a.locked;
+  clone.stun = a.stun;
+  clone.drive = a.drive;
+  clone.trail = a.trail;
+  clone.prevX = a.prevX;
+  clone.prevY = a.prevY;
+  clone.prevHeading = a.prevHeading;
+  clone.integVx = a.integVx;
+  clone.integVy = a.integVy;
+  clone.integOmega = a.integOmega;
+  clone.extra = a.extra;
+  clone.request = a.request;
+  clone.flockAlign = a.flockAlign;
+  clone.flockSep = a.flockSep;
+  clone.chem.set(a.chem);
+  clone.recovering = a.recovering;
+  clone.requestDecay = a.requestDecay;
+  clone.energyCap = a.energyCap;
+  clone.transportThrust = a.transportThrust;
+  clone.transportRecoil = a.transportRecoil;
+  clone.csHeading = a.csHeading;
+  clone.csCos = a.csCos;
+  clone.csSin = a.csSin;
+  return clone;
 }
 
 /** Slot as a small integer: principal 0, left 1, right 2. */

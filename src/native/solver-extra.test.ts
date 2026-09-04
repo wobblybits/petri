@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createAgent, momentOfInertia, boundRadius, discRadius, type Agent } from '../agents.ts';
+import { createAgent, momentOfInertia, boundRadius, discRadius, cloneAgent, type Agent } from '../agents.ts';
 import { solveContact, solveWire, solveWireSpan, type ChainNode } from '../chain.ts';
 import { queryHit, SLOP } from '../collide.ts';
 import { FAR, FAR_STRIDE } from '../gpu/far-kernel.ts';
@@ -19,10 +19,6 @@ import {
   WIRE_NEAR_STRIDE,
   WN,
 } from './solver.ts';
-
-function cloneAgent(a: Agent): Agent {
-  return { ...a };
-}
 
 function cloneNodes(nodes: ChainNode[]): ChainNode[] {
   return nodes.map((n) => ({ ...n }));
