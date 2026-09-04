@@ -254,21 +254,15 @@ export class Sim {
   static farGpuMode: 'auto' | 'on' | 'off' = 'auto';
 
   /**
-   * Bodies at which 'auto' switches to the GPU, and back off again. Measured
-   * against wasm on identical packs: wasm is linear at roughly 0.85us a body
-   * while the GPU is flat near 1.4ms, being almost all round trip, so they
-   * cross around 2,000 and the GPU only pulls away from there (8.9x at 16k).
+   * How far under wasm's capacity 'auto' has to fall before it hands the FAR
+   * solve back. Only a hysteresis band: the switch up is the capacity itself.
    *
-   * The two numbers differ on purpose. A pond sitting on one threshold would
+   * The two edges differ on purpose. A pond sitting exactly on the cap would
    * change solver every frame, and the two do not agree to the digit -- span is
    * Jacobi on the GPU and Gauss-Seidel in the twin -- so flapping would show as
-   * a shimmer. Crossing costs a frame of disagreement; the gap makes it rare.
-   *
-   * The crossing point is a property of this machine's GPU against this
-   * machine's CPU, so it is a field rather than a constant.
+   * a shimmer.
    */
-  static farGpuOn = 2400;
-  static farGpuOff = 1800;
+  static FAR_GPU_RELEASE = 0.95;
 
   /** Which side of the hysteresis band 'auto' is currently latched to. */
   private farGpuLatched = false;
@@ -2115,6 +2109,22 @@ export class Sim {
    * Whether to put the GPU in front of wasm this frame. Capability first: the
    * kernel is the FAR solve only, so a frame needing the NEAR tier is declined
    * whatever the mode says -- that is wrong physics, not slower physics.
+   *
+   * 'auto' means the GPU only where wasm will not go, which is the pack
+   * outgrowing MAX_BODIES or MAX_WIRES. It used to switch at a body count
+   * measured to be the crossing point, and that measurement was wrong twice
+   * over: it timed `stepFar`, which copies the scene in and back out again,
+   * where the sim calls `stepFarInPlace` and pays neither copy; and it ran a
+   * uniform scene where a real pond clumps, which costs the GPU's grid far more
+   * than it costs a spatial hash. On a mature pond of ~6,000 bodies wasm takes
+   * the solve in 7.1ms against the GPU's 13.6, and the whole tick is 13%
+   * shorter for it. The crossing, if there is one below the cap, is nowhere
+   * near where that number claimed.
+   *
+   * Reading the caps off the module rather than restating 32768 means this
+   * follows if the C ever grows. A missing wasm module reports zero capacity,
+   * which lands here as "wasm cannot take it" -- correct, and the reason the
+   * check is capacity rather than a constant.
    */
   private wantFarGpu(): boolean {
     if (!this.canFarGpu()) {
@@ -2125,10 +2135,20 @@ export class Sim {
       this.farGpuLatched = Sim.farGpuMode === 'on';
       return this.farGpuLatched;
     }
-    const n = this.agents.size;
+    const bodies = this.agents.size;
+    const wires = this.graph.wires.size;
+    const fits =
+      nativeSolver.ready && bodies <= nativeSolver.bodyCap && wires <= nativeSolver.wireCap;
     if (this.farGpuLatched) {
-      if (n < Sim.farGpuOff) this.farGpuLatched = false;
-    } else if (n >= Sim.farGpuOn) {
+      const release = Sim.FAR_GPU_RELEASE;
+      if (
+        fits &&
+        bodies <= nativeSolver.bodyCap * release &&
+        wires <= nativeSolver.wireCap * release
+      ) {
+        this.farGpuLatched = false;
+      }
+    } else if (!fits) {
       this.farGpuLatched = true;
     }
     return this.farGpuLatched;

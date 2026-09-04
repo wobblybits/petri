@@ -44,7 +44,7 @@ app.innerHTML = `
         <option value="off">never</option>
       </select>
     </label>
-    <p class="hint" id="gpu-far-hint">Auto switches to the GPU past ~2,400 bodies, where it starts beating wasm. Either way it only engages zoomed out far enough that no body is detailed — watch the solver readout below.</p>
+    <p class="hint" id="gpu-far-hint">Auto keeps the FAR solve on wasm until a pond outgrows it (32,768 bodies), since wasm is about twice as fast up to there. Either way it only engages zoomed out far enough that no body is detailed — watch the solver readout below.</p>
     <p class="hint sound-hint" id="sound-hint">Tick Sound to start the synth.</p>
     <label class="slider">
       <span>Wave speed</span>
