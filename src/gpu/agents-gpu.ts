@@ -7,7 +7,12 @@ const INSTANCE_STRIDE = 9; // floats per instance — see agents.wgsl
  * Instanced-dot layer for the population Canvas2D skips. One draw call
  * regardless of count, versus one drawAgent() Canvas2D call per agent — see
  * render.ts for which agents end up here (the FAR LOD tier) versus drawn in
- * full detail on the canvas layered on top of this one.
+ * full detail on the canvas layered underneath this one.
+ *
+ * On top rather than under: this canvas clears to transparent everywhere it
+ * isn't drawing a dot, so stacking it above Canvas2D means a FAR-tier dot
+ * can never end up buried under a wire or an opaque energy-grid cell —
+ * Canvas2D still draws all of that, just one layer down.
  *
  * A second, separate canvas rather than sharing the existing one: a canvas
  * is either a 2D context or a WebGPU context, never both, and Canvas2D

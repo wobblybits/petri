@@ -27,10 +27,13 @@ export interface ViewOpts {
   /**
    * When true, FAR-tier agents are skipped here entirely — the caller is
    * expected to have already drawn them as instanced dots on a WebGPU
-   * canvas layered underneath (see buildFarInstances / AgentsGpu), which is
-   * one draw call regardless of count instead of one drawAgent() call per
-   * agent. False draws everyone here, exactly as before the GPU layer
-   * existed — the safe default when that layer isn't ready.
+   * canvas layered *on top* of this one (see buildFarInstances / AgentsGpu),
+   * which is one draw call regardless of count instead of one drawAgent()
+   * call per agent, and sits above everything here — including wires and
+   * whatever this draws for the energy grid — so a FAR-tier dot can never
+   * end up buried under either. False draws everyone here, exactly as
+   * before the GPU layer existed — the safe default when that layer isn't
+   * ready.
    */
   gpuAgents: boolean;
 }
@@ -92,18 +95,18 @@ export function render(
   waves: WaveSnapshot | null = null,
 ): void {
   ctx.save();
-  if (opts.gpuAgents) {
-    // The GPU dot layer owns the background when it's active, so this
-    // canvas has to stay transparent for it to show through — but it still
-    // has to clear every frame, or it just keeps accumulating draws forever
-    // (Canvas2D never clears itself; the opaque fillRect below was quietly
-    // doing that job too, and dropping it outright rather than swapping in
-    // an actual clear left both layers smearing).
-    ctx.clearRect(0, 0, camera.viewW, camera.viewH);
-  } else {
-    ctx.fillStyle = '#0c0d10';
-    ctx.fillRect(0, 0, camera.viewW, camera.viewH);
-  }
+  // The background fill. This also doubles as Canvas2D's per-frame clear —
+  // it never clears itself between draws, so this has to run unconditionally
+  // every frame regardless of whether the GPU dot layer is active.
+  //
+  // This canvas is the *bottom* layer (#view-gpu sits on top of it, not
+  // under — see #viewport in style.css): wires, near-tier agents, and
+  // whatever else this draws should never be able to bury a FAR-tier dot,
+  // which an opaque fill on top of it would. The GPU layer's own clear
+  // (agents-gpu.ts) is to transparent, so it shows this canvas through
+  // everywhere it isn't drawing a dot.
+  ctx.fillStyle = '#0c0d10';
+  ctx.fillRect(0, 0, camera.viewW, camera.viewH);
 
   ctx.save();
   camera.apply(ctx);

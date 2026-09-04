@@ -20,8 +20,8 @@ if (!app) throw new Error('missing #app');
 
 app.innerHTML = `
   <div id="viewport">
-    <canvas id="view-gpu"></canvas>
     <canvas id="view"></canvas>
+    <canvas id="view-gpu"></canvas>
   </div>
   <aside id="panel">
     <h1>Interaction nets</h1>

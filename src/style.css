@@ -39,10 +39,13 @@ body,
 }
 
 /*
- * Two canvases, stacked: #view-gpu (WebGPU, the FAR-tier dot layer) behind
- * #view (Canvas2D, everything else — wires, near-tier agents, UI overlays).
- * A canvas is either a 2D context or a WebGPU context, never both, which is
- * why this is two elements rather than one — see gpu/agents-gpu.ts.
+ * Two canvases, stacked: #view (Canvas2D — wires, near-tier agents, UI
+ * overlays, the energy grid) underneath #view-gpu (WebGPU, the FAR-tier dot
+ * layer), on top. On top rather than under so a FAR-tier dot can never end
+ * up buried under a wire or an opaque energy-grid cell — DOM order is what
+ * sets the stacking here, later wins, and #view-gpu is later. A canvas is
+ * either a 2D context or a WebGPU context, never both, which is why this is
+ * two elements rather than one — see gpu/agents-gpu.ts.
  */
 #viewport canvas {
   position: absolute;
@@ -53,7 +56,8 @@ body,
 }
 
 #view-gpu {
-  /* Purely visual — #view sits on top and owns all pointer/drag handling. */
+  /* Purely visual — #view still owns all pointer/drag handling, even though
+   * it's now the layer underneath. */
   pointer-events: none;
 }
 
