@@ -482,6 +482,23 @@ async function tick(now: number): Promise<void> {
   }
 }
 
+/**
+ * One tick at a time, and the next frame asked for only once it is done.
+ *
+ * The guard never fires as this stands — measured, 0 of 96 callbacks — because
+ * the only `requestAnimationFrame` for `frame` is the one below, so a single
+ * callback is ever outstanding. It is not a throttle and it is not why a heavy
+ * pond ticks at 20-odd a second: that is just the tick's own length plus the
+ * wait for the next vsync.
+ *
+ * It is also not dead. It arrived with the step becoming async (see the WASM
+ * FAR solver commit) and it is what makes that safe if the scheduling changes.
+ * The tempting change here is to ask for the next frame at the top, to hold
+ * vsync cadence rather than chaining off completion — and then ticks overlap.
+ * Two `stepAsync` calls in flight is not slow, it is wrong: `farGpu` has one
+ * set of GPU buffers and one readback, so the second pack lands on top of the
+ * first, and the force block assumes one frame at a time.
+ */
 function frame(now: number): void {
   if (ticking) return;
   ticking = true;
