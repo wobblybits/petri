@@ -27,6 +27,16 @@ describe('Camera.fitDisk', () => {
     cam.fitDisk(400);
     expect(cam.zoom).toBeCloseTo(400 / 800, 10);
   });
+
+  it('fits the area below insetTop, not the full view', () => {
+    const cam = new Camera();
+    cam.setView(800, 600);
+    cam.fitDisk(400);
+    expect(cam.zoom).toBeCloseTo(600 / 800, 10);
+    cam.insetTop = 200;
+    cam.fitDisk(400);
+    expect(cam.zoom).toBeCloseTo(400 / 800, 10);
+  });
 });
 
 describe('Camera.zoomAt', () => {
@@ -43,5 +53,17 @@ describe('Camera.zoomAt', () => {
     expect(after.x).toBeCloseTo(before.x, 10);
     expect(after.y).toBeCloseTo(before.y, 10);
     expect(cam.zoom).toBe(2);
+  });
+
+  it('maps the content centre to the camera origin when the view is inset', () => {
+    const cam = new Camera();
+    cam.setView(400, 800);
+    cam.insetTop = 200;
+    cam.zoom = 1;
+    cam.snap(10, 20);
+    const at = cam.worldFromScreen(cam.screenCX, cam.screenCY);
+    expect(at.x).toBeCloseTo(10, 10);
+    expect(at.y).toBeCloseTo(20, 10);
+    expect(cam.gpuView().y).toBeCloseTo(20 + (400 - 500), 10);
   });
 });

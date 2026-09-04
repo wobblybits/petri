@@ -8,6 +8,7 @@ import { Sim } from './sim.ts';
 import { agentsGpu } from './gpu/agents-gpu.ts';
 import { farGpu } from './gpu/far-gpu.ts';
 import { nativeSolver } from './native/solver.ts';
+import { clamp } from './wrap.ts';
 
 const DEMO_SOUP = 5000;
 
@@ -15,13 +16,15 @@ const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('missing #app');
 
 app.classList.add('demo');
+document.documentElement.classList.add('demo');
 app.innerHTML = `
   <div id="viewport">
     <canvas id="view"></canvas>
     <canvas id="view-gpu"></canvas>
     <div class="demo-chrome">
       <aside id="about">
-        <img class="logo" src="${import.meta.env.BASE_URL}petri-logo.png" alt="petri" />
+        <img class="logo logo-desk" src="${import.meta.env.BASE_URL}petri-logo.png" alt="petri" />
+        <img class="logo logo-phone" src="${import.meta.env.BASE_URL}petri-logo-wide.png" alt="petri" />
       </aside>
       <div id="hud">
         <div class="hud-tools">
@@ -57,6 +60,9 @@ const maybeCtx = canvas.getContext('2d');
 if (!maybeCtx) throw new Error('no 2d context');
 const ctx: CanvasRenderingContext2D = maybeCtx;
 const gpuCanvas = document.querySelector<HTMLCanvasElement>('#view-gpu')!;
+const chrome = document.querySelector<HTMLDivElement>('.demo-chrome')!;
+const about = document.querySelector<HTMLElement>('#about')!;
+const hud = document.querySelector<HTMLDivElement>('#hud')!;
 const countInput = document.querySelector<HTMLInputElement>('#count')!;
 const resetBtn = document.querySelector<HTMLButtonElement>('#reset')!;
 const colorBtn = document.querySelector<HTMLButtonElement>('#color')!;
@@ -94,7 +100,87 @@ function sizeCanvas(): void {
   gpuCanvas.height = canvas.height;
   sim.resize(w, h);
   camera.setView(w, h);
+  refreshChromeMetrics();
+  syncChrome();
   if (sim.worldR > 0 && !userZoomed) camera.fitDisk(sim.worldR);
+  syncChrome();
+}
+
+const phoneQuery = window.matchMedia('(max-width: 720px)');
+const CHROME_GAP = 8;
+/** Extra leftward dish growth past the fitted edge before the desktop logo parks off-screen. */
+const LOGO_HIDE_EXTRA = 110;
+/** Bring the logo back once zoom-out has relaxed well past the hide threshold. */
+const LOGO_SHOW_EXTRA = 28;
+let chromeFull = 0;
+let chromeLogoBand = 0;
+let aboutRestRight = 0;
+let logoOff = false;
+
+function refreshChromeMetrics(): void {
+  const tChrome = chrome.style.transform;
+  about.classList.add('no-motion');
+  const parked = about.classList.contains('is-off');
+  about.classList.remove('is-off');
+  chrome.style.transform = 'none';
+  const vr = canvas.getBoundingClientRect();
+  const cr = chrome.getBoundingClientRect();
+  const hr = hud.getBoundingClientRect();
+  const ar = about.getBoundingClientRect();
+  chrome.style.transform = tChrome;
+  chromeFull = cr.height;
+  chromeLogoBand = Math.max(0, hr.top - cr.top);
+  aboutRestRight = ar.right - vr.left;
+  about.style.setProperty('--logo-off-x', `${-Math.ceil(aboutRestRight)}px`);
+  if (parked) about.classList.add('is-off');
+  about.classList.remove('no-motion');
+}
+
+function setLogoOff(next: boolean): void {
+  if (next === logoOff) return;
+  logoOff = next;
+  about.classList.toggle('is-off', next);
+}
+
+function setInsetTop(next: number): void {
+  const prev = camera.insetTop;
+  if (next === prev) return;
+  camera.insetTop = next;
+  if (camera.zoom > 0) camera.y += ((next - prev) * 0.5) / camera.zoom;
+}
+
+/** Slide chrome off the dish as zoom grows. Phone: up, pin the toolbar. Desktop: park the logo. */
+function syncChrome(): void {
+  if (sim.worldR <= 0) {
+    chrome.style.transform = '';
+    setLogoOff(false);
+    setInsetTop(0);
+    return;
+  }
+  if (phoneQuery.matches) {
+    setLogoOff(false);
+    if (chromeFull <= 0) refreshChromeMetrics();
+    const k = (sim.worldY - sim.worldR - camera.y) * camera.zoom;
+    const minInset = chromeFull - chromeLogoBand + CHROME_GAP;
+    const maxInset = chromeFull + CHROME_GAP;
+    const inset = clamp(camera.viewH + 2 * k, minInset, maxInset);
+    setInsetTop(inset);
+    const shift = clamp(maxInset - inset, 0, chromeLogoBand);
+    chrome.style.transform = shift > 0.5 ? `translateY(${-shift}px)` : '';
+    return;
+  }
+  chrome.style.transform = '';
+  setInsetTop(0);
+  if (aboutRestRight <= 0) refreshChromeMetrics();
+  const fittedLeft = camera.screenCX - Math.min(camera.contentW, camera.contentH) * 0.5;
+  const dishLeft = camera.screenCX - sim.worldR * camera.zoom;
+  const extra = fittedLeft - dishLeft;
+  if (!userZoomed) {
+    setLogoOff(false);
+    return;
+  }
+  if (!logoOff && extra > LOGO_HIDE_EXTRA) setLogoOff(true);
+  else if (logoOff && extra < LOGO_SHOW_EXTRA) setLogoOff(false);
 }
 
 function syncCamera(dt: number): void {
@@ -137,12 +223,13 @@ function setTool(next: Tool): void {
 }
 
 function paint(): void {
+  syncChrome();
   view.gpuAgents = agentsGpu.ready;
   if (view.gpuAgents) {
     const need = sim.agents.size * FAR_INSTANCE_STRIDE;
     if (farInstances.length < need) farInstances = new Float32Array(need);
     const count = buildFarInstances(sim, farInstances, view.kindColors);
-    agentsGpu.render(farInstances, count, camera);
+    agentsGpu.render(farInstances, count, camera.gpuView());
   }
   render(ctx, sim, camera, view);
 }
@@ -245,10 +332,43 @@ canvas.addEventListener(
 function swallowPageZoom(ev: Event): void {
   ev.preventDefault();
 }
-window.addEventListener('gesturestart', swallowPageZoom);
-window.addEventListener('gesturechange', swallowPageZoom);
+window.addEventListener('gesturestart', swallowPageZoom, { capture: true, passive: false });
+window.addEventListener('gesturechange', swallowPageZoom, { capture: true, passive: false });
+window.addEventListener('gestureend', swallowPageZoom, { capture: true, passive: false });
+window.addEventListener(
+  'touchmove',
+  (ev) => {
+    if (ev.touches.length > 1) ev.preventDefault();
+  },
+  { capture: true, passive: false },
+);
+window.addEventListener(
+  'wheel',
+  (ev) => {
+    if (ev.ctrlKey || ev.metaKey) ev.preventDefault();
+  },
+  { capture: true, passive: false },
+);
+
+function isBrowserZoomKey(ev: KeyboardEvent): boolean {
+  if (!(ev.ctrlKey || ev.metaKey)) return false;
+  return (
+    ev.key === '+' ||
+    ev.key === '-' ||
+    ev.key === '=' ||
+    ev.key === '_' ||
+    ev.key === '0' ||
+    ev.code === 'NumpadAdd' ||
+    ev.code === 'NumpadSubtract' ||
+    ev.code === 'Numpad0'
+  );
+}
 
 window.addEventListener('keydown', (ev) => {
+  if (isBrowserZoomKey(ev)) {
+    ev.preventDefault();
+    return;
+  }
   if (ev.target instanceof HTMLInputElement) return;
   if (ev.code === 'Space') {
     ev.preventDefault();
@@ -262,6 +382,10 @@ void sim.openFieldGpu().then((ok) => {
 });
 
 new ResizeObserver(() => sizeCanvas()).observe(canvas);
+phoneQuery.addEventListener('change', () => sizeCanvas());
+for (const img of document.querySelectorAll<HTMLImageElement>('.logo')) {
+  img.addEventListener('load', () => sizeCanvas());
+}
 
 let last = performance.now();
 let ticking = false;

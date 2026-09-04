@@ -9,10 +9,28 @@ export class Camera {
   zoom = .065;
   viewW = 800;
   viewH = 600;
+  /** Screen-space top band the dish should sit below (demo chrome on phones). */
+  insetTop = 0;
 
   setView(w: number, h: number): void {
     this.viewW = Math.max(1, w);
     this.viewH = Math.max(1, h);
+  }
+
+  get contentW(): number {
+    return this.viewW;
+  }
+
+  get contentH(): number {
+    return Math.max(1, this.viewH - this.insetTop);
+  }
+
+  get screenCX(): number {
+    return this.viewW * 0.5;
+  }
+
+  get screenCY(): number {
+    return this.insetTop + this.contentH * 0.5;
   }
 
   snap(x: number, y: number): void {
@@ -36,8 +54,8 @@ export class Camera {
 
   worldFromScreen(sx: number, sy: number): { x: number; y: number } {
     return {
-      x: this.x + (sx - this.viewW * 0.5) / this.zoom,
-      y: this.y + (sy - this.viewH * 0.5) / this.zoom,
+      x: this.x + (sx - this.screenCX) / this.zoom,
+      y: this.y + (sy - this.screenCY) / this.zoom,
     };
   }
 
@@ -54,16 +72,30 @@ export class Camera {
     this.y += before.y - after.y;
   }
 
-  /** Frame a disk of `radius` so its diameter fills the shorter viewport edge. */
+  /** Frame a disk of `radius` so its diameter fills the shorter content edge. */
   fitDisk(radius: number): void {
     const span = 2 * radius;
     if (!(span > 0)) return;
-    const minDim = Math.min(this.viewW, this.viewH);
+    const minDim = Math.min(this.contentW, this.contentH);
     this.zoom = clamp(minDim / span, CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
   }
 
+  /**
+   * World-space origin the GPU path should treat as the canvas centre, so a
+   * shifted 2d projection (inset chrome) and the FAR dots stay lined up.
+   */
+  gpuView(): { x: number; y: number; zoom: number; viewW: number; viewH: number } {
+    return {
+      x: this.x + (this.viewW * 0.5 - this.screenCX) / this.zoom,
+      y: this.y + (this.viewH * 0.5 - this.screenCY) / this.zoom,
+      zoom: this.zoom,
+      viewW: this.viewW,
+      viewH: this.viewH,
+    };
+  }
+
   apply(ctx: CanvasRenderingContext2D): void {
-    ctx.translate(this.viewW * 0.5, this.viewH * 0.5);
+    ctx.translate(this.screenCX, this.screenCY);
     ctx.scale(this.zoom, this.zoom);
     ctx.translate(-this.x, -this.y);
   }
