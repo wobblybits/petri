@@ -1409,29 +1409,6 @@ void solver_scent_frame(int cols, int rows, float ox, float oy, float ww, float 
   scent_wh = wh <= 0.f ? 1.f : wh;
 }
 
-/** One channel, bilinear, zero outside the window. Mirrors Fields.sample. */
-static float scent_sample(int ch, float x, float y) {
-  if (scent_cols <= 0 || scent_rows <= 0) return 0.f;
-  float gx = ((x - scent_ox) / scent_ww) * (float)scent_cols;
-  float gy = ((y - scent_oy) / scent_wh) * (float)scent_rows;
-  int i0 = (int)floorf(gx), j0 = (int)floorf(gy);
-  float tx = gx - (float)i0, ty = gy - (float)j0;
-  float acc = 0.f;
-  for (int dj = 0; dj < 2; dj++) {
-    for (int di = 0; di < 2; di++) {
-      int i = i0 + di, j = j0 + dj;
-      float v = 0.f;
-      if (i >= 0 && j >= 0 && i < scent_cols && j < scent_rows) {
-        v = scent[(j * scent_cols + i) * CHANNELS + ch];
-      }
-      float wx = di ? tx : 1.f - tx;
-      float wy = dj ? ty : 1.f - ty;
-      acc += v * wx * wy;
-    }
-  }
-  return acc;
-}
-
 /** Kind-weighted blend of the channels an agent can smell. Mirrors mixScent. */
 /*
  * All four channels at one point, in one bilinear pass.
@@ -1781,13 +1758,25 @@ void solver_declutter(int n, float reach, float at_reach, float cutoff,
  * field is a square grid. A circular pull would leave the corners unreachable
  * in one sense and unprotected in the other.
  */
-void solver_gravitate(int n, float cx, float cy, float base, float reach,
-                      int max_comp, float dt, float half, float edge) {
-  if (n <= 0 || dt <= 0.f) return;
+/*
+ * Split from `solver_gravitate` so a caller can hand out disjoint body
+ * ranges to worker threads. Safe to do: every body here only ever reads its
+ * own slot of `bodies` plus the shared (cx, cy, ...) target and only ever
+ * writes its own velocity, so two ranges never touch the same memory and the
+ * result does not depend on how the ranges are scheduled. Not every pass in
+ * this file has that shape — `flock_apply` and `near_contacts` mutate both
+ * ends of a pair per iteration, so splitting those needs a different scheme
+ * (per-thread accumulators, reduced afterward), not this one.
+ */
+void solver_gravitate_range(int start, int end, float cx, float cy, float base,
+                            float reach, int max_comp, float dt, float half, float edge) {
+  if (dt <= 0.f) return;
   if (base <= 0.f && edge <= 0.f) return;
-  if (n > MAX_BODIES) n = MAX_BODIES;
+  if (start < 0) start = 0;
+  if (end > MAX_BODIES) end = MAX_BODIES;
+  if (end <= start) return;
   int confine = edge > 0.f && half > 0.f;
-  for (int i = 0; i < n; i++) {
+  for (int i = start; i < end; i++) {
     float *p = bodies + i * STRIDE;
     if (p[FAR_LOCKED] >= 0.5f) continue;
     float dx = cx - p[FAR_X];
@@ -1833,6 +1822,12 @@ void solver_gravitate(int n, float cx, float cy, float base, float reach,
     p[FAR_VX] += dx * pull * dt;
     p[FAR_VY] += dy * pull * dt;
   }
+}
+
+void solver_gravitate(int n, float cx, float cy, float base, float reach,
+                      int max_comp, float dt, float half, float edge) {
+  if (n > MAX_BODIES) n = MAX_BODIES;
+  solver_gravitate_range(0, n, cx, cy, base, reach, max_comp, dt, half, edge);
 }
 
 int32_t *solver_decl_comp(void) { return decl_comp; }
