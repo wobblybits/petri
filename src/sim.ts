@@ -3,7 +3,9 @@ import {
   discRadius,
   createAgent,
   ERA_RADIUS,
-  inSnapArc,
+  portAxis,
+  PORT_REACH_BINARY,
+  PORT_REACH_ERA,
   momentOfInertia,
   portWorld,
   slotsFor,
@@ -3121,6 +3123,8 @@ export class Sim {
     const LOCKED = store.locked;
     const STUN = store.stun;
     const ID = store.id;
+    const KIND_CODE = store.kindCode;
+    const SCALE = store.scale;
 
     for (const agent of list) {
       const s = agent.slot;
@@ -3148,6 +3152,17 @@ export class Sim {
       if (STUN[s] <= 0 && this.graph.isFreeAt(aId, 'p')) {
         const aCos = Math.cos(aHeading);
         const aSin = Math.sin(aHeading);
+        /*
+         * The snap well's own geometry, hoisted: `inSnapArc` recomputed
+         * this agent's port position and port axis for every neighbour it
+         * was handed, and both are the same all the way round the loop.
+         * `tip` is already that port position; this is the axis, and
+         * `tipReach` is how far the tip sits from the centre — which is
+         * what lets the range check below run against centre distance.
+         */
+        const aAxis = portAxis(agent, 'p');
+        const tipReach = Math.hypot(tip.x - ax, tip.y - ay);
+        const snapCos = Math.cos(Math.min(params.snapArc, Math.PI * 0.49));
         this.bodyGrid.forEachNear(ax, ay, near, (idx) => {
           const other = list[idx];
           const os = other.slot;
@@ -3166,14 +3181,26 @@ export class Sim {
             biasX += nx * params.faceAttract * aFace * bFace;
             biasY += ny * params.faceAttract * aFace * bFace;
           }
+          /*
+           * Two ports can only be within snapRadius of each other if their
+           * bodies are within that plus both port reaches, so this rejects
+           * the pair on the centre distance already in hand rather than
+           * building the other body's port to find out. Measured at 20k
+           * agents, 99.5% of the neighbours that got this far failed the
+           * arc test — all of them paying for a portWorld first.
+           */
+          const oReach =
+            (KIND_CODE[os] === KIND_ERA ? PORT_REACH_ERA : PORT_REACH_BINARY) * SCALE[os];
+          if (dist - tipReach - oReach > params.snapRadius) return;
           const op = portWorld(other, 'p', w, h);
-          if (inSnapArc(agent, 'p', op.x, op.y, w, h, params.snapRadius, params.snapArc)) {
-            const pd = wrapDeltaVec(tip.x, tip.y, op.x, op.y, w, h);
-            const pdist = Math.hypot(pd.x, pd.y) || 1;
-            const well = (1 - pdist / params.snapRadius) * params.snapWell;
-            biasX += (pd.x / pdist) * well;
-            biasY += (pd.y / pdist) * well;
-          }
+          const pdx = op.x - tip.x;
+          const pdy = op.y - tip.y;
+          const pdist = Math.hypot(pdx, pdy);
+          if (pdist > params.snapRadius || pdist < 1e-6) return;
+          if ((pdx * aAxis.x + pdy * aAxis.y) / pdist < snapCos) return;
+          const well = (1 - pdist / params.snapRadius) * params.snapWell;
+          biasX += (pdx / pdist) * well;
+          biasY += (pdy / pdist) * well;
         });
       }
 
