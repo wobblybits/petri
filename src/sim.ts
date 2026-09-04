@@ -295,10 +295,12 @@ export class Sim {
   private flockQ = new Int32Array(0);
   private flockSeen: number[] = [];
   private flockSwim = new Uint8Array(0);
+  private flockSlot = new Int32Array(0);
   private tmpStemA = { x: 0, y: 0 };
   private tmpStemB = { x: 0, y: 0 };
   private satBuf = new Uint8Array(0);
   private compBuf = new Int32Array(0);
+  private slotBuf = new Int32Array(0);
   /** Pairs in contact last frame — a strike fires on onset, contact continues. */
   private contactAudioPrev = new Set<string>();
   private contactAudioNow = new Set<string>();
@@ -1757,21 +1759,31 @@ export class Sim {
     if (this.satBuf.length < n) {
       this.satBuf = new Uint8Array(n * 2);
       this.compBuf = new Int32Array(n * 2);
+      this.slotBuf = new Int32Array(n * 2);
     }
     const sat = this.satBuf;
     const comp = this.compBuf;
+    const slot = this.slotBuf;
     for (let i = 0; i < n; i++) {
       sat[i] = this.graph.portsFilledAt(list[i]) ? 1 : 0;
       comp[i] = this.components.get(list[i].id) ?? -1 - i;
+      slot[i] = list[i].slot;
     }
+    const store = this.agentStore;
+    const X = store.x;
+    const Y = store.y;
+    const VX = store.vx;
+    const VY = store.vy;
+    const MASS = store.mass;
+    const LOCKED = store.locked;
     this.bodyGrid.forEachPair((i, j) => {
       {
         if (!sat[i] && !sat[j]) return;
         if (comp[i] === comp[j]) return;
-        const A = list[i];
-        const B = list[j];
-        const dx = B.x - A.x;
-        const dy = B.y - A.y;
+        const a = slot[i];
+        const b = slot[j];
+        const dx = X[b] - X[a];
+        const dy = Y[b] - Y[a];
         const dist = Math.hypot(dx, dy);
         if (dist > cutoff || dist < 1e-6) return;
         // Floored so the law cannot run away at touching distance; contacts own
@@ -1780,15 +1792,15 @@ export class Sim {
         const force = atReach * ratio * ratio;
         const nx = dx / dist;
         const ny = dy / dist;
-        if (!A.locked) {
-          const invM = 1 / Math.max(0.08, A.mass);
-          A.vx -= nx * force * invM * dt;
-          A.vy -= ny * force * invM * dt;
+        if (!LOCKED[a]) {
+          const invM = 1 / Math.max(0.08, MASS[a]);
+          VX[a] -= nx * force * invM * dt;
+          VY[a] -= ny * force * invM * dt;
         }
-        if (!B.locked) {
-          const invM = 1 / Math.max(0.08, B.mass);
-          B.vx += nx * force * invM * dt;
-          B.vy += ny * force * invM * dt;
+        if (!LOCKED[b]) {
+          const invM = 1 / Math.max(0.08, MASS[b]);
+          VX[b] += nx * force * invM * dt;
+          VY[b] += ny * force * invM * dt;
         }
       }
     });
@@ -1911,16 +1923,35 @@ export class Sim {
     const list = this.agentList;
     list.length = 0;
     for (const a of this.agents.values()) list.push(a);
+    const n = list.length;
+
+    // Hoisted once: every agent shares this one store, so a hot loop over
+    // `list` can index its typed arrays directly by slot instead of going
+    // through Agent's getter/setter accessors per field per agent. See
+    // agent-store.ts.
+    const store = this.agentStore;
+    const X = store.x;
+    const Y = store.y;
+    const VX = store.vx;
+    const VY = store.vy;
+    const HEADING = store.heading;
+    const OMEGA = store.omega;
+    const PREV_X = store.prevX;
+    const PREV_Y = store.prevY;
+    const PREV_HEADING = store.prevHeading;
+    const LOCKED = store.locked;
+    const ID = store.id;
 
     for (let sub = 0; sub < Sim.SUBSTEPS; sub++) {
-      for (const a of list) {
-        a.prevX = a.x;
-        a.prevY = a.y;
-        a.prevHeading = a.heading;
-        if (a.locked) continue;
-        a.x += a.vx * h;
-        a.y += a.vy * h;
-        a.heading = wrapAngle(a.heading + a.omega * h);
+      for (let i = 0; i < n; i++) {
+        const s = list[i].slot;
+        PREV_X[s] = X[s];
+        PREV_Y[s] = Y[s];
+        PREV_HEADING[s] = HEADING[s];
+        if (LOCKED[s]) continue;
+        X[s] += VX[s] * h;
+        Y[s] += VY[s] * h;
+        HEADING[s] = wrapAngle(HEADING[s] + OMEGA[s] * h);
       }
       for (const wire of this.graph.wires.values()) {
         if (!this.wireSimulatesRope(wire)) continue;
@@ -1939,22 +1970,23 @@ export class Sim {
       this.clearWires(params);
       this.solveContacts(h);
 
-      for (const a of list) {
-        if (a.locked) {
-          a.vx = 0;
-          a.vy = 0;
-          a.omega = 0;
+      for (let i = 0; i < n; i++) {
+        const s = list[i].slot;
+        if (LOCKED[s]) {
+          VX[s] = 0;
+          VY[s] = 0;
+          OMEGA[s] = 0;
           continue;
         }
-        a.vx = (a.x - a.prevX) * invH;
-        a.vy = (a.y - a.prevY) * invH;
-        a.omega = wrapAngle(a.heading - a.prevHeading) * invH;
-        if (held === a.id) {
-          const speed = Math.hypot(a.vx, a.vy);
+        VX[s] = (X[s] - PREV_X[s]) * invH;
+        VY[s] = (Y[s] - PREV_Y[s]) * invH;
+        OMEGA[s] = wrapAngle(HEADING[s] - PREV_HEADING[s]) * invH;
+        if (held === ID[s]) {
+          const speed = Math.hypot(VX[s], VY[s]);
           if (speed > Sim.GRAB_MAX_SPEED) {
             const k = Sim.GRAB_MAX_SPEED / speed;
-            a.vx *= k;
-            a.vy *= k;
+            VX[s] *= k;
+            VY[s] *= k;
           }
         }
       }
@@ -1967,8 +1999,10 @@ export class Sim {
       }
     }
 
-    for (const a of list) {
-      a.stun = Math.max(0, a.stun - dt);
+    const STUN = store.stun;
+    for (let i = 0; i < n; i++) {
+      const a = list[i];
+      STUN[a.slot] = Math.max(0, STUN[a.slot] - dt);
       wrapPos(a, this.w, this.h);
     }
     this.sanitizePoses();
@@ -3160,31 +3194,34 @@ export class Sim {
    * Active locomotion: accelerate only along the principal port.
    * Latched principals don't swim; they just follow the pull.
    */
-  private locomote(agent: Agent, wishX: number, wishY: number, turnK: number): void {
-    if (!this.graph.isFreeAt(agent.id, 'p')) return;
-    const hx = Math.cos(agent.heading);
-    const hy = Math.sin(agent.heading);
+  private locomote(id: number, slot: number, wishX: number, wishY: number, turnK: number): void {
+    if (!this.graph.isFreeAt(id, 'p')) return;
+    const store = this.agentStore;
+    const heading = store.heading[slot];
+    const hx = Math.cos(heading);
+    const hy = Math.sin(heading);
     const ahead = wishX * hx + wishY * hy;
     if (ahead > 0) {
-      agent.vx += ahead * hx;
-      agent.vy += ahead * hy;
+      store.vx[slot] += ahead * hx;
+      store.vy[slot] += ahead * hy;
     }
     const mag = Math.hypot(wishX, wishY);
     if (mag > 1e-8 && turnK !== 0) {
-      agent.omega += turnK * angleDelta(agent.heading, Math.atan2(wishY, wishX));
+      store.omega[slot] += turnK * angleDelta(heading, Math.atan2(wishY, wishX));
     }
   }
 
   /** Flock / constraint pulls on wired cargo (no principal swim). */
-  private netPull(agent: Agent, wishX: number, wishY: number, _turnK: number): void {
-    if (agent.locked) return;
-    agent.vx += wishX;
-    agent.vy += wishY;
+  private netPull(slot: number, wishX: number, wishY: number, _turnK: number): void {
+    const store = this.agentStore;
+    if (store.locked[slot]) return;
+    store.vx[slot] += wishX;
+    store.vy[slot] += wishY;
   }
 
-  private netForce(agent: Agent, wishX: number, wishY: number, turnK: number): void {
-    if (this.graph.isFreeAt(agent.id, 'p')) this.locomote(agent, wishX, wishY, turnK);
-    else this.netPull(agent, wishX, wishY, turnK);
+  private netForce(id: number, slot: number, wishX: number, wishY: number, turnK: number): void {
+    if (this.graph.isFreeAt(id, 'p')) this.locomote(id, slot, wishX, wishY, turnK);
+    else this.netPull(slot, wishX, wishY, turnK);
   }
 
   private flockNative(
@@ -3325,10 +3362,13 @@ export class Sim {
       this.flockQ = new Int32Array(cap);
     }
     if (this.flockSwim.length < n) this.flockSwim = new Uint8Array(n * 2);
+    if (this.flockSlot.length < n) this.flockSlot = new Int32Array(n * 2);
     const dist = this.flockDist;
     const q = this.flockQ;
     const swim = this.flockSwim;
+    const slotOf = this.flockSlot;
     dist.fill(-1, 0, n);
+    for (let i = 0; i < n; i++) slotOf[i] = list[i].slot;
     if (!reuse) {
       for (let i = 0; i < n; i++) {
         swim[i] = this.graph.isFreeAt(list[i].id, 'p') ? 1 : 0;
@@ -3343,11 +3383,23 @@ export class Sim {
       return;
     }
 
+    const store = this.agentStore;
+    const ID = store.id;
+    const LOCKED = store.locked;
+    const MASS = store.mass;
+    const X = store.x;
+    const Y = store.y;
+    const VX = store.vx;
+    const VY = store.vy;
+    const FLOCK_ALIGN = store.flockAlign;
+    const FLOCK_SEP = store.flockSep;
+
     const seen = this.flockSeen;
 
     for (let start = 0; start < n; start++) {
-      const A = list[start];
-      if (A.locked) continue;
+      const sA = slotOf[start];
+      if (LOCKED[sA]) continue;
+      const idA = ID[sA];
       seen.length = 0;
       dist[start] = 0;
       seen.push(start);
@@ -3366,27 +3418,28 @@ export class Sim {
           dist[v] = d;
           seen.push(v);
           q[qt++] = v;
-          const B = list[v];
-          if (B.locked || B.id <= A.id) continue;
+          const sB = slotOf[v];
+          const idB = ID[sB];
+          if (LOCKED[sB] || idB <= idA) continue;
           const w = 1 / d;
-          const mA = Math.max(0.08, A.mass);
-          const mB = Math.max(0.08, B.mass);
+          const mA = Math.max(0.08, MASS[sA]);
+          const mB = Math.max(0.08, MASS[sB]);
           const mSum = mA + mB;
-          const dx = B.x - A.x;
-          const dy = B.y - A.y;
+          const dx = X[sB] - X[sA];
+          const dy = Y[sB] - Y[sA];
           const gap = Math.hypot(dx, dy) || 1e-6;
           const nx = dx / gap;
           const ny = dy / gap;
 
           // The pair's mean of the clamped gains, matching the solver.
-          const pairAlign = 0.5 * (flockGain(A.flockAlign) + flockGain(B.flockAlign));
-          const pairSep = 0.5 * (flockGain(A.flockSep) + flockGain(B.flockSep));
+          const pairAlign = 0.5 * (flockGain(FLOCK_ALIGN[sA]) + flockGain(FLOCK_ALIGN[sB]));
+          const pairSep = 0.5 * (flockGain(FLOCK_SEP[sA]) + flockGain(FLOCK_SEP[sB]));
           if (pairAlign > 0) {
             const kAlign = pairAlign * w * dt;
-            const dvx = B.vx - A.vx;
-            const dvy = B.vy - A.vy;
-            this.netForce(A, dvx * kAlign * (mB / mSum), dvy * kAlign * (mB / mSum), 0);
-            this.netForce(B, -dvx * kAlign * (mA / mSum), -dvy * kAlign * (mA / mSum), 0);
+            const dvx = VX[sB] - VX[sA];
+            const dvy = VY[sB] - VY[sA];
+            this.netForce(idA, sA, dvx * kAlign * (mB / mSum), dvy * kAlign * (mB / mSum), 0);
+            this.netForce(idB, sB, -dvx * kAlign * (mA / mSum), -dvy * kAlign * (mA / mSum), 0);
           }
 
           if (pairSep > 0 && d > 1) {
@@ -3396,8 +3449,8 @@ export class Sim {
               const ax = nx * mag * dt;
               const ay = ny * mag * dt;
               const turn = turnRate * w * 0.25;
-              this.netForce(A, -ax * (mB / mSum), -ay * (mB / mSum), swim[start] ? 0 : turn);
-              this.netForce(B, ax * (mA / mSum), ay * (mA / mSum), swim[v] ? 0 : turn);
+              this.netForce(idA, sA, -ax * (mB / mSum), -ay * (mB / mSum), swim[start] ? 0 : turn);
+              this.netForce(idB, sB, ax * (mA / mSum), ay * (mA / mSum), swim[v] ? 0 : turn);
             }
           }
         }

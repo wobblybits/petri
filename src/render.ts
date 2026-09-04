@@ -60,16 +60,24 @@ export function buildFarInstances(sim: Sim, out: Float32Array, kindColors: boole
     if (!sim.isFarTier(agent.id)) continue;
     const base = n * FAR_INSTANCE_STRIDE;
     if (base + FAR_INSTANCE_STRIDE > out.length) break;
-    const rgb = kindColors ? kindFillRgb(agent.kind, agent.extra) : KIND_RGB[agent.kind];
-    out[base + 0] = agent.x;
-    out[base + 1] = agent.y;
+    // Numeric fields read straight off the store by slot, bypassing Agent's
+    // getters — this walks the whole FAR-tier population every frame. `kind`
+    // stays a getter call: kindFillRgb/KIND_RGB/shapeFor all key on the
+    // string, and boundRadius needs the Agent shape regardless.
+    const store = agent.store;
+    const slot = agent.slot;
+    const kind = agent.kind;
+    const extra = store.extra[slot];
+    const rgb = kindColors ? kindFillRgb(kind, extra) : KIND_RGB[kind];
+    out[base + 0] = store.x[slot];
+    out[base + 1] = store.y[slot];
     out[base + 2] = boundRadius(agent);
-    out[base + 3] = agent.heading;
-    out[base + 4] = shapeFor(agent.kind);
+    out[base + 3] = store.heading[slot];
+    out[base + 4] = shapeFor(kind);
     out[base + 5] = rgb[0] / 255;
     out[base + 6] = rgb[1] / 255;
     out[base + 7] = rgb[2] / 255;
-    out[base + 8] = agent.alpha;
+    out[base + 8] = store.alpha[slot];
     n++;
   }
   return n;
