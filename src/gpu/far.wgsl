@@ -6,12 +6,16 @@
 struct SimParams {
   n: u32,
   nWires: u32,
-  pad0: u32,
-  pad1: u32,
+  cols: u32,
+  rows: u32,
   h: f32,
   slop: f32,
   contactComp: f32,
   spanComp: f32,
+  gridMinX: f32,
+  gridMinY: f32,
+  invCell: f32,
+  pad0: f32,
 }
 
 struct Particle {
@@ -45,6 +49,22 @@ struct Wire {
 @group(0) @binding(1) var<storage, read_write> parts: array<Particle>;
 @group(0) @binding(2) var<storage, read_write> delta: array<vec2f>;
 @group(0) @binding(3) var<storage, read> wires: array<Wire>;
+// Uniform-grid broadphase, rebuilt every substep because bodies move. The twin
+// tests every pair; one thread per body made that 30x parallel and still lost
+// to `native/solver.c`, which spatial-hashes on one core. Parallelism was never
+// going to cover an asymptote.
+@group(0) @binding(4) var<storage, read_write> cellCount: array<atomic<u32>>;
+@group(0) @binding(5) var<storage, read_write> cellBodies: array<u32>;
+// Wire indices touching each body, built once per step. Both disc and span used
+// to scan the whole wire list per body, which is the same quadratic in a second
+// costume -- and with a wire for every other body, the larger half of it.
+@group(0) @binding(6) var<storage, read_write> nei: array<u32>;
+@group(0) @binding(7) var<storage, read_write> neiCount: array<atomic<u32>>;
+
+/** Bodies recorded per cell. Beyond this the cell drops contacts. */
+const CELL_CAP: u32 = 64u;
+/** An agent has three ports, so three wires. The fourth slot is slack. */
+const NEI_CAP: u32 = 4u;
 
 const PI: f32 = 3.14159265;
 const TAU: f32 = 6.2831853;
@@ -61,6 +81,63 @@ const F32_MAX: f32 = 0x1.fffffep+127;
  */
 fn isFinite(x: f32) -> bool {
   return abs(x) <= F32_MAX;
+}
+
+/**
+ * Grid column/row for a point, clamped into range. Clamping rather than
+ * dropping is what keeps the 3x3 scan honest: it is monotone, so two bodies
+ * whose true cells are neighbours stay neighbours after it, and a body that
+ * has drifted off the grid still collides with whatever is at the edge.
+ */
+fn cellXY(x: f32, y: f32) -> vec2i {
+  if (!isFinite(x) || !isFinite(y)) { return vec2i(0, 0); }
+  let cx = clamp(i32(floor((x - params.gridMinX) * params.invCell)), 0, i32(params.cols) - 1);
+  let cy = clamp(i32(floor((y - params.gridMinY) * params.invCell)), 0, i32(params.rows) - 1);
+  return vec2i(cx, cy);
+}
+
+@compute @workgroup_size(64)
+fn clearGrid(@builtin(global_invocation_id) gid: vec3u) {
+  let c = gid.x;
+  if (c >= params.cols * params.rows) { return; }
+  atomicStore(&cellCount[c], 0u);
+}
+
+@compute @workgroup_size(64)
+fn binBodies(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= params.n) { return; }
+  let p = parts[i];
+  let cc = cellXY(p.x, p.y);
+  let c = u32(cc.y) * params.cols + u32(cc.x);
+  let slot = atomicAdd(&cellCount[c], 1u);
+  if (slot < CELL_CAP) { cellBodies[c * CELL_CAP + slot] = i; }
+}
+
+@compute @workgroup_size(64)
+fn clearNei(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= params.n) { return; }
+  atomicStore(&neiCount[i], 0u);
+}
+
+@compute @workgroup_size(64)
+fn buildNei(@builtin(global_invocation_id) gid: vec3u) {
+  let w = gid.x;
+  if (w >= params.nWires) { return; }
+  let wire = wires[w];
+  // Exactly `fillDiscNeighbours`'s gate, and deliberately not span's rest
+  // check: on the twin a wire with a bad rest still marks the pair wired and
+  // suppresses their contact, even though the chord itself does nothing.
+  if (!isFinite(wire.a) || !isFinite(wire.b)) { return; }
+  let ia = i32(wire.a);
+  let ib = i32(wire.b);
+  let sn = i32(params.n);
+  if (ia < 0 || ib < 0 || ia >= sn || ib >= sn || ia == ib) { return; }
+  let sa = atomicAdd(&neiCount[u32(ia)], 1u);
+  if (sa < NEI_CAP) { nei[u32(ia) * NEI_CAP + sa] = w; }
+  let sb = atomicAdd(&neiCount[u32(ib)], 1u);
+  if (sb < NEI_CAP) { nei[u32(ib) * NEI_CAP + sb] = w; }
 }
 
 fn wrapAngle(a: f32) -> f32 {
@@ -99,52 +176,53 @@ fn disc(@builtin(global_invocation_id) gid: vec3u) {
   let alpha = params.contactComp / max(1e-12, params.h * params.h);
   // Span owns wired gaps. Bound discs are fatter than SAT, so colliding a
   // neighbour the chord is holding fights the rest length.
-  var n0: u32 = 0xffffffffu;
-  var n1: u32 = 0xffffffffu;
-  var n2: u32 = 0xffffffffu;
-  var k: u32 = 0u;
-  let si = i32(i);
-  let sn = i32(params.n);
-  for (var w = 0u; w < params.nWires; w++) {
-    let wire = wires[w];
-    // Same validity gate `fillDiscNeighbours` applies. Guarding span but not
-    // this would be worse than guarding neither: a malformed wire would be
-    // skipped by the chord and still mark a body wired here, which is how a
-    // pair silently loses its contact.
-    if (!isFinite(wire.a) || !isFinite(wire.b)) { continue; }
-    let ia = i32(wire.a);
-    let ib = i32(wire.b);
-    if (ia < 0 || ib < 0 || ia >= sn || ib >= sn || ia == ib) { continue; }
-    var other: u32 = 0xffffffffu;
-    if (ia == si) { other = u32(ib); }
-    else if (ib == si) { other = u32(ia); }
-    else { continue; }
-    if (k == 0u) { n0 = other; }
-    else if (k == 1u) { n1 = other; }
-    else { n2 = other; }
-    k = k + 1u;
+  // The wired partners, read off the prebuilt table instead of rescanning
+  // every wire. NEI_CAP entries because three ports cannot make a fourth.
+  var nb = array<u32, 4>(0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu);
+  let ncnt = min(atomicLoad(&neiCount[i]), NEI_CAP);
+  for (var k = 0u; k < ncnt; k++) {
+    let wire = wires[nei[i * NEI_CAP + k]];
+    let ia = u32(i32(wire.a));
+    let ib = u32(i32(wire.b));
+    nb[k] = select(ia, ib, ia == i);
   }
-  for (var j = 0u; j < params.n; j++) {
-    if (j == i) { continue; }
-    let pj = parts[j];
-    var d = vec2f(pj.x - pi.x, pj.y - pi.y);
-    var dist = length(d);
-    let keep = pi.radius + pj.radius;
-    if (dist >= keep) { continue; }
-    let wired = j == n0 || j == n1 || j == n2;
-    if (dist < 1e-6) {
-      d = vec2f(select(-1.0, 1.0, i < j), 0.0);
-      dist = 1.0;
-    } else if (wired) {
-      continue;
+  // Cell size is at least the widest contact gap in the pack, so anything
+  // close enough to touch is at most one cell away on each axis.
+  let cc = cellXY(pi.x, pi.y);
+  let cols = i32(params.cols);
+  let rows = i32(params.rows);
+  for (var dy = -1; dy <= 1; dy++) {
+    let ny = cc.y + dy;
+    if (ny < 0 || ny >= rows) { continue; }
+    for (var dx = -1; dx <= 1; dx++) {
+      let nx = cc.x + dx;
+      if (nx < 0 || nx >= cols) { continue; }
+      let c = u32(ny) * params.cols + u32(nx);
+      let cnt = min(atomicLoad(&cellCount[c]), CELL_CAP);
+      for (var s = 0u; s < cnt; s++) {
+        let j = cellBodies[c * CELL_CAP + s];
+        if (j == i) { continue; }
+        let pj = parts[j];
+        var d = vec2f(pj.x - pi.x, pj.y - pi.y);
+        var dist = length(d);
+        let keep = pi.radius + pj.radius;
+        if (dist >= keep) { continue; }
+        let wired = j == nb[0] || j == nb[1] || j == nb[2] || j == nb[3];
+        if (dist < 1e-6) {
+          d = vec2f(select(-1.0, 1.0, i < j), 0.0);
+          dist = 1.0;
+        } else if (wired) {
+          continue;
+        }
+        let depth = keep - dist - params.slop;
+        if (depth <= 0.0) { continue; }
+        let nrm = d / dist;
+        let denom = pi.invMass + pj.invMass + alpha;
+        if (denom < 1e-12) { continue; }
+        let lam = depth / denom;
+        push -= nrm * (lam * pi.invMass);
+      }
     }
-    let depth = keep - dist - params.slop;
-    if (depth <= 0.0) { continue; }
-    let nrm = d / dist;
-    let denom = pi.invMass + pj.invMass + alpha;
-    if (denom < 1e-12) { continue; }
-    let lam = depth / denom;
-    push -= nrm * (lam * pi.invMass);
   }
   delta[i] = push;
 }
@@ -158,19 +236,15 @@ fn span(@builtin(global_invocation_id) gid: vec3u) {
   var push = vec2f(0.0, 0.0);
   var count = 0u;
   let si = i32(i);
-  let sn = i32(params.n);
-  for (var w = 0u; w < params.nWires; w++) {
-    let wire = wires[w];
-    // The twin's guards, which this had been missing. A rest that is negative
-    // or non-finite makes C meaningless, and an endpoint outside the pack
-    // reads a body that is not there -- indeterminate here rather than merely
-    // wrong, since a float that far out of range converts to whatever the
-    // hardware does with it.
+  // Only this body's own wires. `buildNei` has already applied the endpoint
+  // and self-wire gate, so what is left is the rest check: negative or
+  // non-finite makes C meaningless.
+  let ncnt = min(atomicLoad(&neiCount[i]), NEI_CAP);
+  for (var k = 0u; k < ncnt; k++) {
+    let wire = wires[nei[i * NEI_CAP + k]];
     if (!(wire.rest >= 0.0) || !isFinite(wire.rest)) { continue; }
-    if (!isFinite(wire.a) || !isFinite(wire.b)) { continue; }
     let ia = i32(wire.a);
     let ib = i32(wire.b);
-    if (ia < 0 || ib < 0 || ia >= sn || ib >= sn || ia == ib) { continue; }
     var j: u32;
     var oix: f32;
     var oiy: f32;

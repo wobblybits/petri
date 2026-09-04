@@ -188,6 +188,22 @@ function scenes(): Scene[] {
     out.push({ name: '200-body crowd + 100 wires', data, n, wires: wiresOf(rows), nWires: rows.length });
   }
 
+  {
+    // A pile, which is what the broadphase cannot escape by any grid sizing:
+    // cells are already as small as the widest contact gap allows, so density
+    // this high overruns CELL_CAP and the cell stops recording bodies. Missed
+    // contacts read as a pile that separates too slowly rather than as a blow
+    // up, which is exactly the kind of wrong that goes unnoticed -- so measure
+    // it against the twin, which tests every pair and cannot miss any.
+    const rng = makeRng(31337);
+    const n = 400;
+    const data = new Float32Array(n * FAR_STRIDE);
+    for (let i = 0; i < n; i++) {
+      particle(data, i, 200 + rng() * 60, 200 + rng() * 60, 10.34, 1, rng() * 6.28);
+    }
+    out.push({ name: '400-body pile in one cell-width', data, n, wires: wiresOf([]), nWires: 0 });
+  }
+
   return out;
 }
 
