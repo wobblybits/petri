@@ -542,22 +542,6 @@ export function portLocal(kind: AgentKind, slot: PortSlot): Vec2 {
   return { x: root.x - PORT_EXTRUDE, y: root.y };
 }
 
-/**
- * How far a port tip can sit from the body centre, per unit of scale.
- *
- * For range checks that want to reject a pair before doing real port
- * geometry: the true offset is never more than this, so a centre distance
- * beyond `snapRadius + reach(a) + reach(b)` cannot possibly put two ports
- * in range. The principal reaches furthest — its stem root is out along
- * +x and PORT_EXTRUDE extends past that, where an aux stem sits back at
- * -0.55 and extrudes backward — so this bounds every slot.
- *
- * Written against the same numbers `stemRootInto` and `portLocal` use, so
- * it has to move when they do.
- */
-export const PORT_REACH_ERA = 8 + PORT_EXTRUDE;
-export const PORT_REACH_BINARY = 16 * 1.05 + PORT_EXTRUDE;
-
 /** `chem` layout: emit, taste, then each one's slope against inner state. */
 export const EMIT = 0;
 export const TASTE = 4;
