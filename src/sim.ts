@@ -3098,15 +3098,38 @@ export class Sim {
     const near = Math.max(params.faceRadius, params.snapRadius);
     const list = this.rebuildBodyGrid(Math.max(1, near));
 
+    // Every direct field touch below goes through the store instead of
+    // Agent's accessors — measured the single hottest pass in the sim at
+    // scale (profiled ~32% of a frame). `agent` itself is still threaded
+    // through to portWorld/scentAt/inSnapArc/graph.*, which need the
+    // Agent shape (kind, chem) and are out of scope here.
+    const store = this.agentStore;
+    const X = store.x;
+    const Y = store.y;
+    const HEADING = store.heading;
+    const OMEGA = store.omega;
+    const VX = store.vx;
+    const VY = store.vy;
+    const DRIVE = store.drive;
+    const TRAIL = store.trail;
+    const LOCKED = store.locked;
+    const STUN = store.stun;
+    const ID = store.id;
+
     for (const agent of list) {
-      if (agent.locked) continue;
+      const s = agent.slot;
+      if (LOCKED[s]) continue;
+      const ax = X[s];
+      const ay = Y[s];
+      const aHeading = HEADING[s];
+      const aId = ID[s];
 
       let biasX = 0;
       let biasY = 0;
       const tip = portWorld(agent, 'p', w, h);
-      const pWire = this.graph.wireAt({ id: agent.id, slot: 'p' });
+      const pWire = this.graph.wireAt({ id: aId, slot: 'p' });
       if (pWire) {
-        const other = pWire.a.id === agent.id ? pWire.b : pWire.a;
+        const other = pWire.a.id === aId ? pWire.b : pWire.a;
         const otherA = this.agents.get(other.id);
         if (otherA) {
           const op = portWorld(otherA, other.slot, w, h);
@@ -3116,18 +3139,23 @@ export class Sim {
         }
       }
 
-      if (agent.stun <= 0 && this.graph.isFreeAt(agent.id, 'p')) {
-        this.bodyGrid.forEachNear(agent.x, agent.y, near, (idx) => {
+      if (STUN[s] <= 0 && this.graph.isFreeAt(aId, 'p')) {
+        const aCos = Math.cos(aHeading);
+        const aSin = Math.sin(aHeading);
+        this.bodyGrid.forEachNear(ax, ay, near, (idx) => {
           const other = list[idx];
-          if (other.id === agent.id || other.locked || other.stun > 0) return;
-          if (!this.graph.isFreeAt(other.id, 'p')) return;
-          const d = wrapDeltaVec(agent.x, agent.y, other.x, other.y, w, h);
+          const os = other.slot;
+          const oId = ID[os];
+          if (oId === aId || LOCKED[os] || STUN[os] > 0) return;
+          if (!this.graph.isFreeAt(oId, 'p')) return;
+          const d = wrapDeltaVec(ax, ay, X[os], Y[os], w, h);
           const dist = Math.hypot(d.x, d.y);
           if (dist < 1e-4 || dist > params.faceRadius) return;
           const nx = d.x / dist;
           const ny = d.y / dist;
-          const aFace = Math.cos(agent.heading) * nx + Math.sin(agent.heading) * ny;
-          const bFace = Math.cos(other.heading) * -nx + Math.sin(other.heading) * -ny;
+          const oHeading = HEADING[os];
+          const aFace = aCos * nx + aSin * ny;
+          const bFace = Math.cos(oHeading) * -nx + Math.sin(oHeading) * -ny;
           if (aFace > 0.35 && bFace > 0.35) {
             biasX += nx * params.faceAttract * aFace * bFace;
             biasY += ny * params.faceAttract * aFace * bFace;
@@ -3145,13 +3173,13 @@ export class Sim {
 
       const arc = params.sensorAngle;
       const dist = params.sensorDist;
-      const leftA = agent.heading - arc;
-      const rightA = agent.heading + arc;
+      const leftA = aHeading - arc;
+      const rightA = aHeading + arc;
       const gain = 0.35 + params.sense / 500;
       const bm = Math.hypot(biasX, biasY);
       const scoreAt = (a: number): number => {
-        const sx = agent.x + Math.cos(a) * dist;
-        const sy = agent.y + Math.sin(a) * dist;
+        const sx = ax + Math.cos(a) * dist;
+        const sy = ay + Math.sin(a) * dist;
         let score = this.scentAt(agent, sx, sy, params) * gain;
         if (bm > 1e-6) {
           score += (1.6 * (biasX * Math.cos(a) + biasY * Math.sin(a))) / bm;
@@ -3172,16 +3200,16 @@ export class Sim {
         t = span > 1e-6 ? Math.min(1, over / span) : 1;
         if (rel < 0) t = -t;
       }
-      const err = angleDelta(agent.heading, agent.heading + arc * t);
-      const trail = this.scentAt(agent, agent.x, agent.y, params);
-      agent.trail = trail;
+      const err = angleDelta(aHeading, aHeading + arc * t);
+      const trail = this.scentAt(agent, ax, ay, params);
+      TRAIL[s] = trail;
       const slow = scentSlowFactor(trail);
       const turnBoost = scentTurnBoost(trail);
       const kp = params.turnRate * 6 * turnBoost;
       const kd = (params.turnRate * 2) / Math.sqrt(turnBoost);
-      const principalFree = this.graph.isFreeAt(agent.id, 'p');
+      const principalFree = this.graph.isFreeAt(aId, 'p');
       if (principalFree) {
-        agent.omega += (kp * err - kd * agent.omega) * dt;
+        OMEGA[s] += (kp * err - kd * OMEGA[s]) * dt;
       }
       if (principalFree && params.stepSpeed > 0) {
         // Active Ornstein-Uhlenbeck propulsion: the drive decays toward cruise
@@ -3193,15 +3221,16 @@ export class Sim {
         const kick =
           params.swimNoise * cruise * Math.sqrt(dt / tau) *
           (Math.random() + Math.random() + Math.random() - 1.5) * 2;
-        agent.drive += ((cruise - agent.drive) / tau) * dt + kick;
-        agent.drive = clamp(agent.drive, -cruise * 0.4, cruise * 2.2);
-        const hx = Math.cos(agent.heading);
-        const hy = Math.sin(agent.heading);
-        const along = agent.vx * hx + agent.vy * hy;
+        let drive = DRIVE[s] + ((cruise - DRIVE[s]) / tau) * dt + kick;
+        drive = clamp(drive, -cruise * 0.4, cruise * 2.2);
+        DRIVE[s] = drive;
+        const hx = Math.cos(aHeading);
+        const hy = Math.sin(aHeading);
+        const along = VX[s] * hx + VY[s] * hy;
         const blend = 1 - Math.exp(-6 * dt);
-        const dAlong = (agent.drive - along) * blend;
-        agent.vx += dAlong * hx;
-        agent.vy += dAlong * hy;
+        const dAlong = (drive - along) * blend;
+        VX[s] += dAlong * hx;
+        VY[s] += dAlong * hy;
       }
     }
   }
