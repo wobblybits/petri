@@ -21,7 +21,7 @@ import {
 } from './chain.ts';
 import { bezierPointInto } from './curve.ts';
 import { segmentsInterfere, WIRE_RADIUS } from './geom.ts';
-import { PairGrid } from './grid.ts';
+import { BoxGrid, PairGrid } from './grid.ts';
 import type { Params } from './params.ts';
 import { clamp, easeInOut, lerp, wrap, wrapDeltaVec, type Vec2 } from './wrap.ts';
 import type { LatchEvent } from './audio/types.ts';
@@ -167,6 +167,96 @@ export class Graph {
   private compsVersion = -1;
   private compsAgents = -1;
   private latchPts: { x: number; y: number }[] = [];
+
+  /**
+   * Wire bounding boxes for the latch crossing test, rebuilt for each `snap`
+   * because every endpoint moves every frame. `latchIndexed` says whether it
+   * describes the wires as they are right now: outside the greedy pass it does
+   * not, and `nearbyWires` falls back to the whole map.
+   */
+  private latchGrid = new BoxGrid();
+  private latchWires: Wire[] = [];
+  private latchMinX = new Float64Array(0);
+  private latchMinY = new Float64Array(0);
+  private latchMaxX = new Float64Array(0);
+  private latchMaxY = new Float64Array(0);
+  private latchIndexed = false;
+  private latchHits: Wire[] = [];
+
+  /**
+   * Bin every wire by the box its polyline occupies. Paid once per `snap`,
+   * against the `O(candidates x wires)` it replaces -- and it hoists the two
+   * map lookups and two `stemWorldInto` calls per wire out of the candidate
+   * loop as well, which is most of what the scan cost even before the segment
+   * tests.
+   */
+  private buildLatchIndex(agents: Map<number, Agent>, w: number, h: number): void {
+    const cap = this.wires.size;
+    if (this.latchMinX.length < cap) {
+      this.latchMinX = new Float64Array(cap * 2);
+      this.latchMinY = new Float64Array(cap * 2);
+      this.latchMaxX = new Float64Array(cap * 2);
+      this.latchMaxY = new Float64Array(cap * 2);
+    }
+    this.latchWires.length = 0;
+    let k = 0;
+    for (const wire of this.wires.values()) {
+      const WA = agents.get(wire.a.id);
+      const WB = agents.get(wire.b.id);
+      if (!WA || !WB) continue;
+      const sa = stemWorldInto(WA, wire.a.slot, w, h, stemScratchA);
+      let lox = sa.x;
+      let hix = sa.x;
+      let loy = sa.y;
+      let hiy = sa.y;
+      const sb = stemWorldInto(WB, wire.b.slot, w, h, stemScratchB);
+      if (sb.x < lox) lox = sb.x;
+      else if (sb.x > hix) hix = sb.x;
+      if (sb.y < loy) loy = sb.y;
+      else if (sb.y > hiy) hiy = sb.y;
+      // The rope bulges off the chord, so the nodes set the box, not the ends.
+      for (let i = 0; i < wire.nodes.length; i++) {
+        const nx = wire.nodes[i].x;
+        const ny = wire.nodes[i].y;
+        if (nx < lox) lox = nx;
+        else if (nx > hix) hix = nx;
+        if (ny < loy) loy = ny;
+        else if (ny > hiy) hiy = ny;
+      }
+      this.latchMinX[k] = lox;
+      this.latchMinY[k] = loy;
+      this.latchMaxX[k] = hix;
+      this.latchMaxY[k] = hiy;
+      this.latchWires.push(wire);
+      k++;
+    }
+    this.latchGrid.build(this.latchMinX, this.latchMinY, this.latchMaxX, this.latchMaxY, k);
+    this.latchIndexed = true;
+  }
+
+  /** Wires whose box the chord reaches, or all of them if nothing is indexed. */
+  private nearbyWires(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    pad: number,
+  ): Iterable<Wire> {
+    if (!this.latchIndexed) return this.wires.values();
+    const hits = this.latchHits;
+    hits.length = 0;
+    const wires = this.latchWires;
+    this.latchGrid.forEachNear(
+      Math.min(x0, x1) - pad,
+      Math.min(y0, y1) - pad,
+      Math.max(x0, x1) + pad,
+      Math.max(y0, y1) + pad,
+      (i) => {
+        hits.push(wires[i]);
+      },
+    );
+    return hits;
+  }
 
   clear(): void {
     this.wires.clear();
@@ -575,6 +665,9 @@ export class Graph {
         a.pb.id - b.pb.id ||
         slotOrder(a.pb.slot) - slotOrder(b.pb.slot),
     );
+    // Index the wires once here rather than rescanning them for every
+    // candidate. Only valid while the pass runs: endpoints move next frame.
+    this.buildLatchIndex(agents, w, h);
     const taken = new Set<number>();
     for (const c of cands) {
       const ka = portKey(c.pa);
@@ -587,6 +680,7 @@ export class Graph {
         taken.add(kb);
       }
     }
+    this.latchIndexed = false;
   }
 
   /**
@@ -610,9 +704,12 @@ export class Graph {
    * intervening wire` in sim.test.ts caught it immediately -- two bodies at
    * either side of a wall wired straight through it.
    *
-   * The way out is a spatial index rather than a switch: a latch chord is
-   * about snapRadius long, so it can only cross wires that come near it, and
-   * the wires it must be tested against are a handful rather than all of them.
+   * So it is indexed rather than switched off. `snap` bins every wire's bounding
+   * box before the greedy pass and this walks only the boxes the chord reaches,
+   * which is a handful. The per-wire geometry below is untouched -- the index
+   * decides which wires are examined, never whether one crosses -- and when no
+   * index has been built, as when a test calls this directly, it falls back to
+   * the whole map and behaves exactly as it always did.
    */
   latchCrosses(
     agents: Map<number, Agent>,
@@ -628,7 +725,7 @@ export class Graph {
     const p1 = stemWorldInto(B, pb.slot, w, h, stemScratchB);
     const minDist = WIRE_RADIUS * 2;
     const pts = this.latchPts;
-    for (const wire of this.wires.values()) {
+    for (const wire of this.nearbyWires(p0.x, p0.y, p1.x, p1.y, minDist)) {
       const WA = agents.get(wire.a.id);
       const WB = agents.get(wire.b.id);
       if (!WA || !WB) continue;
