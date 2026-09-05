@@ -82,6 +82,41 @@ export class Fields {
   data: Float32Array;
   tmp: Float32Array;
 
+  /**
+   * Per-channel multipliers on the global diffuse and decay rates.
+   *
+   * The sliders stay one number each, because "how volatile is this world"
+   * is one property of the world. What a channel *is* then scales it: these
+   * say how fast this particular substance moves and how fast it goes away,
+   * relative to everything else.
+   *
+   * They exist because the four channels stopped being four of the same
+   * thing. A signal wants to spread and fade — that is what makes a trail a
+   * trail. A conserved quantity wants to spread and stay, because energy
+   * that evaporates is energy the economy has to mint back. And a
+   * reaction-diffusion pair only patterns at all when the two species move
+   * at different speeds: Gray-Scott wants the substrate about twice the
+   * activator, and at one rate for everything there is no instability to
+   * find.
+   *
+   * All ones is exactly the old behaviour, which is also the only shape the
+   * SIMD kernel in the solver can take — it splats one rate across the whole
+   * register. `uniform` is what decides whether the native path is still
+   * allowed to answer.
+   *
+   * Float64, so that a rate of 1 multiplies a mix of 0.6 back into 0.6.
+   * Float32 rounds both of the mixes a frame actually uses — 0.6 and 0.39 —
+   * and the pass would then land every cell a few bits off the one it
+   * replaces, for a change that is supposed to do nothing until a rate moves.
+   * Four numbers; there is nothing to save by narrowing them.
+   */
+  readonly diffuseRate = new Float64Array([1, 1, 1, 1]);
+  readonly decayRate = new Float64Array([1, 1, 1, 1]);
+
+  private uniform(rate: Float64Array): boolean {
+    return rate[0] === rate[1] && rate[1] === rate[2] && rate[2] === rate[3];
+  }
+
   constructor(cells = FIELD_CELLS) {
     this.cols = cells;
     this.rows = cells;
@@ -99,7 +134,7 @@ export class Fields {
   private scroll: Float32Array | null = null;
 
   /*
-   * The rectangle of cells scent is actually in, plus a small margin.
+   * The rectangle of cells that have ever been deposited into, plus a margin.
    *
    * The grid is a million cells and a pond touches a small patch of it, so
    * diffusing and decaying the whole thing spends almost all of its time on
@@ -107,48 +142,27 @@ export class Fields {
    * neighbours. Tracking where the scent actually is turns both passes into
    * work proportional to the pond rather than to the world.
    *
-   * It has to track *both* ways to do that, which it did not.
+   * The margin is what diffusion is allowed to spread into before a deposit
+   * extends the box again. Two passes at the default mix move a meaningful
+   * amount about a cell, so sixteen is many frames of headroom; beyond it a
+   * vanishing tail is clipped, and decay was taking it to nothing anyway.
    *
-   * The box used only ever to grow, and `diffuse` widened it by a cell on
-   * every side of every call whether or not anything had reached the edge.
-   * Two passes a frame is two cells a side a frame, so from a centred pond
-   * the box reached the grid's own edge in about 256 frames and stayed
-   * there. Measured, a 198-body pond and a 20,000-body one both paid the
-   * same 44 ms a frame after four seconds — the whole point of the box,
-   * given away on a timer. Widening is now conditional on the edge actually
-   * holding something (`diffuse`), and `trim` pulls the sides back in as
-   * decay empties them.
+   * The box only ever grows, which keeps the invariant the ping-pong needs:
+   * outside it both buffers are exactly zero, so a cell entering the box for
+   * the first time is zero in whichever buffer is about to be read.
    *
-   * Shrinking has one obligation. The ping-pong needs both buffers to be
-   * exactly zero outside the box, so that a cell entering it for the first
-   * time reads zero in whichever buffer is about to be read; growth
-   * preserved that for free, and shrinking does not. `trim` therefore zeroes
-   * every row and column it abandons, in both buffers. That also throws away
-   * the vanishing tail below `EMPTY`, which decay was taking to nothing
-   * anyway.
-   *
-   * The margin is what a deposit claims beyond itself. It was sixteen, as
-   * headroom so that diffusion had somewhere to spread before the next
-   * deposit extended the box again — a job that belongs to the conditional
-   * widening now. What is left is the deposit's own bilinear splat (two
-   * cells) and the frame's two diffusion passes (one each), so four covers
-   * it with room to spare. Keeping it at sixteen would only mean `trim`
-   * clearing twelve rows a side a frame that nothing had ever reached.
+   * It briefly grew a shrinking half — a `trim` that pulled the sides back
+   * past rows decay had emptied, and a widening conditional on the edge
+   * holding something. Both are gone, and the reason is worth keeping. At
+   * this world's rates the field fills the dish within seconds however few
+   * bodies are in it — measured, a 198-body pond and a 20,000-body one both
+   * occupy the whole grid — so there is never anything to reclaim. What the
+   * trim did instead was fold sub-threshold mass near the rim back inward,
+   * against a Dirichlet boundary whose whole job is to absorb it, and that
+   * moved a settled pond for no measurable gain. The disk mask below is what
+   * actually keeps this cheap.
    */
-  private static readonly MARGIN = 4;
-
-  /**
-   * Magnitude at or below which a cell counts as empty for the box.
-   *
-   * Only the box reads this; the field itself keeps whatever it holds. It
-   * wants to sit far enough below anything that can change behaviour that
-   * trimming is invisible, and far enough above denormals to actually
-   * terminate. Steering compares two sensors against a dead zone of 5% of
-   * the signal, and `scentSlowFactor` starts to bite around a trail of 1,
-   * so a cell four orders of magnitude below that cannot move any part of
-   * the sim.
-   */
-  private static readonly EMPTY = 1e-4;
+  private static readonly MARGIN = 16;
   private loI = 0;
   private loJ = 0;
   private hiI = -1;
@@ -267,6 +281,21 @@ export class Fields {
       let b = Math.floor((this.boundX + hw - this.originX) / cs - 0.5);
       if (a < 0) a = 0;
       if (b > cols - 1) b = cols - 1;
+      /*
+       * Then walk the ends onto the exact run `cellOut` describes.
+       *
+       * The span is derived through a square root and `cellOut` is a squared
+       * compare, so on a cell sitting all but exactly on the rim the two can
+       * disagree in the last bit. That would be harmless if the span were the
+       * only answer, but `add` and `at` still ask `cellOut` directly — a
+       * deposit would land in a cell the diffusion then treated as outside.
+       * One question, one answer: these loops move each end by a cell at
+       * most, once per rebuild, and cost nothing per frame.
+       */
+      while (a <= b && this.cellOut(a, j)) a++;
+      while (b >= a && this.cellOut(b, j)) b--;
+      while (a > 0 && !this.cellOut(a - 1, j)) a--;
+      while (b < cols - 1 && !this.cellOut(b + 1, j)) b++;
       lo[j] = a;
       hi[j] = b;
       if (b < a) hi[j] = a - 1;
@@ -370,109 +399,6 @@ export class Fields {
     this.touch(Math.floor(gx), Math.floor(gy));
   }
 
-  /**
-   * True when every cell of this row, across the box's current width, is
-   * within `EMPTY` of zero. Signed: a channel is allowed below zero, and a
-   * strong negative is as much "something is here" as a strong positive.
-   */
-  private rowEmpty(j: number): boolean {
-    const e = Fields.EMPTY;
-    const d = this.data;
-    let base = (j * this.cols + this.loI) * CHANNELS;
-    for (let i = this.loI; i <= this.hiI; i++, base += CHANNELS) {
-      if (d[base] > e || d[base] < -e) return false;
-      if (d[base + 1] > e || d[base + 1] < -e) return false;
-      if (d[base + 2] > e || d[base + 2] < -e) return false;
-      if (d[base + 3] > e || d[base + 3] < -e) return false;
-    }
-    return true;
-  }
-
-  /** `rowEmpty` down a column, across the box's current height. */
-  private colEmpty(i: number): boolean {
-    const e = Fields.EMPTY;
-    const d = this.data;
-    const stride = this.cols * CHANNELS;
-    for (let j = this.loJ; j <= this.hiJ; j++) {
-      const base = j * stride + i * CHANNELS;
-      if (d[base] > e || d[base] < -e) return false;
-      if (d[base + 1] > e || d[base + 1] < -e) return false;
-      if (d[base + 2] > e || d[base + 2] < -e) return false;
-      if (d[base + 3] > e || d[base + 3] < -e) return false;
-    }
-    return true;
-  }
-
-  /**
-   * Zero a row across the box's width, in *both* buffers.
-   *
-   * The second buffer is the whole point. Outside the box the ping-pong
-   * assumes both are exactly zero, so a row handed back to the outside has
-   * to be left that way in the one that is not currently live as well —
-   * otherwise a later deposit that grows the box back over it reads a stale
-   * value out of `tmp` on the next diffuse.
-   */
-  private clearRow(j: number): void {
-    const from = (j * this.cols + this.loI) * CHANNELS;
-    const to = (j * this.cols + this.hiI + 1) * CHANNELS;
-    this.data.fill(0, from, to);
-    this.tmp.fill(0, from, to);
-  }
-
-  /** `clearRow` down a column. Strided, so no `fill` to lean on. */
-  private clearCol(i: number): void {
-    const stride = this.cols * CHANNELS;
-    const d = this.data;
-    const t = this.tmp;
-    for (let j = this.loJ; j <= this.hiJ; j++) {
-      const base = j * stride + i * CHANNELS;
-      d[base] = d[base + 1] = d[base + 2] = d[base + 3] = 0;
-      t[base] = t[base + 1] = t[base + 2] = t[base + 3] = 0;
-    }
-  }
-
-  /**
-   * Pull the box in past the sides decay has emptied.
-   *
-   * The other half of tracking where the scent is; `diffuse`'s conditional
-   * widening is the first. Without this the box is a high-water mark — a
-   * pond that swims away leaves the cost of everywhere it has ever been
-   * behind it, forever.
-   *
-   * Rows before columns, so the column scans are over an already-shortened
-   * height and a box that has gone entirely empty is usually settled by the
-   * first loop alone.
-   *
-   * Budgeted per side per frame. Decay empties an edge a row at a time, so
-   * the loops almost always run once or not at all, and the bound is only
-   * there so that a field emptied all at once — a `clear`, a preset swap, a
-   * decay slider yanked to the top — trims over a few frames instead of
-   * walking the whole box in one. A margin's worth converges fast enough
-   * that nothing perceives it.
-   */
-  private trim(): void {
-    if (this.hiI < this.loI) return;
-    const budget = Fields.MARGIN;
-    let n = budget;
-    while (n-- > 0 && this.loJ <= this.hiJ && this.rowEmpty(this.loJ)) this.clearRow(this.loJ++);
-    // Everything in the box was empty, so there is no box. `touch` seeds all
-    // four edges again from scratch the next time anything is deposited.
-    if (this.loJ > this.hiJ) {
-      this.hiI = this.loI - 1;
-      return;
-    }
-    n = budget;
-    while (n-- > 0 && this.hiJ > this.loJ && this.rowEmpty(this.hiJ)) this.clearRow(this.hiJ--);
-    n = budget;
-    while (n-- > 0 && this.loI <= this.hiI && this.colEmpty(this.loI)) this.clearCol(this.loI++);
-    if (this.loI > this.hiI) {
-      this.hiI = this.loI - 1;
-      return;
-    }
-    n = budget;
-    while (n-- > 0 && this.hiI > this.loI && this.colEmpty(this.hiI)) this.clearCol(this.hiI--);
-  }
-
   /** Extend the live box to cover this cell and its margin. */
   private touch(i: number, j: number): void {
     const m = Fields.MARGIN;
@@ -516,9 +442,20 @@ export class Fields {
    */
   diffuse(mix: number): void {
     if (mix <= 0) return;
-    if (nativeSolver.scentDiffuse(this, mix)) return;
-    const m = mix;
-    const keep = 1 - m;
+    if (this.uniform(this.diffuseRate) && nativeSolver.scentDiffuse(this, mix)) return;
+    const dr = this.diffuseRate;
+    const rate = (ch: number): number => {
+      const r = mix * (dr[ch] > 0 ? dr[ch] : 0);
+      return r > 1 ? 1 : r;
+    };
+    const m0 = rate(0);
+    const m1 = rate(1);
+    const m2 = rate(2);
+    const m3 = rate(3);
+    const k0 = 1 - m0;
+    const k1 = 1 - m1;
+    const k2 = 1 - m2;
+    const k3 = 1 - m3;
     const { cols, rows } = this;
     const src = this.data;
     const dst = this.tmp;
@@ -530,23 +467,20 @@ export class Fields {
      * exactly one cell and the box has to be somewhere for it to move into.
      *
      * Without this the box was a hard ceiling on how far scent could ever
-     * spread — a margin's width from the nearest deposit, whatever the
-     * diffusion rate — so turning diffusion up flattened the peak without
-     * extending the reach, which looks exactly like turning it down. The box
-     * is meant to skip cells that are zero and will stay zero, not to clip
-     * the physics.
+     * spread — sixteen cells from the nearest deposit, whatever the diffusion
+     * rate — so turning diffusion up flattened the peak without extending the
+     * reach, which looks exactly like turning it down. The box is meant to
+     * skip cells that are zero and will stay zero, not to clip the physics.
      *
-     * Per side, and only where there is something to spread. An edge that is
-     * empty has nothing to push outward, so widening past it buys a row of
-     * zeros being averaged with zeros — which is precisely the work the box
-     * exists to skip. Done unconditionally, as it was, this alone walked the
-     * box out to the whole grid in four seconds however little scent was in
-     * it. The scan is a perimeter, not an area.
+     * It grows to the whole grid if scent genuinely reaches the whole grid,
+     * which is the correct cost of that happening — and at this world's rates
+     * it does, within seconds. Decay does not bound it in practice; the disk
+     * mask is what keeps the work down.
      */
-    if (this.loI > 0 && !this.colEmpty(this.loI)) this.loI--;
-    if (this.loJ > 0 && !this.rowEmpty(this.loJ)) this.loJ--;
-    if (this.hiI < this.cols - 1 && !this.colEmpty(this.hiI)) this.hiI++;
-    if (this.hiJ < this.rows - 1 && !this.rowEmpty(this.hiJ)) this.hiJ++;
+    if (this.loI > 0) this.loI--;
+    if (this.loJ > 0) this.loJ--;
+    if (this.hiI < this.cols - 1) this.hiI++;
+    if (this.hiJ < this.rows - 1) this.hiJ++;
     // No bound: -1 reflects off the square edge (neither absorbs nor invents).
     // Bound set: a neighbour outside the disk is 0, so scent leaks into the rim.
     const dirichlet = this.boundR > 0;
@@ -579,15 +513,58 @@ export class Fields {
         const right = i < sHi[j] ? base + CHANNELS : -1;
         const up = i >= upLo && i <= upHi ? base - rowStride : -1;
         const down = i >= dnLo && i <= dnHi ? base + rowStride : -1;
-        for (let ch = 0; ch < CHANNELS; ch++) {
-          const k = base + ch;
-          const self = src[k];
-          const a = left >= 0 ? src[left + ch] : dirichlet ? 0 : self;
-          const b = right >= 0 ? src[right + ch] : dirichlet ? 0 : self;
-          const c = up >= 0 ? src[up + ch] : dirichlet ? 0 : self;
-          const e = down >= 0 ? src[down + ch] : dirichlet ? 0 : self;
-          dst[k] = keep * self + m * (a + b + c + e) * 0.25;
-        }
+        /*
+         * Unrolled over the four channels, because they no longer share a
+         * rate and reading one out of an array per channel per cell is the
+         * whole of what per-channel rates would otherwise cost. Measured over
+         * a 1024^2 pass: 15.9 ms through a Float32Array, 14.9 ms through a
+         * Float64Array, 9.5 ms with the rates as locals. The array is small
+         * enough to sit in L1 either way — what it costs is the load itself,
+         * eight of them per cell, and unrolling is how they go away.
+         *
+         * Same shape as the one-rate version it replaces, in the same order,
+         * so at a rate of 1 every cell lands on the same bits it used to.
+         */
+        const s0 = src[base];
+        const s1 = src[base + 1];
+        const s2 = src[base + 2];
+        const s3 = src[base + 3];
+        const l = left >= 0;
+        const r = right >= 0;
+        const u = up >= 0;
+        const w = down >= 0;
+        dst[base] =
+          k0 * s0 +
+          m0 *
+            ((l ? src[left] : dirichlet ? 0 : s0) +
+              (r ? src[right] : dirichlet ? 0 : s0) +
+              (u ? src[up] : dirichlet ? 0 : s0) +
+              (w ? src[down] : dirichlet ? 0 : s0)) *
+            0.25;
+        dst[base + 1] =
+          k1 * s1 +
+          m1 *
+            ((l ? src[left + 1] : dirichlet ? 0 : s1) +
+              (r ? src[right + 1] : dirichlet ? 0 : s1) +
+              (u ? src[up + 1] : dirichlet ? 0 : s1) +
+              (w ? src[down + 1] : dirichlet ? 0 : s1)) *
+            0.25;
+        dst[base + 2] =
+          k2 * s2 +
+          m2 *
+            ((l ? src[left + 2] : dirichlet ? 0 : s2) +
+              (r ? src[right + 2] : dirichlet ? 0 : s2) +
+              (u ? src[up + 2] : dirichlet ? 0 : s2) +
+              (w ? src[down + 2] : dirichlet ? 0 : s2)) *
+            0.25;
+        dst[base + 3] =
+          k3 * s3 +
+          m3 *
+            ((l ? src[left + 3] : dirichlet ? 0 : s3) +
+              (r ? src[right + 3] : dirichlet ? 0 : s3) +
+              (u ? src[up + 3] : dirichlet ? 0 : s3) +
+              (w ? src[down + 3] : dirichlet ? 0 : s3)) *
+            0.25;
       }
     }
 
@@ -595,25 +572,25 @@ export class Fields {
     this.tmp = src;
   }
 
-  /**
-   * Decay, then pull the box in behind it.
-   *
-   * `trim` hangs off the end of decay rather than off its own call in `Sim`
-   * because decay is the pass that empties a cell — it is the only thing
-   * that can newly make an edge trimmable, and it is the last field pass of
-   * the frame. It runs whichever decay path did, so the native one does not
-   * quietly leave the box at its high-water mark.
-   */
   decay(rate: number): void {
     const k = Math.max(0, 1 - rate);
-    if (!nativeSolver.scentDecay(this, k)) this.decayCells(k);
-    this.trim();
+    if (this.uniform(this.decayRate) && nativeSolver.scentDecay(this, k)) return;
+    this.decayCells(rate);
   }
 
-  private decayCells(k: number): void {
+  private decayCells(rate: number): void {
     if (this.hiI < this.loI) return;
     const d = this.data;
     const { cols } = this;
+    const dr = this.decayRate;
+    const keep = (ch: number): number => {
+      const r = rate * (dr[ch] > 0 ? dr[ch] : 0);
+      return r >= 1 ? 0 : 1 - r;
+    };
+    const k0 = keep(0);
+    const k1 = keep(1);
+    const k2 = keep(2);
+    const k3 = keep(3);
     const { lo: sLo, hi: sHi } = this.spans();
     for (let j = this.loJ; j <= this.hiJ; j++) {
       const rowBase = j * cols * CHANNELS;
@@ -623,10 +600,10 @@ export class Fields {
       if (a0 > this.loI) d.fill(0, rowBase + this.loI * CHANNELS, rowBase + a0 * CHANNELS);
       if (b0 < this.hiI) d.fill(0, rowBase + (b0 + 1) * CHANNELS, rowBase + (this.hiI + 1) * CHANNELS);
       for (let i = a0, base = rowBase + a0 * CHANNELS; i <= b0; i++, base += CHANNELS) {
-        d[base] *= k;
-        d[base + 1] *= k;
-        d[base + 2] *= k;
-        d[base + 3] *= k;
+        d[base] *= k0;
+        d[base + 1] *= k1;
+        d[base + 2] *= k2;
+        d[base + 3] *= k3;
       }
     }
   }
