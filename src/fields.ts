@@ -427,10 +427,40 @@ export class Fields {
     this.touch(i0, j0);
     const tx = gx - i0;
     const ty = gy - j0;
-    this.add(i0, j0, ch, amount * (1 - tx) * (1 - ty));
-    this.add(i0 + 1, j0, ch, amount * tx * (1 - ty));
-    this.add(i0, j0 + 1, ch, amount * (1 - tx) * ty);
-    this.add(i0 + 1, j0 + 1, ch, amount * tx * ty);
+    /*
+     * Renormalised over the cells that will actually take it, which matters
+     * only at the rim and matters a lot there.
+     *
+     * A point inside the disk can still straddle cells whose *centres* are
+     * outside it, because `inBounds` asks about the point and `cellOut` asks
+     * about the centre. `add` drops those, so a corpse near the wall used to
+     * lose whatever share of itself landed in them — silently, and worse the
+     * closer to the edge it died. A signal channel would never notice; a
+     * conserved one is exactly where a small unbounded leak is unaffordable.
+     *
+     * Spreading the whole amount over whichever of the four are legal keeps
+     * `addAt` conservative for any point the disk accepts at all. When none of
+     * them are, the point is outside in every sense and the deposit is
+     * genuinely dropped.
+     */
+    const wi = [1 - tx, tx, 1 - tx, tx];
+    const wj = [1 - ty, 1 - ty, ty, ty];
+    const ii = [i0, i0 + 1, i0, i0 + 1];
+    const jj = [j0, j0, j0 + 1, j0 + 1];
+    let take = 0;
+    for (let k = 0; k < 4; k++) {
+      if (this.cell(ii[k], jj[k], ch) < 0 || this.cellOut(ii[k], jj[k])) {
+        wi[k] = 0;
+        continue;
+      }
+      take += wi[k] * wj[k];
+    }
+    if (take <= 0) return;
+    const scale = amount / take;
+    for (let k = 0; k < 4; k++) {
+      const w = wi[k] * wj[k];
+      if (w > 0) this.add(ii[k], jj[k], ch, w * scale);
+    }
   }
 
   /** The live box, as inclusive cell indices. Empty when hi < lo. */

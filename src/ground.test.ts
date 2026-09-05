@@ -116,6 +116,28 @@ describe('ground', () => {
     expect(total(healing)).toBeGreaterThan(emptied);
   });
 
+  it('keeps a deposit whole right up against the rim', () => {
+    // A point inside the disk can straddle cells whose centres are outside it,
+    // and those are dropped. Renormalising over the ones that will take it is
+    // what stops a body that dies near the wall taking part of its worth with
+    // it — silently, and worse the closer to the edge it got.
+    const r = 1200;
+    for (const d of [0, 0.5, 0.9, 0.99]) {
+      const f = new Fields();
+      f.setWorldBound(AT.x, AT.y, r);
+      const before = total(f);
+      f.addAt(CH.energy, AT.x + r * d, AT.y, 5);
+      expect(total(f) - before, `deposit at ${d * 100}% of the radius`).toBeCloseTo(5, 6);
+    }
+  });
+
+  it('drops a deposit that lands outside the dish entirely', () => {
+    const f = new Fields();
+    f.setWorldBound(AT.x, AT.y, 1200);
+    f.addAt(CH.energy, AT.x + 4000, AT.y, 5);
+    expect(total(f)).toBe(0);
+  });
+
   it('heals inward, so the middle of a scar is the last to come back', () => {
     const f = dish();
     graze(f, AT.x, AT.y, 400);
