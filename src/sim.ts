@@ -2412,7 +2412,12 @@ export class Sim {
      * Here rather than in the constructor because a disk is what makes the
      * ground finite, and there is no disk until the world is pinned. Before
      * this the grid answers out of its sparse map exactly as it always did,
-     * which lasts the one frame it takes a pond to acquire a home.
+     * which lasts the one frame it takes a pond to acquire a home — and only
+     * ever that once. `bind` is not undone by `clear`, so a cleared sim keeps
+     * reading a zeroed field rather than falling back to the implicit ambient.
+     * That is the right behaviour (a cleared world has no ground until it is
+     * seeded again) but it does mean "before the first pin" is the only window
+     * in which the sparse path runs at all.
      */
     this.energy.bind(this.fields);
     this.energy.configure(this.energyCell, this.energyAmbient);
@@ -2453,12 +2458,29 @@ export class Sim {
    * copy is 16 MB each way — several times what running it here costs in the
    * first place.
    */
+  /**
+   * Refuses while the ground lives on the field, which is always, so this
+   * currently cannot succeed.
+   *
+   * Not an oversight left in — a tripwire in front of one. The GPU holds the
+   * live field in its own textures and only ever ships deposits and probes
+   * across; `fields.data` is a CPU copy nobody syncs back. Everything that
+   * made energy a resource rather than a seam of ore is on the CPU side of
+   * that line: `grow` and `tuneChannels` both sit inside `if
+   * (!this.fieldOnGpu)`, and `EnergyGrid`'s `take` and `addAt` read and write
+   * `fields.data` directly. Turn this on as it stands and the ground stops
+   * regrowing, channel 2 starts decaying at the scent rate because the
+   * per-channel rates never reach the shader, and the pond mines a CPU array
+   * the GPU is not looking at down to nothing — silently, and only on machines
+   * that have a GPU.
+   *
+   * Nothing calls this today, which is why the whole thing was invisible. It
+   * wants either the growth pass in `field.wgsl` and the ground read back, or
+   * the ground moved off the shared field, before it is worth having.
+   */
   async openFieldGpu(): Promise<boolean> {
     if (this.fieldOnGpu) return true;
-    const ok = await fieldGpu.init(this.fields.cols);
-    this.fieldOnGpu = ok;
-    nativeSolver.useSamples(ok);
-    return ok;
+    return false;
   }
 
   /**

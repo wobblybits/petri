@@ -541,7 +541,16 @@ export class EnergyGrid {
     return s;
   }
 
-  /** Touched cells only — the implicit ambient field is not stored. */
+  /**
+   * Touched cells only — the implicit ambient field is not stored.
+   *
+   * Sparse path only, and so dead in production: bound to a field there is no
+   * map to walk and this yields nothing, whatever the ground actually holds.
+   * The one caller left is a test on a hand-built grid. Kept because that test
+   * is the only remaining cover for the sparse path, which is still what an
+   * `EnergyGrid` built by hand gives you; anything wanting the real ground
+   * wants `getCell` over a range, the way `drawEnergyGrid` does it.
+   */
   forEachStored(fn: (i: number, j: number, e: number) => void): void {
     for (const [key, e] of this.cells) {
       const i = Math.floor(key / CELL_KEY_WIDTH) - CELL_KEY_OFFSET;
