@@ -170,10 +170,26 @@ function drawEnergyGrid(ctx: CanvasRenderingContext2D, sim: Sim, camera: Camera)
   // Cell (i, j) covers world space [originX + i*size, ...), not [i*size, ...)
   // — the grid's lattice is anchored to the scent field's origin, not to the
   // world origin, so the cull window and the draw position both need it.
-  const i0 = Math.floor((left - originX) / size);
-  const i1 = Math.ceil((right - originX) / size);
-  const j0 = Math.floor((top - originY) / size);
-  const j1 = Math.ceil((bottom - originY) / size);
+  let i0 = Math.floor((left - originX) / size);
+  let i1 = Math.ceil((right - originX) / size);
+  let j0 = Math.floor((top - originY) / size);
+  let j1 = Math.ceil((bottom - originY) / size);
+  /*
+   * And clamped to the dish, which the camera window alone is not.
+   *
+   * At the minimum zoom the cover is 72,000 world units across — 1802 x 1127
+   * cells, two million of them, and all but the 256 x 256 that sit over the
+   * field read 0 and so draw a black rect each. That is exactly the freeze the
+   * comment below warns about. The draw is already clipped to this same disk,
+   * so every cell dropped here was invisible anyway; the bounding box is a
+   * superset of the disk, so nothing inside it is lost either.
+   */
+  if (sim.worldR > 0) {
+    i0 = Math.max(i0, Math.floor((sim.worldX - sim.worldR - originX) / size));
+    i1 = Math.min(i1, Math.ceil((sim.worldX + sim.worldR - originX) / size));
+    j0 = Math.max(j0, Math.floor((sim.worldY - sim.worldR - originY) / size));
+    j1 = Math.min(j1, Math.ceil((sim.worldY + sim.worldR - originY) / size));
+  }
   const gold = (e: number): string => {
     const a = Math.min(0.28, 0.06 + 0.12 * (e / ambient));
     return `rgba(232, 196, 88, ${a})`;

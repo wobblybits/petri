@@ -125,6 +125,23 @@ export interface Params {
   eraMass: number;
   nodeMass: number;
   turnRate: number;
+  /**
+   * How strongly a fresh body is drawn to full ground, against a reading of 1
+   * for a cell at capacity.
+   *
+   * The seed only. Like `attractStrong` and `attractMedium` this sets where a
+   * population starts and is never read again — breeding takes it from there,
+   * and a lineage is free to drift to indifference or to outright avoidance,
+   * which for food would be a strange thing to become but is not this
+   * parameter's business to prevent.
+   *
+   * Seeds the taste *slope* against `request`, not the flat weight, so a fed
+   * body ignores food and a hungry one turns toward it. A flat attraction
+   * seems safe — untouched ground is uniform, and a uniform field steers
+   * nothing — but a body eats a dip under itself within a frame or two and
+   * then chases the dip. See `seedChem`, which has the measurement.
+   */
+  attractFood: number;
   sensorAngle: number;
   sensorDist: number;
   stepSpeed: number;
@@ -284,6 +301,7 @@ export function defaultParams(): Params {
     sense: 520,
     attractStrong: 1.45,
     attractMedium: 0.72,
+    attractFood: 0.9,
     snapRadius: 22,
     snapArc: 0.3,
     snapWell: 48,
@@ -350,6 +368,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'sense', label: 'Sense', min: 0, max: 1200, step: 10 },
   { key: 'attractStrong', label: 'Strong attract', min: 0, max: 3, step: 0.05 },
   { key: 'attractMedium', label: 'Medium attract', min: 0, max: 2, step: 0.05 },
+  { key: 'attractFood', label: 'Food attract', min: -2, max: 4, step: 0.05 },
   { key: 'sensorAngle', label: 'Sensor arc', min: 0.1, max: 1.2, step: 0.02 },
   { key: 'stepSpeed', label: 'Step speed', min: 10, max: 180, step: 1 },
   { key: 'swimTau', label: 'Swim persistence', min: 0.1, max: 4, step: 0.05 },

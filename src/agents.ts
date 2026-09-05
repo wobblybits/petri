@@ -661,6 +661,29 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
   const c = new Float32Array(CHEM_LEN);
   const S = params.attractStrong;
   const M = params.attractMedium;
+  /*
+   * Drawn to food when hungry, and blind to it when fed. On the slope against
+   * `request`, not on the base — the one place in this seed where a slope
+   * starts anywhere but zero, and it earns the exception.
+   *
+   * A constant attraction looks safe, on the argument that a flat field steers
+   * nothing: where the ground is untouched both sensors read the same and
+   * there is nothing to turn on. That argument is wrong, and measurably so. A
+   * body harvests from the cell it is standing in, so within a frame or two it
+   * has eaten a dip underneath itself — and then it smells the dip. It is
+   * chasing a gradient of its own making, which is the same self-trail
+   * artifact the sensor geometry is tuned to reject, arriving by a different
+   * door. Seeded flat at 0.9 it cost eight tests: nets dispersed instead of
+   * settling, and a lone body wound itself in circles on its own grazing.
+   *
+   * Gating on need fixes it at the root rather than by turning the gain down.
+   * A fed body has nothing to gain from food and ignores it, so it keeps the
+   * behaviour it always had; a hungry one — and `request` is the
+   * neighbourhood's hunger, already spread along the wires — turns toward the
+   * ground. Which is what foraging is, and what none of this was able to
+   * express at any genome before the ground was something you could smell.
+   */
+  c[TASTE_SLOPE + CH.energy] = params.attractFood;
   if (kind === 'con') {
     c[EMIT] = 1;
     c[TASTE + 1] = M;

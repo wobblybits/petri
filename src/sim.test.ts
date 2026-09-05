@@ -76,6 +76,12 @@ describe('scent steering', () => {
       params.snapWell = 0;
       params.snapRadius = 0;
       params.deposit = 0;
+      // Barren, because the ground is a channel now and every kind is seeded
+      // with a taste for it. A body standing on full ground eats a dip under
+      // itself within a frame or two and then smells the dip — which is a real
+      // behaviour and the wrong one to have inside a test whose whole premise
+      // is that there is nothing to smell.
+      params.ambientEnergy = 0;
       // The swimming kick is coloured noise off Math.random, and it moves the
       // agent, which moves where it lays scent, which is what the two sensors
       // read. Left in, this test asks whether an unseeded random walk happened

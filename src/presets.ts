@@ -35,7 +35,7 @@ export function loadPreset(sim: Sim, name: PresetName, params: Params): void {
   const cx = sim.w * 0.5;
   const cy = sim.h * 0.5;
   if (name === 'soup') {
-    sim.pinWorld(cx, cy);
+    sim.pinWorld(cx, cy, params);
     const n = Math.min(params.soupCount, params.maxAgents);
     const radius = Math.max(0, sim.worldR - 24);
     for (let i = 0; i < n; i++) {

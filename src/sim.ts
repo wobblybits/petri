@@ -104,10 +104,35 @@ export const SENSE_SPAN = 0.1;
  * This used to be a switch on kind returning one of three fixed weight rows.
  * Those rows are now the seed of a per-body genome (`seedChem`), so the switch
  * is a dot product and the weights can drift.
+ *
+ * `groundScale` is what makes that dot product legitimate now that one of the
+ * four channels is the ground rather than a smell. The three signal channels
+ * hold accumulated deposits — five units a port a frame against a decay of a
+ * percent, so they run to peaks around ten. Energy holds a quantity per cell,
+ * and a cell at full capacity holds `ambientEnergy / 16`, about a sixteenth
+ * of one unit. Summing those raw would need a taste weight two orders of
+ * magnitude past `CHEM_TASTE_MAX` before the ground could shift a decision,
+ * so a lineage could never evolve into caring about food however much it
+ * wanted to.
+ *
+ * The scale is `1 / cellCap`, which turns the ground into "how full is it
+ * here", 0 to 1. That is the reading a taste weight can be sensible about,
+ * and it stays sensible when `ambientEnergy` or the cell size moves — the
+ * gene means the same thing at every setting of the sliders.
  */
-export function mixScent(a: Agent, s0: number, s1: number, s2: number, s3: number): number {
+export function mixScent(
+  a: Agent,
+  s0: number,
+  s1: number,
+  s2: number,
+  s3: number,
+  groundScale = 1,
+): number {
   return (
-    effTaste(a, 0) * s0 + effTaste(a, 1) * s1 + effTaste(a, 2) * s2 + effTaste(a, 3) * s3
+    effTaste(a, 0) * s0 +
+    effTaste(a, 1) * s1 +
+    effTaste(a, 2) * s2 * groundScale +
+    effTaste(a, 3) * s3
   );
 }
 
@@ -610,7 +635,7 @@ export class Sim {
     this.energyCell = params.energyCell;
     this.energyAmbient = params.ambientEnergy;
     const h = this.home;
-    if (h && !this.worldPinned) this.pinWorld(h.x, h.y);
+    if (h && !this.worldPinned) this.pinWorld(h.x, h.y, params);
     this.contactAudioNow.clear();
     this.contacts.clear();
     this.radiated.clear();
@@ -2336,8 +2361,25 @@ export class Sim {
    * Cover snaps the field origin to a whole cell; the radius is the largest
    * disk that then sits inside that window.
    */
-  pinWorld(cx: number, cy: number): void {
+  pinWorld(cx: number, cy: number, params?: Params): void {
     if (this.worldPinned) return;
+    /*
+     * `params` because pinning is when the ground gets laid down, and how much
+     * ground there is is a slider.
+     *
+     * `beginFrame` reads the sliders into `energyCell`/`energyAmbient` before
+     * it pins, so its own pin is covered. The other two callers — `loadPreset`
+     * and the designer — pin from outside a frame, where those fields still
+     * hold their construction fallbacks. That seeded the shipped soup at 6.4%
+     * of the stock it was supposed to have, and the fallback cell size of 48
+     * is not a whole multiple of `FIELD_CELL` either, so `index` and `block`
+     * disagreed about which cells they were addressing until the first frame
+     * corrected both.
+     */
+    if (params) {
+      this.energyCell = params.energyCell;
+      this.energyAmbient = params.ambientEnergy;
+    }
     this.worldPinned = true;
     this.worldX = cx;
     this.worldY = cy;
@@ -2364,8 +2406,8 @@ export class Sim {
    * capacity the sliders are actually set to. `step` writes these every frame
    * before it harvests; `pinWorld` can run before the first of those.
    */
-  private energyCell = 48;
-  private energyAmbient = 0.1;
+  private energyCell = 40;
+  private energyAmbient = 1;
 
   /**
    * Tell the field what each channel is, from the sliders, every frame.
@@ -2471,10 +2513,10 @@ export class Sim {
       pro[o + 3] = a.y + rs * sd;
       pro[o + 4] = a.x;
       pro[o + 5] = a.y;
-      pro[o + 8] = effTaste(a, 0);
-      pro[o + 9] = effTaste(a, 1);
-      pro[o + 10] = effTaste(a, 2);
-      pro[o + 11] = effTaste(a, 3);
+      pro[o + 8] = this.tasteOf(a, 0);
+      pro[o + 9] = this.tasteOf(a, 1);
+      pro[o + 10] = this.tasteOf(a, 2);
+      pro[o + 11] = this.tasteOf(a, 3);
     }
 
     const ok = await fieldGpu.step(
@@ -3126,7 +3168,34 @@ export class Sim {
       this.fields.sample(1, x, y),
       this.fields.sample(2, x, y),
       this.fields.sample(3, x, y),
+      this.groundScale,
     );
+  }
+
+  /**
+   * What a full cell of ground reads as, once scaled: 1.
+   *
+   * Zero when there is no ground to speak of — an `ambientEnergy` of 0, which
+   * is how most of the energy tests set up a barren world. A body cannot
+   * smell what is not there, and this keeps that from being a division by it.
+   */
+  private get groundScale(): number {
+    const cap = this.energy.cellCap;
+    return cap > 1e-12 ? 1 / cap : 0;
+  }
+
+  /**
+   * A body's taste weights as the field's consumers need them.
+   *
+   * The scale has to be folded in here rather than left to each consumer,
+   * because there are three of them — the JS dot product, the packed vector
+   * the wasm solver reads, and the GPU's probe buffer — and a steering
+   * difference between them is the kind of bug that only shows up on one
+   * machine.
+   */
+  private tasteOf(a: Agent, c: number): number {
+    const t = effTaste(a, c);
+    return c === CH.energy ? t * this.groundScale : t;
   }
 
   /**
@@ -3171,7 +3240,7 @@ export class Sim {
           sc[i] = a.scale;
         }
         drive[i] = a.drive;
-        for (let c = 0; c < 4; c++) taste[i * 4 + c] = effTaste(a, c);
+        for (let c = 0; c < 4; c++) taste[i * 4 + c] = this.tasteOf(a, c);
         // Drawn host-side so a seeded run stays reproducible; the solver only
         // consumes them.
         noise[i * 3] = Math.random();
@@ -3193,7 +3262,7 @@ export class Sim {
           sc[i] = a.scale;
         }
         drive[i] = a.drive;
-        for (let c = 0; c < 4; c++) taste[i * 4 + c] = effTaste(a, c);
+        for (let c = 0; c < 4; c++) taste[i * 4 + c] = this.tasteOf(a, c);
         const pw = this.graph.wireAtSlot(a.id, 'p');
         let pj = -1;
         let pslot = 0;
