@@ -1,4 +1,5 @@
 import { extraCapFor } from './energy.ts';
+import { CH } from './fields.ts';
 import type { Params } from './params.ts';
 import { rotate, wrap, wrapAngle, wrapDeltaVec, angleDelta, type Vec2 } from './wrap.ts';
 import { AgentStore, KIND_CODE, CODE_KIND } from './agent-store.ts';
@@ -125,6 +126,14 @@ export class Agent {
   }
   set locked(v: boolean) {
     this.store.locked[this.slot] = v ? 1 : 0;
+  }
+
+  /** Designer pin: physics must not move this body. Rewrites still may. */
+  get pinned(): boolean {
+    return this.store.pinned[this.slot] !== 0;
+  }
+  set pinned(v: boolean) {
+    this.store.pinned[this.slot] = v ? 1 : 0;
   }
 
   get stun(): number {
@@ -412,6 +421,7 @@ export function cloneAgent(a: Agent): Agent {
   clone.alpha = a.alpha;
   clone.scale = a.scale;
   clone.locked = a.locked;
+  clone.pinned = a.pinned;
   clone.stun = a.stun;
   clone.drive = a.drive;
   clone.trail = a.trail;
@@ -437,6 +447,11 @@ export function cloneAgent(a: Agent): Agent {
   clone.csCos = a.csCos;
   clone.csSin = a.csSin;
   return clone;
+}
+
+/** True when physics must not integrate this body (rewrite lock or designer pin). */
+export function poseHeld(a: Agent): boolean {
+  return a.locked || a.pinned;
 }
 
 /** Slot as a small integer: principal 0, left 1, right 2. */
@@ -606,8 +621,18 @@ export function flockGain(v: number): number {
   return v > 0 ? v : 0;
 }
 
-/** Emit weight for one channel at this body's current state. Never negative. */
+/**
+ * Emit weight for one channel at this body's current state. Never negative.
+ *
+ * Silent on `CH.energy`, unconditionally and here rather than at the three
+ * places that lay a deposit — the JS scatter, the packed vector the solver
+ * reads, and the GPU's. That channel holds the ground itself now, and a body
+ * that could emit into it would be minting food out of nothing at five units
+ * a port a frame. One choke point, because a fourth deposit path would
+ * otherwise be a very quiet way to break the economy.
+ */
 export function effEmit(a: Agent, c: number): number {
+  if (c === CH.energy) return 0;
   const v = a.chem[EMIT + c] + chemState(a) * a.chem[EMIT_SLOPE + c];
   return v > 0 ? v : 0;
 }
@@ -645,7 +670,23 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
     c[TASTE] = M;
     c[TASTE + 3] = M;
   } else {
-    c[EMIT + 2] = 1;
+    /*
+     * An Era says nothing at seed.
+     *
+     * It used to spend its whole unit of voice on channel 2, which no kind
+     * has ever had a taste for — it was shouting into a band with no
+     * receivers, and that is exactly why channel 2 was free for the ground to
+     * move into. Emitting nothing is what it already amounted to; this just
+     * stops pretending otherwise, and stops the unit-sum budget being spent
+     * on a channel that cannot carry it.
+     *
+     * Not permanent. An Era is the body that produces energy rather than
+     * spending it, so it is the obvious thing to give a voice back to once
+     * emitting *is* producing — but that is an economy change and this is a
+     * storage one. Breeding will hand its descendants a voice long before
+     * then: one erase past the seed, mutation and the renormalisation give a
+     * child a full unit spread across the three channels that carry.
+     */
     c[TASTE] = S;
     c[TASTE + 1] = S;
     c[TASTE + 3] = M;
@@ -683,6 +724,7 @@ export function createAgent(
   agent.alpha = 1;
   agent.scale = 1;
   agent.locked = false;
+  agent.pinned = false;
   agent.stun = 0;
   agent.drive = params.stepSpeed;
   agent.trail = 0;

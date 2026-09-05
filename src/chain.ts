@@ -1,4 +1,4 @@
-import { momentOfInertia, portLocal, stemRoot, type Agent, type PortSlot } from './agents.ts';
+import { momentOfInertia, portLocal, poseHeld, stemRoot, type Agent, type PortSlot } from './agents.ts';
 import { bezierPoint, type Cubic } from './curve.ts';
 import { clamp, rotate, wrap, wrapAngle, wrapDeltaVec, type Vec2 } from './wrap.ts';
 
@@ -128,9 +128,9 @@ export function chordDeviation(pts: Vec2[], w: number, h: number): number {
 
 // --------------------------------------------------------------- rigid bodies
 
-const invMass = (agent: Agent): number => (agent.locked ? 0 : 1 / Math.max(0.08, agent.mass));
+const invMass = (agent: Agent): number => (poseHeld(agent) ? 0 : 1 / Math.max(0.08, agent.mass));
 const invInertia = (agent: Agent): number =>
-  agent.locked ? 0 : 1 / Math.max(1e-4, momentOfInertia(agent));
+  poseHeld(agent) ? 0 : 1 / Math.max(1e-4, momentOfInertia(agent));
 
 /** Offset from body centre to a port's stem root, at the body's current heading. */
 export function attachOffset(agent: Agent, slot: PortSlot): Vec2 {
@@ -168,7 +168,7 @@ function genInvMass(agent: Agent, r: Vec2, nx: number, ny: number): number {
 
 /** Apply a positional impulse `lambda` along `n` at attachment `r`. */
 function applyImpulse(agent: Agent, r: Vec2, nx: number, ny: number, lambda: number): void {
-  if (agent.locked || lambda === 0) return;
+  if (poseHeld(agent) || lambda === 0) return;
   const im = invMass(agent);
   agent.x += im * lambda * nx;
   agent.y += im * lambda * ny;

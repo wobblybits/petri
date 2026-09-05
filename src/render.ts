@@ -188,19 +188,34 @@ function drawEnergyGrid(ctx: CanvasRenderingContext2D, sim: Sim, camera: Camera)
   // hundreds of thousands of fillRects and freezes the tab.
   ctx.fillStyle = gold(grid.ambient);
   ctx.fillRect(left, top, right - left, bottom - top);
-  grid.forEachStored((i, j, e) => {
-    if (i < i0 || i >= i1 || j < j0 || j >= j1) return;
-    const x = originX + i * size;
-    const y = originY + j * size;
-    if (e <= 0) {
-      ctx.fillStyle = '#0c0d10';
+  /*
+   * Over the cells the camera can see, rather than over the cells that have
+   * been touched.
+   *
+   * The grid used to be sparse — an implicit ambient everywhere, with only
+   * grazed cells stored — so drawing what was stored *was* drawing the
+   * interesting part, and there was nothing else to walk. Now the ground
+   * diffuses and regrows, so every cell in the dish differs from ambient by
+   * something, and "stored" would mean all eight hundred thousand of them.
+   * The cull window is what keeps this bounded instead: a screen of 40-unit
+   * cells is a couple of thousand rects however far the pond has spread.
+   */
+  const cap = Math.max(1e-9, grid.ambient);
+  for (let j = j0; j < j1; j++) {
+    for (let i = i0; i < i1; i++) {
+      const e = grid.getCell(i, j);
+      if (Math.abs(e - grid.ambient) < cap * 1e-3) continue;
+      const x = originX + i * size;
+      const y = originY + j * size;
+      if (e <= cap * 1e-3) {
+        ctx.fillStyle = '#0c0d10';
+        ctx.fillRect(x, y, size, size);
+        continue;
+      }
+      ctx.fillStyle = gold(e);
       ctx.fillRect(x, y, size, size);
-      return;
     }
-    if (Math.abs(e - grid.ambient) < 1e-6) return;
-    ctx.fillStyle = gold(e);
-    ctx.fillRect(x, y, size, size);
-  });
+  }
   ctx.restore();
 }
 

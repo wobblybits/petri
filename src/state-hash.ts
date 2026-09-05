@@ -62,6 +62,7 @@ export function stateHash(sim: Sim): string {
       h.num(v);
     }
     h.num(a.locked ? 1 : 0);
+    h.num(a.pinned ? 1 : 0);
   }
   const wires = [...sim.graph.wires.values()].sort((p, q) => p.id - q.id);
   h.num(wires.length);

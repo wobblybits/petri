@@ -28,16 +28,20 @@ describe('AgentStore growth', () => {
     store.x[early.slot] = 999;
     store.heading[early.slot] = 1.25;
     store.locked[early.slot] = 1;
+    store.pinned[early.slot] = 1;
     expect(early.x).toBe(999);
     expect(early.heading).toBe(1.25);
     expect(early.locked).toBe(true);
+    expect(early.pinned).toBe(true);
 
     // And the reverse: writing through the pre-grow Agent must land in the
     // current array, not an abandoned one.
     early.x = 42;
     early.locked = false;
+    early.pinned = false;
     expect(store.x[early.slot]).toBe(42);
     expect(store.locked[early.slot]).toBe(0);
+    expect(store.pinned[early.slot]).toBe(0);
   });
 
   it('keeps chem live across a grow too', () => {

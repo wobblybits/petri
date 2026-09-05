@@ -5,6 +5,7 @@ import {
   ERA_RADIUS,
   inSnapArc,
   momentOfInertia,
+  poseHeld,
   portWorld,
   slotsFor,
   stemRoot,
@@ -281,6 +282,11 @@ export class Sim {
   fields: Fields;
   rewrites: Rewrite[] = [];
   energy = new EnergyGrid(48, 0.1);
+  /**
+   * Commute and erase copy parent traits onto children. The designer turns
+   * this off so Play rewrites the net without breeding a new chemistry.
+   */
+  breed = true;
   /** Per-agent unmet need this frame, rebuilt by `pulseRequests`. */
   private readonly needOf = new Map<number, number>();
   private readonly wireAdj = new WireAdjacency();
@@ -593,6 +599,16 @@ export class Sim {
      * preset still decides where its world is rather than inheriting an
      * arbitrary origin.
      */
+    /*
+     * Before the pin, not after: `pinWorld` lays the ground down at whatever
+     * capacity these say, and it can fire on this very frame. Read out of
+     * `params` further down the frame — where `configure` also happens — and
+     * the first pond in a run gets seeded from the defaults instead of from
+     * its own settings, which is invisible in a soup and is the difference
+     * between barren and fed in a test that asked for barren.
+     */
+    this.energyCell = params.energyCell;
+    this.energyAmbient = params.ambientEnergy;
     const h = this.home;
     if (h && !this.worldPinned) this.pinWorld(h.x, h.y);
     this.contactAudioNow.clear();
@@ -697,9 +713,13 @@ export class Sim {
     if (!this.fieldOnGpu) {
       if (!this.scentWriteNative(params)) this.deposit(params);
       Sim.phase('scentWrite');
+      this.tuneChannels(params);
       this.fields.diffuse(params.diffuse);
       this.fields.diffuse(params.diffuse * 0.65);
       this.fields.decay(params.decay);
+      // After the passes that move it, so a cell grows from what it kept
+      // rather than from what it was about to lose.
+      this.fields.grow(CH.energy, params.energyRegrow * t, this.energy.cellCap);
       Sim.phase('fields');
     }
     this.autoSpawn(params, t);
@@ -768,9 +788,10 @@ export class Sim {
         bodies[o + FAR.vy] = a.vy;
         bodies[o + FAR.heading] = a.heading;
         bodies[o + FAR.omega] = a.omega;
-        bodies[o + FAR.locked] = a.locked ? 1 : 0;
-        bodies[o + FAR.invMass] = a.locked ? 0 : 1 / Math.max(0.08, a.mass);
-        invI[i] = a.locked ? 0 : 1 / Math.max(1e-4, momentOfInertia(a));
+        const held = poseHeld(a);
+        bodies[o + FAR.locked] = held ? 1 : 0;
+        bodies[o + FAR.invMass] = held ? 0 : 1 / Math.max(0.08, a.mass);
+        invI[i] = held ? 0 : 1 / Math.max(1e-4, momentOfInertia(a));
         kinds[i] = this.kindCode(a.kind);
         sc[i] = a.scale;
       }
@@ -806,7 +827,7 @@ export class Sim {
     const bodies = nativeSolver.bodies!;
     for (let i = 0; i < list.length; i++) {
       const a = list[i];
-      if (a.locked) continue;
+      if (poseHeld(a)) continue;
       a.omega = bodies[i * FAR_STRIDE + FAR.omega];
     }
   }
@@ -817,7 +838,7 @@ export class Sim {
     const splay = params.auxSpread * 0.35;
     if (this.portTorquesNative(gain, splay, dt)) return;
     const aim = (agent: Agent, slot: PortSlot, target: { x: number; y: number }): void => {
-      if (agent.locked) return;
+      if (poseHeld(agent)) return;
       const I = momentOfInertia(agent);
       // Critically damped: a bare proportional torque windmills, and a port
       // that latches half a turn out is exactly the case that sets it going.
@@ -931,12 +952,13 @@ export class Sim {
       bodies[o + FAR.vy] = a.vy;
       bodies[o + FAR.heading] = a.heading;
       bodies[o + FAR.omega] = a.omega;
-      bodies[o + FAR.invMass] = a.locked ? 0 : 1 / Math.max(0.08, a.mass);
-      bodies[o + FAR.locked] = a.locked ? 1 : 0;
+      const held = poseHeld(a);
+      bodies[o + FAR.invMass] = held ? 0 : 1 / Math.max(0.08, a.mass);
+      bodies[o + FAR.locked] = held ? 1 : 0;
       // Radius is deliberately absent: no force pass reads it. The broad
       // phases here take their cell size as an argument.
       bm[i] = a.mass;
-      invI[i] = a.locked ? 0 : 1 / Math.max(1e-4, momentOfInertia(a));
+      invI[i] = held ? 0 : 1 / Math.max(1e-4, momentOfInertia(a));
       kinds[i] = this.kindCode(a.kind);
       sc[i] = a.scale;
       index.set(a.id, i);
@@ -949,7 +971,7 @@ export class Sim {
     const bodies = nativeSolver.bodies!;
     for (let i = 0; i < list.length; i++) {
       const a = list[i];
-      if (a.locked) continue;
+      if (poseHeld(a)) continue;
       const o = i * FAR_STRIDE;
       a.vx = bodies[o + FAR.vx];
       a.vy = bodies[o + FAR.vy];
@@ -1698,7 +1720,7 @@ export class Sim {
     const held = this.grabbed;
     if (!held) return;
     const agent = this.agents.get(held.id);
-    if (!agent || agent.locked) return;
+    if (!agent || poseHeld(agent)) return;
     const dx = held.x - agent.x;
     const dy = held.y - agent.y;
     const dist = Math.hypot(dx, dy);
@@ -1761,6 +1783,7 @@ export class Sim {
     const VY = store.vy;
     const MASS = store.mass;
     const LOCKED = store.locked;
+    const PINNED = store.pinned;
     this.bodyGrid.forEachPair((i, j) => {
       {
         if (!sat[i] && !sat[j]) return;
@@ -1777,12 +1800,12 @@ export class Sim {
         const force = atReach * ratio * ratio;
         const nx = dx / dist;
         const ny = dy / dist;
-        if (!LOCKED[a]) {
+        if (!LOCKED[a] && !PINNED[a]) {
           const invM = 1 / Math.max(0.08, MASS[a]);
           VX[a] -= nx * force * invM * dt;
           VY[a] -= ny * force * invM * dt;
         }
-        if (!LOCKED[b]) {
+        if (!LOCKED[b] && !PINNED[b]) {
           const invM = 1 / Math.max(0.08, MASS[b]);
           VX[b] += nx * force * invM * dt;
           VY[b] += ny * force * invM * dt;
@@ -1871,11 +1894,11 @@ export class Sim {
     if (len < 1e-6) return;
     const ux = (dx / len) * k * 26;
     const uy = (dy / len) * k * 26;
-    if (!chord.wireA.locked) {
+    if (!poseHeld(chord.wireA)) {
       chord.wireA.vx += ux;
       chord.wireA.vy += uy;
     }
-    if (!chord.wireB.locked) {
+    if (!poseHeld(chord.wireB)) {
       chord.wireB.vx -= ux;
       chord.wireB.vy -= uy;
     }
@@ -1925,6 +1948,7 @@ export class Sim {
     const PREV_Y = store.prevY;
     const PREV_HEADING = store.prevHeading;
     const LOCKED = store.locked;
+    const PINNED = store.pinned;
     const ID = store.id;
 
     for (let sub = 0; sub < Sim.SUBSTEPS; sub++) {
@@ -1933,7 +1957,7 @@ export class Sim {
         PREV_X[s] = X[s];
         PREV_Y[s] = Y[s];
         PREV_HEADING[s] = HEADING[s];
-        if (LOCKED[s]) continue;
+        if (LOCKED[s] || PINNED[s]) continue;
         X[s] += VX[s] * h;
         Y[s] += VY[s] * h;
         HEADING[s] = wrapAngle(HEADING[s] + OMEGA[s] * h);
@@ -1957,7 +1981,7 @@ export class Sim {
 
       for (let i = 0; i < n; i++) {
         const s = list[i].slot;
-        if (LOCKED[s]) {
+        if (LOCKED[s] || PINNED[s]) {
           VX[s] = 0;
           VY[s] = 0;
           OMEGA[s] = 0;
@@ -1982,7 +2006,7 @@ export class Sim {
         for (let i = 0; i < n; i++) {
           const a = list[i];
           const s = a.slot;
-          if (LOCKED[s]) continue;
+          if (LOCKED[s] || PINNED[s]) continue;
           let maxr = R - discRadius(a);
           if (maxr < 0) maxr = 0;
           const hit = bounceOffDisk(X[s], Y[s], VX[s], VY[s], cx, cy, maxr);
@@ -2166,7 +2190,7 @@ export class Sim {
     for (let i = 0; i < n; i++) {
       const a = list[i];
       const o = i * FAR_STRIDE;
-      const locked = a.locked || this.rewriteFrozen.has(a.id);
+      const locked = poseHeld(a) || this.rewriteFrozen.has(a.id);
       data[o + FAR.x] = a.x;
       data[o + FAR.y] = a.y;
       data[o + FAR.vx] = a.vx;
@@ -2205,7 +2229,7 @@ export class Sim {
   private unpackFar(list: Agent[], data: Float32Array): void {
     for (let i = 0; i < list.length; i++) {
       const a = list[i];
-      if (a.locked || this.rewriteFrozen.has(a.id)) continue;
+      if (poseHeld(a) || this.rewriteFrozen.has(a.id)) continue;
       const o = i * FAR_STRIDE;
       a.x = data[o + FAR.x];
       a.y = data[o + FAR.y];
@@ -2257,7 +2281,7 @@ export class Sim {
     for (let i = 0; i < n; i++) {
       const a = list[i];
       const o = i * FAR_STRIDE;
-      const locked = a.locked || this.rewriteFrozen.has(a.id);
+      const locked = poseHeld(a) || this.rewriteFrozen.has(a.id);
       if (!inherited) {
         data[o + FAR.x] = a.x;
         data[o + FAR.y] = a.y;
@@ -2322,6 +2346,40 @@ export class Sim {
     this.worldR = worldBoundRadius(cx, cy, this.fields.originX, this.fields.originY);
     this.fields.setWorldBound(cx, cy, this.worldR);
     this.energy.setBounds(cx, cy, this.worldR, this.fields.originX, this.fields.originY);
+    /*
+     * The ground moves onto the field, and gets laid down.
+     *
+     * Here rather than in the constructor because a disk is what makes the
+     * ground finite, and there is no disk until the world is pinned. Before
+     * this the grid answers out of its sparse map exactly as it always did,
+     * which lasts the one frame it takes a pond to acquire a home.
+     */
+    this.energy.bind(this.fields);
+    this.energy.configure(this.energyCell, this.energyAmbient);
+    this.energy.seedGround();
+  }
+
+  /*
+   * Last configure, kept so `pinWorld` can seed the ground at the size and
+   * capacity the sliders are actually set to. `step` writes these every frame
+   * before it harvests; `pinWorld` can run before the first of those.
+   */
+  private energyCell = 48;
+  private energyAmbient = 0.1;
+
+  /**
+   * Tell the field what each channel is, from the sliders, every frame.
+   *
+   * Cheap — four numbers — and it has to be per frame because two of them are
+   * live sliders. Energy is the odd one: it never decays, because it is a
+   * quantity and the economy is supposed to conserve it, and it spreads at a
+   * fraction of the signal rate so that local scarcity survives long enough
+   * to forage against.
+   */
+  private tuneChannels(params: Params): void {
+    const f = this.fields;
+    f.decayRate[CH.energy] = 0;
+    f.diffuseRate[CH.energy] = Math.max(0, params.energyDiffuse);
   }
 
   /** True once a device exists and the field has moved there for good. */
@@ -2594,7 +2652,7 @@ export class Sim {
     for (let i = 0; i < list.length; i++) {
       const a = list[i];
       const o = i * FAR_STRIDE;
-      const locked = a.locked;
+      const locked = poseHeld(a);
       bodies[o + FAR.invMass] = locked ? 0 : 1 / Math.max(0.08, a.mass);
       bodies[o + FAR.radius] = boundRadius(a);
       bodies[o + FAR.locked] = locked ? 1 : 0;
@@ -2614,7 +2672,7 @@ export class Sim {
       const A = list[ai];
       const B = list[bi];
       const frozenEnds = frozen.has(A.id) || frozen.has(B.id);
-      const skip = (A.locked && B.locked) || frozenEnds;
+      const skip = (poseHeld(A) && poseHeld(B)) || frozenEnds;
       const full = this.wireSimulatesRope(w) && w.nodes.length > 0;
       const stiff = this.graph.stiffnessOf(w, this.time, params);
       let flags = 0;
@@ -2787,7 +2845,7 @@ export class Sim {
     const j = effMass * Math.abs(vN) * Sim.RADIATION;
     if (j <= 0) return;
     const add = (agent: Agent, sx: number, sy: number) => {
-      if (agent.locked) return;
+      if (poseHeld(agent)) return;
       const cur = this.radiated.get(agent.id) ?? { x: 0, y: 0 };
       cur.x += sx;
       cur.y += sy;
@@ -2825,7 +2883,7 @@ export class Sim {
     this.bodyGrid.forEachPair((i, j) => {
       const A = list[i];
       const B = list[j];
-      if (A.locked && B.locked) return;
+      if (poseHeld(A) && poseHeld(B)) return;
       const detailed = this.agentDetailed(A.id) || this.agentDetailed(B.id);
       // Bound discs are fatter than SAT triangles. A wired pair is already
       // held by the chord; colliding them shoves the net apart of the rest.
@@ -2847,7 +2905,7 @@ export class Sim {
   private applyRadiationLoss(): void {
     for (const [id, imp] of this.radiated) {
       const agent = this.agents.get(id);
-      if (!agent || agent.locked) continue;
+      if (!agent || poseHeld(agent)) continue;
       const im = 1 / Math.max(0.08, agent.mass);
       const dvx = imp.x * im;
       const dvy = imp.y * im;
@@ -2865,12 +2923,13 @@ export class Sim {
     const angKeep = Math.exp(-Math.max(0, params.angDrag) * dt);
     const store = this.agentStore;
     const LOCKED = store.locked;
+    const PINNED = store.pinned;
     const VX = store.vx;
     const VY = store.vy;
     const OMEGA = store.omega;
     for (const agent of this.agents.values()) {
       const s = agent.slot;
-      if (LOCKED[s]) continue;
+      if (LOCKED[s] || PINNED[s]) continue;
       VX[s] *= linKeep;
       VY[s] *= linKeep;
       OMEGA[s] *= angKeep;
@@ -3198,12 +3257,13 @@ export class Sim {
     const DRIVE = store.drive;
     const TRAIL = store.trail;
     const LOCKED = store.locked;
+    const PINNED = store.pinned;
     const STUN = store.stun;
     const ID = store.id;
 
     for (const agent of list) {
       const s = agent.slot;
-      if (LOCKED[s]) continue;
+      if (LOCKED[s] || PINNED[s]) continue;
       const ax = X[s];
       const ay = Y[s];
       const aHeading = HEADING[s];
@@ -3327,6 +3387,7 @@ export class Sim {
   private locomote(id: number, slot: number, wishX: number, wishY: number, turnK: number): void {
     if (!this.graph.isFreeAt(id, 'p')) return;
     const store = this.agentStore;
+    if (store.locked[slot] || store.pinned[slot]) return;
     const heading = store.heading[slot];
     const hx = Math.cos(heading);
     const hy = Math.sin(heading);
@@ -3344,7 +3405,7 @@ export class Sim {
   /** Flock / constraint pulls on wired cargo (no principal swim). */
   private netPull(slot: number, wishX: number, wishY: number, _turnK: number): void {
     const store = this.agentStore;
-    if (store.locked[slot]) return;
+    if (store.locked[slot] || store.pinned[slot]) return;
     store.vx[slot] += wishX;
     store.vy[slot] += wishY;
   }
@@ -3404,7 +3465,7 @@ export class Sim {
         bodies[o + FAR.vy] = a.vy;
         bodies[o + FAR.heading] = a.heading;
         bodies[o + FAR.omega] = a.omega;
-        bodies[o + FAR.locked] = a.locked ? 1 : 0;
+        bodies[o + FAR.locked] = poseHeld(a) ? 1 : 0;
       }
       ids[i] = a.id;
       mass[i] = a.mass;
@@ -3520,6 +3581,7 @@ export class Sim {
     const store = this.agentStore;
     const ID = store.id;
     const LOCKED = store.locked;
+    const PINNED = store.pinned;
     const MASS = store.mass;
     const X = store.x;
     const Y = store.y;
@@ -3532,7 +3594,7 @@ export class Sim {
 
     for (let start = 0; start < n; start++) {
       const sA = slotOf[start];
-      if (LOCKED[sA]) continue;
+      if (LOCKED[sA] || PINNED[sA]) continue;
       const idA = ID[sA];
       seen.length = 0;
       dist[start] = 0;
@@ -4027,6 +4089,7 @@ export class Sim {
         this.w,
         this.h,
         this.agentStore,
+        this.breed,
       );
       // It writes into the agents Map itself, so nothing else knows the roster
       // moved. Anything keyed on it — the body list, the flocking pair list,

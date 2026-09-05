@@ -1,4 +1,5 @@
 import type { Agent, AgentKind } from './agents.ts';
+import { CH, CHANNELS, FIELD_CELL, type Fields } from './fields.ts';
 import type { AgentStore } from './agent-store.ts';
 import { KIND_ERA } from './native/solver.ts';
 import type { Rule } from './rewrite.ts';
@@ -169,12 +170,24 @@ export function atCap(a: { extra: number; energyCap: number }): boolean {
   return a.extra >= a.energyCap - EXTRA_FULL_EPS;
 }
 
-/** Able to pay its side of a rewrite. Not the same as being full. */
-export function canPayShare(a: { extra: number }): boolean {
-  return a.extra >= REWRITE_SHARE - EXTRA_FULL_EPS;
+/**
+ * Able to pay its side of a rewrite. Not the same as being full.
+ *
+ * A heritable `energyCap` can sit below `REWRITE_SHARE` — breeding walks it
+ * down to `EXTRA_CAP * 0.5`. Asking for a whole share then makes a full tank
+ * still unable to commute, so leftover principal pairs sit idle after a few
+ * copies. A body pays the share, or everything it can hold, whichever is
+ * smaller; `spendExtra` already floors at zero.
+ */
+export function canPayShare(a: { extra: number; energyCap: number }): boolean {
+  const share = Math.min(REWRITE_SHARE, a.energyCap);
+  return a.extra >= share - EXTRA_FULL_EPS;
 }
 
-export function extrasOf(a: { extra: number }, b: { extra: number }): number {
+export function extrasOf(
+  a: { extra: number; energyCap: number },
+  b: { extra: number; energyCap: number },
+): number {
   return (canPayShare(a) ? 1 : 0) + (canPayShare(b) ? 1 : 0);
 }
 
@@ -236,15 +249,46 @@ function cellKey(i: number, j: number): number {
   return (i + CELL_KEY_OFFSET) * CELL_KEY_WIDTH + (j + CELL_KEY_OFFSET);
 }
 
+function decodeKey(key: number): { i: number; j: number } {
+  const i = Math.floor(key / CELL_KEY_WIDTH) - CELL_KEY_OFFSET;
+  const j = key - (i + CELL_KEY_OFFSET) * CELL_KEY_WIDTH - CELL_KEY_OFFSET;
+  return { i, j };
+}
+
 /**
  * Sparse world-space energy. Unvisited cells hold `ambient`; once a cell is
  * touched, whatever remains is stored explicitly (including 0).
  * No decay or diffusion — occupancy is the only transport.
+ *
+ * `inexhaustible` keeps every in-bounds cell at `ambient` and makes `take`
+ * a read. The designer uses that so Play is never starved of extra.
  */
 export class EnergyGrid {
   cellSize: number;
   ambient: number;
+  inexhaustible = false;
   private readonly cells = new Map<number, number>();
+
+  /*
+   * Where the energy actually lives.
+   *
+   * Bound to a field, a cell of this grid is a block of that field's cells on
+   * channel `CH.energy`, and this class becomes a coarse view onto them
+   * rather than a store of its own. Unbound it keeps the sparse map, which is
+   * what every test that builds an `EnergyGrid` by hand still gets.
+   *
+   * The point of moving is that the ground stops being inert. On the field it
+   * diffuses, so a grazed patch refills from its neighbours instead of being
+   * gone forever, and `grow` can put a carrying capacity on it — which is the
+   * whole difference between a resource and a seam of ore.
+   *
+   * The view stays coarse on purpose. `harvestSlots` groups bodies by cell so
+   * that everyone standing in the same place competes for the same stock, and
+   * that grouping is the economy's only crowding pressure. A field cell is
+   * ten units across and a body is bigger than that, so indexing straight to
+   * one would have quietly deleted the competition.
+   */
+  private fields: Fields | null = null;
 
   /*
    * The world bound, a disk tracked to `home`. Outside it there is no ground:
@@ -285,6 +329,61 @@ export class EnergyGrid {
     this.ambient = Math.max(0, ambient);
   }
 
+  /** Move storage onto `fields`, channel `CH.energy`. */
+  bind(fields: Fields): void {
+    this.fields = fields;
+    this.cells.clear();
+  }
+
+  /** Field cells per energy cell, along one axis. */
+  get span(): number {
+    return Math.max(1, Math.round(this.cellSize / FIELD_CELL));
+  }
+
+  /**
+   * What one *field* cell holds when the ground is full, so that a whole
+   * energy cell still holds `ambient`.
+   *
+   * This is the rescaling that keeps the economy where it was. An energy cell
+   * is 40 units and a field cell is 10, so sixteen field cells stand where
+   * one grid cell used to, and each holds a sixteenth as much. A body walking
+   * onto full ground finds the same meal it always did.
+   */
+  get cellCap(): number {
+    const s = this.span;
+    return this.ambient / (s * s);
+  }
+
+  /** Lay down full ground across the disk. Field-backed only. */
+  seedGround(): void {
+    this.fields?.fillDisk(CH.energy, this.cellCap);
+  }
+
+  /**
+   * The field cells under energy cell `(i, j)`: `[fi, fi + span)` squared,
+   * clipped to the grid. Empty when the block falls outside it.
+   */
+  private block(i: number, j: number): { fi: number; fj: number; wi: number; wj: number } | null {
+    const f = this.fields;
+    if (!f) return null;
+    const s = this.span;
+    let fi = i * s;
+    let fj = j * s;
+    let wi = s;
+    let wj = s;
+    if (fi < 0) {
+      wi += fi;
+      fi = 0;
+    }
+    if (fj < 0) {
+      wj += fj;
+      fj = 0;
+    }
+    if (fi + wi > f.cols) wi = f.cols - fi;
+    if (fj + wj > f.rows) wj = f.rows - fj;
+    return wi > 0 && wj > 0 ? { fi, fj, wi, wj } : null;
+  }
+
   get lattice(): { x: number; y: number } {
     return { x: this.originX, y: this.originY };
   }
@@ -313,6 +412,10 @@ export class EnergyGrid {
 
   clear(): void {
     this.cells.clear();
+    const f = this.fields;
+    if (!f) return;
+    const d = f.data;
+    for (let k = CH.energy; k < d.length; k += CHANNELS) d[k] = 0;
   }
 
   configure(cellSize: number, ambient: number): void {
@@ -335,6 +438,19 @@ export class EnergyGrid {
   }
 
   getCell(i: number, j: number): number {
+    if (this.inexhaustible) return this.ambient;
+    const f = this.fields;
+    if (f) {
+      const b = this.block(i, j);
+      if (!b) return 0;
+      const d = f.data;
+      let sum = 0;
+      for (let y = 0; y < b.wj; y++) {
+        let k = ((b.fj + y) * f.cols + b.fi) * CHANNELS + CH.energy;
+        for (let x = 0; x < b.wi; x++, k += CHANNELS) sum += d[k];
+      }
+      return sum;
+    }
     const key = cellKey(i, j);
     return this.cells.has(key) ? (this.cells.get(key) ?? 0) : this.ambient;
   }
@@ -347,7 +463,32 @@ export class EnergyGrid {
 
   /** Take up to `n` from a cell and return how much was taken. */
   take(key: number, n: number): number {
-    const want = Math.max(0, n);
+    let want = Math.max(0, n);
+    if (this.inexhaustible) return Math.min(this.ambient, want);
+    const f = this.fields;
+    if (f) {
+      // Cell by cell across the block rather than proportionally: grazing
+      // leaves an uneven floor, and an uneven floor is what diffusion then
+      // has a gradient to work against. Taking a flat share off every cell
+      // would keep the block uniform and there would be nothing to flow.
+      const { i, j } = decodeKey(key);
+      const b = this.block(i, j);
+      if (!b) return 0;
+      const d = f.data;
+      let got = 0;
+      for (let y = 0; y < b.wj && want > FLOW_EPS; y++) {
+        let k = ((b.fj + y) * f.cols + b.fi) * CHANNELS + CH.energy;
+        for (let x = 0; x < b.wi && want > FLOW_EPS; x++, k += CHANNELS) {
+          const have = d[k];
+          if (have <= 0) continue;
+          const g = have < want ? have : want;
+          d[k] = have - g;
+          got += g;
+          want -= g;
+        }
+      }
+      return got;
+    }
     const have = this.cells.has(key) ? (this.cells.get(key) ?? 0) : this.ambient;
     const got = Math.min(have, want);
     this.cells.set(key, have - got);
@@ -357,16 +498,44 @@ export class EnergyGrid {
   addAt(x: number, y: number, amount: number): void {
     if (amount === 0) return;
     if (!this.inBounds(x, y)) return;
+    const f = this.fields;
+    if (f) {
+      // Into the one field cell it happened in, not spread across the block.
+      // A corpse is a point event, and letting it start as a point is what
+      // gives diffusion a plume to make out of it.
+      f.addAt(CH.energy, x, y, amount);
+      return;
+    }
     const { key } = this.index(x, y);
     this.cells.set(key, (this.cells.has(key) ? (this.cells.get(key) ?? 0) : this.ambient) + amount);
   }
 
   setCell(i: number, j: number, amount: number): void {
+    const f = this.fields;
+    if (f) {
+      const b = this.block(i, j);
+      if (!b) return;
+      // Spread evenly: the block is one cell as far as this API is concerned.
+      const each = amount / (b.wi * b.wj);
+      const d = f.data;
+      for (let y = 0; y < b.wj; y++) {
+        let k = ((b.fj + y) * f.cols + b.fi) * CHANNELS + CH.energy;
+        for (let x = 0; x < b.wi; x++, k += CHANNELS) d[k] = each;
+      }
+      return;
+    }
     this.cells.set(cellKey(i, j), amount);
   }
 
-  /** Sum of explicitly stored cells (not implicit ambient). */
+  /** Every unit of energy on the ground. */
   storedTotal(): number {
+    const f = this.fields;
+    if (f) {
+      const d = f.data;
+      let sum = 0;
+      for (let k = CH.energy; k < d.length; k += CHANNELS) sum += d[k];
+      return sum;
+    }
     let s = 0;
     for (const v of this.cells.values()) s += v;
     return s;

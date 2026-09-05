@@ -101,6 +101,7 @@ export interface ConfineAgent {
   vx: number;
   vy: number;
   locked: boolean;
+  pinned?: boolean;
 }
 
 export class ConfinePool {
@@ -221,7 +222,7 @@ export class ConfinePool {
       scratch[i * STRIDE + FAR_Y] = a.y;
       scratch[i * STRIDE + FAR_VX] = a.vx;
       scratch[i * STRIDE + FAR_VY] = a.vy;
-      scratch[i * STRIDE + FAR_LOCKED] = a.locked ? 1 : 0;
+      scratch[i * STRIDE + FAR_LOCKED] = a.locked || a.pinned ? 1 : 0;
     }
     this.sharedBodies.set(scratch.subarray(0, n * STRIDE));
     this.params[PARAMS_CX] = cx;

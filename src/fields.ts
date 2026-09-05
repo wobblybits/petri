@@ -3,11 +3,30 @@ import { nativeSolver } from './native/solver.ts';
 export const CH = {
   conP: 0,
   dupP: 1,
-  eraP: 2,
+  /**
+   * Energy. Not a signal — the stuff itself, stored where everything else
+   * about this world is stored.
+   *
+   * It was the channel an Era's principal laid into, and it was the one
+   * channel nothing listened to: `seedChem` gives no kind a taste for it, so
+   * Eras spent their whole unit of voice shouting into a band with no
+   * receivers. That made it the obvious place to put a substance, and putting
+   * it here is what turns "how much food is at this spot" into something the
+   * same diffusion, the same disk mask and the same sampling already answer
+   * for everything else.
+   *
+   * Nothing deposits into it through `emit`. A body's voice is spent across
+   * the three signalling channels; energy arrives by dying, by a rewrite's
+   * leftovers, by a full producer spilling, and by growing.
+   */
+  energy: 2,
   aux: 3,
 } as const;
 
 export const CHANNELS = 4;
+
+/** The channels a body's voice is spread across — everything but `energy`. */
+export const VOICE = [CH.conP, CH.dupP, CH.aux] as const;
 
 /*
  * The world grid, shared by the scent field and the energy grid.
@@ -386,6 +405,34 @@ export class Fields {
     this.add(i0 + 1, j0 + 1, ch, amount * tx * ty);
   }
 
+  /**
+   * Add a *quantity* at a world point, spread bilinearly over the four cells
+   * that straddle it.
+   *
+   * `deposit`'s twin, and the difference is `depositScale`. A scent deposit is
+   * a density: widen the cell and the same emitter should still read the same
+   * strength, so the amount is scaled by the cell's area. Energy is a count of
+   * things, and a unit of it has to stay a unit however the grid is cut, or
+   * the economy's totals move when the resolution does.
+   *
+   * Bilinear rather than into one cell, so that what lands is independent of
+   * where inside a cell it landed — a corpse a hair either side of a boundary
+   * should not be worth a different amount.
+   */
+  addAt(ch: number, x: number, y: number, amount: number): void {
+    if (amount === 0) return;
+    const { gx, gy } = this.toGrid(x, y);
+    const i0 = Math.floor(gx);
+    const j0 = Math.floor(gy);
+    this.touch(i0, j0);
+    const tx = gx - i0;
+    const ty = gy - j0;
+    this.add(i0, j0, ch, amount * (1 - tx) * (1 - ty));
+    this.add(i0 + 1, j0, ch, amount * tx * (1 - ty));
+    this.add(i0, j0 + 1, ch, amount * (1 - tx) * ty);
+    this.add(i0 + 1, j0 + 1, ch, amount * tx * ty);
+  }
+
   /** The live box, as inclusive cell indices. Empty when hi < lo. */
   get boxLoI(): number { return this.loI; }
   get boxHiI(): number { return this.hiI; }
@@ -608,6 +655,95 @@ export class Fields {
     }
   }
 
+  /**
+   * Logistic regrowth on one channel: `E += r * E * (1 - E / cap)`.
+   *
+   * The world's productivity, and the shape of it matters more than the rate.
+   *
+   * Growth is proportional to what is already there, so **a cell grazed to
+   * exactly nothing does not come back**. Zero is a fixed point of the
+   * logistic, and the only thing that can recolonise a dead cell is diffusion
+   * from a neighbour that still has something — which spreads at a finite
+   * speed, from the edges inward. That is the whole anti-strip-mine argument
+   * in one line: overgraze a patch and you have made a scar that heals slowly
+   * and from its rim, rather than a cell that refills on a timer wherever you
+   * happen to be standing.
+   *
+   * Bounded by `cap`, so this is not a free-energy tap: it is the carrying
+   * capacity of the ground, and the most the whole dish can hold is fixed.
+   *
+   * One-directional. A cell above capacity — a corpse's whole worth dropped
+   * in one place — is left alone rather than pulled back down, because this
+   * is a resource and not a signal, and the tidy-looking symmetric version
+   * would quietly destroy energy the economy is careful to conserve. Excess
+   * spreads out by diffusion instead, and stops growing until it is under
+   * capacity again.
+   *
+   * `r` is per frame, already multiplied by dt by the caller — this pass has
+   * no idea what a second is.
+   */
+  grow(ch: number, r: number, cap: number): void {
+    if (!(r > 0) || !(cap > 0)) return;
+    if (this.hiI < this.loI) return;
+    const d = this.data;
+    const { cols } = this;
+    const { lo: sLo, hi: sHi } = this.spans();
+    const invCap = 1 / cap;
+    for (let j = this.loJ; j <= this.hiJ; j++) {
+      const rowBase = j * cols * CHANNELS;
+      const a0 = sLo[j] > this.loI ? sLo[j] : this.loI;
+      const b0 = sHi[j] < this.hiI ? sHi[j] : this.hiI;
+      for (let i = a0, k = rowBase + a0 * CHANNELS + ch; i <= b0; i++, k += CHANNELS) {
+        const e = d[k];
+        if (e <= 0 || e >= cap) continue;
+        d[k] = e + r * e * (1 - e * invCap);
+      }
+    }
+  }
+
+  /**
+   * Set one channel to `value` across every cell inside the live disk, and
+   * open the box over it.
+   *
+   * How a world starts with ground in it. The sparse grid this replaces could
+   * answer "ambient" for a cell nobody had touched; a field holds what it
+   * holds, so the ground has to actually be put there — once, when the world
+   * is pinned and the disk first exists.
+   */
+  fillDisk(ch: number, value: number): void {
+    if (this.boundR <= 0) return;
+    const { lo, hi } = this.spans();
+    const d = this.data;
+    const stride = this.cols * CHANNELS;
+    let loJ = -1;
+    let hiJ = -1;
+    let loI = this.cols;
+    let hiI = -1;
+    for (let j = 0; j < this.rows; j++) {
+      if (hi[j] < lo[j]) continue;
+      if (loJ < 0) loJ = j;
+      hiJ = j;
+      if (lo[j] < loI) loI = lo[j];
+      if (hi[j] > hiI) hiI = hi[j];
+      for (let i = lo[j], k = j * stride + lo[j] * CHANNELS + ch; i <= hi[j]; i++, k += CHANNELS) {
+        d[k] = value;
+      }
+    }
+    if (hiJ < 0) return;
+    // The box has to cover what was just written, or the passes skip it.
+    if (this.hiI < this.loI) {
+      this.loI = loI;
+      this.hiI = hiI;
+      this.loJ = loJ;
+      this.hiJ = hiJ;
+      return;
+    }
+    if (loI < this.loI) this.loI = loI;
+    if (hiI > this.hiI) this.hiI = hiI;
+    if (loJ < this.loJ) this.loJ = loJ;
+    if (hiJ > this.hiJ) this.hiJ = hiJ;
+  }
+
   sample(ch: number, x: number, y: number): number {
     const { gx, gy } = this.toGrid(x, y);
     const i0 = Math.floor(gx);
@@ -621,10 +757,26 @@ export class Fields {
     return a * (1 - tx) * (1 - ty) + b * tx * (1 - ty) + c * (1 - tx) * ty + d * tx * ty;
   }
 
-  peak(): number {
+  /**
+   * The loudest thing anything is *saying* — the signal channels only.
+   *
+   * `CH.energy` is deliberately not in it. The ground sits at capacity across
+   * the whole dish, so including it would make this a constant a bit under
+   * `cellCap` no matter what the pond was doing, which is useless as a
+   * normaliser for the scent overlay and wrong as an answer to "is anything
+   * being emitted". Pass a channel to ask about one specifically, the ground
+   * included.
+   */
+  peak(ch?: number): number {
     let m = 0;
     const d = this.data;
-    for (let i = 0; i < d.length; i++) if (d[i] > m) m = d[i];
+    if (ch !== undefined) {
+      for (let i = ch; i < d.length; i += CHANNELS) if (d[i] > m) m = d[i];
+      return m;
+    }
+    for (let i = 0; i < d.length; i += CHANNELS) {
+      for (const c of VOICE) if (d[i + c] > m) m = d[i + c];
+    }
     return m;
   }
 
@@ -637,12 +789,12 @@ export class Fields {
         const base = (j * cols + i) * CHANNELS;
         const posCon = Math.max(0, data[base + CH.conP]);
         const posDup = Math.max(0, data[base + CH.dupP]);
-        const posEra = Math.max(0, data[base + CH.eraP]);
+        const posEra = Math.max(0, data[base + CH.energy]);
         const posAux = Math.max(0, data[base + CH.aux]);
         const neg =
           Math.max(0, -data[base + CH.conP]) +
           Math.max(0, -data[base + CH.dupP]) +
-          Math.max(0, -data[base + CH.eraP]) +
+          Math.max(0, -data[base + CH.energy]) +
           Math.max(0, -data[base + CH.aux]);
         const con = posCon / peak;
         const dup = posDup / peak;

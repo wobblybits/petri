@@ -321,12 +321,14 @@ describe('simulation presets', () => {
     params.spawnInterval = 0;
     params.rewriteDuration = 20;
     params.stepSpeed = 0;
-    const a = sim.spawn('era', 80, 80, 0, params, true)!;
+    // A Con, because an Era says nothing at seed — its voice used to go on
+    // the channel the ground now lives on, and nothing emits onto the ground.
+    const a = sim.spawn('con', 80, 80, 0, params, true)!;
     a.extra = -0.5;
     sim.fields.clear();
     step(sim, params, 8);
     const p = portWorld(a, 'p', sim.w, sim.h);
-    expect(sim.fields.sample(CH.eraP, p.x, p.y)).toBeGreaterThan(0.5);
+    expect(sim.fields.sample(CH.conP, p.x, p.y)).toBeGreaterThan(0.5);
   });
 
   it('rewrites a principal meeting even when aux ports are still free', () => {
@@ -359,6 +361,17 @@ describe('simulation presets', () => {
         (w.a.id === a.id && w.b.id === b.id) || (w.a.id === b.id && w.b.id === a.id),
     );
     expect(between.length).toBe(1);
+  });
+
+  it('does not latch when snap reach is zero', () => {
+    const sim = new Sim(240, 160);
+    const params = defaultParams();
+    params.snapRadius = 0;
+    params.rewriteDuration = 20;
+    sim.spawn('era', 90, 80, 0, params, true);
+    sim.spawn('era', 110, 80, Math.PI, params, true);
+    sim.step(1 / 60, params);
+    expect(sim.graph.wires.size).toBe(0);
   });
 
   it('starving agents still snap', () => {

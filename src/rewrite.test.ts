@@ -35,7 +35,7 @@ import {
   TRAIT_RANGE,
   type NetSnapshot,
 } from './rewrite.ts';
-import { EXTRA_CAP } from './energy.ts';
+import { EXTRA_CAP, extraCapFor } from './energy.ts';
 import { Sim } from './sim.ts';
 import { defaultParams, type Params } from './params.ts';
 import { buildTopology } from './audio/topology.ts';
@@ -686,6 +686,36 @@ describe('heritable traits', () => {
       expect(e.requestDecay).toBeGreaterThanOrEqual(parentDecay - decayRange.mutate - 1e-9);
       expect(e.requestDecay).toBeLessThanOrEqual(parentDecay + decayRange.mutate + 1e-9);
       expect(e.requestDecay, 'must not reset to the slider').not.toBe(params.requestDecay);
+    }
+  });
+
+  it('skips trait inheritance when breeding is off', () => {
+    const { sim, params } = oscillatorPair();
+    const dup = [...sim.agents.values()].find((a) => a.kind === 'dup')!;
+    const con = [...sim.agents.values()].find((a) => a.kind === 'con')!;
+    dup.requestDecay = 0.55;
+    con.requestDecay = 0.95;
+    dup.energyCap = EXTRA_CAP * 0.6;
+    con.energyCap = EXTRA_CAP * 1.8;
+    const before = new Set(sim.agents.keys());
+    const rw = beginRewrite(dup, con, sim.graph, sim.agents, sim.w, sim.h, 1);
+    sim.nextId = commitRewrite(
+      rw,
+      sim.agents,
+      sim.graph,
+      params,
+      sim.nextId,
+      sim.time,
+      sim.w,
+      sim.h,
+      sim.agentStore,
+      false,
+    );
+    const children = [...sim.agents.values()].filter((a) => !before.has(a.id));
+    expect(children).toHaveLength(4);
+    for (const c of children) {
+      expect(c.requestDecay).toBe(params.requestDecay);
+      expect(c.energyCap).toBe(extraCapFor(c.kind));
     }
   });
 });

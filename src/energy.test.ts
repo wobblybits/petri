@@ -180,6 +180,15 @@ describe('EnergyGrid', () => {
     g.addAt(3, 3, 2);
     expect(g.getAt(3, 3)).toBeCloseTo(2);
   });
+
+  it('inexhaustible cells stay at ambient after harvest', () => {
+    const g = new EnergyGrid(10, 8);
+    g.inexhaustible = true;
+    expect(g.take(g.index(3, 3).key, 5)).toBe(5);
+    expect(g.getAt(3, 3)).toBe(8);
+    expect(g.take(g.index(3, 3).key, 100)).toBe(8);
+    expect(g.getAt(3, 3)).toBe(8);
+  });
 });
 
 describe('harvest slots', () => {
@@ -237,6 +246,17 @@ describe('harvest slots', () => {
     harvestSlots([a], grid);
     expect(a.extra).toBe(0);
     expect(grid.getAt(2, 2)).toBe(1);
+  });
+
+  it('fills every agent on an inexhaustible cell', () => {
+    const grid = new EnergyGrid(10, 8);
+    grid.inexhaustible = true;
+    const a = body(1, 2, 2);
+    const b = body(2, 3, 2);
+    harvestSlots([a, b], grid);
+    expect(a.extra).toBeCloseTo(EXTRA_CAP, 6);
+    expect(b.extra).toBeCloseTo(EXTRA_CAP, 6);
+    expect(grid.getAt(2, 2)).toBe(8);
   });
 });
 
@@ -653,6 +673,26 @@ describe('sim energy', () => {
     expect(sim.agents.size).toBe(4);
   });
 
+  it('lets a commute fire when both tanks are full but smaller than a share', () => {
+    const sim = new Sim(800, 600);
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.ambientEnergy = 0;
+    params.upkeep = 0;
+    params.rewriteDuration = 0.12;
+    params.wireShrink = 0.08;
+    const cap = EXTRA_CAP * 0.6;
+    const c = sim.spawn('con', 380, 300, 0, params, true)!;
+    const d = sim.spawn('dup', 420, 300, Math.PI, params, true)!;
+    c.energyCap = cap;
+    d.energyCap = cap;
+    c.extra = cap;
+    d.extra = cap;
+    sim.wire(c.id, 'p', d.id, 'p', params);
+    for (let f = 0; f < 240; f++) sim.step(1 / 60, params);
+    expect(sim.agents.size).toBe(4);
+  });
+
   it('returns annihilation energy to the grid when the net vanishes', () => {
     const sim = new Sim(800, 600);
     const params = defaultParams();
@@ -765,6 +805,15 @@ describe('sim energy', () => {
     harvestSlots([roomy, cramped], grid);
     expect(roomy.extra).toBeCloseTo(roomy.energyCap, 6);
     expect(cramped.extra, 'no room left to harvest into').toBeCloseTo(EXTRA_CAP * 0.5, 6);
+  });
+
+  it('lets a full tank pay a rewrite even when breeding shrank it below a share', () => {
+    const cramped = body(1, 0, 0, EXTRA_CAP * 0.5, 0, false, 'con', EXTRA_CAP * 0.5);
+    expect(cramped.energyCap).toBeLessThan(REWRITE_SHARE);
+    expect(canPayShare(cramped)).toBe(true);
+    const roomy = body(2, 0, 0, EXTRA_CAP * 0.5, 0, false, 'con', EXTRA_CAP);
+    expect(canPayShare(roomy), 'a default tank still needs a whole share').toBe(false);
+    expect(extrasOf(cramped, cramped)).toBe(2);
   });
 
   it('fills an Era past a full Con from the ground and along a wire', () => {

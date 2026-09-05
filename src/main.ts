@@ -25,7 +25,7 @@ app.innerHTML = `
   </div>
   <aside id="panel">
     <h1>Interaction nets</h1>
-    <p class="lede">Era, Dup, and Con forage on an energy grid, latch ports, and rewrite like Lafont combinators. Annihilation releases energy; a Con–Dup commute spends it.</p>
+    <p class="lede">Era, Dup, and Con forage on an energy grid, latch ports, and rewrite like Lafont combinators. Annihilation releases energy; a Con–Dup commute spends it. <a href="./design.html">Net designer</a></p>
     <div class="row">
       <button type="button" id="pause">Pause</button>
       <button type="button" id="step">Step</button>

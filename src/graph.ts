@@ -1,5 +1,6 @@
 import {
   inSnapArc,
+  poseHeld,
   portKey,
   portKeyAt,
   portWorld,
@@ -7,6 +8,7 @@ import {
   stemWorldInto,
   wireCubic,
   type Agent,
+  type AgentKind,
   type PortRef,
   type PortSlot,
 } from './agents.ts';
@@ -398,6 +400,41 @@ export class Graph {
   }
 
   /**
+   * Rotate which wire (or vacancy) sits on which of an agent's ports.
+   *
+   * The occupancy of `p, l, r` — including empty slots — shifts one step so a
+   * designer can try every attachment without tearing the ropes down and
+   * rebuilding them. Era has only a principal, so there is nothing to turn.
+   * Returns false when the agent has fewer than two slots or every slot is
+   * already empty.
+   */
+  cycleSlots(agentId: number, kind: AgentKind, dir: 1 | -1 = 1): boolean {
+    const slots = slotsFor(kind);
+    if (slots.length < 2) return false;
+    const n = slots.length;
+    const step = dir >= 0 ? 1 : n - 1;
+    type Occ = { wire: Wire; end: 'a' | 'b' };
+    const occ: (Occ | null)[] = slots.map((slot) => {
+      const wire = this.wireAtSlot(agentId, slot);
+      if (!wire) return null;
+      const end: 'a' | 'b' = wire.a.id === agentId && wire.a.slot === slot ? 'a' : 'b';
+      return { wire, end };
+    });
+    if (occ.every((o) => o === null)) return false;
+    for (const slot of slots) this.portWire.delete(portKeyAt(agentId, slot));
+    for (let i = 0; i < n; i++) {
+      const o = occ[i];
+      if (!o) continue;
+      const slot = slots[(i + step) % n];
+      if (o.end === 'a') o.wire.a = { id: agentId, slot };
+      else o.wire.b = { id: agentId, slot };
+      this.portWire.set(portKeyAt(agentId, slot), o.wire.id);
+    }
+    this.bump();
+    return true;
+  }
+
+  /**
    * Drop the rope onto the current stem chord. Used after `rebind` so a
    * leftover does not keep a polyline that belonged to the dying ports.
    */
@@ -597,6 +634,7 @@ export class Graph {
     params: Params,
     time: number,
   ): void {
+    if (params.snapRadius <= 0) return;
     type Cand = { pa: PortRef; pb: PortRef; dist: number; rank: number };
     const ports: { ref: PortRef; x: number; y: number; principal: boolean }[] = [];
     for (const agent of agents.values()) {
@@ -995,7 +1033,7 @@ export class Graph {
       const A = agents.get(wire.a.id);
       const B = agents.get(wire.b.id);
       if (!A || !B) continue;
-      if (A.locked && B.locked) continue;
+      if (poseHeld(A) && poseHeld(B)) continue;
       if (frozen && (frozen.has(A.id) || frozen.has(B.id))) continue;
       const stiff = this.stiffness(wire, time, params);
       if (!ropeIsLive(wire, detailed)) {

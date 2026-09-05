@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EMIT, EMIT_SLOPE, TASTE, TASTE_SLOPE, effEmit, effTaste, seedChem, type Agent } from './agents.ts';
+import { CH } from './fields.ts';
 import { CHEM_TASTE_MAX } from './rewrite.ts';
 import { defaultParams } from './params.ts';
 import { loadPreset } from './presets.ts';
@@ -87,19 +88,43 @@ describe('scent genome', () => {
     expect(effEmit(needy, 0)).toBe(effEmit(quiet, 0));
     expect(effTaste(needy, 1)).toBe(effTaste(quiet, 1));
 
-    // Give it something to say under pressure: quiet when fed, loud on
-    // channel 2 when its net is hungry. Channel 2 is the one nothing has ever
-    // listened to, which is exactly the free bandwidth a lineage can claim.
-    needy.chem[EMIT_SLOPE + 2] = 0.8;
-    needy.chem[TASTE_SLOPE + 2] = 2;
-    expect(effEmit(needy, 2), 'a needy body should be saying more').toBeGreaterThan(
-      effEmit(quiet, 2),
+    // Give it something to say under pressure: quiet when fed, loud on the
+    // aux channel when its net is hungry — and listening harder for the
+    // ground while it is at it, which is the one thing a hungry body most
+    // wants to find.
+    needy.chem[EMIT_SLOPE + CH.aux] = 0.8;
+    needy.chem[TASTE_SLOPE + CH.energy] = 2;
+    expect(effEmit(needy, CH.aux), 'a needy body should be saying more').toBeGreaterThan(
+      effEmit(quiet, CH.aux),
     );
-    expect(effTaste(needy, 2), 'and listening harder').toBeGreaterThan(effTaste(quiet, 2));
+    expect(effTaste(needy, CH.energy), 'and listening harder').toBeGreaterThan(
+      effTaste(quiet, CH.energy),
+    );
 
     // Half as needy, half the shift: the response is linear in state.
     const half = { chem: Float32Array.from(needy.chem), request: 0.5 } as unknown as Agent;
-    expect(effEmit(half, 2)).toBeCloseTo((effEmit(quiet, 2) + effEmit(needy, 2)) / 2, 6);
+    expect(effEmit(half, CH.aux)).toBeCloseTo(
+      (effEmit(quiet, CH.aux) + effEmit(needy, CH.aux)) / 2,
+      6,
+    );
+  });
+
+  /*
+   * The ground is on channel 2, so nothing emits into it — ever, at any
+   * genome, however far a lineage drifts. A body that could would be minting
+   * food from nothing at five units a free port a frame, which is the whole
+   * economy gone, so this is worth a test of its own rather than trusting
+   * three deposit paths to keep agreeing about it.
+   */
+  it('never lets a body emit onto the ground, whatever its genes say', () => {
+    const params = defaultParams();
+    const a = { chem: seedChem('con', params), request: 1 } as unknown as Agent;
+    a.chem[EMIT + CH.energy] = 9;
+    a.chem[EMIT_SLOPE + CH.energy] = 9;
+    expect(effEmit(a, CH.energy), 'the ground is not a thing you can shout').toBe(0);
+    // And it is still perfectly able to smell it.
+    a.chem[TASTE + CH.energy] = 1.5;
+    expect(effTaste(a, CH.energy)).toBeGreaterThan(0);
   });
 
   it('never lets a modulated emit go negative', () => {
@@ -157,6 +182,7 @@ describe('heritable flocking', () => {
     seen: number;
   } {
     const params = pond().params;
+    params.flockAlign = 0;
     const sim = new Sim(800, 600);
     loadPreset(sim, 'oscillator', params);
     const before = sim.nextId;
@@ -179,12 +205,11 @@ describe('heritable flocking', () => {
 
   it('lets an off trait move both ways, and does not ratchet it up', () => {
     /*
-     * `flockAlign` ships at zero so alignment has to emerge rather than being
-     * given. Clamping the gene at zero would have handed it over regardless: a
-     * trait sitting on its own floor has half its mutations absorbed and half
-     * moving up, which is a reflecting barrier and drifts upward whether or not
-     * anything selects for it. Letting the gene go negative — and clamping only
-     * where the force reads it — removes the barrier.
+     * Alignment ships on in the pond, but the gene has to be able to sit
+     * off without a reflecting barrier: clamp it at zero and half the
+     * mutations are absorbed and half move up, so the trait climbs whether
+     * or not anything selects for it. This run seeds it at zero and only
+     * clamps where the force reads it, so the walk can go both ways.
      */
     const r = survey(1800);
     expect(r.born, 'nothing bred, so nothing could drift').toBeGreaterThan(20);

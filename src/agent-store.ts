@@ -46,6 +46,7 @@ export class AgentStore {
   alpha!: Float64Array;
   scale!: Float64Array;
   locked!: Uint8Array;
+  pinned!: Uint8Array;
   stun!: Float64Array;
   drive!: Float64Array;
   trail!: Float64Array;
@@ -143,6 +144,7 @@ export class AgentStore {
     this.alpha[slot] = 0;
     this.scale[slot] = 0;
     this.locked[slot] = 0;
+    this.pinned[slot] = 0;
     this.stun[slot] = 0;
     this.drive[slot] = 0;
     this.trail[slot] = 0;
@@ -201,6 +203,7 @@ export class AgentStore {
     this.alpha = growF64(this.alpha);
     this.scale = growF64(this.scale);
     this.locked = growU8(this.locked);
+    this.pinned = growU8(this.pinned);
     this.stun = growF64(this.stun);
     this.drive = growF64(this.drive);
     this.trail = growF64(this.trail);

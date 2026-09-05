@@ -152,6 +152,27 @@ export interface Params {
    * charging rate, is what the net is competing over.
    */
   ambientEnergy: number;
+  /**
+   * How fast the ground spreads, as a multiple of the scent `diffuse` slider.
+   *
+   * Small, because energy is not a smell. A signal wants to reach across the
+   * dish inside a second — that is what makes a trail worth following. Ground
+   * that did the same would be a single shared pool with no local scarcity in
+   * it, and nothing to forage toward. This is the number that decides how far
+   * a grazed patch can draw on its neighbours, and so how big a dead zone a
+   * net can make before it has to move.
+   */
+  energyDiffuse: number;
+  /**
+   * Logistic regrowth rate, per second, toward `ambientEnergy` per cell.
+   *
+   * Not a refill timer. Growth is proportional to what is already in the cell,
+   * so a cell taken to exactly zero never comes back on its own and has to be
+   * recolonised from a neighbour — grazing to the floor makes a scar that
+   * heals from its rim at the speed `energyDiffuse` sets. 0 turns the ground
+   * back into the seam of ore it used to be.
+   */
+  energyRegrow: number;
   /** Extra drained per second. 0 = off. Hitting −1 kills the agent. */
   upkeep: number;
   /**
@@ -272,7 +293,7 @@ export function defaultParams(): Params {
     springK: 12,
     springDamp: 45,
     auxSpread: 1.7,
-    declutter: 0,
+    declutter: 1.4,
     nearBudget: 0,
     uncross: 0,
     wireClear: 1,
@@ -295,13 +316,15 @@ export function defaultParams(): Params {
     swimNoise: 0.35,
     drag: 0.55,
     angDrag: 2.4,
-    flockAlign: 0.0,
+    flockAlign: 5.5,
     flockSep: 48,
     maxAgents: 100000,
     soupCount: 10000,
     spawnInterval: 0.5,
     energyCell: 40,
     ambientEnergy: 1,
+    energyDiffuse: 0.05,
+    energyRegrow: 0.04,
     upkeep: 0.015,
     emitCost: 0,
     rescueTo: 0.9,
@@ -361,6 +384,8 @@ export const SLIDERS: SliderSpec[] = [
   // scent field's cell for the two grids to line up (see EnergyGrid).
   { key: 'energyCell', label: 'Energy cell', min: FIELD_CELL, max: 160, step: FIELD_CELL },
   { key: 'ambientEnergy', label: 'Ambient energy', min: 0, max: 2, step: 0.05 },
+  { key: 'energyDiffuse', label: 'Ground spread', min: 0, max: 0.5, step: 0.005 },
+  { key: 'energyRegrow', label: 'Ground regrow', min: 0, max: 0.4, step: 0.005 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
   { key: 'emitCost', label: 'Emit cost', min: 0, max: 0.05, step: 0.001 },
   { key: 'rescueTo', label: 'Rescue fill', min: 0, max: 1, step: 0.05 },

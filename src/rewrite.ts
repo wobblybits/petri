@@ -1,6 +1,7 @@
 import { CHEM_LEN, EMIT, EMIT_SLOPE, TASTE, TASTE_SLOPE, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
 import type { AgentStore } from './agent-store.ts';
 import { DEBT_CAP_MAX, EXTRA_CAP } from './energy.ts';
+import { CH, VOICE } from './fields.ts';
 import { otherEnd, type Graph } from './graph.ts';
 import type { Params } from './params.ts';
 import {
@@ -993,13 +994,24 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, assort: boolean): voi
     const combined = assort ? (Math.random() < 0.5 ? a : b) : lerp(a, b, Math.random());
     c[k] = combined + (Math.random() * 2 - 1) * CHEM_MUTATE;
   }
+  /*
+   * The voice is spread across the channels that carry it, which is no longer
+   * all four: `CH.energy` holds the ground and nothing emits into it. Zeroing
+   * its two genes rather than leaving them to drift is what keeps the budget
+   * honest — normalising over four slots while only three can be heard would
+   * let a lineage bank a quarter of its unit somewhere silent, and the whole
+   * point of the unit sum is that saying one thing costs you another.
+   */
+  c[EMIT + CH.energy] = 0;
+  c[EMIT_SLOPE + CH.energy] = 0;
   let sum = 0;
-  for (let k = EMIT; k < EMIT + 4; k++) {
+  for (const k0 of VOICE) {
+    const k = EMIT + k0;
     if (c[k] < 0) c[k] = 0;
     sum += c[k];
   }
   // A body with nothing left to say is mute, not amplified from noise.
-  if (sum > 1e-6) for (let k = EMIT; k < EMIT + 4; k++) c[k] /= sum;
+  if (sum > 1e-6) for (const k0 of VOICE) c[EMIT + k0] /= sum;
   for (let k = TASTE; k < TASTE + 4; k++) {
     c[k] = Math.min(CHEM_TASTE_MAX, Math.max(-CHEM_TASTE_MAX, c[k]));
   }
@@ -1028,6 +1040,7 @@ export function commitRewrite(
   w: number,
   h: number,
   store: AgentStore,
+  breed = true,
 ): number {
   // Local, not the whole pond: `commitRewrite` reads only `result.spawned` and
   // the fused joins out of `result.net.wires`. Wires that were not incident to
@@ -1046,8 +1059,10 @@ export function commitRewrite(
     ag.vx = 0;
     ag.vy = 0;
     ag.stun = 0.45;
-    if (conParent && dupParent) inheritTraits(ag, conParent, dupParent);
-    else if (eraParent) inheritFromClone(ag, eraParent);
+    if (breed) {
+      if (conParent && dupParent) inheritTraits(ag, conParent, dupParent);
+      else if (eraParent) inheritFromClone(ag, eraParent);
+    }
     agents.set(s.id, ag);
   }
   inheritLeftoverWires(graph, result.net.wires, agents, w, h, time);
