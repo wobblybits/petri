@@ -721,6 +721,23 @@ export class Sim {
         if (voice > 0) a.extra -= rent * voice;
       }
     }
+    /*
+     * Rent on moving, charged like the rent on being heard.
+     *
+     * Per unit of speed rather than per unit of distance, which is the same
+     * thing over a frame and reads better against the other per-second costs.
+     * Only bodies that can actually swim pay: a wired-in body is cargo, moved
+     * by the constraint rather than by its own port, and billing it for the
+     * net's motion would make being carried expensive.
+     */
+    if (params.swimCost > 0) {
+      const rent = params.swimCost * t;
+      for (const a of this.agents.values()) {
+        if (a.locked || !this.graph.isFreeAt(a.id, 'p')) continue;
+        const speed = Math.hypot(a.vx, a.vy);
+        if (speed > 0) a.extra -= rent * speed;
+      }
+    }
     for (const id of this.contactDamage(params, t)) this.kill(id);
     for (const id of tickUpkeepFast(this.agents.values(), this.agentStore, t, params.upkeep, this.energy)) {
       this.kill(id);
@@ -3920,6 +3937,31 @@ export class Sim {
       }
     }
 
+    /*
+     * And what a body wants, not only what it is short of.
+     *
+     * `rescueNeed` and `redexNeed` are both shortfalls — about to die, about
+     * to reproduce. Neither says anything about where the net should be, so a
+     * net had no way to spend energy on going somewhere. This is the third
+     * claim: a body that can swim asks in proportion to how much it likes
+     * what it can smell, which is its `trail` read through its own taste
+     * weights, so the ask is already in the currency of that body's genome.
+     *
+     * `trail` is last frame's reading, written by `steer`. A frame of latency
+     * in an appetite is not a thing anything can perceive, and it saves
+     * sampling the field a second time for every body in the pond.
+     *
+     * Clamped at zero because taste is signed: a body that is repelled by
+     * everything around it has a negative trail, and that is a reason to
+     * leave rather than a reason to be fed.
+     */
+    if (params.forageAsk > 0) {
+      for (const a of this.agents.values()) {
+        if (a.locked || !this.graph.isFreeAt(a.id, 'p')) continue;
+        const want = params.forageAsk * (a.trail > 0 ? a.trail : 0);
+        if (want > (need.get(a.id) ?? 0)) need.set(a.id, want);
+      }
+    }
     for (const [id, n] of need) {
       const a = this.agents.get(id);
       if (a) seedRequest(a, n);

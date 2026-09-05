@@ -208,6 +208,48 @@ export interface Params {
    */
   emitCost: number;
   /**
+   * Extra per second per unit of speed, charged for moving.
+   *
+   * What ties a net's energy to its locomotion, and so what lets a net have a
+   * motor at all. Swimming was free, which made thrust a property of a body
+   * rather than of the net that feeds it: a starving swimmer swam exactly as
+   * hard as a full one, and there was nothing for the transport machinery to
+   * be *for* beyond keeping redexes alive.
+   *
+   * With a price on it the wire network becomes a fuel line. A sub-net that
+   * swims runs itself down and asks; `spreadRequests` carries the ask inward
+   * and `flowCharges` sends stock back out; `applyTransportRecoil` already
+   * kicks the pair as it goes. Which bodies a net chooses to feed is which
+   * way it goes — and because `transportThrust`, `transportRecoil` and
+   * `requestDecay` are all heritable, what a lineage does with that is
+   * something it can evolve rather than something set here.
+   *
+   * Off by default. Turning it on is a real change to the economy: at a
+   * cruise of 38 and an upkeep of 0.015, a cost of 0.0004 roughly doubles
+   * what a moving body pays to exist.
+   */
+  swimCost: number;
+  /**
+   * How loudly a body asks for energy on account of liking where it is.
+   *
+   * The other half of the motor. A price on swimming alone gives a net a fuel
+   * bill; this is what makes the bill *directional*. A body with a free
+   * principal reads its own `trail` — everything it can smell, through its own
+   * taste weights — and asks in proportion, so the bodies standing where the
+   * net most wants to be are the ones that get fed and thrust hardest.
+   *
+   * Off by default, like the other two dials that change what energy is spent
+   * on. Not caution for its own sake: the field takes the largest claim it can
+   * see, so an appetite competes directly with `rescueNeed` and `redexNeed` —
+   * somebody about to die, and somebody about to reproduce. At 0.05 against
+   * the scent a pond makes of itself it already outbid a rescue, topping a
+   * dying body past its own `rescueTo` to a full tank while its donors went
+   * without. Wanting to go somewhere nice should lose to both of those, and
+   * where the crossover sits depends on how loud the pond is, which is four
+   * other sliders. Worth tuning by eye rather than guessing a default.
+   */
+  forageAsk: number;
+  /**
    * Fraction of this body's own tank a rescue fills, from `debtCap` at 0 to
    * `energyCap` at 1. The absolute extra it asks up to is
    * `debtCap + rescueTo * (energyCap - debtCap)`, so it cannot land outside
@@ -345,6 +387,8 @@ export function defaultParams(): Params {
     energyRegrow: 0.04,
     upkeep: 0.015,
     emitCost: 0,
+    swimCost: 0,
+    forageAsk: 0,
     rescueTo: 0.9,
     debtCap: -1,
     requestDecay: 0.95,
@@ -407,6 +451,8 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'energyRegrow', label: 'Ground regrow', min: 0, max: 0.4, step: 0.005 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
   { key: 'emitCost', label: 'Emit cost', min: 0, max: 0.05, step: 0.001 },
+  { key: 'swimCost', label: 'Swim cost', min: 0, max: 0.002, step: 0.00005 },
+  { key: 'forageAsk', label: 'Forage ask', min: 0, max: 0.5, step: 0.01 },
   { key: 'rescueTo', label: 'Rescue fill', min: 0, max: 1, step: 0.05 },
   { key: 'debtCap', label: 'Debt cap', min: -2.5, max: -0.05, step: 0.05 },
   { key: 'requestDecay', label: 'Demand decay', min: 0.5, max: 0.98, step: 0.01 },
