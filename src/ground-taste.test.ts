@@ -46,7 +46,7 @@ function scarLeftOf(sim: Sim, x: number): void {
 describe('the ground as something to smell', () => {
   it('reads a full cell as 1, whatever the capacity is set to', () => {
     const params = defaultParams();
-    const a = { chem: seedChem('con', params), request: 0 } as unknown as Agent;
+    const a = { chem: seedChem('con', params), request: 0, extra: 0, energyCap: 1, trail: 0 } as unknown as Agent;
     a.chem[TASTE + CH.energy] = 1;
     for (let k = 0; k < 4; k++) if (k !== CH.energy) a.chem[TASTE + k] = 0;
 
@@ -113,7 +113,7 @@ describe('the ground as something to smell', () => {
 
   it('lets avoidance work too, since taste is signed', () => {
     const params = defaultParams();
-    const a = { chem: seedChem('con', params), request: 0 } as unknown as Agent;
+    const a = { chem: seedChem('con', params), request: 0, extra: 0, energyCap: 1, trail: 0 } as unknown as Agent;
     for (let k = 0; k < 4; k++) a.chem[TASTE + k] = 0;
     a.chem[TASTE + CH.energy] = -2;
     // Nothing in the pipeline clamps a negative weight on the ground away. A

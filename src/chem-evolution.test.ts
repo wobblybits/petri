@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EMIT, EMIT_SLOPE, TASTE, TASTE_SLOPE, effEmit, effTaste, seedChem, type Agent } from './agents.ts';
+import { EMIT, EMIT_SLOPE, FULL, HERE, NEED, STATE_DIMS, TASTE, TASTE_SLOPE, effEmit, effTaste, seedChem, type Agent } from './agents.ts';
 import { CH } from './fields.ts';
 import { CHEM_TASTE_MAX } from './rewrite.ts';
 import { defaultParams } from './params.ts';
@@ -82,8 +82,8 @@ describe('scent genome', () => {
 
   it('modulates what a body says by how its neighbourhood is doing', () => {
     const params = defaultParams();
-    const quiet = { chem: seedChem('con', params), request: 0 } as unknown as Agent;
-    const needy = { chem: seedChem('con', params), request: 1 } as unknown as Agent;
+    const quiet = { chem: seedChem('con', params), request: 0, extra: 0, energyCap: 1, trail: 0 } as unknown as Agent;
+    const needy = { chem: seedChem('con', params), request: 1, extra: 0, energyCap: 1, trail: 0 } as unknown as Agent;
     // Seeded, the slope is zero and state changes nothing at all.
     expect(effEmit(needy, 0)).toBe(effEmit(quiet, 0));
     expect(effTaste(needy, 1)).toBe(effTaste(quiet, 1));
@@ -92,8 +92,8 @@ describe('scent genome', () => {
     // aux channel when its net is hungry — and listening harder for the
     // ground while it is at it, which is the one thing a hungry body most
     // wants to find.
-    needy.chem[EMIT_SLOPE + CH.aux] = 0.8;
-    needy.chem[TASTE_SLOPE + CH.energy] = 2;
+    needy.chem[EMIT_SLOPE + CH.aux * STATE_DIMS + NEED] = 0.8;
+    needy.chem[TASTE_SLOPE + CH.energy * STATE_DIMS + NEED] = 2;
     expect(effEmit(needy, CH.aux), 'a needy body should be saying more').toBeGreaterThan(
       effEmit(quiet, CH.aux),
     );
@@ -102,7 +102,7 @@ describe('scent genome', () => {
     );
 
     // Half as needy, half the shift: the response is linear in state.
-    const half = { chem: Float32Array.from(needy.chem), request: 0.5 } as unknown as Agent;
+    const half = { chem: Float32Array.from(needy.chem), request: 0.5, extra: 0, energyCap: 1, trail: 0 } as unknown as Agent;
     expect(effEmit(half, CH.aux)).toBeCloseTo(
       (effEmit(quiet, CH.aux) + effEmit(needy, CH.aux)) / 2,
       6,
@@ -118,20 +118,69 @@ describe('scent genome', () => {
    */
   it('never lets a body emit onto the ground, whatever its genes say', () => {
     const params = defaultParams();
-    const a = { chem: seedChem('con', params), request: 1 } as unknown as Agent;
+    const a = { chem: seedChem('con', params), request: 1, extra: 0, energyCap: 1, trail: 0 } as unknown as Agent;
     a.chem[EMIT + CH.energy] = 9;
-    a.chem[EMIT_SLOPE + CH.energy] = 9;
+    a.chem[EMIT_SLOPE + CH.energy * STATE_DIMS + NEED] = 9;
     expect(effEmit(a, CH.energy), 'the ground is not a thing you can shout').toBe(0);
     // And it is still perfectly able to smell it.
     a.chem[TASTE + CH.energy] = 1.5;
     expect(effTaste(a, CH.energy)).toBeGreaterThan(0);
   });
 
+  /*
+   * The three state dimensions have to be about different things, or the
+   * widening bought nothing.
+   *
+   * `NEED` is the neighbourhood's, spread over the wires. `FULL` is this
+   * body's own tank. A rule with two clauses — "shout when my net is hungry
+   * *but* I am full", the shape a body that has something to give would want —
+   * needs both, and needs them separable. With one input it was not merely
+   * hard to express, it was outside the language.
+   */
+  it('separates what my net needs from what I have', () => {
+    const params = defaultParams();
+    const mk = (request: number, extra: number) =>
+      ({ chem: seedChem('con', params), request, extra, energyCap: 1, trail: 0 }) as unknown as Agent;
+
+    const donor = mk(1, 1); // net starving, I am full
+    const beggar = mk(1, 0); // net starving, I am empty too
+    const idle = mk(0, 1); // net fine, I am full
+
+    for (const a of [donor, beggar, idle]) {
+      a.chem[EMIT + CH.conP] = 0;
+      a.chem[EMIT_SLOPE + CH.conP * STATE_DIMS + NEED] = 0.5;
+      a.chem[EMIT_SLOPE + CH.conP * STATE_DIMS + FULL] = 0.5;
+    }
+    // Both clauses true, so this one is loudest — and the two bodies that
+    // satisfy exactly one of them are equally quiet, which is what proves the
+    // dimensions are not two names for the same reading.
+    expect(effEmit(donor, CH.conP)).toBeCloseTo(1, 6);
+    expect(effEmit(beggar, CH.conP)).toBeCloseTo(0.5, 6);
+    expect(effEmit(idle, CH.conP)).toBeCloseTo(0.5, 6);
+  });
+
+  it('lets a body condition on where it is, with a sign', () => {
+    const params = defaultParams();
+    const mk = (trail: number) =>
+      ({ chem: seedChem('con', params), request: 0, extra: 0, energyCap: 1, trail }) as unknown as Agent;
+    const a = mk(4);
+    const b = mk(-4);
+    for (const x of [a, b]) {
+      x.chem[TASTE + CH.aux] = 0;
+      x.chem[TASTE_SLOPE + CH.aux * STATE_DIMS + HERE] = 1;
+    }
+    // Squashed, so a strong like and a strong dislike land either side of zero
+    // and neither can run away with the weight.
+    expect(effTaste(a, CH.aux)).toBeGreaterThan(0.5);
+    expect(effTaste(b, CH.aux)).toBeLessThan(-0.5);
+    expect(Math.abs(effTaste(a, CH.aux))).toBeLessThan(1);
+  });
+
   it('never lets a modulated emit go negative', () => {
     const params = defaultParams();
-    const a = { chem: seedChem('con', params), request: 1 } as unknown as Agent;
+    const a = { chem: seedChem('con', params), request: 1, extra: 0, energyCap: 1, trail: 0 } as unknown as Agent;
     // A body that goes silent under pressure, pushed past silence.
-    a.chem[EMIT_SLOPE] = -5;
+    a.chem[EMIT_SLOPE + CH.conP * STATE_DIMS + NEED] = -5;
     expect(effEmit(a, 0), 'emitting a negative amount is not a thing').toBe(0);
   });
 

@@ -1,4 +1,4 @@
-import { CHEM_LEN, EMIT, EMIT_SLOPE, TASTE, TASTE_SLOPE, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
+import { CHEM_LEN, EMIT, EMIT_SLOPE, STATE_DIMS, TASTE, TASTE_SLOPE, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
 import type { AgentStore } from './agent-store.ts';
 import { DEBT_CAP_MAX, EXTRA_CAP } from './energy.ts';
 import { CH, VOICE } from './fields.ts';
@@ -887,8 +887,21 @@ export type TraitKey = (typeof TRAIT_KEYS)[number];
  * the tank a fresh Con or Dup starts at, since commute parents are always
  * one of each.
  */
-/** How far one generation can nudge a single chemistry weight. */
-export const CHEM_MUTATE = 0.06;
+/**
+ * How far one generation can nudge a single chemistry weight.
+ *
+ * Scaled to the genome's size rather than fixed, because the thing that should
+ * stay constant across a change to the layout is how far a child lands from
+ * its parents *overall* — and that is the root-sum-square of the per-gene
+ * steps, so it grows as the square root of the gene count. The genome doubled
+ * from sixteen floats to thirty-two when the inner state went from one number
+ * to three; left at a flat 0.06 that would have quietly multiplied every
+ * lineage's drift by 1.41, on a system where drift already competes with
+ * selection for control of the outcome.
+ *
+ * `0.06` was the figure at sixteen genes, so that is the reference.
+ */
+export const CHEM_MUTATE = 0.06 * Math.sqrt(16 / CHEM_LEN);
 /** Ceiling on a taste weight, positive or negative. */
 export const CHEM_TASTE_MAX = 4;
 /** Ceiling on an emit slope. One unit of voice is the base's whole budget, so
@@ -1003,7 +1016,7 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, assort: boolean): voi
    * point of the unit sum is that saying one thing costs you another.
    */
   c[EMIT + CH.energy] = 0;
-  c[EMIT_SLOPE + CH.energy] = 0;
+  for (let d = 0; d < STATE_DIMS; d++) c[EMIT_SLOPE + CH.energy * STATE_DIMS + d] = 0;
   let sum = 0;
   for (const k0 of VOICE) {
     const k = EMIT + k0;
@@ -1022,10 +1035,10 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, assort: boolean): voi
    * pressure — both are things worth being able to evolve into, and neither is
    * expressible if the slope is held to the same shape as the base.
    */
-  for (let k = EMIT_SLOPE; k < EMIT_SLOPE + 4; k++) {
+  for (let k = EMIT_SLOPE; k < EMIT_SLOPE + 4 * STATE_DIMS; k++) {
     c[k] = Math.min(CHEM_SLOPE_MAX, Math.max(-CHEM_SLOPE_MAX, c[k]));
   }
-  for (let k = TASTE_SLOPE; k < TASTE_SLOPE + 4; k++) {
+  for (let k = TASTE_SLOPE; k < TASTE_SLOPE + 4 * STATE_DIMS; k++) {
     c[k] = Math.min(CHEM_TASTE_MAX, Math.max(-CHEM_TASTE_MAX, c[k]));
   }
 }

@@ -55,7 +55,9 @@ describe('scent steering', () => {
     // mixScent reads through the body, because the weights are modulated by
     // its inner state; a bare genome is not enough to ask the question with.
     const body = (kind: 'con' | 'dup' | 'era') =>
-      ({ chem: seedChem(kind, params), request: 0 }) as unknown as Parameters<typeof mixScent>[0];
+      ({ chem: seedChem(kind, params), request: 0, extra: 0, energyCap: 1, trail: 0 }) as unknown as Parameters<
+        typeof mixScent
+      >[0];
     const dup = body('dup');
     const con = body('con');
     const era = body('era');

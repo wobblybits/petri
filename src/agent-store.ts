@@ -13,10 +13,10 @@ import type { AgentKind } from './agents.ts';
  * `chem` is a duplicate of agents.ts's CHEM_LEN rather than an import, to
  * keep the dependency direction one-way: agents.ts builds its flyweight on
  * top of this module, so this module cannot import back from agents.ts.
- * Sixteen is a structural fact about the chem layout (emit/taste/their two
+ * Thirty-two is a structural fact about the chem layout (emit/taste, then a
  * slopes, four channels each), not a tunable — safe to duplicate.
  */
-const CHEM_LEN = 16;
+const CHEM_LEN = 32;
 
 export const KIND_CODE: Record<AgentKind, number> = { era: KIND_ERA, dup: KIND_DUP, con: KIND_CON };
 export const CODE_KIND: AgentKind[] = [];
@@ -61,7 +61,7 @@ export class AgentStore {
   flockAlign!: Float64Array;
   flockSep!: Float64Array;
   /**
-   * `chem`, all agents': slot `i`'s 16 floats live at `chemAll[i*16 .. i*16+16)`.
+   * `chem`, all agents': slot `i`'s 32 floats live at `chemAll[i*32 .. i*32+32)`.
    *
    * Float32, not Float64 like every other field here: this matches the
    * original plain-object `Agent`'s own `chem: Float32Array` (a deliberate

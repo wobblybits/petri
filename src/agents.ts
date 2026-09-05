@@ -266,9 +266,11 @@ export class Agent {
    * Aux ports still lay into channel 3 regardless, so that channel keeps its
    * kind-independent "a free port is here" sense.
    *
-   * Sixteen floats, not eight: each of emit and taste has a slope against the
-   * body's inner state as well as a base, so what it says and what it listens
-   * for can depend on how its neighbourhood is doing. See `chemState`.
+   * Thirty-two floats, not eight: each of emit and taste has a base per
+   * channel and a slope against every dimension of the body's inner state, so
+   * what it says and what it listens for can depend on how its neighbourhood
+   * is doing, on how full it is itself, and on how much it likes where it is
+   * standing — separately, and with a sign. See `STATE_DIMS`.
    *
    * A live view into AgentStore.chemAll, cached and re-sliced only when the
    * store's `generation` changes (a growth reallocation). Always
@@ -581,30 +583,98 @@ export function portLocal(kind: AgentKind, slot: PortSlot): Vec2 {
   return { x: root.x - PORT_EXTRUDE, y: root.y };
 }
 
-/** `chem` layout: emit, taste, then each one's slope against inner state. */
+/**
+ * The inner state a body's chemistry is modulated by.
+ *
+ * It was one number — `request` — and everything a body could condition on
+ * had to be expressible as "how badly does my neighbourhood need energy". So a
+ * lineage could evolve to shout when its net was hungry and nothing else: not
+ * to go quiet when it was itself full, not to hunt harder when it liked where
+ * it was standing, not any rule with two clauses in it. One input is a gain
+ * knob, not a controller.
+ *
+ * Three, now, and the three are chosen to be about different things — which
+ * matters more than how many there are, because two inputs that move together
+ * buy nothing a single one did not. `NEED` is the neighbourhood's, spread over
+ * the wires. `FULL` is this body's own and nobody else's. `HERE` is about the
+ * world rather than the body at all.
+ *
+ * Each is bounded, and that is load-bearing rather than tidiness. A slope
+ * multiplies its input, so an unbounded state and a bounded weight is the same
+ * unbounded product — one runaway body would emit a number the field cannot
+ * hold. Bounding the state instead means `CHEM_SLOPE_MAX` actually caps what a
+ * slope can do, which is what makes the mutation range mean something.
+ */
+export const STATE_DIMS = 3;
+/**
+ * The neighbourhood's unmet need, 0..1. Aggregated by `spreadRequests` over
+ * the wire graph and decayed per hop, so this is emphatically *not* the body's
+ * own hunger — it is what the net around it is short of. Emitting on it turns
+ * a gradient that only travels along wires into one that travels through
+ * space, so a starving net can call to a forager that is not attached to it.
+ */
+export const NEED = 0;
+/**
+ * How full this body's own tank is, 0 (at or below break-even) to 1 (at its
+ * own `energyCap`). The private counterpart to `NEED`: a body can now tell the
+ * difference between "I am hungry" and "my net is hungry", which is the
+ * distinction every rule about when to forage and when to give away turns on.
+ */
+export const FULL = 1;
+/**
+ * How much this body likes where it is standing, squashed to (-1, 1).
+ *
+ * Its own `trail` — everything it can smell, already weighted by its own taste
+ * — through `x / (1 + |x|)`. Signed, because a body can be somewhere it is
+ * repelled by, and that is a different situation from being somewhere dull,
+ * and the two should be able to drive different behaviour.
+ *
+ * The one dimension that is about the world. It is also the one that closes a
+ * loop: taste feeds the trail, the trail feeds the state, and the state feeds
+ * taste. A lineage can evolve a body whose sense of smell sharpens the more it
+ * likes what it smells, or one that goes blind when overwhelmed.
+ */
+export const HERE = 2;
+
+/** Squash to (-1, 1). Cheaper than `tanh` and the same shape; see the note on
+ *  `CHEM_SLOPE_MAX` for why bounded and *signed* is the requirement. */
+function soft(x: number): number {
+  return x / (1 + (x < 0 ? -x : x));
+}
+
+/** One dimension of the inner state. See `STATE_DIMS`. */
+export function chemState(a: StateBody, d: number): number {
+  if (d === NEED) {
+    const r = a.request;
+    return r <= 0 ? 0 : r >= 1 ? 1 : r;
+  }
+  if (d === FULL) {
+    const cap = a.energyCap;
+    if (!(cap > 0)) return 0;
+    const f = a.extra / cap;
+    return f <= 0 ? 0 : f >= 1 ? 1 : f;
+  }
+  return soft(a.trail);
+}
+
+/** What `chemState` reads. Loose, so tests can hand it an object literal. */
+export type StateBody = {
+  request: number;
+  extra: number;
+  energyCap: number;
+  trail: number;
+};
+
+/**
+ * `chem` layout: emit, taste, then each one's slope matrix against the inner
+ * state vector. Emit and taste are four wide (one per channel); each slope is
+ * four by `STATE_DIMS`, row-major by channel.
+ */
 export const EMIT = 0;
 export const TASTE = 4;
 export const EMIT_SLOPE = 8;
-export const TASTE_SLOPE = 12;
-export const CHEM_LEN = 16;
-
-/**
- * The inner state a body's chemistry is modulated by, normalised to [0, 1].
- *
- * `request` rather than `extra`, and the difference matters: request is
- * already aggregated across the net by `spreadRequests`, which walks the wire
- * adjacency and decays per hop. A body's request therefore reflects its
- * *neighbourhood's* need, not its own hunger. Emitting it turns a gradient
- * that only travels along wires into one that travels through space, so a
- * starving net can call to a forager that is not attached to it — which is
- * something the sim has no way to do at all otherwise.
- *
- * Hunger drives the cost instead; see `params.emitCost`.
- */
-export function chemState(a: { request: number }): number {
-  const r = a.request;
-  return r <= 0 ? 0 : r >= 1 ? 1 : r;
-}
+export const TASTE_SLOPE = EMIT_SLOPE + 4 * STATE_DIMS;
+export const CHEM_LEN = TASTE_SLOPE + 4 * STATE_DIMS;
 
 /**
  * A flocking gain as the force sees it: never negative.
@@ -633,13 +703,20 @@ export function flockGain(v: number): number {
  */
 export function effEmit(a: Agent, c: number): number {
   if (c === CH.energy) return 0;
-  const v = a.chem[EMIT + c] + chemState(a) * a.chem[EMIT_SLOPE + c];
+  const ch = a.chem;
+  const o = EMIT_SLOPE + c * STATE_DIMS;
+  let v = ch[EMIT + c];
+  for (let d = 0; d < STATE_DIMS; d++) v += ch[o + d] * chemState(a, d);
   return v > 0 ? v : 0;
 }
 
 /** Taste weight for one channel at this body's current state. May be negative. */
 export function effTaste(a: Agent, c: number): number {
-  return a.chem[TASTE + c] + chemState(a) * a.chem[TASTE_SLOPE + c];
+  const ch = a.chem;
+  const o = TASTE_SLOPE + c * STATE_DIMS;
+  let v = ch[TASTE + c];
+  for (let d = 0; d < STATE_DIMS; d++) v += ch[o + d] * chemState(a, d);
+  return v;
 }
 
 /**
@@ -683,7 +760,7 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
    * ground. Which is what foraging is, and what none of this was able to
    * express at any genome before the ground was something you could smell.
    */
-  c[TASTE_SLOPE + CH.energy] = params.attractFood;
+  c[TASTE_SLOPE + CH.energy * STATE_DIMS + NEED] = params.attractFood;
   if (kind === 'con') {
     c[EMIT] = 1;
     c[TASTE + 1] = M;
