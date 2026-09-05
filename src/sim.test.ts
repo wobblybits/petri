@@ -18,6 +18,7 @@ import {
 } from './energy.ts';
 import { nativeSolver } from './native/solver.ts';
 import { CH, FIELD_CELLS, FIELD_EXTENT } from './fields.ts';
+import { EMIT } from './agents.ts';
 import { angleDelta } from './wrap.ts';
 import { AGENT_BAND, WIRE_HAIRLINE_PX, WIRE_STROKE_PX, wiresDrawable } from './audio/lod.ts';
 
@@ -300,7 +301,17 @@ describe('simulation presets', () => {
     expect(sim.agents.size).toBe(n0 + 1);
   });
 
-  it('filled ports do not deposit scent', () => {
+  /*
+   * A filled port stops advertising a socket. It does not stop the body
+   * talking — those were one rule and are now two.
+   *
+   * This used to assert that a wired pair laid down nothing at all, and it
+   * passed for a reason that stopped being the reason: an Era says nothing at
+   * seed, so a mute pair emitting its voice looks exactly like a pair that
+   * cannot emit. Both Eras are given a voice here so the two halves can be
+   * told apart.
+   */
+  it('keeps a wired body audible, but stops its filled ports marking', () => {
     const sim = new Sim(240, 160);
     const params = defaultParams();
     params.decay = 0;
@@ -308,12 +319,20 @@ describe('simulation presets', () => {
     params.deposit = 4;
     params.wireShrink = 10;
     params.rewriteDuration = 10;
+    params.ambientEnergy = 0;
     const a = sim.spawn('era', 80, 80, 0, params, true)!;
     const b = sim.spawn('era', 160, 80, Math.PI, params, true)!;
+    for (const e of [a, b]) {
+      for (let k = 0; k < 4; k++) e.chem[EMIT + k] = 0;
+      e.chem[EMIT + CH.conP] = 1;
+    }
+    // Two single-ported bodies wired to each other: between them there is not
+    // one free port in the world.
     sim.wire(a.id, 'p', b.id, 'p', params);
     sim.fields.clear();
     step(sim, params, 8);
-    expect(sim.fields.peak()).toBe(0);
+    expect(sim.fields.peak(CH.conP), 'a wired net went silent').toBeGreaterThan(0);
+    expect(sim.fields.peak(CH.aux), 'a filled port advertised a socket').toBe(0);
   });
 
   it('starving agents still deposit from free ports', () => {

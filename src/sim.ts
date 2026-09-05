@@ -2477,7 +2477,10 @@ export class Sim {
       const a = list[i];
       if (a.locked) continue;
       for (const slot of slotsFor(a.kind)) {
-        if (!this.graph.isFreeAt(a.id, slot)) continue;
+        // See `deposit`: a voice carries whether or not the port is attached,
+        // an aux marker does not.
+        const free = this.graph.isFreeAt(a.id, slot);
+        if (slot !== 'p' && !free) continue;
         const w = portWorld(a, slot, this.w, this.h);
         const o = nDep * dStride;
         dep[o] = w.x;
@@ -3138,23 +3141,41 @@ export class Sim {
     return true;
   }
 
+  /*
+   * A body says what it is; a free port says that it is free. Those were one
+   * thing and are now two.
+   *
+   * Every port used to be skipped unless it was unattached, which meant a
+   * fully wired body emitted nothing whatever — so a net was mute, and its
+   * voice was not its own but its periphery's. A net of forty bodies with
+   * four free ports spoke exactly as loudly as four loose ones. That is the
+   * wrong shape for the thing this world is supposed to be about: a net is
+   * the organism, and it could not be heard.
+   *
+   * So the principal lays this body's voice whether or not it is attached.
+   * Volume is per body, not per free port, so a net's carrying distance now
+   * scales with how much of it there is — which is what makes "there is
+   * something large over there" a thing a stranger can smell at all.
+   *
+   * The aux marker keeps its gate, because it is not a voice. `CH.aux` means
+   * "there is somewhere to attach here", and that has to stay false when
+   * there is not, or the one kind-independent signal in the field stops being
+   * true. Emitting it from a filled port would advertise a socket that is not
+   * there and every latch-seeking body in range would come and find nothing.
+   */
   private deposit(params: Params): void {
     for (const agent of this.agents.values()) {
       if (agent.locked) continue;
       for (const slot of slotsFor(agent.kind)) {
-        if (!this.graph.isFreeAt(agent.id, slot)) continue;
-        const p = portWorld(agent, slot, this.w, this.h);
+        const free = this.graph.isFreeAt(agent.id, slot);
         if (slot === 'p') {
-          // A principal lays this body's own emit vector across all four
-          // channels; which channel that lands in is now a gene, not the kind,
-          // and how loudly depends on how its neighbourhood is doing.
+          const p = portWorld(agent, slot, this.w, this.h);
           for (let ch = 0; ch < 4; ch++) {
             const w = effEmit(agent, ch);
             if (w !== 0) this.fields.deposit(ch, p.x, p.y, params.deposit * w);
           }
-        } else {
-          // Aux ports still lay into the shared channel, so it keeps meaning
-          // "a free port is here" independently of anyone's chemistry.
+        } else if (free) {
+          const p = portWorld(agent, slot, this.w, this.h);
           this.fields.deposit(CH.aux, p.x, p.y, params.deposit * 0.7);
         }
       }

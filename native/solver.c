@@ -1591,11 +1591,17 @@ void solver_deposit(int n, float amount) {
   for (int i = 0; i < n; i++) {
     if (bodies[i * STRIDE + FAR_LOCKED] >= 0.5f) continue;
     uint8_t free_mask = port_free[i];
-    if (!free_mask) continue;
     const float *em = body_emit + i * 4;
     int slots = kind[i] == 0 ? 1 : 3;
     for (int slot = 0; slot < slots; slot++) {
-      if (!(free_mask & (1 << slot))) continue;
+      /* A voice carries whether or not the port is attached; an aux marker
+       * does not. See the twin in sim.ts's `deposit` for why: a net whose
+       * every port is filled used to emit nothing whatever, so the organism
+       * this world is about could not be heard, only its edges could. But
+       * channel 3 means "there is somewhere to attach here", and advertising
+       * a socket that is full would bring every latch-seeking body in range
+       * to find nothing. */
+      if (slot != 0 && !(free_mask & (1 << slot))) continue;
       float px, py;
       port_world(i, slot, &px, &py);
       if (slot == 0) {
@@ -1605,8 +1611,6 @@ void solver_deposit(int n, float amount) {
           if (em[ch] != 0.f) scent_add(ch, px, py, amount * em[ch]);
         }
       } else {
-        /* Aux ports still lay into the shared channel, so it keeps meaning
-         * "a free port is here" independently of anyone's chemistry. */
         scent_add(3, px, py, amount * 0.7f);
       }
     }
