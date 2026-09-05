@@ -286,6 +286,31 @@ export class Agent {
   }
 
   /**
+   * How many rewrites deep this body is from a founder, and which founder.
+   *
+   * Read by nothing the sim does. They are here so that "did this change
+   * help?" is a question with an answer. Every heritable trait in this project
+   * drifts as well as adapts, and with `CHEM_MUTATE` across thirty-two genes
+   * the drift is not small — a genome that has moved away from its seed, which
+   * is all `chem-evolution` can currently show, is equally consistent with
+   * selection and with a random walk. Telling those apart needs to know how
+   * deep a line is and which lines are still alive.
+   */
+  get born(): number {
+    return this.store.born[this.slot];
+  }
+  set born(v: number) {
+    this.store.born[this.slot] = v;
+  }
+
+  get lineage(): number {
+    return this.store.lineage[this.slot];
+  }
+  set lineage(v: number) {
+    this.store.lineage[this.slot] = v;
+  }
+
+  /**
    * Set when the body falls into debt, cleared when it is back on its feet.
    *
    * Hunger measured against break-even stops the moment the debt is settled,
@@ -424,6 +449,8 @@ export function cloneAgent(a: Agent): Agent {
   clone.scale = a.scale;
   clone.locked = a.locked;
   clone.pinned = a.pinned;
+  clone.born = a.born;
+  clone.lineage = a.lineage;
   clone.stun = a.stun;
   clone.drive = a.drive;
   clone.trail = a.trail;
@@ -825,6 +852,11 @@ export function createAgent(
   agent.scale = 1;
   agent.locked = false;
   agent.pinned = false;
+  // A body made outside a rewrite is a founder: generation zero of its own
+  // line. `autoSpawn` makes a great many of these, which is the point of
+  // being able to count them.
+  agent.born = 0;
+  agent.lineage = id;
   agent.stun = 0;
   agent.drive = params.stepSpeed;
   agent.trail = 0;

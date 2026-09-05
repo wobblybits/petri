@@ -35,6 +35,7 @@ import {
   detectRule,
   PULL_END,
   rewriteHandoffStems,
+  TRAIT_KEYS,
   type Rewrite,
 } from './rewrite.ts';
 import {
@@ -3909,6 +3910,59 @@ export class Sim {
    * that is 0.1 short, and a surplus at one end of a net finds a shortage at
    * the other end by following the gradient a wire at a time.
    */
+  /**
+   * A snapshot of who is alive and how they differ, for telling drift from
+   * selection.
+   *
+   * Deliberately not called by anything per frame. It walks the whole roster
+   * and allocates, and it exists for a bench or a console to ask occasionally
+   * — the cost of answering "is this evolving or wandering?" belongs to
+   * whoever asks the question, not to every frame that does not.
+   *
+   * `lines` is the count of distinct surviving founders, which is the number
+   * that actually distinguishes the two. A population under selection loses
+   * lines: some founders leave descendants and most do not. A population under
+   * pure drift with a steady stream of fresh immigrants keeps roughly as many
+   * lines as have arrived, however far the mean of any trait has wandered.
+   */
+  census(): {
+    bodies: number;
+    lines: number;
+    bornMax: number;
+    bornMean: number;
+    trait: Record<string, { mean: number; sd: number }>;
+  } {
+    const lines = new Set<number>();
+    let bornSum = 0;
+    let bornMax = 0;
+    const sums: Record<string, number> = {};
+    const sqs: Record<string, number> = {};
+    const keys = [...TRAIT_KEYS] as string[];
+    for (const k of keys) {
+      sums[k] = 0;
+      sqs[k] = 0;
+    }
+    let n = 0;
+    for (const a of this.agents.values()) {
+      n++;
+      lines.add(a.lineage);
+      bornSum += a.born;
+      if (a.born > bornMax) bornMax = a.born;
+      for (const k of keys) {
+        const v = (a as unknown as Record<string, number>)[k];
+        sums[k] += v;
+        sqs[k] += v * v;
+      }
+    }
+    const trait: Record<string, { mean: number; sd: number }> = {};
+    for (const k of keys) {
+      const mean = n > 0 ? sums[k] / n : 0;
+      const varr = n > 0 ? Math.max(0, sqs[k] / n - mean * mean) : 0;
+      trait[k] = { mean, sd: Math.sqrt(varr) };
+    }
+    return { bodies: n, lines: lines.size, bornMax, bornMean: n > 0 ? bornSum / n : 0, trait };
+  }
+
   private pulseRequests(params: Params): void {
     resetRequestsFast(this.agents.values(), this.agentStore);
     const need = this.needOf;

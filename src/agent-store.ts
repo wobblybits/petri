@@ -82,6 +82,22 @@ export class AgentStore {
   csHeading!: Float64Array;
   csCos!: Float64Array;
   csSin!: Float64Array;
+  /**
+   * Ancestry, which nothing in the sim reads — it exists to be measured.
+   *
+   * Every heritable trait in this project drifts as well as adapts, and with
+   * `CHEM_MUTATE` on thirty-two genes the drift is not small. Nothing here
+   * could previously tell the two apart: a test could show a genome had moved
+   * away from its seed, which is what the scent-genome test does, and that is
+   * equally consistent with selection and with a random walk. `born` and
+   * `lineage` are what make the question answerable — how many rewrites deep a
+   * body is, and which founder it came from.
+   *
+   * `Int32Array` and never read per frame, so this is 8 bytes a body and no
+   * cost in the hot path.
+   */
+  born!: Int32Array;
+  lineage!: Int32Array;
 
   /** Slots < highWater have been allocated at least once (live or freed). */
   private highWater = 0;
@@ -169,6 +185,8 @@ export class AgentStore {
     this.csHeading[slot] = 0;
     this.csCos[slot] = 0;
     this.csSin[slot] = 0;
+    this.born[slot] = 0;
+    this.lineage[slot] = 0;
   }
 
   private growTo(newCapacity: number): void {
@@ -230,6 +248,8 @@ export class AgentStore {
     this.csHeading = growF64(this.csHeading);
     this.csCos = growF64(this.csCos);
     this.csSin = growF64(this.csSin);
+    this.born = growI32(this.born);
+    this.lineage = growI32(this.lineage);
 
     this.capacity = newCapacity;
     if (oldCapacity > 0) this.generation++;

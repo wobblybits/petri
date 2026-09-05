@@ -965,6 +965,13 @@ function nudgeTrait(value: number, range: { min: number; max: number; mutate: nu
 
 function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent): void {
   const assort = child.kind === 'dup';
+  // Depth is one past the deeper parent, so a line's generation count does not
+  // reset every time it crosses with a fresher one. Which line the child is
+  // *of* follows the Con — arbitrary between two parents, but it has to be one
+  // of them and picking at random would make lineage counts a coin-flip rather
+  // than a measurement.
+  child.born = Math.max(conParent.born, dupParent.born) + 1;
+  child.lineage = conParent.lineage;
   for (const key of TRAIT_KEYS) {
     const range = TRAIT_RANGE[key];
     const combined = assort
@@ -979,6 +986,8 @@ function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent): void {
 
 /** Copy one parent onto the child, then the same mutation nudge commute uses. */
 function inheritFromClone(child: Agent, parent: Agent): void {
+  child.born = parent.born + 1;
+  child.lineage = parent.lineage;
   for (const key of TRAIT_KEYS) {
     child[key] = nudgeTrait(parent[key], TRAIT_RANGE[key]);
   }
