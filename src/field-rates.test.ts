@@ -80,10 +80,10 @@ describe('per-channel field rates', () => {
    */
   it('conserves a channel whose decay rate is zero', () => {
     const f = seeded();
-    f.decayRate[CH.eraP] = 0;
-    const before = total(f, CH.eraP);
+    f.decayRate[CH.energy] = 0;
+    const before = total(f, CH.energy);
     for (let i = 0; i < 60; i++) frame(f);
-    const after = total(f, CH.eraP);
+    const after = total(f, CH.energy);
     const decayed = total(f, CH.conP);
 
     expect(Math.abs(after - before) / before, 'a conserved channel drifted').toBeLessThan(1e-5);
@@ -93,7 +93,7 @@ describe('per-channel field rates', () => {
 
   it('spreads a slow channel less far than a fast one', () => {
     const f = seeded();
-    f.diffuseRate[CH.eraP] = 0.25;
+    f.diffuseRate[CH.energy] = 0.25;
     for (let i = 0; i < 40; i++) frame(f);
 
     // Peak height is the readable proxy for how far a blob has spread: the
@@ -102,7 +102,7 @@ describe('per-channel field rates', () => {
     let slowPeak = 0;
     for (let i = 0; i < f.data.length; i += CHANNELS) {
       if (f.data[i + CH.conP] > fastPeak) fastPeak = f.data[i + CH.conP];
-      if (f.data[i + CH.eraP] > slowPeak) slowPeak = f.data[i + CH.eraP];
+      if (f.data[i + CH.energy] > slowPeak) slowPeak = f.data[i + CH.energy];
     }
     expect(slowPeak).toBeGreaterThan(fastPeak * 1.5);
   });
@@ -142,8 +142,8 @@ describe('per-channel field rates', () => {
 
   it('holds the disk mask however the rates are set', () => {
     const f = seeded();
-    f.decayRate[CH.eraP] = 0;
-    f.diffuseRate[CH.eraP] = 1;
+    f.decayRate[CH.energy] = 0;
+    f.diffuseRate[CH.energy] = 1;
     // A tight disk around the deposit: everything outside it must stay zero,
     // including the channel that never decays.
     f.setWorldBound(AT.x, AT.y, 200);
