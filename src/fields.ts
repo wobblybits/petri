@@ -702,6 +702,63 @@ export class Fields {
   }
 
   /**
+   * Gray-Scott between two channels: `u + 2v -> 3v`, fed and killed.
+   *
+   *     uvv = u * v * v
+   *     u  +=  -uvv + feed * (1 - u)
+   *     v  +=   uvv - (feed + kill) * v
+   *
+   * What it buys is the one thing four independent decaying blobs cannot do.
+   * As it stands every channel is a hill around whoever is emitting, so what a
+   * body smells is always *who is there* — the field carries information but
+   * does not hold any of its own. A reaction puts local maxima where nobody is
+   * standing, travelling fronts, and regions that have just been used up and
+   * are briefly unusable. Signal comes apart from source, and "over there" can
+   * mean something no emitter is saying.
+   *
+   * Two things it needs to work at all, both of which are the caller's job.
+   * The species must diffuse at different rates — `diffuseRate` exists partly
+   * for this, and Gray-Scott wants the substrate at roughly twice the
+   * activator; equal rates have no instability to find and simply blur. And
+   * `feed`/`kill` live in a thin sliver of their own plane, roughly F in
+   * [0.01, 0.09] and k in [0.045, 0.07], with the interesting behaviour in a
+   * fraction of that. Outside it the pattern is a uniform wash either way,
+   * which is why this is off unless someone deliberately turns it on rather
+   * than something with a plausible-looking default.
+   *
+   * `u` is normalised toward 1 by the feed term, so this expects a channel
+   * whose natural scale is about 1 — `CH.energy` read against `cellCap`, or a
+   * signal channel that is not also carrying deposits at peaks of ten. Handed
+   * a raw signal channel it will not explode, because `soft`-free arithmetic
+   * on bounded inputs stays bounded, but the pattern will sit outside its
+   * regime and do nothing interesting.
+   */
+  react(uCh: number, vCh: number, feed: number, kill: number, dt: number): void {
+    if (!(dt > 0) || uCh === vCh) return;
+    if (!(feed > 0) && !(kill > 0)) return;
+    if (this.hiI < this.loI) return;
+    const d = this.data;
+    const { cols } = this;
+    const { lo: sLo, hi: sHi } = this.spans();
+    const f = feed * dt;
+    const kv = (feed + kill) * dt;
+    for (let j = this.loJ; j <= this.hiJ; j++) {
+      const rowBase = j * cols * CHANNELS;
+      const a0 = sLo[j] > this.loI ? sLo[j] : this.loI;
+      const b0 = sHi[j] < this.hiI ? sHi[j] : this.hiI;
+      for (let i = a0, k = rowBase + a0 * CHANNELS; i <= b0; i++, k += CHANNELS) {
+        const u = d[k + uCh];
+        const v = d[k + vCh];
+        const uvv = u * v * v * dt;
+        const nu = u - uvv + f * (1 - u);
+        const nv = v + uvv - kv * v;
+        d[k + uCh] = nu > 0 ? nu : 0;
+        d[k + vCh] = nv > 0 ? nv : 0;
+      }
+    }
+  }
+
+  /**
    * Set one channel to `value` across every cell inside the live disk, and
    * open the box over it.
    *
