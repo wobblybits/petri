@@ -22,6 +22,31 @@ export interface Params {
    * agents from *other* nets. Flocking separation only ever applied within a
    * net, so before this nothing pushed separate nets apart at all.
    */
+  /**
+   * Personal space: a local force holding bodies off each other.
+   *
+   * Measured to cost reproduction, together with `flockAlign`, and neither
+   * alone. Over 45s of a 250-body soup, counting how deep the average lineage
+   * gets (`Sim.census().bornMean`):
+   *
+   *     declutter 1.4, flockAlign 5.5   ->  0.36    (as shipped)
+   *     declutter 0,   flockAlign 5.5   ->  0.29
+   *     declutter 1.4, flockAlign 0     ->  0.42
+   *     declutter 0,   flockAlign 0     ->  6.54
+   *
+   * Eighteen times the generation depth with both off, and almost nothing from
+   * turning off either one. The mechanism is visible in the wire counts: at the
+   * shipped values only 2 of 93 wires are principal-to-principal and none are
+   * Con-Dup, while 98% of bodies can afford a rewrite and the ground is still
+   * at capacity. Bodies are rich and idle — they are not meeting. Personal
+   * space holds them apart and alignment turns a head-on approach into a shoal
+   * swimming the same way, and a commute needs two principals nose to nose.
+   *
+   * Left as they are, because these are what make a settled net look settled
+   * and a pond look like a pond, and that is a real thing to want. But it is a
+   * direct trade against evolution and it should be a decision rather than a
+   * surprise.
+   */
   declutter: number;
   /**
    * Activity LOD budget. Settled taut islands run the cheap disc+span path
@@ -151,6 +176,8 @@ export interface Params {
   swimNoise: number;
   drag: number;
   angDrag: number;
+  /** Shoaling. See `declutter` for what this costs reproduction, and why the
+   *  two only matter together. */
   flockAlign: number;
   flockSep: number;
   maxAgents: number;
