@@ -171,24 +171,50 @@ export function atCap(a: { extra: number; energyCap: number }): boolean {
 }
 
 /**
- * Able to pay its side of a rewrite. Not the same as being full.
+ * What this end owes toward a rewrite that builds bodies.
  *
  * A heritable `energyCap` can sit below `REWRITE_SHARE` — breeding walks it
  * down to `EXTRA_CAP * 0.5`. Asking for a whole share then makes a full tank
  * still unable to commute, so leftover principal pairs sit idle after a few
- * copies. A body pays the share, or everything it can hold, whichever is
- * smaller; `spendExtra` already floors at zero.
+ * copies. A body owes the share, or everything it can hold, whichever is
+ * smaller — otherwise it carries a debt it is physically unable to settle.
  */
-export function canPayShare(a: { extra: number; energyCap: number }): boolean {
-  const share = Math.min(REWRITE_SHARE, a.energyCap);
-  return a.extra >= share - EXTRA_FULL_EPS;
+export function rewriteShareOf(a: { energyCap: number }): number {
+  return Math.min(REWRITE_SHARE, a.energyCap);
 }
 
-export function extrasOf(
-  a: { extra: number; energyCap: number },
-  b: { extra: number; energyCap: number },
-): number {
-  return (canPayShare(a) ? 1 : 0) + (canPayShare(b) ? 1 : 0);
+/**
+ * Has this end's stake been met?
+ *
+ * `paid` is what the escrow already holds for it. `canPayShare` is the same
+ * question asked of a body's own tank, which is the special case of a pair
+ * that pays outright rather than accumulating.
+ */
+export function stakeMet(a: { energyCap: number }, paid: number): boolean {
+  return paid >= rewriteShareOf(a) - EXTRA_FULL_EPS;
+}
+
+/** Able to pay its side of a rewrite outright. Not the same as being full. */
+export function canPayShare(a: { extra: number; energyCap: number }): boolean {
+  return stakeMet(a, a.extra);
+}
+
+/**
+ * Move up to `want` out of a body and report what actually moved.
+ *
+ * Bounded by `spareEnergy`, which is the same rule transport uses: a body in
+ * debt contributes nothing, and contributing never puts one into debt. That is
+ * what keeps a pair from starving itself to fund a rewrite it may not live to
+ * see — and why this cannot be written as `spendExtra`'s floor at zero, which
+ * would let a body in debt pay anyway.
+ */
+export function payToward(a: SlotBody, want: number): number {
+  if (!(want > 0)) return 0;
+  const spare = spareEnergy(a);
+  const give = want < spare ? want : spare;
+  if (give <= 0) return 0;
+  a.extra -= give;
+  return give;
 }
 
 export function spendExtra(a: { extra: number }): void {
@@ -804,9 +830,15 @@ export function rescueNeed(a: SlotBody): number {
  * Measured against the share it has to pay, not against the storage cap — it
  * is asking for enough to commute, not for a full tank. Per end rather than
  * per pair: an end holding 0.8 is short 0.2 no matter what its partner holds.
+ *
+ * `banked` is what a redex escrow already holds against this end, so an ask
+ * shrinks as the stake fills instead of restating the whole share every frame
+ * and out-pulling redexes that have got nowhere. A body in debt still asks for
+ * enough to clear it *and* pay, which is why this reads `extra` rather than
+ * `spareEnergy`.
  */
-export function redexNeed(a: SlotBody): number {
-  const gap = REWRITE_SHARE - a.extra;
+export function redexNeed(a: SlotBody, banked = 0): number {
+  const gap = rewriteShareOf(a) - banked - a.extra;
   return gap > 0 ? gap : 0;
 }
 

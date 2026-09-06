@@ -62,18 +62,18 @@ import {
   agentValue,
   deathYield,
   EnergyGrid,
-  extrasOf,
-  canPayShare,
   flowChargesFast,
   harvestSlotsFast,
+  payToward,
   rescueNeed,
   redexNeed,
   resetRequestsFast,
   rewriteCost,
+  rewriteShareOf,
   rewriteYield,
   seedRequest,
   settlePool,
-  spendExtra,
+  stakeMet,
   spreadRequestsFast,
   tickUpkeepFast,
   WireAdjacency,
@@ -175,6 +175,23 @@ export function scentTurnBoost(trail: number): number {
 
 /** Monotonic, process-wide. Only ever compared for equality. */
 let nextSimId = 1;
+
+/**
+ * Energy two ends of a ready redex have put up toward their commute, held
+ * against the wire that joins them. See `Sim.accrueRedexes`.
+ *
+ * `a`/`b` are the agent ids the stakes came from, so a refund can find them
+ * without the wire; `x`/`y` are where the redex last stood, for the case where
+ * it cannot.
+ */
+type RedexEscrow = {
+  a: number;
+  b: number;
+  paidA: number;
+  paidB: number;
+  x: number;
+  y: number;
+};
 
 export class Sim {
   /** Substeps per frame. One constraint iteration each. */
@@ -382,6 +399,14 @@ export class Sim {
   /** Agents in an active rewrite — their incident ropes are kinematic. */
   private rewriteFrozen = new Set<number>();
   /**
+   * Energy banked against a ready redex, keyed by wire id. See `accrueRedexes`.
+   *
+   * This is real energy that has left its bodies and is not yet in the ground
+   * or in a new body, so anything totalling the pond has to count it — that is
+   * what `escrowTotal` is for.
+   */
+  private readonly escrow = new Map<number, RedexEscrow>();
+  /**
    * Physics detail. When a view is passed, FAR agents keep disc contacts and a
    * chord constraint but skip SAT, rope XPBD, wire clearance, and Hertzian.
    * Missing view = everyone NEAR, which is what tests and a paused layout want.
@@ -472,6 +497,9 @@ export class Sim {
     this.agentStore = new AgentStore();
     this.graph.clear();
     this.rewrites = [];
+    // Not `refundEscrows`: the bodies and the ground are both being thrown
+    // away on the next two lines, so there is nowhere for a stake to go back to.
+    this.escrow.clear();
     this.fields.clear();
     this.energy.clear();
     this.time = 0;
@@ -726,6 +754,7 @@ export class Sim {
     // one marker it was the second-largest phase in the frame and there was no
     // way to tell which quarter of it was the cost.
     this.pulseRequests(params);
+    this.accrueRedexes(params);
     this.startRewrites(params);
     this.tickRewrites(params, t);
     Sim.phase('rewrites');
@@ -4076,6 +4105,134 @@ export class Sim {
   }
 
   /**
+   * Bank what a ready redex can afford now, so meeting poor is not the same as
+   * never meeting.
+   *
+   * Affordability used to be an instantaneous gate. A pair became ready, was
+   * asked for both shares in that one frame, and if it could not pay, the
+   * meeting was lost — the need it had posted evaporated with it and the two
+   * drifted on. That made "rich at the right instant" the selected trait
+   * rather than "able to get rich", which is a much less interesting thing for
+   * a soup to be good at.
+   *
+   * Two facts make an escrow the natural fix. `shrinkProgress` is monotone in
+   * the wire's age, so a ready redex does not become unready by getting older;
+   * and `pulseRequests` is already pumping energy toward exactly these ends.
+   * What the pair lacked was somewhere to put it as it arrived.
+   *
+   * The pot belongs to the *wire*, not to the moment. It survives a lapse in
+   * readiness — ends jostled apart by declutter, a stun — because the wire
+   * surviving is what still makes the two a redex. It is refunded when the
+   * wire goes, which `kill` triggers through `detachAgent`, so a partner dying
+   * mid-accrual returns the stake instead of burning it.
+   *
+   * Runs after `pulseRequests` and before `startRewrites`, which keeps the
+   * invariant the phase order was chosen for: energy that arrives to complete
+   * a redex is spent on the frame it lands.
+   */
+  private accrueRedexes(params: Params): void {
+    // Turned off mid-run: hand back what is held rather than freezing it in a
+    // pot nothing will ever spend.
+    if (params.rewriteDuration <= 0) {
+      this.refundEscrows();
+      return;
+    }
+    const busy = this.rewriteBusy();
+    for (const wire of this.graph.wires.values()) {
+      const A = this.agents.get(wire.a.id);
+      const B = this.agents.get(wire.b.id);
+      if (!A || !B) continue;
+      if (busy.has(A.id) || busy.has(B.id)) continue;
+      if (!this.principalRedexReady(wire, A, B, params)) continue;
+      if (rewriteCost(detectRule(A.kind, B.kind)) <= 0) continue;
+      let e = this.escrow.get(wire.id);
+      // A wire id outliving a `rebind` would otherwise hand one pair's stake
+      // to another. Refund and start the pot again under the new ends.
+      if (e && (e.a !== A.id || e.b !== B.id)) {
+        this.refundEscrow(e);
+        e = undefined;
+      }
+      if (!e) {
+        e = { a: A.id, b: B.id, paidA: 0, paidB: 0, x: A.x, y: A.y };
+        this.escrow.set(wire.id, e);
+      }
+      // Where to put a refund if both ends are gone by the time it lapses.
+      e.x = A.x;
+      e.y = A.y;
+      /*
+       * A body clawing its way out of debt keeps what reaches it.
+       *
+       * Without this the pot swallows rescue energy on the frame it lands —
+       * `pulseRequests` runs first, so `flowCharges` has just delivered it —
+       * and the body can never climb back out. It would ask louder, be fed,
+       * be emptied again, and starve with a full stake to its name. The
+       * `recovering` latch is already exactly this question, held across the
+       * zero crossing by `rescueNeed`, so paying is simply suspended until it
+       * is back on its feet.
+       */
+      if (!A.recovering) e.paidA += payToward(A, rewriteShareOf(A) - e.paidA);
+      if (!B.recovering) e.paidB += payToward(B, rewriteShareOf(B) - e.paidB);
+    }
+    this.sweepEscrows();
+  }
+
+  /** Drop the pots whose wire has gone, handing back what they held. */
+  private sweepEscrows(): void {
+    if (this.escrow.size === 0) return;
+    for (const [id, e] of this.escrow) {
+      if (this.graph.wires.has(id)) continue;
+      this.refundEscrow(e);
+      this.escrow.delete(id);
+    }
+  }
+
+  /** Hand back every stake and forget the pots. */
+  private refundEscrows(): void {
+    if (this.escrow.size === 0) return;
+    for (const e of this.escrow.values()) this.refundEscrow(e);
+    this.escrow.clear();
+  }
+
+  private refundEscrow(e: RedexEscrow): void {
+    this.repay(e.a, e.paidA, e.x, e.y);
+    this.repay(e.b, e.paidB, e.x, e.y);
+  }
+
+  /**
+   * Give a stake back to the body that put it up, or to the ground where the
+   * redex stood if that body is gone.
+   *
+   * Overfill spills onto the ground rather than evaporating, for the reason
+   * `tickUpkeep` gives at the only other site that can push a body past its
+   * cap: a hole in the conservation the rest of the economy is careful about
+   * is exactly how a mechanism quietly stops being worth anything.
+   */
+  private repay(id: number, amount: number, x: number, y: number): void {
+    if (!(amount > 0)) return;
+    const a = this.agents.get(id);
+    if (!a) {
+      this.energy.addAt(x, y, amount);
+      return;
+    }
+    const room = a.energyCap - a.extra;
+    const give = amount < room ? amount : room;
+    if (give > 0) a.extra += give;
+    if (amount - give > 0) this.energy.addAt(a.x, a.y, amount - give);
+  }
+
+  /**
+   * Energy held in redex escrows, which is in neither a body nor the ground.
+   *
+   * Anything totalling the pond has to add this or it will read a pair saving
+   * up for a commute as a leak.
+   */
+  escrowTotal(): number {
+    let total = 0;
+    for (const e of this.escrow.values()) total += e.paidA + e.paidB;
+    return total;
+  }
+
+  /**
    * The net's demand for energy, as one field, and one hop of flow along it.
    *
    * Two things want energy and they compete on the same scale. A body that has
@@ -4175,12 +4332,18 @@ export class Sim {
         if (!A || !B) continue;
         if (busy.has(A.id) || busy.has(B.id)) continue;
         if (!this.principalRedexReady(wire, A, B, params)) continue;
-        const cost = rewriteCost(detectRule(A.kind, B.kind));
-        if (cost <= 0 || extrasOf(A, B) >= cost) continue;
-        for (const end of [A, B]) {
-          const r = redexNeed(end);
-          if (r > (need.get(end.id) ?? 0)) need.set(end.id, r);
-        }
+        if (rewriteCost(detectRule(A.kind, B.kind)) <= 0) continue;
+        // Per end against its own stake, not the old pair-wide share count:
+        // an end that has already banked its half should stop asking while its
+        // partner keeps on, which is the whole point of accumulating.
+        const e = this.escrow.get(wire.id);
+        const paidA = e ? e.paidA : 0;
+        const paidB = e ? e.paidB : 0;
+        if (stakeMet(A, paidA) && stakeMet(B, paidB)) continue;
+        const rA = redexNeed(A, paidA);
+        if (rA > (need.get(A.id) ?? 0)) need.set(A.id, rA);
+        const rB = redexNeed(B, paidB);
+        if (rB > (need.get(B.id) ?? 0)) need.set(B.id, rB);
       }
     }
 
@@ -4529,18 +4692,15 @@ export class Sim {
       if (busy.has(A.id) || busy.has(B.id)) continue;
       if (!this.principalRedexReady(wire, A, B, params)) continue;
       const rule = detectRule(A.kind, B.kind);
-      const cost = rewriteCost(rule);
-      if (cost > 0) {
-        if (extrasOf(A, B) < cost) continue;
-        let need = cost;
-        if (canPayShare(A) && need > 0) {
-          spendExtra(A);
-          need--;
-        }
-        if (canPayShare(B) && need > 0) {
-          spendExtra(B);
-          need--;
-        }
+      if (rewriteCost(rule) > 0) {
+        // Already paid, or not yet. `accrueRedexes` ran this frame and took
+        // whatever the two could spare, so the pot is as full as it can be —
+        // a pair rich enough to cover both shares outright filled it on the
+        // frame it became ready and fires here exactly as it always did.
+        const e = this.escrow.get(wire.id);
+        if (!e || !stakeMet(A, e.paidA) || !stakeMet(B, e.paidB)) continue;
+        // Spent: the stake becomes the new bodies, so it must not be refunded.
+        this.escrow.delete(wire.id);
       }
       // Cancel only what the two are doing relative to each other. Zeroing
       // both outright pinned a collapsing pair to the world for the whole

@@ -11,11 +11,12 @@ import {
   EXTRA_CAP,
   EXTRA_FLOOR,
   extraCapFor,
-  extrasOf,
   flowCharges,
   harvestSlots,
   hungerNeed,
   redexNeed,
+  rewriteShareOf,
+  stakeMet,
   rescueNeed,
   rescueTarget,
   REQUEST_DECAY,
@@ -411,7 +412,10 @@ describe('request gradient', () => {
     const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
     expect(flowCharges(list, adj)).toBe(0);
     expect(agents.get(1)!.extra).toBe(1);
-    expect(extrasOf(agents.get(1)!, agents.get(2)!)).toBe(1);
+    expect(canPayShare(agents.get(1)!), 'the donor could have paid a share').toBe(true);
+    expect(canPayShare(agents.get(2)!), 'the other could not, and got nothing to change that').toBe(
+      false,
+    );
   });
 
   it('reads hunger straight off the debt', () => {
@@ -726,7 +730,13 @@ describe('sim energy', () => {
     sim.wire(c.id, 'l', e.id, 'p', params);
     for (let f = 0; f < 240; f++) sim.step(1 / 60, params);
     expect(e.extra).toBe(0);
-    expect(c.extra >= 1 || d.extra >= 1).toBe(true);
+    // It used to end up in one end's tank, where it sat: a pair needs both
+    // shares and one full end could not spend a thing. It is now staked on the
+    // redex itself, which is the same walk with somewhere to put the energy at
+    // the end of it. Still short of the two shares a commute costs, so the
+    // pair has not fired — it is saving, not idle.
+    expect(sim.escrowTotal(), 'the neighbour extra reached the redex').toBeCloseTo(1, 6);
+    expect(c.extra + d.extra, 'and is committed rather than banked').toBeCloseTo(0, 6);
     expect(sim.agents.size).toBe(3);
   });
 
@@ -813,7 +823,11 @@ describe('sim energy', () => {
     expect(canPayShare(cramped)).toBe(true);
     const roomy = body(2, 0, 0, EXTRA_CAP * 0.5, 0, false, 'con', EXTRA_CAP);
     expect(canPayShare(roomy), 'a default tank still needs a whole share').toBe(false);
-    expect(extrasOf(cramped, cramped)).toBe(2);
+    expect(rewriteShareOf(cramped), 'and owes only what it can hold').toBeCloseTo(
+      EXTRA_CAP * 0.5,
+      6,
+    );
+    expect(stakeMet(cramped, cramped.extra), 'so a full small tank meets its stake').toBe(true);
   });
 
   it('fills an Era past a full Con from the ground and along a wire', () => {
