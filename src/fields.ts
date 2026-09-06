@@ -854,6 +854,43 @@ export class Fields {
    * being emitted". Pass a channel to ask about one specifically, the ground
    * included.
    */
+  /**
+   * All four channels at one point, into `out[off .. off+4)`.
+   *
+   * `sample` four times over would redo the grid transform, the two floors and
+   * the four corner indices each time, for readings that always come from the
+   * same four cells. This is the same arithmetic once and four lerps after it.
+   *
+   * It exists because the state vector needs the channels *separately*. A body
+   * has only ever had `trail` — the taste-weighted sum — which is one number,
+   * so nothing could condition on which channel it was smelling, only on how
+   * much it liked the mixture. Emitting on one channel because you smell
+   * another was outside the language.
+   */
+  sampleAll(x: number, y: number, out: Float64Array, off = 0): void {
+    const { gx, gy } = this.toGrid(x, y);
+    const i0 = Math.floor(gx);
+    const j0 = Math.floor(gy);
+    const tx = gx - i0;
+    const ty = gy - j0;
+    const w00 = (1 - tx) * (1 - ty);
+    const w10 = tx * (1 - ty);
+    const w01 = (1 - tx) * ty;
+    const w11 = tx * ty;
+    const a = this.cell(i0, j0, 0);
+    const b = this.cell(i0 + 1, j0, 0);
+    const c = this.cell(i0, j0 + 1, 0);
+    const e = this.cell(i0 + 1, j0 + 1, 0);
+    const d = this.data;
+    for (let ch = 0; ch < CHANNELS; ch++) {
+      out[off + ch] =
+        (a < 0 ? 0 : d[a + ch] * w00) +
+        (b < 0 ? 0 : d[b + ch] * w10) +
+        (c < 0 ? 0 : d[c + ch] * w01) +
+        (e < 0 ? 0 : d[e + ch] * w11);
+    }
+  }
+
   peak(ch?: number): number {
     let m = 0;
     const d = this.data;

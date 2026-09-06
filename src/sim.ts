@@ -10,6 +10,17 @@ import {
   slotsFor,
   stemRoot,
   stemOffset,
+  B_STATE,
+  CHEM_LEN,
+  IN_BOUND,
+  IN_DEMAND,
+  IN_DIMS,
+  IN_FULL,
+  IN_SENSE,
+  STATE_DIMS,
+  W_IN,
+  W_NET,
+  W_SELF,
   effEmit,
   effTaste,
   flockGain,
@@ -4103,7 +4114,160 @@ export class Sim {
     adj.build(list.length, index, () => this.graph.wires.values());
     spreadRequestsFast(list, this.agentStore, adj);
     flowChargesFast(list, this.agentStore, adj, (from, to, amount) => this.recoil(from, to, amount));
+    Sim.phase('pulseRequests');
+    this.updateState(list, adj);
+    Sim.phase('state');
   }
+
+  /**
+   * One round of message passing: every body's `h` from its inputs, its own
+   * last value, and the mean of its wired neighbours'.
+   *
+   *     h <- phi( Wx.x + Wh.h + Wn.mean(h_j) + b )
+   *
+   * One round per frame, not a relaxation to convergence. The recurrence is
+   * across frames rather than within one, which is both cheaper and more
+   * expressive than iterating: state persists, so a body can integrate over
+   * time rather than recomputing itself from scratch. Information travels one
+   * wire-hop a frame, sixty hops a second, which crosses any net worth having.
+   *
+   * *Mean* of the neighbours, not sum. A sum scales with degree, so the same
+   * genome saturates `phi` at a hub and barely moves a leaf — behaviour
+   * differing by position for a reason that is not about position. `BOUND`
+   * already carries degree, bounded and on purpose.
+   *
+   * Read *after* `spreadRequests` and `flowCharges`, so `DEMAND` and `FULL` are
+   * this frame's. `sense` and `trail` are last frame's, written by the steer
+   * pass — a frame of latency in smell that steering has always had.
+   *
+   * `hPrev` because every body has to see the same generation of its
+   * neighbours. Updating in place would make the answer depend on iteration
+   * order, and the order is the roster, which changes whenever anything is
+   * born.
+   */
+  private hPrev = new Float64Array(0);
+  private readonly stateInput = new Float64Array(IN_DIMS);
+  private readonly stateMean = new Float64Array(STATE_DIMS);
+
+  private updateState(list: Agent[], adj: WireAdjacency): void {
+    const n = list.length;
+    if (n === 0) return;
+    const store = this.agentStore;
+    const H = store.hAll;
+    const SENSE = store.senseAll;
+    /*
+     * Straight into `chemAll` with a slot offset, rather than through
+     * `Agent.chem`.
+     *
+     * That accessor hands back a `subarray` view per body, and this reads
+     * eighty weights out of it per body per frame. Through the view the pass
+     * cost 16.5 ms at 20k bodies — 825 ns a body for eighty multiplies, which
+     * is an order of magnitude off what the arithmetic is worth. It is the
+     * same finding the store conversions in this file's history keep making,
+     * and the same fix.
+     */
+    const CHEM = store.chemAll;
+    const S = STATE_DIMS;
+    if (this.hPrev.length < n * S) this.hPrev = new Float64Array(n * S);
+    const prev = this.hPrev;
+    const slotOf = this.slotBuf.length >= n ? this.slotBuf : (this.slotBuf = new Int32Array(n));
+    for (let i = 0; i < n; i++) {
+      const s = list[i].slot;
+      slotOf[i] = s;
+      const po = i * S;
+      const ho = s * S;
+      for (let d = 0; d < S; d++) prev[po + d] = H[ho + d];
+    }
+
+    const { off, nei } = adj;
+    const EXTRA = store.extra;
+    const CAP = store.energyCap;
+    const REQUEST = store.request;
+    const BOUND_OF = store.bound;
+    const X = store.x;
+    const Y = store.y;
+    const gScale = this.groundScale;
+    const x = this.stateInput;
+    const mean = this.stateMean;
+    for (let i = 0; i < n; i++) {
+      const slot = slotOf[i];
+      const g = slot * CHEM_LEN;
+
+      /*
+       * Sampling is skipped entirely unless this genome reads the field. A
+       * bilinear sample is four scattered reads into a sixteen-megabyte array
+       * that will not be in cache, once a body, for a value nearly every
+       * genome multiplies by zero — `Wx`'s sense columns seed to zero, because
+       * the one seeded pathway runs through `IN_DEMAND`. The inputs are zeroed
+       * rather than left reading a stale `SENSE`, so behaviour never depends
+       * on when a body last happened to sample.
+       */
+      let reads = false;
+      for (let d = 0; d < S && !reads; d++) {
+        const wi = g + W_IN + d * IN_DIMS + IN_SENSE;
+        for (let c = 0; c < 4; c++) {
+          if (CHEM[wi + c] !== 0) {
+            reads = true;
+            break;
+          }
+        }
+      }
+      if (reads) {
+        const so = slot * 4;
+        this.fields.sampleAll(X[slot], Y[slot], SENSE, so);
+        SENSE[so + CH.energy] *= gScale;
+        x[IN_SENSE] = SENSE[so];
+        x[IN_SENSE + 1] = SENSE[so + 1];
+        x[IN_SENSE + 2] = SENSE[so + 2];
+        x[IN_SENSE + 3] = SENSE[so + 3];
+      } else {
+        x[IN_SENSE] = 0;
+        x[IN_SENSE + 1] = 0;
+        x[IN_SENSE + 2] = 0;
+        x[IN_SENSE + 3] = 0;
+      }
+      const cap = CAP[slot];
+      const full = cap > 0 ? EXTRA[slot] / cap : 0;
+      x[IN_FULL] = full <= 0 ? 0 : full >= 1 ? 1 : full;
+      x[IN_BOUND] = BOUND_OF[slot];
+      const r = REQUEST[slot];
+      x[IN_DEMAND] = r <= 0 ? 0 : r >= 1 ? 1 : r;
+
+      /*
+       * The neighbour mean is a property of the body, not of the dimension
+       * being computed, so it is gathered once rather than inside the `d`
+       * loop. The obvious way round cost four times as much, because each of
+       * the four output dimensions re-walked the whole adjacency.
+       */
+      const lo = off[i];
+      const hi = off[i + 1];
+      const deg = hi - lo;
+      if (deg > 0) {
+        for (let k = 0; k < S; k++) mean[k] = 0;
+        for (let e = lo; e < hi; e++) {
+          const base = nei[e] * S;
+          for (let k = 0; k < S; k++) mean[k] += prev[base + k];
+        }
+        for (let k = 0; k < S; k++) mean[k] /= deg;
+      }
+
+      const po = i * S;
+      const ho = slot * S;
+      for (let d = 0; d < S; d++) {
+        let v = CHEM[g + B_STATE + d];
+        const wi = g + W_IN + d * IN_DIMS;
+        for (let k = 0; k < IN_DIMS; k++) v += CHEM[wi + k] * x[k];
+        const ws = g + W_SELF + d * S;
+        for (let k = 0; k < S; k++) v += CHEM[ws + k] * prev[po + k];
+        if (deg > 0) {
+          const wn = g + W_NET + d * S;
+          for (let k = 0; k < S; k++) v += CHEM[wn + k] * mean[k];
+        }
+        H[ho + d] = v / (1 + (v < 0 ? -v : v));
+      }
+    }
+  }
+
 
   /**
    * The sender's own `transportRecoil` is the kick's size — it is the one

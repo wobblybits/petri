@@ -1,4 +1,4 @@
-import { CHEM_LEN, EMIT, EMIT_SLOPE, STATE_DIMS, TASTE, TASTE_SLOPE, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
+import { B_STATE, CHEM_LEN, EMIT, E_OUT, STATE_DIMS, TASTE, T_OUT, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
 import type { AgentStore } from './agent-store.ts';
 import { DEBT_CAP_MAX, EXTRA_CAP } from './energy.ts';
 import { CH, VOICE } from './fields.ts';
@@ -1025,7 +1025,7 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, assort: boolean): voi
    * point of the unit sum is that saying one thing costs you another.
    */
   c[EMIT + CH.energy] = 0;
-  for (let d = 0; d < STATE_DIMS; d++) c[EMIT_SLOPE + CH.energy * STATE_DIMS + d] = 0;
+  for (let d = 0; d < STATE_DIMS; d++) c[E_OUT + CH.energy * STATE_DIMS + d] = 0;
   let sum = 0;
   for (const k0 of VOICE) {
     const k = EMIT + k0;
@@ -1044,10 +1044,23 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, assort: boolean): voi
    * pressure — both are things worth being able to evolve into, and neither is
    * expressible if the slope is held to the same shape as the base.
    */
-  for (let k = EMIT_SLOPE; k < EMIT_SLOPE + 4 * STATE_DIMS; k++) {
+  /*
+   * Every weight is bounded, and it has to be for the same reason the state
+   * is: `phi` keeps `h` inside (-1, 1), so a bounded weight against a bounded
+   * activation is a bounded product, and the mutation range means something.
+   * Leave any matrix unclamped and one lineage's runaway entry produces a
+   * number the field cannot hold.
+   *
+   * `E` gets the tighter bound. One unit of voice is a body's whole budget, so
+   * a coefficient of one against a saturated state can silence a channel or
+   * double it and no more; `T` and the state matrices are allowed to be
+   * louder, because a taste weight is compared against other taste weights
+   * rather than spent.
+   */
+  for (let k = E_OUT; k < E_OUT + 4 * STATE_DIMS; k++) {
     c[k] = Math.min(CHEM_SLOPE_MAX, Math.max(-CHEM_SLOPE_MAX, c[k]));
   }
-  for (let k = TASTE_SLOPE; k < TASTE_SLOPE + 4 * STATE_DIMS; k++) {
+  for (let k = T_OUT; k < B_STATE + STATE_DIMS; k++) {
     c[k] = Math.min(CHEM_TASTE_MAX, Math.max(-CHEM_TASTE_MAX, c[k]));
   }
 }

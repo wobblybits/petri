@@ -16,7 +16,10 @@ import type { AgentKind } from './agents.ts';
  * Thirty-two is a structural fact about the chem layout (emit/taste, then a
  * slopes, four channels each), not a tunable — safe to duplicate.
  */
-const CHEM_LEN = 40;
+const CHEM_LEN = 104;
+/** Width of the recurrent state `h`, and of one body's cached scent reading. */
+const STATE_W = 4;
+const SENSE_W = 4;
 
 export const KIND_CODE: Record<AgentKind, number> = { era: KIND_ERA, dup: KIND_DUP, con: KIND_CON };
 export const CODE_KIND: AgentKind[] = [];
@@ -107,6 +110,17 @@ export class AgentStore {
    * topology actually changes, which is what it depends on.
    */
   bound!: Float64Array;
+  /**
+   * The recurrent internal state, `STATE_W` floats a body.
+   *
+   * State, not genome: it is not inherited and not mutated, it is what the
+   * genome's matrices compute from one frame to the next. Zero for a fresh
+   * body, which with zero-seeded matrices makes a newborn behave exactly as a
+   * bodiless one did.
+   */
+  hAll!: Float64Array;
+  /** Last frame's four raw channel readings at each body's position. */
+  senseAll!: Float64Array;
 
   /** Slots < highWater have been allocated at least once (live or freed). */
   private highWater = 0;
@@ -197,6 +211,8 @@ export class AgentStore {
     this.born[slot] = 0;
     this.lineage[slot] = 0;
     this.bound[slot] = 0;
+    this.hAll.fill(0, slot * STATE_W, slot * STATE_W + STATE_W);
+    this.senseAll.fill(0, slot * SENSE_W, slot * SENSE_W + SENSE_W);
   }
 
   private growTo(newCapacity: number): void {
@@ -261,6 +277,12 @@ export class AgentStore {
     this.born = growI32(this.born);
     this.lineage = growI32(this.lineage);
     this.bound = growF64(this.bound);
+    const newH = new Float64Array(newCapacity * STATE_W);
+    if (this.hAll) newH.set(this.hAll.subarray(0, live * STATE_W));
+    this.hAll = newH;
+    const newSense = new Float64Array(newCapacity * SENSE_W);
+    if (this.senseAll) newSense.set(this.senseAll.subarray(0, live * SENSE_W));
+    this.senseAll = newSense;
 
     this.capacity = newCapacity;
     if (oldCapacity > 0) this.generation++;

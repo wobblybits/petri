@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BOUND, EMIT, EMIT_SLOPE, FULL, HERE, NEED, STATE_DIMS, TASTE, TASTE_SLOPE, bareBody, effEmit, effTaste, seedChem, type Agent } from './agents.ts';
+import { EMIT, E_OUT, STATE_DIMS, TASTE, T_OUT, bareBody, effEmit, effTaste, seedChem, type Agent } from './agents.ts';
 import { CH } from './fields.ts';
 import { CHEM_TASTE_MAX } from './rewrite.ts';
 import { defaultParams } from './params.ts';
@@ -80,135 +80,62 @@ describe('scent genome', () => {
     }
   });
 
-  it('modulates what a body says by how its neighbourhood is doing', () => {
+  /*
+   * A body is a small recurrent network now, so the unit tests split in two:
+   * what the output matrices do with a state (here, with `h` set by hand), and
+   * what the input matrix and the wire graph do to produce one (further down,
+   * which needs a Sim because it needs neighbours).
+   */
+  it('maps state to what it says through E, and to what it listens for through T', () => {
     const params = defaultParams();
-    const quiet = bareBody(seedChem('con', params), { request: 0, extra: 0, trail: 0 });
-    const needy = bareBody(seedChem('con', params), { request: 1, extra: 0, trail: 0 });
-    // Seeded, the slope is zero and state changes nothing at all.
-    expect(effEmit(needy, 0)).toBe(effEmit(quiet, 0));
-    expect(effTaste(needy, 1)).toBe(effTaste(quiet, 1));
+    const chem = seedChem('con', params);
+    // Say ch0 when h0 is up, listen for ch1 when h2 is down.
+    chem[E_OUT + CH.conP * STATE_DIMS + 0] = 1;
+    chem[T_OUT + CH.dupP * STATE_DIMS + 2] = -2;
+    const base = chem[EMIT + CH.conP];
+    const tBase = chem[TASTE + CH.dupP];
 
-    // Give it something to say under pressure: quiet when fed, loud on the
-    // aux channel when its net is hungry — and listening harder for the
-    // ground while it is at it, which is the one thing a hungry body most
-    // wants to find.
-    needy.chem[EMIT_SLOPE + CH.aux * STATE_DIMS + NEED] = 0.8;
-    needy.chem[TASTE_SLOPE + CH.energy * STATE_DIMS + NEED] = 2;
-    expect(effEmit(needy, CH.aux), 'a needy body should be saying more').toBeGreaterThan(
-      effEmit(quiet, CH.aux),
-    );
-    expect(effTaste(needy, CH.energy), 'and listening harder').toBeGreaterThan(
-      effTaste(quiet, CH.energy),
-    );
+    const rest = bareBody(chem, { h: [0, 0, 0, 0] });
+    const lit = bareBody(chem, { h: [0.5, 0, 0, 0] });
+    const inv = bareBody(chem, { h: [0, 0, 0.5, 0] });
 
-    // Half as needy, half the shift: the response is linear in state.
-    const half = bareBody(Float32Array.from(needy.chem), { request: 0.5, extra: 0, trail: 0 });
-    expect(effEmit(half, CH.aux)).toBeCloseTo(
-      (effEmit(quiet, CH.aux) + effEmit(needy, CH.aux)) / 2,
-      6,
-    );
+    expect(effEmit(rest, CH.conP), 'a zero state is just the base').toBeCloseTo(base, 6);
+    expect(effEmit(lit, CH.conP)).toBeCloseTo(base + 0.5, 6);
+    expect(effTaste(rest, CH.dupP)).toBeCloseTo(tBase, 6);
+    expect(effTaste(inv, CH.dupP)).toBeCloseTo(tBase - 1, 6);
   });
 
-  /*
-   * The ground is on channel 2, so nothing emits into it — ever, at any
-   * genome, however far a lineage drifts. A body that could would be minting
-   * food from nothing at five units a free port a frame, which is the whole
-   * economy gone, so this is worth a test of its own rather than trusting
-   * three deposit paths to keep agreeing about it.
-   */
+  it('leaves a seeded body behaving exactly as a stateless one did', () => {
+    // Every matrix seeds to zero except the food pathway, so a fresh body
+    // computes h = phi(0) = 0 and its output is its bases. That is what makes
+    // a spawned agent arrive unevolved, which is the point of seeding at all.
+    const params = defaultParams();
+    const a = bareBody(seedChem('con', params));
+    expect(effEmit(a, CH.conP)).toBeCloseTo(1, 6);
+    expect(effEmit(a, CH.dupP)).toBeCloseTo(0, 6);
+    expect(effTaste(a, CH.dupP)).toBeCloseTo(params.attractMedium, 6);
+  });
+
   it('never lets a body emit onto the ground, whatever its genes say', () => {
     const params = defaultParams();
-    const a = bareBody(seedChem('con', params), { request: 1, extra: 0, trail: 0 });
-    a.chem[EMIT + CH.energy] = 9;
-    a.chem[EMIT_SLOPE + CH.energy * STATE_DIMS + NEED] = 9;
+    const chem = seedChem('con', params);
+    chem[EMIT + CH.energy] = 9;
+    for (let d = 0; d < STATE_DIMS; d++) chem[E_OUT + CH.energy * STATE_DIMS + d] = 9;
+    const a = bareBody(chem, { h: [1, 1, 1, 1] });
     expect(effEmit(a, CH.energy), 'the ground is not a thing you can shout').toBe(0);
     // And it is still perfectly able to smell it.
-    a.chem[TASTE + CH.energy] = 1.5;
+    chem[TASTE + CH.energy] = 1.5;
     expect(effTaste(a, CH.energy)).toBeGreaterThan(0);
   });
 
-  /*
-   * The three state dimensions have to be about different things, or the
-   * widening bought nothing.
-   *
-   * `NEED` is the neighbourhood's, spread over the wires. `FULL` is this
-   * body's own tank. A rule with two clauses — "shout when my net is hungry
-   * *but* I am full", the shape a body that has something to give would want —
-   * needs both, and needs them separable. With one input it was not merely
-   * hard to express, it was outside the language.
-   */
-  it('separates what my net needs from what I have', () => {
-    const params = defaultParams();
-    const mk = (request: number, extra: number) =>
-      bareBody(seedChem('con', params), { request, extra });
-
-    const donor = mk(1, 1); // net starving, I am full
-    const beggar = mk(1, 0); // net starving, I am empty too
-    const idle = mk(0, 1); // net fine, I am full
-
-    for (const a of [donor, beggar, idle]) {
-      a.chem[EMIT + CH.conP] = 0;
-      a.chem[EMIT_SLOPE + CH.conP * STATE_DIMS + NEED] = 0.5;
-      a.chem[EMIT_SLOPE + CH.conP * STATE_DIMS + FULL] = 0.5;
-    }
-    // Both clauses true, so this one is loudest — and the two bodies that
-    // satisfy exactly one of them are equally quiet, which is what proves the
-    // dimensions are not two names for the same reading.
-    expect(effEmit(donor, CH.conP)).toBeCloseTo(1, 6);
-    expect(effEmit(beggar, CH.conP)).toBeCloseTo(0.5, 6);
-    expect(effEmit(idle, CH.conP)).toBeCloseTo(0.5, 6);
-  });
-
-  it('lets a body condition on where it is, with a sign', () => {
-    const params = defaultParams();
-    const mk = (trail: number) =>
-      bareBody(seedChem('con', params), { trail });
-    const a = mk(4);
-    const b = mk(-4);
-    for (const x of [a, b]) {
-      x.chem[TASTE + CH.aux] = 0;
-      x.chem[TASTE_SLOPE + CH.aux * STATE_DIMS + HERE] = 1;
-    }
-    // Squashed, so a strong like and a strong dislike land either side of zero
-    // and neither can run away with the weight.
-    expect(effTaste(a, CH.aux)).toBeGreaterThan(0.5);
-    expect(effTaste(b, CH.aux)).toBeLessThan(-0.5);
-    expect(Math.abs(effTaste(a, CH.aux))).toBeLessThan(1);
-  });
-
-  /*
-   * `BOUND` is what lets one channel mean two things in a lifetime.
-   *
-   * A port's seeded scent is doing latching work only while that port is open.
-   * Once it is matched the meaning has done its job and the channel is free to
-   * carry whatever the lineage has drifted onto; when a neighbour dies and the
-   * socket reopens, latching is wanted again — and at exactly the moment it
-   * becomes useful, because an open port is how two nets fuse. A body that
-   * cannot read its own occupancy has to mean one thing forever, and every
-   * signal it might evolve competes with mate-finding.
-   */
-  it('lets a body say one thing with sockets open and another once wired in', () => {
-    const params = defaultParams();
-    const loose = bareBody(seedChem('con', params), { bound: 0 });
-    const wiredIn = bareBody(seedChem('con', params), { bound: 1 });
-    for (const a of [loose, wiredIn]) {
-      a.chem[EMIT + CH.conP] = 1;
-      a.chem[EMIT + CH.aux] = 0;
-      // Trade the latching channel away for the aux one as the ports fill.
-      a.chem[EMIT_SLOPE + CH.conP * STATE_DIMS + BOUND] = -1;
-      a.chem[EMIT_SLOPE + CH.aux * STATE_DIMS + BOUND] = 1;
-    }
-    expect(effEmit(loose, CH.conP), 'an open body should still be latching').toBeCloseTo(1, 6);
-    expect(effEmit(loose, CH.aux)).toBeCloseTo(0, 6);
-    expect(effEmit(wiredIn, CH.conP), 'a matched body is done latching').toBeCloseTo(0, 6);
-    expect(effEmit(wiredIn, CH.aux), 'and free to say something else').toBeCloseTo(1, 6);
-  });
 
   it('never lets a modulated emit go negative', () => {
     const params = defaultParams();
-    const a = bareBody(seedChem('con', params), { request: 1, extra: 0, trail: 0 });
+    // `request` no longer reaches emit directly — it is an input to `h`, and
+    // `h` is what `E` reads. Set the state, not the input.
+    const a = bareBody(seedChem('con', params), { h: [1, 0, 0, 0] });
     // A body that goes silent under pressure, pushed past silence.
-    a.chem[EMIT_SLOPE + CH.conP * STATE_DIMS + NEED] = -5;
+    a.chem[E_OUT + CH.conP * STATE_DIMS + 0] = -5;
     expect(effEmit(a, 0), 'emitting a negative amount is not a thing').toBe(0);
   });
 

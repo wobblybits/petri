@@ -38,6 +38,10 @@ export class Agent {
   readonly slot: number;
   private _chem: Float32Array | null = null;
   private _chemGen = -1;
+  private _h: Float64Array | null = null;
+  private _hGen = -1;
+  private _sense: Float64Array | null = null;
+  private _senseGen = -1;
 
   constructor(store: AgentStore, slot: number) {
     this.store = store;
@@ -308,6 +312,38 @@ export class Agent {
   }
   set lineage(v: number) {
     this.store.lineage[this.slot] = v;
+  }
+
+  /**
+   * This body's recurrent state, a live view into `AgentStore.hAll`.
+   *
+   * Re-sliced only when the store reallocates, like `chem`. Always
+   * index-written, never reassigned.
+   */
+  get h(): Float64Array {
+    const store = this.store;
+    if (this._hGen !== store.generation) {
+      this._h = store.hAll.subarray(this.slot * STATE_DIMS, this.slot * STATE_DIMS + STATE_DIMS);
+      this._hGen = store.generation;
+    }
+    return this._h!;
+  }
+
+  /**
+   * The four raw channel readings at this body's position.
+   *
+   * Only refreshed on frames where this body's `Wx` actually reads the field —
+   * sampling is four scattered reads into a very large array and most genomes
+   * multiply the result by zero. Stale otherwise, and deliberately not fed
+   * into the state when stale.
+   */
+  get sense(): Float64Array {
+    const store = this.store;
+    if (this._senseGen !== store.generation) {
+      this._sense = store.senseAll.subarray(this.slot * 4, this.slot * 4 + 4);
+      this._senseGen = store.generation;
+    }
+    return this._sense!;
   }
 
   /** Fraction of this body's ports that are attached. See `BOUND`. */
@@ -697,6 +733,25 @@ export const HERE = 2;
  */
 export const BOUND = 3;
 
+/**
+ * The input vector `x` the state is driven by: the four raw channel readings
+ * at this body's position, then the three physical facts about it.
+ *
+ * `DEMAND` is in here as an *input* and deliberately not as part of `h`. It is
+ * the energy-shortfall field — a max-relaxation of what bodies are actually
+ * short of, which is what makes it a potential `flowCharges` can move energy
+ * down. Let a genome decide what to put in it and selection drives "ask
+ * maximally" within a few generations; the field goes flat, and a flat field
+ * moves nothing. A lineage can still evolve to *broadcast* its hunger — `Wx`
+ * picking this up and `E` putting it on a channel — it simply cannot lie to
+ * the transport layer about it.
+ */
+export const IN_SENSE = 0;
+export const IN_FULL = 4;
+export const IN_BOUND = 5;
+export const IN_DEMAND = 6;
+export const IN_DIMS = 7;
+
 /** Squash to (-1, 1). Cheaper than `tanh` and the same shape; see the note on
  *  `CHEM_SLOPE_MAX` for why bounded and *signed* is the requirement. */
 function soft(x: number): number {
@@ -731,15 +786,21 @@ export function chemState(a: StateBody, d: number): number {
  * file, twice. Going through here means adding a dimension breaks the build at
  * this one function instead.
  */
-export function bareBody(chem: Float32Array, over: Partial<StateBody> = {}): Agent {
-  const body: StateBody & { chem: Float32Array } = {
+export function bareBody(
+  chem: Float32Array,
+  over: Partial<StateBody> & { h?: number[] } = {},
+): Agent {
+  const { h, ...rest } = over;
+  const body: StateBody & { chem: Float32Array; h: Float64Array; sense: Float64Array } = {
     chem,
     request: 0,
     extra: 0,
     energyCap: 1,
     trail: 0,
     bound: 0,
-    ...over,
+    h: Float64Array.from(h ?? new Array(STATE_DIMS).fill(0)),
+    sense: new Float64Array(4),
+    ...rest,
   };
   return body as unknown as Agent;
 }
@@ -754,15 +815,70 @@ export type StateBody = {
 };
 
 /**
- * `chem` layout: emit, taste, then each one's slope matrix against the inner
- * state vector. Emit and taste are four wide (one per channel); each slope is
- * four by `STATE_DIMS`, row-major by channel.
+ * `chem` layout.
+ *
+ * A body is a very small recurrent network over the wire graph:
+ *
+ *     x  = [ sense(4) , FULL , BOUND , DEMAND ]              in R^7
+ *     h <- phi( Wx.x + Wh.h + Wn.mean(h of wired neighbours) + b )   in R^4
+ *     emit  = normalise(relu( E.h + e0 ))                    in R^4
+ *     taste = T.h + t0                                       in R^4
+ *
+ * `e0` and `t0` are the named, kind-seeded part — "a Con emits ch0 and seeks
+ * ch1" lives there, and every matrix seeds to zero, so a fresh body computes
+ * `h = phi(0) = 0` and behaves exactly as it did before any of this existed.
+ * The matrices are what drift. That is deliberate: a body spawned out of the
+ * soup should arrive with its scent interactions unevolved and pick them up by
+ * breeding into a net.
+ *
+ * `h`'s four dimensions have no names, and cannot: whatever a lineage makes
+ * them mean is the point. `e0[con] = 0.72` is still readable off a body, which
+ * is why the bases stayed vectors instead of being folded into the matrices.
  */
 export const EMIT = 0;
 export const TASTE = 4;
-export const EMIT_SLOPE = 8;
-export const TASTE_SLOPE = EMIT_SLOPE + 4 * STATE_DIMS;
-export const CHEM_LEN = TASTE_SLOPE + 4 * STATE_DIMS;
+/** `E`, state -> emit. Row-major by channel: `E_OUT + c * STATE_DIMS + d`. */
+export const E_OUT = 8;
+/** `T`, state -> taste. Same shape. */
+export const T_OUT = E_OUT + 4 * STATE_DIMS;
+/** `Wx`, input -> state. Row-major by state dim: `W_IN + d * IN_DIMS + k`. */
+export const W_IN = T_OUT + 4 * STATE_DIMS;
+/** `Wh`, state -> state. This body's own memory. */
+export const W_SELF = W_IN + STATE_DIMS * IN_DIMS;
+/** `Wn`, mean neighbour state -> state. Its diagonal is a learned per-hop decay. */
+export const W_NET = W_SELF + STATE_DIMS * STATE_DIMS;
+/** `b`, the state bias. */
+export const B_STATE = W_NET + STATE_DIMS * STATE_DIMS;
+export const CHEM_LEN = B_STATE + STATE_DIMS;
+
+/**
+ * Emit weight for one channel. Never negative.
+ *
+ * Silent on `CH.energy`, unconditionally and here rather than at the three
+ * places that lay a deposit — that channel holds the ground, and a body able
+ * to emit into it would be minting food from nothing at five units a port a
+ * frame. One choke point, because a fourth deposit path would otherwise be a
+ * very quiet way to break the economy.
+ */
+export function effEmit(a: Agent, c: number): number {
+  if (c === CH.energy) return 0;
+  const ch = a.chem;
+  const h = a.h;
+  const o = E_OUT + c * STATE_DIMS;
+  let v = ch[EMIT + c];
+  for (let d = 0; d < STATE_DIMS; d++) v += ch[o + d] * h[d];
+  return v > 0 ? v : 0;
+}
+
+/** Taste weight for one channel. May be negative — that is avoidance. */
+export function effTaste(a: Agent, c: number): number {
+  const ch = a.chem;
+  const h = a.h;
+  const o = T_OUT + c * STATE_DIMS;
+  let v = ch[TASTE + c];
+  for (let d = 0; d < STATE_DIMS; d++) v += ch[o + d] * h[d];
+  return v;
+}
 
 /**
  * A flocking gain as the force sees it: never negative.
@@ -779,33 +895,7 @@ export function flockGain(v: number): number {
   return v > 0 ? v : 0;
 }
 
-/**
- * Emit weight for one channel at this body's current state. Never negative.
- *
- * Silent on `CH.energy`, unconditionally and here rather than at the three
- * places that lay a deposit — the JS scatter, the packed vector the solver
- * reads, and the GPU's. That channel holds the ground itself now, and a body
- * that could emit into it would be minting food out of nothing at five units
- * a port a frame. One choke point, because a fourth deposit path would
- * otherwise be a very quiet way to break the economy.
- */
-export function effEmit(a: Agent, c: number): number {
-  if (c === CH.energy) return 0;
-  const ch = a.chem;
-  const o = EMIT_SLOPE + c * STATE_DIMS;
-  let v = ch[EMIT + c];
-  for (let d = 0; d < STATE_DIMS; d++) v += ch[o + d] * chemState(a, d);
-  return v > 0 ? v : 0;
-}
 
-/** Taste weight for one channel at this body's current state. May be negative. */
-export function effTaste(a: Agent, c: number): number {
-  const ch = a.chem;
-  const o = TASTE_SLOPE + c * STATE_DIMS;
-  let v = ch[TASTE + c];
-  for (let d = 0; d < STATE_DIMS; d++) v += ch[o + d] * chemState(a, d);
-  return v;
-}
 
 /**
  * The hardcoded weights, written out as a genome.
@@ -848,7 +938,21 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
    * ground. Which is what foraging is, and what none of this was able to
    * express at any genome before the ground was something you could smell.
    */
-  c[TASTE_SLOPE + CH.energy * STATE_DIMS + NEED] = params.attractFood;
+  /*
+   * The one place a matrix is seeded away from zero, and it is a two-hop
+   * pathway rather than a weight: `h[0]` is wired to carry `DEMAND`, and taste
+   * for the ground is wired to read `h[0]`. So a fresh body is drawn to food
+   * exactly when its neighbourhood is short of energy, and is blind to it
+   * otherwise — which is the behaviour, and it now has to be *built* out of
+   * the same parts a lineage would use rather than hardcoded as a slope.
+   *
+   * Blind when fed matters for a reason worth keeping: a body harvests the
+   * cell it stands in, so within a frame or two it has eaten a dip underneath
+   * itself and would otherwise chase the dip. `phi` compresses [0,1] to
+   * [0,0.5], so the gain is doubled to land where the old flat slope did.
+   */
+  c[W_IN + 0 * IN_DIMS + IN_DEMAND] = 1;
+  c[T_OUT + CH.energy * STATE_DIMS + 0] = params.attractFood * 2;
   if (kind === 'con') {
     c[EMIT] = 1;
     c[TASTE + 1] = M;
