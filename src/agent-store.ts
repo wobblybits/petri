@@ -1,5 +1,5 @@
 import { KIND_CON, KIND_DUP, KIND_ERA } from './native/solver.ts';
-import { CHEM_LEN, STATE_DIMS as STATE_W } from './chem-layout.ts';
+import { CHEM_LEN, CRITIC_LEN, PLASTIC_LEN, STATE_DIMS as STATE_W } from './chem-layout.ts';
 import type { AgentKind } from './agents.ts';
 
 /*
@@ -164,6 +164,41 @@ export class AgentStore {
   /** This frame's locomotion head: cruise speed and turn gain, per body. */
   cruise!: Float64Array;
   turn!: Float64Array;
+  /**
+   * What this body has learned since it was born: a delta on the state
+   * matrices, `PLASTIC_LEN` floats laid out exactly as `chem` lays the same
+   * weights. The effective weight is `chem[k] + plastic[k]`.
+   *
+   * Separate from `chem` rather than written into it so that learned drift
+   * and inherited drift can be told apart by anything measuring the pond,
+   * and so inheritance has something to scale. **Nothing here ever decays.**
+   * A body carries what it learned into whatever net it latches into next,
+   * and that transfer is what lets one net's experience reach another.
+   */
+  plasticAll!: Float32Array;
+  /**
+   * The eligibility trace, same shape as `plastic`.
+   *
+   * This one does decay, at `params.learnTrace` a frame, and that is a
+   * different thing from forgetting: it is the credit window, about the time
+   * a transfer takes to show up in the tank, so that a weight is rewarded
+   * for what it was doing shortly before things improved.
+   */
+  traceAll!: Float32Array;
+  /** The critic's weights on `h`, and its bias. See `CRITIC_LEN`. */
+  criticAll!: Float64Array;
+  /** Last frame's value estimate, for the temporal-difference error. */
+  prevValue!: Float64Array;
+  /**
+   * Whether this body has learned anything at all yet.
+   *
+   * Monotone: set the first time a learned weight goes non-zero and never
+   * cleared, which is exact precisely because nothing decays. A pond with
+   * learning switched off, or one whose bodies have not learned yet, reads
+   * its genome the way it always did and pays one branch a body for the
+   * privilege.
+   */
+  plasticOn!: Uint8Array;
 
   /**
    * Which slots' genomes have changed since a consumer last looked.
@@ -296,6 +331,11 @@ export class AgentStore {
     this.readsField[slot] = 0;
     this.cruise[slot] = 0;
     this.turn[slot] = 0;
+    this.plasticAll.fill(0, slot * PLASTIC_LEN, slot * PLASTIC_LEN + PLASTIC_LEN);
+    this.traceAll.fill(0, slot * PLASTIC_LEN, slot * PLASTIC_LEN + PLASTIC_LEN);
+    this.criticAll.fill(0, slot * CRITIC_LEN, slot * CRITIC_LEN + CRITIC_LEN);
+    this.prevValue[slot] = 0;
+    this.plasticOn[slot] = 0;
     this.emitAll.fill(0, slot * 4, slot * 4 + 4);
     this.tasteAll.fill(0, slot * 4, slot * 4 + 4);
   }
@@ -372,6 +412,17 @@ export class AgentStore {
     this.readsField = growU8(this.readsField);
     this.cruise = growF64(this.cruise);
     this.turn = growF64(this.turn);
+    const newPlastic = new Float32Array(newCapacity * PLASTIC_LEN);
+    if (this.plasticAll) newPlastic.set(this.plasticAll.subarray(0, live * PLASTIC_LEN));
+    this.plasticAll = newPlastic;
+    const newTrace = new Float32Array(newCapacity * PLASTIC_LEN);
+    if (this.traceAll) newTrace.set(this.traceAll.subarray(0, live * PLASTIC_LEN));
+    this.traceAll = newTrace;
+    const newCritic = new Float64Array(newCapacity * CRITIC_LEN);
+    if (this.criticAll) newCritic.set(this.criticAll.subarray(0, live * CRITIC_LEN));
+    this.criticAll = newCritic;
+    this.prevValue = growF64(this.prevValue);
+    this.plasticOn = growU8(this.plasticOn);
     const newEmit = new Float64Array(newCapacity * 4);
     if (this.emitAll) newEmit.set(this.emitAll.subarray(0, live * 4));
     this.emitAll = newEmit;

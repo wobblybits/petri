@@ -21,6 +21,8 @@ import {
   L_OUT,
   P_BASE,
   P_OUT,
+  PLASTIC_LEN,
+  CRITIC_LEN,
   IN_BOUND,
   IN_DEMAND,
   IN_DIMS,
@@ -57,6 +59,7 @@ import {
   detectRule,
   PULL_END,
   rewriteHandoffStems,
+  CHEM_TASTE_MAX,
   TRAIT_KEYS,
   type Rewrite,
 } from './rewrite.ts';
@@ -4958,7 +4961,7 @@ export class Sim {
     Sim.phase('pulse:spread');
     flowChargesFast(list, this.agentStore, adj, (from, to, amount) => this.recoil(from, to, amount));
     Sim.phase('pulse:flow');
-    this.updateState(list, adj);
+    this.updateState(list, adj, params);
     Sim.phase('state');
   }
 
@@ -4991,11 +4994,19 @@ export class Sim {
   private hPrev = new Float64Array(0);
   private readonly stateInput = new Float64Array(IN_DIMS);
   private readonly stateMean = new Float64Array(STATE_DIMS);
+  /** `chem + plastic` over the state matrices, for a body that has learned. */
+  private readonly effWeights = new Float32Array(PLASTIC_LEN);
+  /** `phi'` per state dim, and the inputs each learned weight multiplies. */
+  private readonly learnPost = new Float64Array(STATE_DIMS);
+  private readonly learnPre = new Float64Array(IN_DIMS + 2 * STATE_DIMS);
 
-  private updateState(list: Agent[], adj: WireAdjacency): void {
+  private updateState(list: Agent[], adj: WireAdjacency, params: Params): void {
     const n = list.length;
     if (n === 0) return;
     if (this.genomeOnGpu) {
+      // Learning does not happen on this path yet: the shader computes `h`
+      // and this only unpacks it. See `docs/plasticity-plan.md` phase 4 —
+      // it wants a binding merge before the learned block will fit.
       this.unpackGenome();
       return;
     }
@@ -5046,6 +5057,19 @@ export class Sim {
     const FS = store.flockSep;
     const TT = store.transportThrust;
     const TR = store.transportRecoil;
+    const PLASTIC = store.plasticAll;
+    const TRACE = store.traceAll;
+    const CRITIC = store.criticAll;
+    const PREV_V = store.prevValue;
+    const PLASTIC_ON = store.plasticOn;
+    const post = this.learnPost;
+    const pre = this.learnPre;
+    const learn = params.learnRate > 0;
+    const etaM = params.learnRate;
+    const etaC = params.learnCritic;
+    const lam = params.learnTrace;
+    const discount = params.learnDiscount;
+    const MAXW = CHEM_TASTE_MAX;
     for (let i = 0; i < n; i++) {
       const slot = slotOf[i];
       const g = slot * CHEM_LEN;
@@ -5145,20 +5169,41 @@ export class Sim {
       const x4 = x[4];
       const x5 = x[5];
       const x6 = x[6];
-      const gi = g + W_IN;
-      const gs = g + W_SELF;
-      const gn = g + W_NET;
-      const gb = g + B_STATE;
+      /*
+       * The state matrices as this body actually has them: its genome plus
+       * whatever it has learned since it was born. `plasticOn` is monotone —
+       * learned weights never decay, so a body that has learned anything has
+       * learned it for good — which keeps the sum off the path of a pond
+       * where nothing has.
+       */
+      let W = CHEM;
+      let wo = g + W_IN;
+      if (PLASTIC_ON[slot]) {
+        const plo = slot * PLASTIC_LEN;
+        const eff = this.effWeights;
+        for (let k = 0; k < PLASTIC_LEN; k++) eff[k] = CHEM[wo + k] + PLASTIC[plo + k];
+        W = eff;
+        wo = 0;
+      }
+      const gi = wo;
+      const gs = wo + W_SELF - W_IN;
+      const gn = wo + W_NET - W_IN;
+      const gb = wo + B_STATE - W_IN;
+      let v0 = 0;
+      let v1 = 0;
+      let v2 = 0;
+      let v3 = 0;
       {
         const wi = gi + 0;
         const ws = gs + 0;
         const wn = gn + 0;
         const v =
-          CHEM[gb + 0] +
-          CHEM[wi] * x0 + CHEM[wi + 1] * x1 + CHEM[wi + 2] * x2 + CHEM[wi + 3] * x3 +
-          CHEM[wi + 4] * x4 + CHEM[wi + 5] * x5 + CHEM[wi + 6] * x6 +
-          CHEM[ws] * p0 + CHEM[ws + 1] * p1 + CHEM[ws + 2] * p2 + CHEM[ws + 3] * p3 +
-          CHEM[wn] * m0 + CHEM[wn + 1] * m1 + CHEM[wn + 2] * m2 + CHEM[wn + 3] * m3;
+          W[gb + 0] +
+          W[wi] * x0 + W[wi + 1] * x1 + W[wi + 2] * x2 + W[wi + 3] * x3 +
+          W[wi + 4] * x4 + W[wi + 5] * x5 + W[wi + 6] * x6 +
+          W[ws] * p0 + W[ws + 1] * p1 + W[ws + 2] * p2 + W[ws + 3] * p3 +
+          W[wn] * m0 + W[wn + 1] * m1 + W[wn + 2] * m2 + W[wn + 3] * m3;
+        v0 = v;
         H[ho + 0] = v / (1 + (v < 0 ? -v : v));
       }
       {
@@ -5166,11 +5211,12 @@ export class Sim {
         const ws = gs + 4;
         const wn = gn + 4;
         const v =
-          CHEM[gb + 1] +
-          CHEM[wi] * x0 + CHEM[wi + 1] * x1 + CHEM[wi + 2] * x2 + CHEM[wi + 3] * x3 +
-          CHEM[wi + 4] * x4 + CHEM[wi + 5] * x5 + CHEM[wi + 6] * x6 +
-          CHEM[ws] * p0 + CHEM[ws + 1] * p1 + CHEM[ws + 2] * p2 + CHEM[ws + 3] * p3 +
-          CHEM[wn] * m0 + CHEM[wn + 1] * m1 + CHEM[wn + 2] * m2 + CHEM[wn + 3] * m3;
+          W[gb + 1] +
+          W[wi] * x0 + W[wi + 1] * x1 + W[wi + 2] * x2 + W[wi + 3] * x3 +
+          W[wi + 4] * x4 + W[wi + 5] * x5 + W[wi + 6] * x6 +
+          W[ws] * p0 + W[ws + 1] * p1 + W[ws + 2] * p2 + W[ws + 3] * p3 +
+          W[wn] * m0 + W[wn + 1] * m1 + W[wn + 2] * m2 + W[wn + 3] * m3;
+        v1 = v;
         H[ho + 1] = v / (1 + (v < 0 ? -v : v));
       }
       {
@@ -5178,11 +5224,12 @@ export class Sim {
         const ws = gs + 8;
         const wn = gn + 8;
         const v =
-          CHEM[gb + 2] +
-          CHEM[wi] * x0 + CHEM[wi + 1] * x1 + CHEM[wi + 2] * x2 + CHEM[wi + 3] * x3 +
-          CHEM[wi + 4] * x4 + CHEM[wi + 5] * x5 + CHEM[wi + 6] * x6 +
-          CHEM[ws] * p0 + CHEM[ws + 1] * p1 + CHEM[ws + 2] * p2 + CHEM[ws + 3] * p3 +
-          CHEM[wn] * m0 + CHEM[wn + 1] * m1 + CHEM[wn + 2] * m2 + CHEM[wn + 3] * m3;
+          W[gb + 2] +
+          W[wi] * x0 + W[wi + 1] * x1 + W[wi + 2] * x2 + W[wi + 3] * x3 +
+          W[wi + 4] * x4 + W[wi + 5] * x5 + W[wi + 6] * x6 +
+          W[ws] * p0 + W[ws + 1] * p1 + W[ws + 2] * p2 + W[ws + 3] * p3 +
+          W[wn] * m0 + W[wn + 1] * m1 + W[wn + 2] * m2 + W[wn + 3] * m3;
+        v2 = v;
         H[ho + 2] = v / (1 + (v < 0 ? -v : v));
       }
       {
@@ -5190,11 +5237,12 @@ export class Sim {
         const ws = gs + 12;
         const wn = gn + 12;
         const v =
-          CHEM[gb + 3] +
-          CHEM[wi] * x0 + CHEM[wi + 1] * x1 + CHEM[wi + 2] * x2 + CHEM[wi + 3] * x3 +
-          CHEM[wi + 4] * x4 + CHEM[wi + 5] * x5 + CHEM[wi + 6] * x6 +
-          CHEM[ws] * p0 + CHEM[ws + 1] * p1 + CHEM[ws + 2] * p2 + CHEM[ws + 3] * p3 +
-          CHEM[wn] * m0 + CHEM[wn + 1] * m1 + CHEM[wn + 2] * m2 + CHEM[wn + 3] * m3;
+          W[gb + 3] +
+          W[wi] * x0 + W[wi + 1] * x1 + W[wi + 2] * x2 + W[wi + 3] * x3 +
+          W[wi + 4] * x4 + W[wi + 5] * x5 + W[wi + 6] * x6 +
+          W[ws] * p0 + W[ws + 1] * p1 + W[ws + 2] * p2 + W[ws + 3] * p3 +
+          W[wn] * m0 + W[wn + 1] * m1 + W[wn + 2] * m2 + W[wn + 3] * m3;
+        v3 = v;
         H[ho + 3] = v / (1 + (v < 0 ? -v : v));
       }
 
@@ -5240,6 +5288,155 @@ export class Sim {
       FS[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 1, H, ho, S) * HEAD_SCALE.sep, -60, 120);
       TT[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 0, H, ho, S) * HEAD_SCALE.thrust, 0, 1);
       TR[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 1, H, ho, S) * HEAD_SCALE.recoil, 0, 200);
+
+      /*
+       * What this body learns from the frame it has just had.
+       *
+       * Three factors, every one of them local to the body: an eligibility
+       * trace per weight saying what that weight was lately doing, `phi'`
+       * saying how much the state would have moved had the weight been
+       * different, and one scalar saying whether things went better than
+       * expected. The scalar is a temporal-difference error from the body's
+       * own critic, and it is the only part of this that is a gradient
+       * rather than a correlation — without it a Hebbian rule cannot tell a
+       * useful coincidence from any other, and everything that fires
+       * together grows together until it all saturates.
+       *
+       * The cost is the body's **own** tank: `x4` is `IN_FULL`, clamped to
+       * [0,1], so `x4 - 1` is zero when full and -1 when empty. Local, by
+       * decision. `x6` is the same shortfall relaxed over the wire graph and
+       * is the other candidate teacher — it would make the net's condition
+       * the thing a body learns about rather than its own — and swapping
+       * them is this one line, since both are already in `x`.
+       *
+       * Nothing here decays except the trace, which is a credit window and
+       * not a memory. A learned weight is the body's for life and travels
+       * with it into whatever net it latches into next; that carriage is the
+       * point of learning rather than only breeding.
+       */
+      if (learn) {
+        const plo = slot * PLASTIC_LEN;
+        const cro = slot * CRITIC_LEN;
+        const value =
+          CRITIC[cro] * H[ho] +
+          CRITIC[cro + 1] * H[ho + 1] +
+          CRITIC[cro + 2] * H[ho + 2] +
+          CRITIC[cro + 3] * H[ho + 3] +
+          CRITIC[cro + 4];
+        const dlt = x4 - 1 + discount * value - PREV_V[slot];
+        PREV_V[slot] = value;
+        /*
+         * The critic's own update is an ordinary delta rule. Its estimate a
+         * frame ago was a dot product with `h` a frame ago, so `h` a frame
+         * ago is the gradient, and `prev` still holds it.
+         */
+        const kc = etaC * dlt;
+        CRITIC[cro] += kc * p0;
+        CRITIC[cro + 1] += kc * p1;
+        CRITIC[cro + 2] += kc * p2;
+        CRITIC[cro + 3] += kc * p3;
+        CRITIC[cro + 4] += kc;
+
+        // phi'(v) = 1 / (1 + |v|)^2. A saturated dimension has almost none
+        // of it, which is what stops a pinned state dragging its inputs.
+        const q0 = 1 / (1 + (v0 < 0 ? -v0 : v0));
+        const q1 = 1 / (1 + (v1 < 0 ? -v1 : v1));
+        const q2 = 1 / (1 + (v2 < 0 ? -v2 : v2));
+        const q3 = 1 / (1 + (v3 < 0 ? -v3 : v3));
+        post[0] = q0 * q0;
+        post[1] = q1 * q1;
+        post[2] = q2 * q2;
+        post[3] = q3 * q3;
+        pre[0] = x0;
+        pre[1] = x1;
+        pre[2] = x2;
+        pre[3] = x3;
+        pre[4] = x4;
+        pre[5] = x5;
+        pre[6] = x6;
+        pre[7] = p0;
+        pre[8] = p1;
+        pre[9] = p2;
+        pre[10] = p3;
+        pre[11] = m0;
+        pre[12] = m1;
+        pre[13] = m2;
+        pre[14] = m3;
+        const step = etaM * dlt;
+        const gW = g + W_IN;
+        let touched = 0;
+        let at = 0;
+        /*
+         * `Wx`, then `Wh`, then `Wn`, then `b` — the order the genome lays
+         * them in, so one running index serves the trace, the learned delta
+         * and the gene it is added to. The clamp is against the sum, because
+         * what has to stay in range is the weight the state pass reads.
+         */
+        for (let d = 0; d < S; d++) {
+          const pd = post[d];
+          for (let k = 0; k < IN_DIMS; k++, at++) {
+            const ti = plo + at;
+            const tr = lam * TRACE[ti] + pd * pre[k];
+            TRACE[ti] = tr;
+            const base = CHEM[gW + at];
+            let w = PLASTIC[ti] + step * tr;
+            if (w < -MAXW - base) w = -MAXW - base;
+            else if (w > MAXW - base) w = MAXW - base;
+            PLASTIC[ti] = w;
+            if (w !== 0) {
+              touched = 1;
+              /*
+               * A learned sense weight turns a body that could not look at
+               * the field into one that can, and the gate saying so is
+               * otherwise settled at birth. Monotone, which is exact here
+               * precisely because nothing decays back to zero.
+               */
+              if (k < 4) READS[slot] = 1;
+            }
+          }
+        }
+        for (let d = 0; d < S; d++) {
+          const pd = post[d];
+          for (let k = 0; k < S; k++, at++) {
+            const ti = plo + at;
+            const tr = lam * TRACE[ti] + pd * pre[7 + k];
+            TRACE[ti] = tr;
+            const base = CHEM[gW + at];
+            let w = PLASTIC[ti] + step * tr;
+            if (w < -MAXW - base) w = -MAXW - base;
+            else if (w > MAXW - base) w = MAXW - base;
+            PLASTIC[ti] = w;
+            if (w !== 0) touched = 1;
+          }
+        }
+        for (let d = 0; d < S; d++) {
+          const pd = post[d];
+          for (let k = 0; k < S; k++, at++) {
+            const ti = plo + at;
+            const tr = lam * TRACE[ti] + pd * pre[11 + k];
+            TRACE[ti] = tr;
+            const base = CHEM[gW + at];
+            let w = PLASTIC[ti] + step * tr;
+            if (w < -MAXW - base) w = -MAXW - base;
+            else if (w > MAXW - base) w = MAXW - base;
+            PLASTIC[ti] = w;
+            if (w !== 0) touched = 1;
+          }
+        }
+        // The bias, whose input is one.
+        for (let d = 0; d < S; d++, at++) {
+          const ti = plo + at;
+          const tr = lam * TRACE[ti] + post[d];
+          TRACE[ti] = tr;
+          const base = CHEM[gW + at];
+          let w = PLASTIC[ti] + step * tr;
+          if (w < -MAXW - base) w = -MAXW - base;
+          else if (w > MAXW - base) w = MAXW - base;
+          PLASTIC[ti] = w;
+          if (w !== 0) touched = 1;
+        }
+        if (touched) PLASTIC_ON[slot] = 1;
+      }
     }
   }
 

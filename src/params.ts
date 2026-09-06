@@ -452,6 +452,48 @@ export interface Params {
    * net's stroke somewhere neither parent line swims alone.
    */
   transportThrust: number;
+  /**
+   * How fast a body's state matrices change while it is alive. 0 = off, and
+   * off is exactly the simulation as it was.
+   *
+   * A body is a small recurrent network whose weights have until now been
+   * fixed from birth: everything it knows, it inherited. This is the other
+   * way information can get into one. Each weight keeps an eligibility trace
+   * of what it was lately doing, and a temporal-difference error from the
+   * body's own critic says whether that was better or worse than expected;
+   * the product is the update. Three factors, all local to the body, no
+   * error signal handed down from anywhere.
+   *
+   * What is learned is kept for life and goes with the body when it detaches
+   * and latches somewhere else. That is the point rather than a side effect:
+   * it makes an agent that has been through a net different from one that
+   * has not, and it is how one net's experience reaches another.
+   *
+   * See `docs/plasticity-plan.md`.
+   */
+  learnRate: number;
+  /** How fast the critic itself learns to predict. Its own delta rule. */
+  learnCritic: number;
+  /**
+   * Eligibility trace decay, per frame. Not weight decay — nothing here
+   * forgets. This is the credit window: how far back a weight is still
+   * held responsible for what the body's tank is doing now. 0.95 is about
+   * twenty frames, which is roughly how long a transfer takes to land.
+   */
+  learnTrace: number;
+  /** Discount on the critic's own prediction, per frame. */
+  learnDiscount: number;
+  /**
+   * How much of what a parent learned is consolidated into its children's
+   * genome, 0 to 1.
+   *
+   * At 1 a lineage compounds what it learned: a commute's children start
+   * from `chem + plastic`, so the worm keeps the experience of the bodies it
+   * grew from. At 0 learning is somatic and dies with the body. The children
+   * always start with an empty slate of their own; what this scales is how
+   * much of their parents' arrived already written into the genome.
+   */
+  inheritLearned: number;
 }
 
 export function defaultParams(): Params {
@@ -517,6 +559,11 @@ export function defaultParams(): Params {
     requestDecay: 0.95,
     transportRecoil: 100,
     transportThrust: 1.0,
+    learnRate: 0,
+    learnCritic: 0.02,
+    learnTrace: 0.95,
+    learnDiscount: 0.95,
+    inheritLearned: 1,
   };
 }
 
@@ -589,4 +636,9 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'requestDecay', label: 'Demand decay', min: 0.5, max: 0.98, step: 0.01 },
   { key: 'transportRecoil', label: 'Pump recoil (seed)', min: 0, max: 200, step: 5 },
   { key: 'transportThrust', label: 'Pump thrust (seed)', min: 0, max: 1, step: 0.05 },
+  { key: 'learnRate', label: 'Learn rate', min: 0, max: 0.02, step: 0.0005 },
+  { key: 'learnCritic', label: 'Learn critic', min: 0, max: 0.2, step: 0.005 },
+  { key: 'learnTrace', label: 'Learn trace decay', min: 0.5, max: 0.995, step: 0.005 },
+  { key: 'learnDiscount', label: 'Learn discount', min: 0.5, max: 0.995, step: 0.005 },
+  { key: 'inheritLearned', label: 'Inherit learned', min: 0, max: 1, step: 0.05 },
 ];

@@ -1,4 +1,4 @@
-import { CHEM_LEN, EMIT, E_OUT, refreshReadsField, STATE_DIMS, TASTE, T_OUT, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
+import { CHEM_LEN, CRITIC_LEN, EMIT, E_OUT, PLASTIC_BASE, PLASTIC_LEN, refreshReadsField, STATE_DIMS, TASTE, T_OUT, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
 import type { AgentStore } from './agent-store.ts';
 import { DEBT_CAP_MAX, EXTRA_CAP } from './energy.ts';
 import { otherEnd, type Graph } from './graph.ts';
@@ -1024,7 +1024,7 @@ function assortChance(child: Agent, conParent: Agent, dupParent: Agent): number 
   return p <= 0 ? 0 : p >= 1 ? 1 : p;
 }
 
-function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent): void {
+function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent, kappa: number): void {
   const chance = assortChance(child, conParent, dupParent);
   // Depth is one past the deeper parent, so a line's generation count does not
   // reset every time it crosses with a fresher one. Which line the child is
@@ -1043,11 +1043,11 @@ function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent): void {
         : blend(conParent[key], dupParent[key]);
     child[key] = nudgeTrait(combined, range);
   }
-  inheritChem(child, conParent, dupParent, chance);
+  inheritChem(child, conParent, dupParent, chance, kappa);
 }
 
 /** Copy one parent onto the child, then the same mutation nudge commute uses. */
-function inheritFromClone(child: Agent, parent: Agent): void {
+function inheritFromClone(child: Agent, parent: Agent, kappa: number): void {
   child.born = parent.born + 1;
   child.lineage = parent.lineage;
   for (const key of TRAIT_KEYS) {
@@ -1055,7 +1055,7 @@ function inheritFromClone(child: Agent, parent: Agent): void {
   }
   // One parent, so blending and assorting are the same thing; 1 is the cheaper
   // of the two and says what is happening.
-  inheritChem(child, parent, parent, 1);
+  inheritChem(child, parent, parent, 1, kappa);
 }
 
 /**
@@ -1072,13 +1072,53 @@ function inheritFromClone(child: Agent, parent: Agent): void {
  * avoidance, and a body that flees what it can smell is a behaviour the fixed
  * weights could never express.
  */
-function inheritChem(child: Agent, con: Agent, dup: Agent, chance: number): void {
+function inheritChem(child: Agent, con: Agent, dup: Agent, chance: number, kappa: number): void {
   const c = child.chem;
+  /*
+   * A parent hands on what it was born with *plus* what it learned, scaled
+   * by `params.inheritLearned`.
+   *
+   * Consolidation rather than a second inherited array: the child starts
+   * with an empty slate of its own and the parents' experience arrives
+   * already written into its genome, where mutation and the clamps treat it
+   * like any other gene. At `kappa` of 1 a lineage compounds what the bodies
+   * it grew from worked out; at 0 learning is somatic and dies with them.
+   *
+   * With nothing learned every `plastic` entry is zero, so this is exactly
+   * the arithmetic it was before, down to the bit — and it consumes the same
+   * random numbers in the same order, which is what keeps a pond that has
+   * learning switched off reproducible against its old hashes.
+   */
+  const conP = con.store.plasticAll;
+  const dupP = dup.store.plasticAll;
+  const conO = con.slot * PLASTIC_LEN;
+  const dupO = dup.slot * PLASTIC_LEN;
+  const learnedHi = PLASTIC_BASE + PLASTIC_LEN;
   for (let k = 0; k < CHEM_LEN; k++) {
-    const a = con.chem[k];
-    const b = dup.chem[k];
+    let a = con.chem[k];
+    let b = dup.chem[k];
+    if (kappa !== 0 && k >= PLASTIC_BASE && k < learnedHi) {
+      a += kappa * conP[conO + k - PLASTIC_BASE];
+      b += kappa * dupP[dupO + k - PLASTIC_BASE];
+    }
     const combined = Math.random() < chance ? (Math.random() < 0.5 ? a : b) : blend(a, b);
     c[k] = combined + (Math.random() * 2 - 1) * CHEM_MUTATE;
+  }
+  /*
+   * The critic comes across too, averaged rather than assorted: it is not a
+   * gene, it is a prediction about the neighbourhood the child is being born
+   * into, and both parents were standing in it. Averaged and not blended so
+   * that this consumes no random numbers — a pond with learning off has to
+   * hash exactly as it did.
+   */
+  const childC = child.store.criticAll;
+  const conC = con.store.criticAll;
+  const dupC = dup.store.criticAll;
+  const childO = child.slot * CRITIC_LEN;
+  const conCo = con.slot * CRITIC_LEN;
+  const dupCo = dup.slot * CRITIC_LEN;
+  for (let k = 0; k < CRITIC_LEN; k++) {
+    childC[childO + k] = kappa * 0.5 * (conC[conCo + k] + dupC[dupCo + k]);
   }
   /*
    * One unit of voice across all four channels, the ground included.
@@ -1165,8 +1205,8 @@ export function commitRewrite(
     ag.vy = 0;
     ag.stun = 0.45;
     if (breed) {
-      if (conParent && dupParent) inheritTraits(ag, conParent, dupParent);
-      else if (eraParent) inheritFromClone(ag, eraParent);
+      if (conParent && dupParent) inheritTraits(ag, conParent, dupParent, params.inheritLearned);
+      else if (eraParent) inheritFromClone(ag, eraParent, params.inheritLearned);
       // Inheritance rewrote `chem`, so the cached sense gate is stale.
       refreshReadsField(ag);
     }

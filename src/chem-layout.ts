@@ -161,6 +161,31 @@ export const L_BASE = L_OUT + 2 * STATE_DIMS;
 export const CHEM_LEN = L_BASE + 2;
 
 /**
+ * The span of `chem` a body can change while it is alive: `Wx`, `Wh`, `Wn`
+ * and `b`, which the layout above happens to put next to each other.
+ *
+ * Only the state matrices learn. They are the only weights with a local
+ * gradient — `phi'` gives each one a defensible eligibility — while an
+ * output head has no per-channel error signal to learn from, so teaching one
+ * would need random feedback and that is a separate decision. Behaviour
+ * still changes, because every head reads `h`.
+ *
+ * Contiguous, so the learned block and the eligibility trace are both flat
+ * arrays indexed exactly as the genome indexes the same weights, and the
+ * effective weight is one add. Derived rather than written down, like every
+ * other number in this file; if a matrix moves, this moves with it.
+ */
+export const PLASTIC_BASE = W_IN;
+export const PLASTIC_LEN = F_OUT - W_IN;
+
+/**
+ * The critic: a linear readout of `h` that predicts the cost this body is
+ * heading into, plus its bias. Its error is what gates learning — the only
+ * part of the rule that is a real gradient rather than a correlation.
+ */
+export const CRITIC_LEN = STATE_DIMS + 1;
+
+/**
  * What one unit of a head's output is worth, per row.
  *
  * The heads exist in the same genome as the emit and taste weights, which live

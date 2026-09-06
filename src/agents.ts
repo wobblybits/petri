@@ -705,6 +705,7 @@ export function portLocal(kind: AgentKind, slot: PortSlot): Vec2 {
 export {
   B_STATE,
   CHEM_LEN,
+  CRITIC_LEN,
   EMIT,
   E_OUT,
   F_BASE,
@@ -717,6 +718,8 @@ export {
   IN_DIMS,
   IN_FULL,
   IN_SENSE,
+  PLASTIC_BASE,
+  PLASTIC_LEN,
   P_BASE,
   P_OUT,
   SENSE_SCALE,
