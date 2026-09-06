@@ -25,3 +25,6 @@ dist-ssr
 
 # Claude Code local preview config
 .claude/
+
+# Experiment sweep output
+experiments/out/

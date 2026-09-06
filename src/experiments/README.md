@@ -1,0 +1,39 @@
+# Experiments
+
+Sweeps that study the pond instead of asserting about it. A trial is a
+seeded soup run for a fixed number of simulated seconds and sampled on a
+schedule; a sweep is a parameter grid crossed with seeds. Nothing here passes
+or fails — the output is a table on stdout and a JSON file under
+`experiments/out/` you can plot.
+
+```bash
+npm run experiment -- breeding          # declutter x flockAlign x spawnInterval
+npm run experiment -- economy           # the dials that ship at zero, one at a time
+EXP_SECONDS=180 EXP_BODIES=600 npm run experiment -- breeding
+```
+
+`--disableConsoleIntercept` is already in the script; without it vitest
+swallows the table.
+
+## What to read
+
+- `bornMean` and `lines` together. Selection loses lines while depth climbs;
+  drift with immigration keeps as many lines as arrived.
+- `commutes` is the reproduction rate. `conDupWires` is how many are waiting
+  to happen, so a low rate with a high count is an economy problem and a low
+  count is a meeting problem.
+- `matrixDrift` is how far the unseeded part of the genome has moved. It
+  rises under drift and under selection alike; it only says the genome is
+  being touched at all.
+- `canPay` is the fraction of bodies that could fund a rewrite this frame.
+
+## Adding one
+
+Copy `breeding.exp.ts`. A sweep is a `grid` of `Params` keys to value lists,
+a list of seeds, and the trial shape. The harness runs the CPU path
+(`Sim.step`), which Node can run and which is the same simulation as the GPU
+path bar one frame of genome latency.
+
+Warm-up is real: a preset drops its whole population in as founders, so the
+first thirty seconds measure the seeding. Sample every ten seconds and read
+the slope, not the first row.

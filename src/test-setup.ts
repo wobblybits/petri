@@ -1,5 +1,6 @@
 import { afterEach, beforeEach } from 'vitest';
 import { Sim } from './sim.ts';
+import { nativeSolver } from './native/solver.ts';
 
 /**
  * Per-test isolation, applied to every file.
@@ -38,6 +39,9 @@ beforeEach(() => {
   Math.random = seeded(TEST_SEED);
   Sim.nativeForces = true;
   Sim.auditForceBlock = false;
+  // The wasm module is the third thing that outlives a file, and the one
+  // whose leaks are not a flag but a buffer: see `NativeSolver.resetCaches`.
+  nativeSolver.resetCaches();
 });
 
 afterEach(() => {

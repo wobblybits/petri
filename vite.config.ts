@@ -147,6 +147,14 @@ function audioWorklet(): Plugin {
 
 const isDemo = process.env.VITE_APP === 'demo';
 
+/** Test files that simulate minutes of pond. Their own project; see below. */
+const SOAK = [
+  'src/net-health.test.ts',
+  'src/determinism.test.ts',
+  'src/connected.test.ts',
+  'src/oscillator-zoom.test.ts',
+];
+
 /** Pages serves index.html; Vite's demo input is demo.html. */
 function demoAsIndex(): Plugin {
   return {
@@ -208,7 +216,23 @@ export default defineConfig({
         test: {
           name: 'suite',
           include: ['src/**/*.test.ts'],
-          exclude: ['**/node_modules/**', '**/dist/**', 'src/**/*.perf.test.ts'],
+          exclude: ['**/node_modules/**', '**/dist/**', 'src/**/*.perf.test.ts', ...SOAK],
+        },
+      },
+      /*
+       * The minute-long runs, on their own. Each of these simulates whole
+       * minutes of pond and between them they were most of the suite's wall
+       * time; `npm test` should answer "did I break it" in the time it takes
+       * to read the diff, and these answer a different question — "does a
+       * pond stay a pond" — which is worth asking before a merge, not on
+       * every save. `npm run test:soak`.
+       */
+      {
+        extends: true,
+        test: {
+          name: 'soak',
+          include: SOAK,
+          testTimeout: 300_000,
         },
       },
       {
@@ -218,6 +242,21 @@ export default defineConfig({
           include: ['src/**/*.perf.test.ts'],
           fileParallelism: false,
           testTimeout: 300_000,
+        },
+      },
+      /*
+       * Parameter sweeps that study the pond rather than assert about it.
+       * They print a table and write JSON; see src/experiments/README.md.
+       * Serial, because they are timed against simulated seconds and each
+       * one wants the whole machine. `npm run experiment -- <name>`.
+       */
+      {
+        extends: true,
+        test: {
+          name: 'experiments',
+          include: ['src/experiments/**/*.exp.ts'],
+          fileParallelism: false,
+          testTimeout: 3_600_000,
         },
       },
     ],

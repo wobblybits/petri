@@ -13,9 +13,12 @@
     "build:demo": "tsc && VITE_APP=demo vite build",
     "preview": "vite preview",
     "test": "vitest run --project suite",
-    "bench": "vitest run --project bench"
+    "test:soak": "vitest run --project soak",
+    "bench": "vitest run --project bench",
+    "experiment": "vitest run --project experiments --disableConsoleIntercept"
   },
   "devDependencies": {
+    "@types/node": "^26.4.1",
     "typescript": "~6.0.2",
     "vite": "^8.2.2",
     "vitest": "^4.1.11"
