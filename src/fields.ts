@@ -1089,8 +1089,22 @@ export class Fields {
       for (let i = ch; i < d.length; i += CHANNELS) if (d[i] > m) m = d[i];
       return m;
     }
+    /*
+     * Unrolled rather than `for (const c of VOICE)`.
+     *
+     * That inner loop allocated an iterator per cell — a million a call — and
+     * this runs once a frame out of `paintOverlay` whenever the scent overlay
+     * is on. Measured over 1024^2: 6.92 ms through the for-of, 2.04 ms
+     * unrolled. It cost five milliseconds a frame and no benchmark in this repo
+     * could see it, because they all time `sim.step` and none of them render.
+     *
+     * `VOICE` stays the statement of which channels are signals; this is the
+     * same three written out.
+     */
     for (let i = 0; i < d.length; i += CHANNELS) {
-      for (const c of VOICE) if (d[i + c] > m) m = d[i + c];
+      if (d[i + CH.conP] > m) m = d[i + CH.conP];
+      if (d[i + CH.dupP] > m) m = d[i + CH.dupP];
+      if (d[i + CH.aux] > m) m = d[i + CH.aux];
     }
     return m;
   }
