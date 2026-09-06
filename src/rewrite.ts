@@ -978,7 +978,7 @@ export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: n
  * Every consumer clamps afterwards — `TRAIT_RANGE` for the scalars, the matrix
  * bounds for the genome — so widening the draw cannot put a value out of range.
  */
-const BLEND_WIDEN = 0.5;
+export const BLEND_WIDEN = 0.5;
 
 /** A blend that does not collapse the population's spread. See `BLEND_WIDEN`. */
 function blend(a: number, b: number): number {

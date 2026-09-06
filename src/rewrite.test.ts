@@ -24,6 +24,7 @@ import { loadPreset } from './presets.ts';
 import {
   applyRewrite,
   beginRewrite,
+  BLEND_WIDEN,
   commitRewrite,
   leftoverOf,
   portsConnected,
@@ -637,13 +638,24 @@ describe('heritable traits', () => {
           `dup child's ${key} = ${c[key]} should copy one whole parent (dup ${dup[key]}, con ${con[key]})`,
         ).toBe(true);
       }
-      // A blended Con child is not pinned to either endpoint: it can only be
-      // guaranteed to fall somewhere in the (mutation-widened) span between
-      // its two parents, which is a strictly larger range than "near one
-      // parent" whenever the parents differ by more than a couple of mutation
-      // steps, as they do here.
-      const lo = Math.min(dup[key], con[key]) - mutate;
-      const hi = Math.max(dup[key], con[key]) + mutate;
+      /*
+       * A blended Con child is not pinned to either endpoint, and is not
+       * confined between them either. `blend` is BLX-alpha: it draws from the
+       * parents' interval widened by `BLEND_WIDEN` on each side, precisely so
+       * that a blending lineage can explore past the range its ancestors
+       * spanned and so that offspring variance does not collapse toward the
+       * mean every generation. Then a mutation nudge on top, then the trait's
+       * own clamp.
+       */
+      const span = Math.abs(dup[key] - con[key]);
+      const lo = Math.max(
+        TRAIT_RANGE[key].min,
+        Math.min(dup[key], con[key]) - BLEND_WIDEN * span - mutate,
+      );
+      const hi = Math.min(
+        TRAIT_RANGE[key].max,
+        Math.max(dup[key], con[key]) + BLEND_WIDEN * span + mutate,
+      );
       for (const c of conChildren) {
         expect(c[key]).toBeGreaterThanOrEqual(lo);
         expect(c[key]).toBeLessThanOrEqual(hi);
