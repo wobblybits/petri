@@ -3946,6 +3946,19 @@ export class Sim {
    * lines: some founders leave descendants and most do not. A population under
    * pure drift with a steady stream of fresh immigrants keeps roughly as many
    * lines as have arrived, however far the mean of any trait has wandered.
+   *
+   * **Give it a warm-up before believing any of it.** A preset drops its whole
+   * population in at once as founders, so `bornMean` and `bornMax` start at
+   * exactly zero by construction and every early reading is measuring the
+   * seeding rather than the dynamics — `lines / bodies` starts at 1 for the
+   * same reason. Under a minute of simulated time these say almost nothing
+   * about a steady state, and it is very easy to read "has not got going yet"
+   * as "does not work". Trait means and standard deviations are only slightly
+   * better off: they begin as the spread `seedChem` and the sliders put there.
+   *
+   * What *is* fair early is a comparison between two runs at the same age and
+   * the same seed, which is what the numbers on `declutter` are. An absolute
+   * claim about whether a pond sustains evolution needs it run out properly.
    */
   census(): {
     bodies: number;

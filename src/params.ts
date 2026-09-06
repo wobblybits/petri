@@ -35,7 +35,10 @@ export interface Params {
    *     declutter 0,   flockAlign 0     ->  6.54
    *
    * Eighteen times the generation depth with both off, and almost nothing from
-   * turning off either one. The mechanism is visible in the wire counts: at the
+   * turning off either one. Read as a comparison at equal age, which is what
+   * it is — 45 s is mostly warm-up for a preset that drops its whole
+   * population in at once as founders, so the absolute figures are far too
+   * early to say what any of these settles at. See `Sim.census`. The mechanism is visible in the wire counts: at the
    * shipped values only 2 of 93 wires are principal-to-principal and none are
    * Con-Dup, while 98% of bodies can afford a rewrite and the ground is still
    * at capacity. Bodies are rich and idle — they are not meeting. Personal
