@@ -774,6 +774,61 @@ export function head(a: Agent, matrix: number, base: number, row: number): numbe
 }
 
 /**
+ * The realised emit vector: what this genome actually says, into `out`.
+ *
+ * `relu(E.h + e0)` per channel and then **normalised to one unit across all
+ * four**, which is the budget the whole honesty argument rests on and which
+ * was, until this function existed, enforced nowhere.
+ *
+ * It had been applied to `e0` at birth by `inheritChem` and never again. `E`
+ * is free to add up to `CHEM_SLOPE_MAX` per state dimension on top, so a
+ * genome satisfying every invariant inheritance guarantees — bases
+ * non-negative and summing to one, every `E` entry inside its bound —
+ * realised a total of 17 against a documented budget of 1. "Louder is
+ * strictly better" was reachable, which is the exact thing the budget exists
+ * to prevent, and the trade-off that justified deleting `emitCost` did not
+ * hold: measured, the ground channel and both signal channels rose *together*
+ * off a single state dimension.
+ *
+ * Normalising the realised vector rather than tightening the slope bound is
+ * the fix that restores the documented invariant instead of merely shrinking
+ * the violation. It has to see all four channels at once, which is why this
+ * is a vector and not four scalar calls.
+ *
+ * A body that has mutated its way to silence stays silent rather than being
+ * amplified back out of noise — the same rule `inheritChem` uses on the bases.
+ */
+export function emitVector(chem: Float32Array, g: number, h: Float64Array, ho: number, out: Float64Array, oo: number): void {
+  let sum = 0;
+  for (let c = 0; c < 4; c++) {
+    const o = g + E_OUT + c * STATE_DIMS;
+    let v = chem[g + EMIT + c];
+    for (let d = 0; d < STATE_DIMS; d++) v += chem[o + d] * h[ho + d];
+    if (v < 0) v = 0;
+    out[oo + c] = v;
+    sum += v;
+  }
+  // Reciprocal once rather than four divides; this runs per body per frame.
+  if (sum > 1e-6) {
+    const inv = 1 / sum;
+    for (let c = 0; c < 4; c++) out[oo + c] *= inv;
+  }
+}
+
+/** The taste vector. Signed, and not normalised — a taste weight is compared
+ *  against other taste weights rather than spent, so there is no budget. */
+export function tasteVector(chem: Float32Array, g: number, h: Float64Array, ho: number, out: Float64Array, oo: number): void {
+  for (let c = 0; c < 4; c++) {
+    const o = g + T_OUT + c * STATE_DIMS;
+    let v = chem[g + TASTE + c];
+    for (let d = 0; d < STATE_DIMS; d++) v += chem[o + d] * h[ho + d];
+    out[oo + c] = v;
+  }
+}
+
+const SCRATCH4 = new Float64Array(4);
+
+/**
  * Emit weight for one *signal* channel. Never negative.
  *
  * Still zero on `CH.energy`, and still here rather than at the three places
@@ -786,12 +841,8 @@ export function head(a: Agent, matrix: number, base: number, row: number): numbe
  */
 export function effEmit(a: Agent, c: number): number {
   if (c === CH.energy) return 0;
-  const ch = a.chem;
-  const h = a.h;
-  const o = E_OUT + c * STATE_DIMS;
-  let v = ch[EMIT + c];
-  for (let d = 0; d < STATE_DIMS; d++) v += ch[o + d] * h[d];
-  return v > 0 ? v : 0;
+  emitVector(a.chem, 0, a.h, 0, SCRATCH4, 0);
+  return SCRATCH4[c];
 }
 
 /**
@@ -806,22 +857,14 @@ export function effEmit(a: Agent, c: number): number {
  * energy itself.
  */
 export function emitEnergy(a: Agent): number {
-  const ch = a.chem;
-  const h = a.h;
-  const o = E_OUT + CH.energy * STATE_DIMS;
-  let v = ch[EMIT + CH.energy];
-  for (let d = 0; d < STATE_DIMS; d++) v += ch[o + d] * h[d];
-  return v > 0 ? v : 0;
+  emitVector(a.chem, 0, a.h, 0, SCRATCH4, 0);
+  return SCRATCH4[CH.energy];
 }
 
 /** Taste weight for one channel. May be negative — that is avoidance. */
 export function effTaste(a: Agent, c: number): number {
-  const ch = a.chem;
-  const h = a.h;
-  const o = T_OUT + c * STATE_DIMS;
-  let v = ch[TASTE + c];
-  for (let d = 0; d < STATE_DIMS; d++) v += ch[o + d] * h[d];
-  return v;
+  tasteVector(a.chem, 0, a.h, 0, SCRATCH4, 0);
+  return SCRATCH4[c];
 }
 
 /**

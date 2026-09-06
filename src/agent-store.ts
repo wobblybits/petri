@@ -118,6 +118,21 @@ export class AgentStore {
   hAll!: Float64Array;
   /** Last frame's four raw channel readings at each body's position. */
   senseAll!: Float64Array;
+  /**
+   * This frame's realised emit and taste vectors, four channels each.
+   *
+   * Materialised once by `updateState` rather than recomputed by each
+   * consumer. The scent pass asked for emit four times a body and the steer
+   * pass asked for taste four times a body, each call walking the genome
+   * again — 13.8 ms a frame at 20k between them, for two vectors that are pure
+   * functions of `h` and could not have changed since it was computed.
+   *
+   * Emit here is the *normalised* vector: what the body actually says, summing
+   * to one unit across the four channels. That is the budget, and it is
+   * enforced here because here is the only place all four are known at once.
+   */
+  emitAll!: Float64Array;
+  tasteAll!: Float64Array;
 
   /** Slots < highWater have been allocated at least once (live or freed). */
   private highWater = 0;
@@ -210,6 +225,8 @@ export class AgentStore {
     this.bound[slot] = 0;
     this.hAll.fill(0, slot * STATE_W, slot * STATE_W + STATE_W);
     this.senseAll.fill(0, slot * SENSE_W, slot * SENSE_W + SENSE_W);
+    this.emitAll.fill(0, slot * 4, slot * 4 + 4);
+    this.tasteAll.fill(0, slot * 4, slot * 4 + 4);
   }
 
   private growTo(newCapacity: number): void {
@@ -280,6 +297,12 @@ export class AgentStore {
     const newSense = new Float64Array(newCapacity * SENSE_W);
     if (this.senseAll) newSense.set(this.senseAll.subarray(0, live * SENSE_W));
     this.senseAll = newSense;
+    const newEmit = new Float64Array(newCapacity * 4);
+    if (this.emitAll) newEmit.set(this.emitAll.subarray(0, live * 4));
+    this.emitAll = newEmit;
+    const newTaste = new Float64Array(newCapacity * 4);
+    if (this.tasteAll) newTaste.set(this.tasteAll.subarray(0, live * 4));
+    this.tasteAll = newTaste;
 
     this.capacity = newCapacity;
     if (oldCapacity > 0) this.generation++;

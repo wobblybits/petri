@@ -26,8 +26,8 @@ import {
   W_IN,
   W_NET,
   W_SELF,
-  effEmit,
-  emitEnergy,
+  emitVector,
+  tasteVector,
   effTaste,
   flockGain,
   stemOffsetInto,
@@ -758,7 +758,7 @@ export class Sim {
       const rate = params.farmRate * t;
       for (const a of this.agents.values()) {
         if (a.locked) continue;
-        const w = emitEnergy(a);
+        const w = this.agentStore.emitAll[a.slot * 4 + CH.energy];
         if (w <= 0) continue;
         const want = rate * w;
         const have = a.extra > 0 ? a.extra : 0;
@@ -2573,6 +2573,7 @@ export class Sim {
     const dStride = fieldGpu.depositStride;
     const pStride = fieldGpu.probeStride;
 
+    const EMITS = this.agentStore.emitAll;
     const scale = this.fields.depositScale;
     const amt = params.deposit * scale;
     let nDep = 0;
@@ -2589,10 +2590,11 @@ export class Sim {
         dep[o] = w.x;
         dep[o + 1] = w.y;
         if (slot === 'p') {
-          dep[o + 4] = amt * effEmit(a, 0);
-          dep[o + 5] = amt * effEmit(a, 1);
-          dep[o + 6] = amt * effEmit(a, 2);
-          dep[o + 7] = amt * effEmit(a, 3);
+          const eo = a.slot * 4;
+          dep[o + 4] = amt * EMITS[eo];
+          dep[o + 5] = amt * EMITS[eo + 1];
+          dep[o + 6] = 0;
+          dep[o + 7] = amt * EMITS[eo + 3];
         } else {
           dep[o + 4] = 0;
           dep[o + 5] = 0;
@@ -3189,6 +3191,7 @@ export class Sim {
     const kinds = nativeSolver.kind;
     const sc = nativeSolver.scale;
     const emit = nativeSolver.bodyEmit;
+    const EMITS = this.agentStore.emitAll;
     if (!free || !kinds || !sc || !emit) return false;
 
     const list = this.forceList();
@@ -3226,7 +3229,11 @@ export class Sim {
       bodies[o + FAR.locked] = a.locked ? 1 : 0;
       kinds[i] = this.kindCode(a.kind);
       sc[i] = a.scale;
-      for (let c = 0; c < 4; c++) emit[i * 4 + c] = effEmit(a, c);
+      // Materialised by `updateState`; `CH.energy` is masked here rather than
+      // in the vector, because the vector is the budget and the deposit path
+      // is the thing that must never see the ground. See `effEmit`.
+      const eo = a.slot * 4;
+      for (let c = 0; c < 4; c++) emit[i * 4 + c] = c === CH.energy ? 0 : EMITS[eo + c];
       if (!freeFresh) {
         let mask = 0;
         for (const slot of slotsFor(a.kind)) {
@@ -3278,14 +3285,17 @@ export class Sim {
    * shape rather than being changed because it was on a list.
    */
   private deposit(params: Params): void {
+    const EMITS = this.agentStore.emitAll;
     for (const agent of this.agents.values()) {
       if (agent.locked) continue;
       for (const slot of slotsFor(agent.kind)) {
         const free = this.graph.isFreeAt(agent.id, slot);
         if (slot === 'p') {
           const p = portWorld(agent, slot, this.w, this.h);
+          const eo = agent.slot * 4;
           for (let ch = 0; ch < 4; ch++) {
-            const w = effEmit(agent, ch);
+            if (ch === CH.energy) continue;
+            const w = EMITS[eo + ch];
             if (w !== 0) this.fields.deposit(ch, p.x, p.y, params.deposit * w);
           }
         } else if (free) {
@@ -3296,14 +3306,21 @@ export class Sim {
     }
   }
 
+  /**
+   * Dotted against the materialised taste vector rather than through
+   * `mixScent`, which rebuilds it from the genome on every call — and this is
+   * called three times a body a frame, once per sensor and once for the trail.
+   * `mixScent` stays as the readable statement of what the dot product is, and
+   * is what the tests exercise.
+   */
   private scentAt(agent: Agent, x: number, y: number, _params: Params): number {
-    return mixScent(
-      agent,
-      this.fields.sample(0, x, y),
-      this.fields.sample(1, x, y),
-      this.fields.sample(2, x, y),
-      this.fields.sample(3, x, y),
-      this.groundScale,
+    const t = this.agentStore.tasteAll;
+    const o = agent.slot * 4;
+    return (
+      t[o] * this.fields.sample(0, x, y) +
+      t[o + 1] * this.fields.sample(1, x, y) +
+      t[o + 2] * this.fields.sample(2, x, y) * this.groundScale +
+      t[o + 3] * this.fields.sample(3, x, y)
     );
   }
 
@@ -3329,7 +3346,7 @@ export class Sim {
    * machine.
    */
   private tasteOf(a: Agent, c: number): number {
-    const t = effTaste(a, c);
+    const t = this.agentStore.tasteAll[a.slot * 4 + c];
     return c === CH.energy ? t * this.groundScale : t;
   }
 
@@ -4217,6 +4234,8 @@ export class Sim {
     const gScale = this.groundScale;
     const x = this.stateInput;
     const mean = this.stateMean;
+    const EMITS = store.emitAll;
+    const TASTES = store.tasteAll;
     const FA = store.flockAlign;
     const FS = store.flockSep;
     const TT = store.transportThrust;
@@ -4314,6 +4333,26 @@ export class Sim {
        * genome was allowed to say. Alignment past its ceiling is negative
        * damping; separation past its own has no equilibrium to settle at.
        */
+      /*
+       * Emit and taste materialised here, once, instead of by each consumer.
+       *
+       * Both are pure functions of `h`, which was computed three lines up, and
+       * both were being rebuilt from the genome four times a body a frame —
+       * `effEmit` in the scent pass and `tasteOf` in steer, 13.8 ms between
+       * them at 20k. Emit is normalised on the way in, which is the only place
+       * all four channels are known at once and therefore the only place the
+       * unit budget can actually be enforced.
+       *
+       * One behaviour change worth naming: `taste` is now this frame's rather
+       * than last frame's. `updateState` runs in `endFrame`, so the scent pass
+       * already saw this frame's `h` while `steer` and `flock` ran in the next
+       * frame's `beginFrame` and saw the previous. That asymmetry between what
+       * a body says and what it listens for is gone, which is almost certainly
+       * an improvement and is definitely a change — it moves `state-hash`.
+       */
+      emitVector(CHEM, g, H, ho, EMITS, slot * 4);
+      tasteVector(CHEM, g, H, ho, TASTES, slot * 4);
+
       FA[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 0, H, ho, S) * HEAD_SCALE.align, -8, 16);
       FS[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 1, H, ho, S) * HEAD_SCALE.sep, -60, 120);
       TT[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 0, H, ho, S) * HEAD_SCALE.thrust, 0, 1);

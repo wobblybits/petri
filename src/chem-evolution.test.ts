@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { EMIT, E_OUT, STATE_DIMS, TASTE, T_OUT, bareBody, effEmit, effTaste, seedChem, type Agent } from './agents.ts';
+import { CHEM_LEN, EMIT, E_OUT, STATE_DIMS, TASTE, T_OUT, bareBody, effEmit, effTaste, emitEnergy, seedChem, type Agent } from './agents.ts';
+import { CHEM_SLOPE_MAX } from './rewrite.ts';
 import { CH } from './fields.ts';
 import { CHEM_TASTE_MAX } from './rewrite.ts';
 import { defaultParams } from './params.ts';
@@ -89,20 +90,67 @@ describe('scent genome', () => {
   it('maps state to what it says through E, and to what it listens for through T', () => {
     const params = defaultParams();
     const chem = seedChem('con', params);
-    // Say ch0 when h0 is up, listen for ch1 when h2 is down.
-    chem[E_OUT + CH.conP * STATE_DIMS + 0] = 1;
+    // Shift voice toward ch1 as h0 rises, and listen for ch1 less as h2 rises.
+    chem[E_OUT + CH.dupP * STATE_DIMS + 0] = 1;
     chem[T_OUT + CH.dupP * STATE_DIMS + 2] = -2;
-    const base = chem[EMIT + CH.conP];
     const tBase = chem[TASTE + CH.dupP];
 
     const rest = bareBody(chem, { h: [0, 0, 0, 0] });
     const lit = bareBody(chem, { h: [0.5, 0, 0, 0] });
     const inv = bareBody(chem, { h: [0, 0, 0.5, 0] });
 
-    expect(effEmit(rest, CH.conP), 'a zero state is just the base').toBeCloseTo(base, 6);
-    expect(effEmit(lit, CH.conP)).toBeCloseTo(base + 0.5, 6);
+    // Emit is a *distribution*: state moves voice between channels, it does
+    // not add any. At rest a Con puts everything on ch0; lit, ch1 has taken a
+    // share of it and ch0 has lost exactly that share.
+    expect(effEmit(rest, CH.conP)).toBeCloseTo(1, 6);
+    expect(effEmit(rest, CH.dupP)).toBeCloseTo(0, 6);
+    expect(effEmit(lit, CH.dupP)).toBeGreaterThan(0);
+    expect(effEmit(lit, CH.conP)).toBeLessThan(1);
+
+    // Taste has no budget — a weight is compared against other weights rather
+    // than spent — so it is free to move in absolute terms.
     expect(effTaste(rest, CH.dupP)).toBeCloseTo(tBase, 6);
     expect(effTaste(inv, CH.dupP)).toBeCloseTo(tBase - 1, 6);
+  });
+
+  /*
+   * The budget has to hold on what a body *does*, not on what its genome says.
+   *
+   * It was enforced only by `inheritChem`, which projects the bases onto the
+   * unit simplex at birth. `E` then adds up to `CHEM_SLOPE_MAX` per state
+   * dimension on top of that, so a genome satisfying every invariant
+   * inheritance guarantees realised a total of **17** against a documented
+   * budget of 1. "Louder is strictly better" was reachable, which is the one
+   * thing the budget exists to prevent — and the trade-off that justified
+   * deleting `emitCost` did not hold either, because the ground channel and
+   * both signal channels rose together off a single state dimension.
+   *
+   * The old tests could not have caught it: they asserted `chem[EMIT..EMIT+4]`,
+   * which is the genome, and nothing asserted anything about the output.
+   */
+  it('spends one unit however extreme the genome and the state get', () => {
+    const c = new Float32Array(CHEM_LEN);
+    for (let k = 0; k < 4; k++) c[EMIT + k] = 0.25;
+    for (let k = E_OUT; k < E_OUT + 4 * STATE_DIMS; k++) c[k] = CHEM_SLOPE_MAX;
+    for (const h of [[0, 0, 0, 0], [1, 1, 1, 1], [-1, -1, -1, -1], [0.9, -0.9, 0.5, -0.2]]) {
+      const a = bareBody(c, { h });
+      const total = effEmit(a, CH.conP) + effEmit(a, CH.dupP) + effEmit(a, CH.aux) + emitEnergy(a);
+      // One unit, or nothing at all — a state that drives every channel below
+      // zero leaves a body mute rather than being renormalised out of noise.
+      expect(
+        Math.abs(total - 1) < 1e-6 || total === 0,
+        `h=[${h}] realised ${total}`,
+      ).toBe(true);
+    }
+  });
+
+  it('leaves a body that mutated its way to silence silent', () => {
+    // The same rule `inheritChem` uses on the bases: nothing is amplified back
+    // out of noise just because everything else went to zero too.
+    const c = new Float32Array(CHEM_LEN);
+    const a = bareBody(c, { h: [1, 1, 1, 1] });
+    for (const ch of [CH.conP, CH.dupP, CH.aux]) expect(effEmit(a, ch)).toBe(0);
+    expect(emitEnergy(a)).toBe(0);
   });
 
   it('leaves a seeded body behaving exactly as a stateless one did', () => {
