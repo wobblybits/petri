@@ -310,14 +310,36 @@ export class FieldGpu {
   }
 
   /**
+   * Zero the field on the device: a new pond in the same session.
+   *
+   * `Fields.clear` only empties the CPU mirror, and on this path nothing
+   * reads that. Without this the old pond's scent was still in the buffers
+   * when the new one pinned its world, and its bodies were steering on trails
+   * nobody had laid.
+   */
+  clear(): void {
+    const device = this.device;
+    if (!this.ready || !device || !this.fieldA || !this.fieldB || !this.acc) return;
+    const enc = device.createCommandEncoder();
+    enc.clearBuffer(this.fieldA);
+    enc.clearBuffer(this.fieldB);
+    enc.clearBuffer(this.acc);
+    device.queue.submit([enc.finish()]);
+    this.aLive = true;
+  }
+
+  /** What the last `submit` asked for, so `collect` knows what to wait on. */
+  private pendingProbe = 0;
+  private pendingEntries = 0;
+
+  /**
    * One frame of field: scatter the deposits, fold them in, diffuse twice,
    * decay, and gather the probes. Returns false if the GPU is not available,
    * in which case the caller keeps doing it on the CPU.
    *
-   * The gathered samples are read back one frame late by design — mapping a
-   * buffer stalls the pipeline, so the read is issued now and collected on the
-   * next call. Sensing a frame behind is invisible at 60fps and worth far more
-   * than the stall costs.
+   * `submit` and `collect` are separable so a second pipeline on the same
+   * device — the genome's — can be queued behind this one before either
+   * readback is waited on, which turns two round trips a frame into one.
    */
   async step(
     fields: Fields,
@@ -331,6 +353,25 @@ export class FieldGpu {
     harvest: { ch: number; blocks: number; entries: number },
     fill: { ch: number; value: number } | null,
   ): Promise<boolean> {
+    if (!this.submit(fields, nDeposit, nProbe, mix, mix2, decayRate, grow, react, harvest, fill)) {
+      return false;
+    }
+    return this.collect();
+  }
+
+  /** Encode and submit a frame's passes. False if the device is not there. */
+  submit(
+    fields: Fields,
+    nDeposit: number,
+    nProbe: number,
+    mix: number,
+    mix2: number,
+    decayRate: number,
+    grow: { ch: number; r: number; cap: number; catCh: number; gamma: number },
+    react: { u: number; v: number; feed: number; kill: number; dt: number },
+    harvest: { ch: number; blocks: number; entries: number },
+    fill: { ch: number; value: number } | null,
+  ): boolean {
     const device = this.device;
     if (!this.ready || !device || !this.fieldA || !this.fieldB || !this.acc) return false;
     try {
@@ -483,16 +524,39 @@ export class FieldGpu {
         enc.copyBufferToBuffer(this.hFlow!, 0, this.hRead!, 0, harvest.entries * 4);
       }
       device.queue.submit([enc.finish()]);
+      this.pendingProbe = nProbe;
+      this.pendingEntries = harvest.entries;
+      return true;
+    } catch (e) {
+      this.lastError = String(e);
+      return false;
+    }
+  }
+
+  /**
+   * Wait for the last `submit`'s readbacks and unpack them into `sampleData`
+   * and `gotData`. Both maps are issued before either is awaited, since they
+   * ride the same submission and finish together.
+   */
+  async collect(): Promise<boolean> {
+    const nProbe = this.pendingProbe;
+    const entries = this.pendingEntries;
+    this.pendingProbe = 0;
+    this.pendingEntries = 0;
+    if (!this.ready || !this.device) return false;
+    try {
+      const sampleBytes = nProbe * SAMPLE_FLOATS * 4;
+      const gotBytes = entries * 4;
+      const waits: Promise<void>[] = [];
+      if (nProbe > 0) waits.push(this.readback!.mapAsync(GPUMapMode.READ, 0, sampleBytes));
+      if (entries > 0) waits.push(this.hRead!.mapAsync(GPUMapMode.READ, 0, gotBytes));
+      if (waits.length > 0) await Promise.all(waits);
       if (nProbe > 0) {
-        const bytes = nProbe * SAMPLE_FLOATS * 4;
-        await this.readback!.mapAsync(GPUMapMode.READ, 0, bytes);
-        this.sampleData.set(new Float32Array(this.readback!.getMappedRange(0, bytes)));
+        this.sampleData.set(new Float32Array(this.readback!.getMappedRange(0, sampleBytes)));
         this.readback!.unmap();
       }
-      if (harvest.entries > 0) {
-        const bytes = harvest.entries * 4;
-        await this.hRead!.mapAsync(GPUMapMode.READ, 0, bytes);
-        this.gotData.set(new Float32Array(this.hRead!.getMappedRange(0, bytes)));
+      if (entries > 0) {
+        this.gotData.set(new Float32Array(this.hRead!.getMappedRange(0, gotBytes)));
         this.hRead!.unmap();
       }
       return true;

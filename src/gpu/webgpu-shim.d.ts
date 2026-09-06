@@ -63,6 +63,7 @@ interface GPUCommandEncoder {
   beginComputePass(): GPUComputePassEncoder;
   beginRenderPass(desc: unknown): GPURenderPassEncoder;
   copyBufferToBuffer(src: GPUBuffer, srcOffset: number, dst: GPUBuffer, dstOffset: number, size: number): void;
+  clearBuffer(buffer: GPUBuffer, offset?: number, size?: number): void;
   finish(): GPUCommandBuffer;
 }
 

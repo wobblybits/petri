@@ -1,9 +1,11 @@
 import {
-  inSnapArc,
+  ERA_SLOTS,
+  inSnapArcAt,
+  NODE_SLOTS,
   poseHeld,
   portKey,
   portKeyAt,
-  portWorld,
+  portWorldInto,
   slotsFor,
   stemWorldInto,
   wireCubic,
@@ -25,7 +27,7 @@ import { bezierPointInto } from './curve.ts';
 import { segmentsInterfere, WIRE_RADIUS } from './geom.ts';
 import { BoxGrid, PairGrid } from './grid.ts';
 import type { Params } from './params.ts';
-import { clamp, easeInOut, lerp, wrap, wrapDeltaVec, type Vec2 } from './wrap.ts';
+import { clamp, easeInOut, lerp, wrap, type Vec2 } from './wrap.ts';
 import type { LatchEvent } from './audio/types.ts';
 
 const stemScratchA = { x: 0, y: 0 };
@@ -112,10 +114,8 @@ export function ropeIsLive(wire: Wire, detailed?: (wire: Wire) => boolean): bool
   return wire.ropePath !== 'span';
 }
 
-const SLOT_ORDER = { p: 0, l: 1, r: 2 } as const;
-function slotOrder(slot: PortSlot): number {
-  return SLOT_ORDER[slot];
-}
+/** Slot names by the code `snap` keys its port table on: p, l, r. */
+const SLOT_NAME: readonly PortSlot[] = ['p', 'l', 'r'];
 
 export function otherEnd(wire: Wire, port: PortRef): PortRef {
   if (wire.a.id === port.id && wire.a.slot === port.slot) return wire.b;
@@ -150,8 +150,73 @@ export class Graph {
 
   /** Broad phase for latching: ports only ever pair up within snapRadius. */
   private portGrid = new PairGrid();
-  private portX: number[] = [];
-  private portY: number[] = [];
+  /**
+   * The free ports of the pond, as parallel arrays reused frame to frame:
+   * the body, its id, the slot as a small integer, and the tip.
+   *
+   * This was an array of objects each carrying a fresh `PortRef`, rebuilt
+   * every frame, with a second array of candidate objects on top of it — on
+   * the order of a hundred thousand short-lived objects a frame at fifty
+   * thousand bodies, for a pass whose inputs are a body, a slot and a point.
+   * The greedy pass at the end needs a real `PortRef` only for the handful of
+   * latches it actually makes.
+   */
+  private snapAgents: Agent[] = [];
+  private portId = new Int32Array(0);
+  private snapSlot = new Uint8Array(0);
+  private portX = new Float64Array(0);
+  private portY = new Float64Array(0);
+  /** Candidate pairs, by port-table index, and an index array to sort them. */
+  private candA = new Int32Array(0);
+  private candB = new Int32Array(0);
+  private candDist = new Float64Array(0);
+  private candRank = new Int8Array(0);
+  private candOrder = new Int32Array(0);
+  private nCands = 0;
+  /** Scratch refs for `latchCrosses`, which reads them and keeps nothing. */
+  private readonly snapRefA: PortRef = { id: 0, slot: 'p' };
+  private readonly snapRefB: PortRef = { id: 0, slot: 'p' };
+  private readonly snapTip = { x: 0, y: 0 };
+
+  private growPorts(cap: number): void {
+    const id = new Int32Array(cap);
+    id.set(this.portId);
+    this.portId = id;
+    const sl = new Uint8Array(cap);
+    sl.set(this.snapSlot);
+    this.snapSlot = sl;
+    const px = new Float64Array(cap);
+    px.set(this.portX);
+    this.portX = px;
+    const py = new Float64Array(cap);
+    py.set(this.portY);
+    this.portY = py;
+  }
+
+  private pushCand(i: number, j: number, dist2: number, rank: number): void {
+    const n = this.nCands;
+    if (n >= this.candA.length) {
+      const cap = n * 2 + 64;
+      const a = new Int32Array(cap);
+      a.set(this.candA);
+      this.candA = a;
+      const b = new Int32Array(cap);
+      b.set(this.candB);
+      this.candB = b;
+      const d = new Float64Array(cap);
+      d.set(this.candDist);
+      this.candDist = d;
+      const r = new Int8Array(cap);
+      r.set(this.candRank);
+      this.candRank = r;
+      this.candOrder = new Int32Array(cap);
+    }
+    this.candA[n] = i;
+    this.candB[n] = j;
+    this.candDist[n] = dist2;
+    this.candRank[n] = rank;
+    this.nCands = n + 1;
+  }
 
   /** Birth length floor, as a fraction of wireMinRest. */
   static BIRTH_FLOOR = 0.2;
@@ -543,15 +608,19 @@ export class Graph {
 
   /** Cheap degree test: a few port lookups rather than a scan of every wire. */
   isWired(agent: Agent): boolean {
-    for (const slot of slotsFor(agent.kind)) {
-      if (!this.isFreeAt(agent.id, slot)) return true;
+    // The shared slot lists rather than `slotsFor`, which allocates: this is
+    // asked once a body a frame by the activity LOD.
+    const slots = agent.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
+    for (let i = 0; i < slots.length; i++) {
+      if (!this.isFreeAt(agent.id, slots[i])) return true;
     }
     return false;
   }
 
   portsFilled(agent: Agent): boolean {
-    for (const slot of slotsFor(agent.kind)) {
-      if (this.isFreeAt(agent.id, slot)) return false;
+    const slots = agent.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
+    for (let i = 0; i < slots.length; i++) {
+      if (this.isFreeAt(agent.id, slots[i])) return false;
     }
     return true;
   }
@@ -621,10 +690,25 @@ export class Graph {
     this.bump();
   }
 
+  /**
+   * Drop every wire touching `agentId`.
+   *
+   * Through the port map, not a scan. This used to copy the whole wire map
+   * into an array and walk it — once per death and twice per rewrite — which
+   * is nothing at a hundred wires and is most of a frame at seventy thousand:
+   * a churning pond kills tens of bodies a frame, and each one paid for every
+   * wire in the pond. A body has three ports and a port holds at most one
+   * wire, so three lookups find everything the scan did. A self-wire is
+   * reached through either of its ends and detached once, since the second
+   * lookup finds the port empty.
+   */
   detachAgent(agentId: number): void {
-    for (const w of [...this.wires.values()]) {
-      if (w.a.id === agentId || w.b.id === agentId) this.detach(w.id);
-    }
+    const wp = this.wireAtSlot(agentId, 'p');
+    if (wp) this.detach(wp.id);
+    const wl = this.wireAtSlot(agentId, 'l');
+    if (wl) this.detach(wl.id);
+    const wr = this.wireAtSlot(agentId, 'r');
+    if (wr) this.detach(wr.id);
   }
 
   snap(
@@ -635,90 +719,119 @@ export class Graph {
     time: number,
   ): void {
     if (params.snapRadius <= 0) return;
-    type Cand = { pa: PortRef; pb: PortRef; dist: number; rank: number };
-    const ports: { ref: PortRef; x: number; y: number; principal: boolean }[] = [];
+    const list = this.snapAgents;
+    const tip = this.snapTip;
+    let n = 0;
     for (const agent of agents.values()) {
       const store = agent.store;
       const s = agent.slot;
       if (store.locked[s] || store.stun[s] > 0) continue;
-      for (const slot of slotsFor(agent.kind)) {
-        const ref: PortRef = { id: agent.id, slot };
-        if (!this.isFree(ref)) continue;
-        if (this.sealed.has(portKey(ref))) continue;
-        const p = portWorld(agent, slot, w, h);
-        ports.push({ ref, x: p.x, y: p.y, principal: slot === 'p' });
+      const id = agent.id;
+      const slots = agent.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
+      for (let k = 0; k < slots.length; k++) {
+        const slot = slots[k];
+        const key = portKeyAt(id, slot);
+        if (this.portWire.has(key) || this.sealed.has(key)) continue;
+        if (n >= this.portX.length) this.growPorts(n * 2 + 64);
+        portWorldInto(agent, slot, w, h, tip);
+        list[n] = agent;
+        this.portId[n] = id;
+        // The slot's index in its list is its code: p, l, r as 0, 1, 2.
+        this.snapSlot[n] = k;
+        this.portX[n] = tip.x;
+        this.portY[n] = tip.y;
+        n++;
       }
     }
+    list.length = n;
 
-    const cands: Cand[] = [];
     const r = params.snapRadius;
     const r2 = r * r;
     const touchR = 5.5;
     const touchR2 = touchR * touchR;
+    const arcCos = Math.cos(Math.min(params.snapArc, Math.PI * 0.49));
     // Ports only ever latch within snapRadius, so testing every pair against
     // every other was work the radius check threw away immediately — millions
     // of rejections a frame at a few thousand agents.
-    const nPorts = ports.length;
-    if (this.portX.length < nPorts) {
-      this.portX = new Array(nPorts * 2);
-      this.portY = new Array(nPorts * 2);
-    }
-    for (let i = 0; i < nPorts; i++) {
-      this.portX[i] = ports[i].x;
-      this.portY[i] = ports[i].y;
-    }
-    this.portGrid.build(this.portX, this.portY, nPorts, Math.max(1, r));
+    this.portGrid.build(this.portX, this.portY, n, Math.max(1, r));
+    this.nCands = 0;
+    const PID = this.portId;
+    const SLOT = this.snapSlot;
+    const PX = this.portX;
+    const PY = this.portY;
     this.portGrid.forEachPair((p, q) => {
       // Keep the original lower-index-first ordering: it decides which end
       // becomes wire.a, and the constraint solve is order-sensitive.
       const i = p < q ? p : q;
       const j = p < q ? q : p;
-      const A = ports[i];
-      const B = ports[j];
-      if (A.ref.id === B.ref.id) return;
-      const d = wrapDeltaVec(A.x, A.y, B.x, B.y, w, h);
-      const dist2 = d.x * d.x + d.y * d.y;
+      if (PID[i] === PID[j]) return;
+      const dx = PX[j] - PX[i];
+      const dy = PY[j] - PY[i];
+      const dist2 = dx * dx + dy * dy;
       if (dist2 > r2) return;
-      const agentA = agents.get(A.ref.id);
-      const agentB = agents.get(B.ref.id);
-      if (!agentA || !agentB) return;
       const touching = dist2 <= touchR2;
+      const sa = SLOT[i];
+      const sb = SLOT[j];
       if (!touching) {
-        if (!inSnapArc(agentA, A.ref.slot, B.x, B.y, w, h, r, params.snapArc)) return;
-        if (!inSnapArc(agentB, B.ref.slot, A.x, A.y, w, h, r, params.snapArc)) return;
+        if (!inSnapArcAt(list[i], sa, PX[i], PY[i], PX[j], PY[j], r, arcCos)) return;
+        if (!inSnapArcAt(list[j], sb, PX[j], PY[j], PX[i], PY[i], r, arcCos)) return;
       }
-      const rank = A.principal && B.principal ? 0 : A.principal || B.principal ? 1 : 2;
-      cands.push({ pa: A.ref, pb: B.ref, dist: dist2, rank: touching ? rank - 1 : rank });
+      const pa = sa === 0;
+      const pb = sb === 0;
+      const rank = pa && pb ? 0 : pa || pb ? 1 : 2;
+      this.pushCand(i, j, dist2, touching ? rank - 1 : rank);
     });
+    const nc = this.nCands;
+    if (nc === 0) {
+      list.length = 0;
+      return;
+    }
     // Total order, so the greedy pass below cannot depend on the order
     // candidates happened to be generated in. Rank and distance alone leave
     // exact ties — which mirror-symmetric presets produce — to be broken by
-    // Array#sort's stability, i.e. by Map iteration order.
-    cands.sort(
-      (a, b) =>
-        a.rank - b.rank ||
-        a.dist - b.dist ||
-        a.pa.id - b.pa.id ||
-        slotOrder(a.pa.slot) - slotOrder(b.pa.slot) ||
-        a.pb.id - b.pb.id ||
-        slotOrder(a.pb.slot) - slotOrder(b.pb.slot),
+    // the sort's stability, i.e. by Map iteration order.
+    const order = this.candOrder;
+    for (let k = 0; k < nc; k++) order[k] = k;
+    const CA = this.candA;
+    const CB = this.candB;
+    const CD = this.candDist;
+    const CR = this.candRank;
+    order.subarray(0, nc).sort(
+      (x, y) =>
+        CR[x] - CR[y] ||
+        CD[x] - CD[y] ||
+        PID[CA[x]] - PID[CA[y]] ||
+        SLOT[CA[x]] - SLOT[CA[y]] ||
+        PID[CB[x]] - PID[CB[y]] ||
+        SLOT[CB[x]] - SLOT[CB[y]],
     );
     // Index the wires once here rather than rescanning them for every
     // candidate. Only valid while the pass runs: endpoints move next frame.
     this.buildLatchIndex(agents, w, h);
-    const taken = new Set<number>();
-    for (const c of cands) {
-      const ka = portKey(c.pa);
-      const kb = portKey(c.pb);
-      if (taken.has(ka) || taken.has(kb)) continue;
-      if (!this.isFree(c.pa) || !this.isFree(c.pb)) continue;
-      if (this.latchCrosses(agents, c.pa, c.pb, w, h)) continue;
-      if (this.connect(agents, c.pa, c.pb, w, h, params, time)) {
-        taken.add(ka);
-        taken.add(kb);
-      }
+    const refA = this.snapRefA;
+    const refB = this.snapRefB;
+    for (let k = 0; k < nc; k++) {
+      const c = order[k];
+      const i = CA[c];
+      const j = CB[c];
+      const ia = PID[i];
+      const ib = PID[j];
+      const sla = SLOT_NAME[SLOT[i]];
+      const slb = SLOT_NAME[SLOT[j]];
+      // A port latched earlier in this pass is no longer free, which is the
+      // whole of what the old `taken` set recorded.
+      if (this.portWire.has(portKeyAt(ia, sla)) || this.portWire.has(portKeyAt(ib, slb))) continue;
+      refA.id = ia;
+      refA.slot = sla;
+      refB.id = ib;
+      refB.slot = slb;
+      if (this.latchCrosses(agents, refA, refB, w, h)) continue;
+      // `connect` keeps its refs, so a latch is the one place this pass allocates.
+      this.connect(agents, { id: ia, slot: sla }, { id: ib, slot: slb }, w, h, params, time);
     }
     this.latchIndexed = false;
+    // Not held across frames: a body that dies would otherwise stay reachable.
+    list.length = 0;
   }
 
   /**

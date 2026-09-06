@@ -261,7 +261,7 @@ export class Fields {
     this.boundX = cx;
     this.boundY = cy;
     this.boundR = r > 0 ? r : 0;
-    this.spanStamp = '';
+    this.spanCols = -1;
   }
 
   /*
@@ -285,20 +285,45 @@ export class Fields {
    */
   private spanLo: Int32Array | null = null;
   private spanHi: Int32Array | null = null;
-  /** Inputs the cached spans were built from; `''` forces a rebuild. */
-  private spanStamp = '';
+  /**
+   * Inputs the cached spans were built from. Six numbers compared directly
+   * rather than a template string: this is asked five times a frame (diffuse
+   * twice, react, decay, grow) and a string was built and thrown away each
+   * time to answer a question six compares settle.
+   */
+  private spanBX = NaN;
+  private spanBY = NaN;
+  private spanBR = NaN;
+  private spanOX = NaN;
+  private spanOY = NaN;
+  private spanCols = -1;
+
+  private spansFresh(): boolean {
+    return (
+      this.spanBX === this.boundX &&
+      this.spanBY === this.boundY &&
+      this.spanBR === this.boundR &&
+      this.spanOX === this.originX &&
+      this.spanOY === this.originY &&
+      this.spanCols === this.cols
+    );
+  }
 
   private spans(): { lo: Int32Array; hi: Int32Array } {
-    const stamp = `${this.boundX},${this.boundY},${this.boundR},${this.originX},${this.originY},${this.cols}`;
     let lo = this.spanLo;
     let hi = this.spanHi;
     if (!lo || !hi || lo.length !== this.rows) {
       lo = this.spanLo = new Int32Array(this.rows);
       hi = this.spanHi = new Int32Array(this.rows);
-      this.spanStamp = '';
+      this.spanCols = -1;
     }
-    if (this.spanStamp === stamp) return { lo, hi };
-    this.spanStamp = stamp;
+    if (this.spansFresh()) return { lo, hi };
+    this.spanBX = this.boundX;
+    this.spanBY = this.boundY;
+    this.spanBR = this.boundR;
+    this.spanOX = this.originX;
+    this.spanOY = this.originY;
+    this.spanCols = this.cols;
     const { cols, rows } = this;
     if (this.boundR <= 0) {
       lo.fill(0);

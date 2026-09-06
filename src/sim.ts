@@ -10,7 +10,6 @@ import {
   NODE_SLOTS,
   portWorld,
   portWorldInto,
-  slotsFor,
   stemRoot,
   stemOffset,
   B_STATE,
@@ -444,11 +443,42 @@ export class Sim {
   private genomeOnGpu = false;
   /** True once a genome pass has been dispatched and not yet unpacked. */
   private genomePending = false;
-  /** Reused staging for the genome pass's neighbour lists. */
-  private readonly genomeAdj = new WireAdjacency();
-  private readonly genomeIndex = new Map<number, number>();
   private genomeSlotBuf = new Int32Array(0);
   private genomeCount = 0;
+  /** `AgentStore.chemVersion` the GPU's genome table was last synced to. */
+  private genomeChemVersion = -1;
+  /**
+   * Whether the solver steers from readings handed to it — the GPU probe's —
+   * rather than sampling a field it holds. Mirrors `nativeSolver.useSamples`
+   * for this Sim, since that flag is a singleton the whole process shares.
+   */
+  private steerFromSamples = false;
+  /**
+   * Which topology and roster `wireAdj` describes. See `wireAdjacency`.
+   */
+  private adjGraphVersion = -1;
+  private adjRosterVersion = -1;
+  private readonly adjIndex = new Map<number, number>();
+  /** Principal pairs ready to rewrite this frame. See `collectReadyRedexes`. */
+  private readonly readyRedexes: Wire[] = [];
+  /**
+   * Running counts of the events selection acts through, since `clear()`.
+   *
+   * `census()` can say how deep the population is; it cannot say how fast it
+   * turns over, and turnover is the number that decides whether anything
+   * about a pond is evolving or merely wandering. Integers, bumped where the
+   * events happen, read by the experiment harness and by nothing per frame.
+   */
+  readonly tally = {
+    spawned: 0,
+    born: 0,
+    died: 0,
+    commutes: 0,
+    erases: 0,
+    annihilations: 0,
+    latches: 0,
+    snaps: 0,
+  };
   /**
    * Physics detail. When a view is passed, FAR agents keep disc contacts and a
    * chord constraint but skip SAT, rope XPBD, wire clearance, and Hertzian.
@@ -502,7 +532,10 @@ export class Sim {
     this.coverW = this.w;
     this.coverH = this.h;
     this.fields = new Fields();
-    this.graph.onLatch = (ev) => audio.push(ev, this.graph, this.agents);
+    this.graph.onLatch = (ev) => {
+      this.tally.latches++;
+      audio.push(ev, this.graph, this.agents);
+    };
     audio.contacts = this.contacts;
   }
 
@@ -563,6 +596,27 @@ export class Sim {
     this.hitWake.length = 0;
     this.ropesDrawable = true;
     this.lodActive = false;
+    /*
+     * Everything the GPU path carries across a frame boundary. A harvest plan
+     * or a genome dispatched against the old roster would otherwise be paid
+     * out to whichever bodies of the new pond landed in the same slots — and
+     * with ids restarting at one and slots at zero, that is nearly all of
+     * them; the id check in `creditHarvest` and `unpackGenome` cannot tell a
+     * new body 1 from an old one. The field is cleared on the device for the
+     * same reason: `fields.clear()` above only zeroes the CPU mirror, and the
+     * old pond's scent would still be in the buffers when the new one pinned
+     * its world.
+     */
+    this.harvestPending = false;
+    this.genomePending = false;
+    this.genomeCount = 0;
+    this.genomeChemVersion = -1;
+    this.steerFromSamples = false;
+    this.adjGraphVersion = -1;
+    this.adjRosterVersion = -1;
+    this.readyRedexes.length = 0;
+    if (this.fieldOnGpu) fieldGpu.clear();
+    for (const k of Object.keys(this.tally) as (keyof Sim['tally'])[]) this.tally[k] = 0;
     audio.invalidateTopology();
   }
 
@@ -590,6 +644,7 @@ export class Sim {
     );
     this.agents.set(a.id, a);
     this.rosterVersion++;
+    this.tally.spawned++;
     // Queued, so it lands after the topology that first contains this agent.
     audio.push({ type: 'spawn', agent: a.id, kind: a.kind }, this.graph, this.agents);
     return a;
@@ -614,6 +669,7 @@ export class Sim {
     this.agents.delete(id);
     this.agentStore.release(id);
     this.rosterVersion++;
+    this.tally.died++;
     if (this.grabbed?.id === id) this.grabbed = null;
   }
 
@@ -827,6 +883,11 @@ export class Sim {
     // relaxing it, moving energy down it, and the state update — because at
     // one marker it was the second-largest phase in the frame and there was no
     // way to tell which quarter of it was the cost.
+    // Which principal pairs are ready is asked once, here, and read by the
+    // three passes after it. Each used to walk every wire in the pond to
+    // answer it for itself — three full passes, each resolving both endpoints
+    // and measuring the rope, for a set that cannot change between them.
+    this.collectReadyRedexes(params);
     this.pulseRequests(params);
     this.accrueRedexes(params);
     this.startRewrites(params);
@@ -1290,10 +1351,71 @@ export class Sim {
     const g = this.graph;
     const BOUND_OF = this.agentStore.bound;
     for (const a of this.agents.values()) {
-      const slots = slotsFor(a.kind);
+      const slots = a.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
       let filled = 0;
-      for (const slot of slots) if (!g.isFreeAt(a.id, slot)) filled++;
+      for (let k = 0; k < slots.length; k++) if (!g.isFreeAt(a.id, slots[k])) filled++;
       BOUND_OF[a.slot] = filled / slots.length;
+    }
+  }
+
+  /** Bit per unattached port: principal 1, left 2, right 4. */
+  private freePortMask(a: Agent): number {
+    const g = this.graph;
+    const id = a.id;
+    const p = g.isFreeAt(id, 'p') ? 1 : 0;
+    if (a.kind === 'era') return p;
+    return p | (g.isFreeAt(id, 'l') ? 2 : 0) | (g.isFreeAt(id, 'r') ? 4 : 0);
+  }
+
+  /**
+   * The wire graph as flat neighbour lists over `forceList()` order.
+   *
+   * Rebuilt only when the topology or the roster has moved, like every other
+   * thing derived from them. It used to be built twice a frame on the GPU
+   * path — once for the need field and once for the genome, each with its
+   * own id-to-index map — on the grounds that rewrites and deaths happen
+   * between the two. They do, and they bump the versions this is keyed on,
+   * so on the frames they happen the second build still runs; on the frames
+   * they do not, which is most of them, it is free.
+   */
+  private wireAdjacency(): WireAdjacency {
+    const list = this.forceList();
+    if (this.adjGraphVersion === this.graph.version && this.adjRosterVersion === this.rosterVersion) {
+      return this.wireAdj;
+    }
+    const index = this.adjIndex;
+    index.clear();
+    for (let i = 0; i < list.length; i++) index.set(list[i].id, i);
+    this.wireAdj.build(list.length, index, () => this.graph.wires.values());
+    this.adjGraphVersion = this.graph.version;
+    this.adjRosterVersion = this.rosterVersion;
+    return this.wireAdj;
+  }
+
+  /**
+   * Every wire whose two principals are ready to rewrite, with neither end
+   * already in a rewrite. `pulseRequests`, `accrueRedexes` and
+   * `startRewrites` all read this rather than each walking the wire map.
+   *
+   * `rewriteFrozen` is the busy set: it is collected from `rewrites` at the
+   * top of the frame and nothing adds to `rewrites` before `startRewrites`,
+   * which is the last of the three. Within that pass no two ready wires can
+   * share an end — a principal has one wire — so nothing has to be added to
+   * it as rewrites begin.
+   */
+  private collectReadyRedexes(params: Params): void {
+    const out = this.readyRedexes;
+    out.length = 0;
+    if (params.rewriteDuration <= 0) return;
+    const busy = this.rewriteFrozen;
+    for (const wire of this.graph.wires.values()) {
+      if (wire.a.slot !== 'p' || wire.b.slot !== 'p') continue;
+      const A = this.agents.get(wire.a.id);
+      const B = this.agents.get(wire.b.id);
+      if (!A || !B) continue;
+      if (busy.has(A.id) || busy.has(B.id)) continue;
+      if (!this.principalRedexReady(wire, A, B, params)) continue;
+      out.push(wire);
     }
   }
 
@@ -1327,17 +1449,9 @@ export class Sim {
       flags[i] = pFree ? 1 : 0;
       sat[i] = g.portsFilledAt(a) ? 1 : 0;
       // Bitmask of free ports, for the scent deposit in endFrame. Built here
-      // rather than there so the slot list is walked once per topology instead
-      // of once per body per frame — `slotsFor` returns a fresh array, so that
-      // loop was 20k allocations a frame on its own.
-      free[i] =
-        a.kind === 'era'
-          ? pFree
-            ? 1
-            : 0
-          : (pFree ? 1 : 0) |
-            (g.isFreeAt(a.id, 'l') ? 2 : 0) |
-            (g.isFreeAt(a.id, 'r') ? 4 : 0);
+      // rather than there so it is walked once per topology instead of once
+      // per body per frame.
+      free[i] = this.freePortMask(a);
       comp[i] = this.components.get(a.id) ?? -1 - i;
       const pw = g.wireAtSlot(a.id, 'p');
       if (pw) {
@@ -2915,7 +3029,7 @@ export class Sim {
      */
     Sim.phase('gpu:packBlocks');
 
-    const ok = await fieldGpu.step(
+    const submitted = fieldGpu.submit(
       this.fields,
       nDep,
       n,
@@ -2939,23 +3053,31 @@ export class Sim {
       { ch: CH.energy, blocks: plan.nBlocks, entries: plan.nEntries },
       seed === null ? null : { ch: CH.energy, value: seed },
     );
-    if (!ok) {
-      // The device went away mid-session. Fall back for good rather than
-      // leaving the field frozen on whatever the GPU last held. Nothing
-      // grazed, so nothing is owed: drop the pending credit or the next
-      // frame pays out of a buffer the GPU never wrote.
-      this.harvestPending = false;
-      this.fieldOnGpu = false;
-      nativeSolver.useSamples(false);
+    if (!submitted) {
+      this.dropFieldGpu();
       return;
     }
     Sim.phase('gpu:dispatch');
+
+    /*
+     * The genome's dispatch goes on the queue now, behind the field's, before
+     * either readback is waited on. Its inputs are the store and the wire
+     * graph, none of which the field's readback touches; its one dependency —
+     * the probe's output buffer — is on the device, where submission order is
+     * the ordering. Waiting on the field first and dispatching after was two
+     * full round trips a frame where one will do.
+     */
+    const genomeSubmitted = this.genomeOnGpu && this.submitGenome(list, n);
+
+    if (!(await fieldGpu.collect())) {
+      this.dropFieldGpu();
+      return;
+    }
 
     // Before the sample unpack rather than after, so a frame that is being
     // watched shows the field the same passes just produced.
     if (this.wantFieldReadback) await fieldGpu.readInto(this.fields);
 
-    const out = nativeSolver.steerSamples;
     const got = fieldGpu.sampleData;
     const sStride = fieldGpu.sampleStride;
     /*
@@ -2967,9 +3089,9 @@ export class Sim {
      * them from `Fields.sampleAll`, out of a CPU array the GPU never writes,
      * and that was the quietest of the reasons `openFieldGpu` refuses.
      *
-     * Written straight into the store by slot rather than kept in list order,
-     * because that is how `updateState` indexes everything else and it runs
-     * against a list it rebuilds for itself.
+     * Both are written straight into the store by slot rather than kept in
+     * list order, because that is how everything downstream indexes and
+     * because the list can move before they are read — see `steerAll`.
      *
      * A frame late, like the steering samples and for the same reason: this
      * runs after `endFrame`, so what lands here is read at the top of the next
@@ -2978,74 +3100,98 @@ export class Sim {
      * smell for a newborn, against a stall every frame for everyone.
      */
     const SENSE = this.agentStore.senseAll;
+    const STEER = this.agentStore.steerAll;
     for (let i = 0; i < n; i++) {
       const o = i * sStride;
-      const so = list[i].slot * 4;
+      const slot = list[i].slot;
+      const to = slot * 3;
+      STEER[to] = got[o];
+      STEER[to + 1] = got[o + 1];
+      STEER[to + 2] = got[o + 2];
+      const so = slot * 4;
       SENSE[so] = got[o + 4];
       SENSE[so + 1] = got[o + 5];
       SENSE[so + 2] = got[o + 6];
       SENSE[so + 3] = got[o + 7];
     }
-    if (out) {
-      for (let i = 0; i < n; i++) {
-        const o = i * sStride;
-        out[i * 3] = got[o];
-        out[i * 3 + 1] = got[o + 1];
-        out[i * 3 + 2] = got[o + 2];
-      }
-      nativeSolver.useSamples(true);
-    }
+    this.steerFromSamples = true;
     Sim.phase('gpu:unpack');
 
-    if (this.genomeOnGpu) await this.gpuGenomeStep(list, n);
+    if (genomeSubmitted) {
+      if (await genomeGpu.collect()) {
+        this.genomePending = true;
+      } else {
+        // Back to the CPU pass for good; nothing is owed, since `updateState`
+        // recomputes from the store either way.
+        this.genomeOnGpu = false;
+        this.genomePending = false;
+      }
+      Sim.phase('gpu:genome');
+    }
+  }
+
+  /**
+   * The device went away mid-session. Fall back for good rather than leaving
+   * the field frozen on whatever the GPU last held. Nothing grazed, so
+   * nothing is owed: drop the pending credit or the next frame pays out of a
+   * buffer the GPU never wrote. The genome goes with it, since its sense
+   * inputs were the probe's.
+   */
+  private dropFieldGpu(): void {
+    this.harvestPending = false;
+    this.genomePending = false;
+    this.fieldOnGpu = false;
+    this.genomeOnGpu = false;
+    this.steerFromSamples = false;
+    nativeSolver.useSamples(false);
   }
 
   /**
    * Hand the genome pass a frame, in the same list order everything else uses.
    *
-   * Runs after the field's, and has to: its sense inputs are the raw channel
-   * readings `gather` just wrote, in a buffer it borrows rather than a
-   * readback it waits for. The four numbers that would have been the most
-   * expensive thing to ship never cross the bus.
+   * Queued after the field's dispatch, and has to be: its sense inputs are
+   * the raw channel readings `gather` writes, in a buffer it borrows rather
+   * than a readback it waits for. The four numbers that would have been the
+   * most expensive thing to ship never cross the bus.
    *
    * Like the field's samples, what comes back is spent at the top of the next
    * frame — `updateState` unpacks it where it used to compute it. So `h`
    * advances exactly one step per frame either way, and the inputs are a
    * frame older than the CPU pass would have read, which is the same bargain
    * steering and smell already take.
+   *
+   * True when the dispatch was queued; `gpuFieldStep` collects it.
    */
-  private async gpuGenomeStep(list: Agent[], n: number): Promise<void> {
+  private submitGenome(list: Agent[], n: number): boolean {
     const samples = fieldGpu.sampleBuffer;
-    if (!samples || n === 0) return;
+    if (!samples || n === 0) return false;
     const store = this.agentStore;
-    /*
-     * Rebuilt here rather than borrowing `pulseRequests`'s copy: rewrites,
-     * deaths and spawns all happen between that pass and this one, so the
-     * indices in it may no longer describe this list.
-     */
-    const index = this.genomeIndex;
-    index.clear();
+    const adj = this.wireAdjacency();
+    const nNei = adj.off[n];
     let maxSlot = 0;
     for (let i = 0; i < n; i++) {
-      index.set(list[i].id, i);
       if (list[i].slot > maxSlot) maxSlot = list[i].slot;
     }
-    const adj = this.genomeAdj;
-    adj.build(n, index, () => this.graph.wires.values());
-    const nNei = adj.off[n];
 
     const chemFloats = (maxSlot + 1) * CHEM_LEN;
     /*
-     * Uploaded every frame, and that is a deliberate first cut rather than an
-     * oversight. A genome changes only at birth, so the table could be pushed
-     * on a version bump — but every path that writes `chem` would have to
-     * remember to bump it (`seedChem`, `inheritChem`, `cloneAgent`, the
-     * designer, whatever pokes it next), and a missed bump is a body running
-     * somebody else's genome, silently. At five thousand bodies this is 2.7MB
-     * a frame; if it shows up in the ledger, that is the trade to revisit.
+     * The genome table crosses only when it changed. A genome is written at
+     * birth and nowhere else, and every path that writes one has to call
+     * `refreshReadsField` or the sense gate goes stale — so that is the one
+     * place the store learns a slot is dirty, and this is what spends the
+     * mark. Uploading everything every frame was 2.7 MB at five thousand
+     * bodies and would have been 27 MB at fifty; a frame with one birth now
+     * pushes one genome. A moved buffer starts over from nothing.
      */
-    genomeGpu.reserve(n, nNei, chemFloats);
-    genomeGpu.uploadChem(store.chemAll, chemFloats);
+    const chemMoved = genomeGpu.reserve(n, nNei, chemFloats);
+    if (chemMoved || this.genomeChemVersion !== store.chemVersion) {
+      const lo = store.chemDirtyLo * CHEM_LEN;
+      const hi = Math.min(store.chemDirtyHi * CHEM_LEN, chemFloats);
+      if (chemMoved || hi <= lo) genomeGpu.uploadChem(store.chemAll, chemFloats);
+      else genomeGpu.uploadChemRange(store.chemAll, lo, hi);
+      this.genomeChemVersion = store.chemVersion;
+      store.clearChemDirty();
+    }
 
     const H = store.hAll;
     const hData = genomeGpu.hData;
@@ -3079,17 +3225,13 @@ export class Sim {
     for (let e = 0; e < nNei; e++) neiData[e] = adj.nei[e];
     Sim.phase('gpu:packGenome');
 
-    const ok = await genomeGpu.run(samples, n, nNei, this.groundScale, CH.energy);
-    if (!ok) {
-      // Back to the CPU pass for good; nothing is owed, since `updateState`
-      // recomputes from the store either way.
+    if (!genomeGpu.submit(samples, n, nNei, this.groundScale, CH.energy)) {
       this.genomeOnGpu = false;
       this.genomePending = false;
-      return;
+      return false;
     }
     this.genomeSlots(list, n);
-    this.genomePending = true;
-    Sim.phase('gpu:genome');
+    return true;
   }
 
   /**
@@ -3566,6 +3708,7 @@ export class Sim {
       if (wire.lastLen / rest > limit) doomed.push(wire.id);
     }
     for (let i = 0; i < doomed.length; i++) this.graph.detach(doomed[i]);
+    this.tally.snaps += doomed.length;
   }
 
   /**
@@ -3690,13 +3833,7 @@ export class Sim {
       // is the thing that must never see the ground. See `effEmit`.
       const eo = a.slot * 4;
       for (let c = 0; c < 4; c++) emit[i * 4 + c] = c === CH.energy ? 0 : EMITS[eo + c];
-      if (!freeFresh) {
-        let mask = 0;
-        for (const slot of slotsFor(a.kind)) {
-          if (this.graph.isFreeAt(a.id, slot)) mask |= 1 << this.slotCode(slot);
-        }
-        free[i] = mask;
-      }
+      if (!freeFresh) free[i] = this.freePortMask(a);
     }
     Sim.phase('scent:bodyPack');
     nativeSolver.deposit(n, params.deposit);
@@ -3742,20 +3879,22 @@ export class Sim {
    */
   private deposit(params: Params): void {
     const EMITS = this.agentStore.emitAll;
+    const p = this.portScratch;
     for (const agent of this.agents.values()) {
       if (agent.locked) continue;
-      for (const slot of slotsFor(agent.kind)) {
-        const free = this.graph.isFreeAt(agent.id, slot);
+      const slots = agent.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
+      for (let k = 0; k < slots.length; k++) {
+        const slot = slots[k];
         if (slot === 'p') {
-          const p = portWorld(agent, slot, this.w, this.h);
+          portWorldInto(agent, slot, this.w, this.h, p);
           const eo = agent.slot * 4;
           for (let ch = 0; ch < 4; ch++) {
             if (ch === CH.energy) continue;
             const w = EMITS[eo + ch];
             if (w !== 0) this.fields.deposit(ch, p.x, p.y, params.deposit * w);
           }
-        } else if (free) {
-          const p = portWorld(agent, slot, this.w, this.h);
+        } else if (this.graph.isFreeAt(agent.id, slot)) {
+          portWorldInto(agent, slot, this.w, this.h, p);
           this.fields.deposit(CH.aux, p.x, p.y, params.deposit * 0.7);
         }
       }
@@ -3832,7 +3971,32 @@ export class Sim {
     const n = list.length;
     if (n === 0) return true;
     if (!nativeSolver.canNear(n, 0, 0)) return false;
-    if (!nativeSolver.loadScent(this.fields)) return false;
+    /*
+     * The field crosses only when the solver is going to sample it. On the
+     * GPU path the three readings a body steers on came back with last
+     * frame's probe and sit in the store by slot; the box copy used to happen
+     * regardless, which with the field on the GPU is the whole disk — a
+     * twelve-megabyte memcpy into wasm every frame that nothing then read.
+     *
+     * Packed by slot into list order here, rather than written into the
+     * solver's array in list order when they arrived, because the list can
+     * move between the two — see `AgentStore.steerAll`.
+     */
+    if (this.steerFromSamples) {
+      const out = nativeSolver.steerSamples;
+      if (!out) return false;
+      const STEER = this.agentStore.steerAll;
+      for (let i = 0; i < n; i++) {
+        const so = list[i].slot * 3;
+        out[i * 3] = STEER[so];
+        out[i * 3 + 1] = STEER[so + 1];
+        out[i * 3 + 2] = STEER[so + 2];
+      }
+      nativeSolver.useSamples(true);
+    } else {
+      if (!nativeSolver.loadScent(this.fields)) return false;
+      nativeSolver.useSamples(false);
+    }
     if (!this.forceBlock && !this.packPose(list)) return false;
 
     /*
@@ -4459,15 +4623,6 @@ export class Sim {
    */
   private static readonly REWRITE_SHRINK_READY = 0.45;
 
-  private rewriteBusy(): Set<number> {
-    const busy = new Set<number>();
-    for (const rw of this.rewrites) {
-      busy.add(rw.a);
-      busy.add(rw.b);
-    }
-    return busy;
-  }
-
   private principalRedexReady(wire: Wire, A: Agent, B: Agent, params: Params): boolean {
     if (wire.a.slot !== 'p' || wire.b.slot !== 'p') return false;
     if (A.locked || B.locked || A.stun > 0 || B.stun > 0) return false;
@@ -4514,13 +4669,12 @@ export class Sim {
       this.refundEscrows();
       return;
     }
-    const busy = this.rewriteBusy();
-    for (const wire of this.graph.wires.values()) {
+    const ready = this.readyRedexes;
+    for (let k = 0; k < ready.length; k++) {
+      const wire = ready[k];
       const A = this.agents.get(wire.a.id);
       const B = this.agents.get(wire.b.id);
       if (!A || !B) continue;
-      if (busy.has(A.id) || busy.has(B.id)) continue;
-      if (!this.principalRedexReady(wire, A, B, params)) continue;
       if (rewriteCost(detectRule(A.kind, B.kind)) <= 0) continue;
       let e = this.escrow.get(wire.id);
       // A wire id outliving a `rebind` would otherwise hand one pair's stake
@@ -4738,13 +4892,12 @@ export class Sim {
     }
 
     if (params.rewriteDuration > 0) {
-      const busy = this.rewriteBusy();
-      for (const wire of this.graph.wires.values()) {
+      const ready = this.readyRedexes;
+      for (let k = 0; k < ready.length; k++) {
+        const wire = ready[k];
         const A = this.agents.get(wire.a.id);
         const B = this.agents.get(wire.b.id);
         if (!A || !B) continue;
-        if (busy.has(A.id) || busy.has(B.id)) continue;
-        if (!this.principalRedexReady(wire, A, B, params)) continue;
         if (rewriteCost(detectRule(A.kind, B.kind)) <= 0) continue;
         // Per end against its own stake, not the old pair-wide share count:
         // an end that has already banked its half should stop asking while its
@@ -4789,17 +4942,8 @@ export class Sim {
       const a = this.agents.get(id);
       if (a) seedRequest(a, n);
     }
-    // Dense list and index, reused rather than rebuilt: the force block has
-    // already made both, and a Map of neighbour arrays cost an array per body
-    // per frame for a structure thrown away at the end of it.
     const list = this.forceList();
-    const index = this.packIndex;
-    if (!this.forceBlock) {
-      index.clear();
-      for (let i = 0; i < list.length; i++) index.set(list[i].id, i);
-    }
-    const adj = this.wireAdj;
-    adj.build(list.length, index, () => this.graph.wires.values());
+    const adj = this.wireAdjacency();
     Sim.phase('pulse:seed');
     spreadRequestsFast(list, this.agentStore, adj);
     Sim.phase('pulse:spread');
@@ -5156,13 +5300,12 @@ export class Sim {
 
   private startRewrites(params: Params): void {
     if (params.rewriteDuration <= 0) return;
-    const busy = this.rewriteBusy();
-    for (const wire of this.graph.wires.values()) {
+    const ready = this.readyRedexes;
+    for (let k = 0; k < ready.length; k++) {
+      const wire = ready[k];
       const A = this.agents.get(wire.a.id);
       const B = this.agents.get(wire.b.id);
       if (!A || !B) continue;
-      if (busy.has(A.id) || busy.has(B.id)) continue;
-      if (!this.principalRedexReady(wire, A, B, params)) continue;
       const rule = detectRule(A.kind, B.kind);
       if (rewriteCost(rule) > 0) {
         // Already paid, or not yet. `accrueRedexes` ran this frame and took
@@ -5197,8 +5340,6 @@ export class Sim {
       );
       this.rewrites.push(rw);
       audio.push(rewriteAudio(rw, 'begin', wire.id, []), this.graph, this.agents);
-      busy.add(A.id);
-      busy.add(B.id);
     }
   }
 
@@ -5266,11 +5407,13 @@ export class Sim {
    */
   private reelRewriteLeftovers(rw: Rewrite): void {
     const seen = new Set<number>();
-    for (const id of [rw.a, rw.b]) {
+    for (let e = 0; e < 2; e++) {
+      const id = e === 0 ? rw.a : rw.b;
       const ag = this.agents.get(id);
       if (!ag) continue;
-      for (const slot of slotsFor(ag.kind)) {
-        const wire = this.graph.wireAt({ id, slot });
+      const slots = ag.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
+      for (let k = 0; k < slots.length; k++) {
+        const wire = this.graph.wireAtSlot(id, slots[k]);
         if (!wire || wire.id === rw.wireId || seen.has(wire.id)) continue;
         seen.add(wire.id);
         const handoff = rewriteHandoffStems(rw, wire, this.agents, this.w, this.h);
@@ -5381,6 +5524,10 @@ export class Sim {
       // moved. Anything keyed on it — the body list, the flocking pair list,
       // the force scratch — is stale until this line.
       this.noteRosterChange();
+      this.tally.born += this.nextId - beforeId;
+      if (rw.rule === 'commute') this.tally.commutes++;
+      else if (rw.rule === 'erase') this.tally.erases++;
+      else this.tally.annihilations++;
       const recipients: Agent[] = [];
       for (const id of leftoverIds) {
         const ag = this.agents.get(id);

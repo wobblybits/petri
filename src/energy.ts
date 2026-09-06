@@ -275,12 +275,6 @@ function cellKey(i: number, j: number): number {
   return (i + CELL_KEY_OFFSET) * CELL_KEY_WIDTH + (j + CELL_KEY_OFFSET);
 }
 
-function decodeKey(key: number): { i: number; j: number } {
-  const i = Math.floor(key / CELL_KEY_WIDTH) - CELL_KEY_OFFSET;
-  const j = key - (i + CELL_KEY_OFFSET) * CELL_KEY_WIDTH - CELL_KEY_OFFSET;
-  return { i, j };
-}
-
 /**
  * Sparse world-space energy. Unvisited cells hold `ambient`; once a cell is
  * touched, whatever remains is stored explicitly (including 0).
@@ -447,8 +441,20 @@ export class EnergyGrid {
    * have to agree.
    */
   blockRect(i: number, j: number): { fi: number; fj: number; wi: number; wj: number } | null {
+    const b = this.rectScratch;
+    if (!this.blockRectAt(i, j, b)) return null;
+    return { fi: b[0], fj: b[1], wi: b[2], wj: b[3] };
+  }
+
+  private readonly rectScratch = new Int32Array(4);
+
+  /**
+   * `blockRect` into a caller's four ints — `fi, fj, wi, wj` — so the two
+   * callers that run once a body a frame do not mint a record each.
+   */
+  blockRectAt(i: number, j: number, out: Int32Array): boolean {
     const f = this.fields;
-    if (!f) return null;
+    if (!f) return false;
     const s = this.span;
     let fi = i * s;
     let fj = j * s;
@@ -464,7 +470,36 @@ export class EnergyGrid {
     }
     if (fi + wi > f.cols) wi = f.cols - fi;
     if (fj + wj > f.rows) wj = f.rows - fj;
-    return wi > 0 && wj > 0 ? { fi, fj, wi, wj } : null;
+    if (wi <= 0 || wj <= 0) return false;
+    out[0] = fi;
+    out[1] = fj;
+    out[2] = wi;
+    out[3] = wj;
+    return true;
+  }
+
+  /** Energy cells along one side of the field-backed grid; 0 when unbound. */
+  get cellsPerSide(): number {
+    const f = this.fields;
+    return f ? Math.ceil(f.cols / this.span) : 0;
+  }
+
+  /**
+   * Dense index of the energy cell under a point — `j * side + i` — or -1
+   * when the point is off the field. `side` is `cellsPerSide`, passed in so
+   * a loop over every body does not re-derive it each time.
+   *
+   * What `HarvestPlan` bins on. Every point inside the live disk lands in
+   * the field's rectangle, since the disk is inscribed in it with a margin,
+   * so for the pond this never returns -1; the check is for the grid's own
+   * sake when it is asked about somewhere else.
+   */
+  denseIndexAt(x: number, y: number, side: number): number {
+    if (side <= 0) return -1;
+    const i = Math.floor((x - this.originX) / this.cellSize);
+    const j = Math.floor((y - this.originY) / this.cellSize);
+    if (i < 0 || j < 0 || i >= side || j >= side) return -1;
+    return j * side + i;
   }
 
   get lattice(): { x: number; y: number } {
@@ -495,6 +530,11 @@ export class EnergyGrid {
 
   clear(): void {
     this.cells.clear();
+    // The deferred queue too. It is filled by deaths and spills, and a pond
+    // being thrown away has been killing bodies all frame; left here, that
+    // energy would land on the next pond's ground, out of nowhere.
+    this.nPending = 0;
+    this.pendingSeed = null;
     const f = this.fields;
     if (!f) return;
     const d = f.data;
@@ -554,14 +594,22 @@ export class EnergyGrid {
       // leaves an uneven floor, and an uneven floor is what diffusion then
       // has a gradient to work against. Taking a flat share off every cell
       // would keep the block uniform and there would be nothing to flow.
-      const { i, j } = decodeKey(key);
-      const b = this.blockRect(i, j);
-      if (!b) return 0;
+      //
+      // The key is decoded and the block clipped in place: this runs once a
+      // hungry body a frame on the CPU field, and both helpers allocate.
+      const i = Math.floor(key / CELL_KEY_WIDTH) - CELL_KEY_OFFSET;
+      const j = key - (i + CELL_KEY_OFFSET) * CELL_KEY_WIDTH - CELL_KEY_OFFSET;
+      const b = this.rectScratch;
+      if (!this.blockRectAt(i, j, b)) return 0;
+      const fi = b[0];
+      const fj = b[1];
+      const wi = b[2];
+      const wj = b[3];
       const d = f.data;
       let got = 0;
-      for (let y = 0; y < b.wj && want > FLOW_EPS; y++) {
-        let k = ((b.fj + y) * f.cols + b.fi) * CHANNELS + CH.energy;
-        for (let x = 0; x < b.wi && want > FLOW_EPS; x++, k += CHANNELS) {
+      for (let y = 0; y < wj && want > FLOW_EPS; y++) {
+        let k = ((fj + y) * f.cols + fi) * CHANNELS + CH.energy;
+        for (let x = 0; x < wi && want > FLOW_EPS; x++, k += CHANNELS) {
           const have = d[k];
           if (have <= 0) continue;
           const g = have < want ? have : want;
@@ -751,7 +799,28 @@ export class HarvestPlan {
   keys = new Float64Array(0);
   nBlocks = 0;
   nEntries = 0;
-  private readonly bins = new Map<number, number[]>();
+  /*
+   * Binning as intrusive lists over a dense cell table.
+   *
+   * It was a `Map` from cell key to an array of slots, rebuilt from nothing
+   * every frame: one `index()` record per body, one array per occupied cell,
+   * a `decodeKey` and a `blockRect` record per block. At fifty thousand bodies
+   * that is on the order of a hundred thousand allocations a frame for a
+   * grouping the field's own lattice already defines.
+   *
+   * `head[c]` is the most recent body to land in cell `c` and `next[slot]` the
+   * one before it. A cell's chain is unwound when its block is written out —
+   * reversed back into arrival order, then sorted by id, which arrival order
+   * already is in practice — and `head` is cleared as it goes, so the table
+   * is all -1 between builds without a fill. The dense index is the field's
+   * own: `cellsPerSide` squared cells, sixty-five thousand at the shipped
+   * sizes, which is a quarter-megabyte table for a pond that touches a few
+   * thousand of them.
+   */
+  private head = new Int32Array(0);
+  private next = new Int32Array(0);
+  private touched = new Int32Array(0);
+  private readonly rect = new Int32Array(4);
 
   build(agents: Iterable<Agent>, store: AgentStore, grid: EnergyGrid): void {
     const LOCKED = store.locked;
@@ -760,10 +829,21 @@ export class HarvestPlan {
     const X = store.x;
     const Y = store.y;
     const ID = store.id;
-    const bins = this.bins;
-    bins.clear();
     this.nBlocks = 0;
     this.nEntries = 0;
+    const side = grid.cellsPerSide;
+    if (side <= 0) return;
+    const cells = side * side;
+    if (this.head.length < cells) {
+      this.head = new Int32Array(cells).fill(-1);
+      this.touched = new Int32Array(cells);
+    }
+    if (this.next.length < store.capacity) this.next = new Int32Array(store.capacity);
+    const head = this.head;
+    const next = this.next;
+    const touched = this.touched;
+    let nTouched = 0;
+    let entries = 0;
     for (const a of agents) {
       const s = a.slot;
       if (LOCKED[s]) continue;
@@ -772,48 +852,72 @@ export class HarvestPlan {
       const y = Y[s];
       // Off the map is barren, not merely empty: no ambient either.
       if (!grid.inBounds(x, y)) continue;
-      const { key } = grid.index(x, y);
-      let list = bins.get(key);
-      if (!list) {
-        list = [];
-        bins.set(key, list);
-      }
-      list.push(s);
+      const c = grid.denseIndexAt(x, y, side);
+      if (c < 0) continue;
+      if (head[c] < 0) touched[nTouched++] = c;
+      next[s] = head[c];
+      head[c] = s;
+      entries++;
     }
-    if (bins.size === 0) return;
+    if (nTouched === 0) return;
 
-    let entries = 0;
-    for (const list of bins.values()) entries += list.length;
-    if (this.blocks.length < bins.size * 6) this.blocks = new Int32Array(bins.size * 12);
-    if (this.keys.length < bins.size) this.keys = new Float64Array(bins.size * 2);
+    if (this.blocks.length < nTouched * 6) this.blocks = new Int32Array(nTouched * 12);
+    if (this.keys.length < nTouched) this.keys = new Float64Array(nTouched * 2);
     if (this.slots.length < entries) {
       this.slots = new Int32Array(entries * 2);
       this.ids = new Int32Array(entries * 2);
       this.rooms = new Float64Array(entries * 2);
     }
     const B = this.blocks;
-    for (const [key, list] of bins) {
-      const { i, j } = decodeKey(key);
-      const rect = grid.blockRect(i, j);
+    const slots = this.slots;
+    const ids = this.ids;
+    const rooms = this.rooms;
+    const rect = this.rect;
+    for (let t = 0; t < nTouched; t++) {
+      const c = touched[t];
+      const i = c % side;
+      const j = (c - i) / side;
+      const first = this.nEntries;
+      let k = first;
+      for (let s = head[c]; s >= 0; s = next[s]) slots[k++] = s;
+      head[c] = -1;
       // A block clipped away entirely feeds nobody; drop it rather than
-      // emitting a zero-sized rect for the shader to skip.
-      if (!rect) continue;
-      list.sort((a, b) => ID[a] - ID[b]);
-      const bo = this.nBlocks * 6;
-      B[bo] = rect.fi;
-      B[bo + 1] = rect.fj;
-      B[bo + 2] = rect.wi;
-      B[bo + 3] = rect.wj;
-      B[bo + 4] = this.nEntries;
-      B[bo + 5] = list.length;
-      this.keys[this.nBlocks] = key;
-      this.nBlocks++;
-      for (const slot of list) {
-        this.slots[this.nEntries] = slot;
-        this.ids[this.nEntries] = ID[slot];
-        this.rooms[this.nEntries] = CAP[slot] - EXTRA[slot];
-        this.nEntries++;
+      // emitting a zero-sized rect for the shader to skip. Its slots were
+      // written past `nEntries` and are simply overwritten by the next block.
+      if (!grid.blockRectAt(i, j, rect)) continue;
+      // The chain is newest-first. Bodies eat in id order and ids arrive
+      // ascending, so reversing it is nearly the whole sort; the insertion
+      // pass after it is what makes that exact rather than usual.
+      for (let lo = first, hi = k - 1; lo < hi; lo++, hi--) {
+        const tmp = slots[lo];
+        slots[lo] = slots[hi];
+        slots[hi] = tmp;
       }
+      for (let p = first + 1; p < k; p++) {
+        const v = slots[p];
+        const vid = ID[v];
+        let q = p - 1;
+        while (q >= first && ID[slots[q]] > vid) {
+          slots[q + 1] = slots[q];
+          q--;
+        }
+        slots[q + 1] = v;
+      }
+      const bo = this.nBlocks * 6;
+      B[bo] = rect[0];
+      B[bo + 1] = rect[1];
+      B[bo + 2] = rect[2];
+      B[bo + 3] = rect[3];
+      B[bo + 4] = first;
+      B[bo + 5] = k - first;
+      this.keys[this.nBlocks] = cellKey(i, j);
+      this.nBlocks++;
+      for (let e = first; e < k; e++) {
+        const sl = slots[e];
+        ids[e] = ID[sl];
+        rooms[e] = CAP[sl] - EXTRA[sl];
+      }
+      this.nEntries = k;
     }
   }
 }

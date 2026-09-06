@@ -25,7 +25,7 @@ export class PairGrid {
    * Bucket `count` points. `cellSize` should be at least the largest interaction
    * radius, so every interacting pair lands in the same cell or an adjacent one.
    */
-  build(xs: readonly number[], ys: readonly number[], count: number, cellSize: number): void {
+  build(xs: ArrayLike<number>, ys: ArrayLike<number>, count: number, cellSize: number): void {
     this.count = count;
     if (count === 0) return;
     if (this.cellOf.length < count) {

@@ -665,15 +665,25 @@ export function discRadius(agent: Agent): number {
   return agentSize(agent.kind) * TRI_DISC_RATIO * agent.scale;
 }
 
+/**
+ * Sum of squared vertex radii of the unit Con/Dup triangle (`triangleLocal`
+ * at `s = 1`): `1.05^2 + 2 * (0.55^2 + 0.82^2)`. The inertia below used to
+ * build the three vertices and sum them, which allocated an array and three
+ * points per call — and `packPose` asks for the inertia of every body every
+ * frame, so that was two hundred thousand short-lived objects a frame at a
+ * fifty-thousand-body pond, in a function whose answer is a constant times
+ * `scale^2`.
+ */
+const TRI_VERTEX_R2 = 1.05 * 1.05 + 2 * (0.55 * 0.55 + 0.82 * 0.82);
+
 export function momentOfInertia(agent: Agent): number {
   const m = Math.max(0.08, agent.mass);
   if (agent.kind === 'era') {
     const r = ERA_RADIUS * agent.scale;
     return 0.5 * m * r * r;
   }
-  let s = 0;
-  for (const p of triangleLocal(agent.scale)) s += p.x * p.x + p.y * p.y;
-  return (m * s) / 6;
+  const s = 16 * agent.scale;
+  return (m * TRI_VERTEX_R2 * s * s) / 6;
 }
 
 export const PORT_EXTRUDE = 8;
@@ -782,6 +792,9 @@ export function refreshReadsField(a: Agent): void {
     }
   }
   a.store.readsField[a.slot] = reads;
+  // This is the one choke point every chem write already has to pass through,
+  // so it is also where the GPU's copy of the genome learns it is stale.
+  a.store.markChem(a.slot);
 }
 
 /** One row of an output head: `base + row . h`. */
@@ -1132,9 +1145,14 @@ export function createAgent(
   agent.extra = 0;
   agent.request = 0;
   // Phenotype, seeded so frame zero is right; `updateState` rewrites it from
-  // `F` and `f0` every frame after that.
+  // `F` and `f0` every frame after that. The locomotion head gets the same
+  // treatment: without it a body's first frame had a cruise of zero and a turn
+  // gain of zero, so a fresh soup stood still for one tick and a newborn could
+  // not steer until the state pass had run once.
   agent.flockAlign = params.flockAlign;
   agent.flockSep = params.flockSep;
+  store.cruise[slot] = params.stepSpeed;
+  store.turn[slot] = params.turnRate;
   agent.recovering = false;
   agent.requestDecay = params.requestDecay;
   agent.energyCap = extraCapFor(kind);
@@ -1265,6 +1283,37 @@ export function inSnapArc(
   const axis = portAxis(agent, slot);
   const cos = (d.x * axis.x + d.y * axis.y) / dist;
   return cos >= Math.cos(Math.min(halfArc, Math.PI * 0.49));
+}
+
+/**
+ * `inSnapArc` for a caller that already has both tips in hand.
+ *
+ * `slotCode` is 0 for the principal, 1 and 2 for the aux legs. `arcCos` is
+ * `cos(min(halfArc, PI * 0.49))`, hoisted by the caller since it is the same
+ * for every pair in a pass. The port axis is the heading for an Era or a
+ * principal and its reverse for an aux leg, which is what `portAxis` computes
+ * by rotating and normalising an offset — three objects a call, on the hottest
+ * pair loop in the latch pass.
+ */
+export function inSnapArcAt(
+  agent: Agent,
+  slotCode: number,
+  px: number,
+  py: number,
+  tx: number,
+  ty: number,
+  radius: number,
+  arcCos: number,
+): boolean {
+  const dx = tx - px;
+  const dy = ty - py;
+  const dist = Math.hypot(dx, dy);
+  if (dist > radius || dist < 1e-6) return false;
+  const sign = agent.kind === 'era' || slotCode === 0 ? 1 : -1;
+  const heading = agent.heading;
+  const ax = sign * Math.cos(heading);
+  const ay = sign * Math.sin(heading);
+  return (dx * ax + dy * ay) / dist >= arcCos;
 }
 
 export function portOffset(agent: Agent, slot: PortSlot): Vec2 {

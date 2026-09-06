@@ -97,7 +97,6 @@ type Exp = {
   solver_body_cruise(): number;
   solver_body_turn(): number;
   solver_declutter(n: number, reach: number, atReach: number, cutoff: number, floorFrac: number, dt: number): void;
-  solver_confine(n: number, cx: number, cy: number, dt: number, half: number, edge: number): void;
   solver_world_bound(cx: number, cy: number, r: number): void;
   solver_decl_comp(): number;
   solver_decl_sat(): number;
@@ -419,10 +418,6 @@ export class NativeSolver {
     this.exp?.solver_declutter(n, reach, atReach, cutoff, floorFrac, dt);
   }
 
-  confine(n: number, cx: number, cy: number, dt: number, half: number, edge: number): void {
-    this.exp?.solver_confine(n, cx, cy, dt, half, edge);
-  }
-
   worldBound(cx: number, cy: number, r: number): void {
     this.exp?.solver_world_bound(cx, cy, r);
   }
@@ -511,6 +506,27 @@ export class NativeSolver {
   private skGraph = -1;
   private skRoster = -1;
   private skN = -1;
+
+  /**
+   * Forget every cache and every mode a Sim left behind.
+   *
+   * The module is one instance per process and the test suite runs hundreds
+   * of Sims through it. Each cache is keyed on a Sim id, so a stale one is
+   * never *used* by the wrong Sim — but a fresh Sim inherits the scent buffer's
+   * contents and the sampling mode from whoever ran last, and which file ran
+   * last is up to the scheduler. That was the order dependence in the
+   * determinism tests. `test-setup` calls this before every test.
+   */
+  resetCaches(): void {
+    this.fkSim = -1;
+    this.fkGraph = -1;
+    this.fkRoster = -1;
+    this.skSim = -1;
+    this.skGraph = -1;
+    this.skRoster = -1;
+    this.scentOwner = null;
+    this.useSamples(false);
+  }
 
   /** True when the per-body scratch is this caller's and still current. */
   scratchHolds(simId: number, graphVersion: number, rosterVersion: number, n: number): boolean {

@@ -18,6 +18,9 @@ import type { AgentKind } from './agents.ts';
  */
 const SENSE_W = 4;
 
+/** Process-wide, so two stores never hand out the same `chemVersion`. */
+let nextChemVersion = 1;
+
 export const KIND_CODE: Record<AgentKind, number> = { era: KIND_ERA, dup: KIND_DUP, con: KIND_CON };
 export const CODE_KIND: AgentKind[] = [];
 CODE_KIND[KIND_ERA] = 'era';
@@ -124,6 +127,19 @@ export class AgentStore {
   /** Last frame's four raw channel readings at each body's position. */
   senseAll!: Float64Array;
   /**
+   * Last frame's three steering readings — left sensor, right sensor, own
+   * position — each already collapsed against the body's taste, when the
+   * field lives on the GPU and the probe brings them back.
+   *
+   * By slot, like `senseAll`, and for a reason that bit: they used to go
+   * straight into the solver's array in *list* order, and the list is rebuilt
+   * whenever the roster moves. A body spawned or erased between the probe at
+   * the end of one frame and the steer at the top of the next shifted every
+   * body after it onto a neighbour's readings, and a body born past the old
+   * end of the list steered on whatever the buffer last held there.
+   */
+  steerAll!: Float64Array;
+  /**
    * This frame's realised emit and taste vectors, four channels each.
    *
    * Materialised once by `updateState` rather than recomputed by each
@@ -151,6 +167,43 @@ export class AgentStore {
   /** This frame's locomotion head: cruise speed and turn gain, per body. */
   cruise!: Float64Array;
   turn!: Float64Array;
+
+  /**
+   * Which slots' genomes have changed since a consumer last looked.
+   *
+   * The GPU genome pass reads `chemAll` by slot and was uploading the whole
+   * table every frame — 2.7 MB at five thousand bodies, 27 MB at fifty — on
+   * the grounds that a missed invalidation would be a body silently running
+   * somebody else's genome. The invalidation has one choke point already:
+   * `refreshReadsField` must be called after anything writes `chem`, or the
+   * sense gate goes stale, so it is the right place to stamp this too.
+   *
+   * A dirty *range* rather than a flag, so a frame with one birth uploads one
+   * genome. `chemVersion` is a process-wide counter rather than a per-store
+   * one so a fresh store after `Sim.clear()` cannot collide with the version a
+   * consumer remembers from the store it replaced.
+   */
+  chemVersion = nextChemVersion++;
+  chemDirtyLo = 0;
+  chemDirtyHi = 0;
+
+  /** Note that slot `slot`'s genome changed. */
+  markChem(slot: number): void {
+    if (this.chemDirtyHi <= this.chemDirtyLo) {
+      this.chemDirtyLo = slot;
+      this.chemDirtyHi = slot + 1;
+    } else {
+      if (slot < this.chemDirtyLo) this.chemDirtyLo = slot;
+      if (slot + 1 > this.chemDirtyHi) this.chemDirtyHi = slot + 1;
+    }
+    this.chemVersion = nextChemVersion++;
+  }
+
+  /** Consumer has caught up to `chemVersion`; nothing is dirty. */
+  clearChemDirty(): void {
+    this.chemDirtyLo = 0;
+    this.chemDirtyHi = 0;
+  }
 
   /** Slots < highWater have been allocated at least once (live or freed). */
   private highWater = 0;
@@ -228,6 +281,7 @@ export class AgentStore {
     this.flockAlign[slot] = 0;
     this.flockSep[slot] = 0;
     this.chemAll.fill(0, slot * CHEM_LEN, slot * CHEM_LEN + CHEM_LEN);
+    this.markChem(slot);
     this.recovering[slot] = 0;
     this.requestDecay[slot] = 0;
     this.energyCap[slot] = 0;
@@ -244,6 +298,7 @@ export class AgentStore {
     this.bound[slot] = 0;
     this.hAll.fill(0, slot * STATE_W, slot * STATE_W + STATE_W);
     this.senseAll.fill(0, slot * SENSE_W, slot * SENSE_W + SENSE_W);
+    this.steerAll.fill(0, slot * 3, slot * 3 + 3);
     this.readsField[slot] = 0;
     this.cruise[slot] = 0;
     this.turn[slot] = 0;
@@ -320,6 +375,9 @@ export class AgentStore {
     const newSense = new Float64Array(newCapacity * SENSE_W);
     if (this.senseAll) newSense.set(this.senseAll.subarray(0, live * SENSE_W));
     this.senseAll = newSense;
+    const newSteer = new Float64Array(newCapacity * 3);
+    if (this.steerAll) newSteer.set(this.steerAll.subarray(0, live * 3));
+    this.steerAll = newSteer;
     this.readsField = growU8(this.readsField);
     this.cruise = growF64(this.cruise);
     this.turn = growF64(this.turn);

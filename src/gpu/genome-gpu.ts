@@ -163,18 +163,31 @@ export class GenomeGpu {
     return chemMoved;
   }
 
-  /** Push the genome table. Only when it changed — see `reserve`. */
+  /** Push the whole genome table. Only when it moved — see `reserve`. */
   uploadChem(chem: Float32Array, floats: number): void {
-    const device = this.device;
-    if (!device || !this.chem) return;
-    device.queue.writeBuffer(this.chem, 0, chem.buffer, chem.byteOffset, floats * 4);
+    this.uploadChemRange(chem, 0, floats);
   }
+
+  /**
+   * Push the floats `[lo, hi)` of the genome table: the slots that changed
+   * since the last upload, which `AgentStore` tracks as a dirty range. A frame
+   * with one birth uploads one genome rather than every one in the pond.
+   */
+  uploadChemRange(chem: Float32Array, lo: number, hi: number): void {
+    const device = this.device;
+    if (!device || !this.chem || hi <= lo) return;
+    device.queue.writeBuffer(this.chem, lo * 4, chem.buffer, chem.byteOffset + lo * 4, (hi - lo) * 4);
+  }
+
+  /** Bytes the last `submit` copied out, for `collect` to map. */
+  private pendingBytes = 0;
 
   /**
    * One frame of genome. `samples` is the field's probe buffer, borrowed.
    *
    * Returns false if the device has gone, in which case the caller keeps
-   * doing it on the CPU.
+   * doing it on the CPU. `submit` and `collect` are separable so the dispatch
+   * can be queued behind the field's before either readback is waited on.
    */
   async run(
     samples: GPUBuffer,
@@ -183,9 +196,24 @@ export class GenomeGpu {
     groundScale: number,
     energyCh: number,
   ): Promise<boolean> {
+    if (!this.submit(samples, n, nei, groundScale, energyCh)) return false;
+    return this.collect();
+  }
+
+  /** Encode and submit a frame's dispatch. False if the device is not there. */
+  submit(
+    samples: GPUBuffer,
+    n: number,
+    nei: number,
+    groundScale: number,
+    energyCh: number,
+  ): boolean {
     const device = this.device;
     if (!this.ready || !device || !this.pipeline) return false;
-    if (n === 0) return true;
+    if (n === 0) {
+      this.pendingBytes = 0;
+      return true;
+    }
     try {
       const u = new ArrayBuffer(UNIFORM_BYTES);
       const u32 = new Uint32Array(u);
@@ -251,6 +279,21 @@ export class GenomeGpu {
       const bytes = n * OUT_STRIDE * 4;
       enc.copyBufferToBuffer(this.out!, 0, this.read!, 0, bytes);
       device.queue.submit([enc.finish()]);
+      this.pendingBytes = bytes;
+      return true;
+    } catch (e) {
+      this.lastError = String(e);
+      return false;
+    }
+  }
+
+  /** Wait for the last `submit`'s readback and unpack it into `outData`. */
+  async collect(): Promise<boolean> {
+    const bytes = this.pendingBytes;
+    this.pendingBytes = 0;
+    if (!this.ready || !this.device) return false;
+    if (bytes === 0) return true;
+    try {
       await this.read!.mapAsync(GPUMapMode.READ, 0, bytes);
       this.outData.set(new Float32Array(this.read!.getMappedRange(0, bytes)));
       this.read!.unmap();
