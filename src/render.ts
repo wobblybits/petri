@@ -120,6 +120,15 @@ export function render(
   ctx.save();
   camera.apply(ctx);
 
+  /*
+   * Both of the views below paint from `sim.fields.data`, which is a stale
+   * copy when the field lives on the GPU. Asking for it here rather than
+   * inside them means the sim does one copy a frame while either is open and
+   * none at all when neither is — and it is asked for a frame ahead, since
+   * the copy happens during the step and this runs after it.
+   */
+  sim.wantFieldReadback = opts.energyGrid === true || opts.overlay === true;
+
   if (opts.energyGrid) drawEnergyGrid(ctx, sim, camera);
 
   if (opts.overlay) {

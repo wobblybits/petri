@@ -418,6 +418,16 @@ export class Sim {
   /** True once a GPU harvest has been dispatched and not yet credited. */
   private harvestPending = false;
   /**
+   * Ask for the GPU field to be copied back into `fields.data` each frame.
+   *
+   * Off by default and deliberately opt-in: it is a sixteen-megabyte copy, and
+   * the only things that want it are the two debug overlays, which paint from
+   * the CPU array. `render.ts` sets it from its own options, so the cost is
+   * paid exactly while somebody is looking. Ignored when the field is here
+   * anyway.
+   */
+  wantFieldReadback = false;
+  /**
    * Physics detail. When a view is passed, FAR agents keep disc contacts and a
    * chord constraint but skip SAT, rope XPBD, wire clearance, and Hertzian.
    * Missing view = everyone NEAR, which is what tests and a paused layout want.
@@ -2643,11 +2653,29 @@ export class Sim {
    *   scalars, and `gpuFieldStep` writes them into the store, so the state
    *   pass takes its sense from wherever the field actually lives.
    *
-   * Splitting the ground back off onto its own CPU array would close the one
-   * remaining blocker without a harvest shader, and it does not work:
-   * `FERTILISE_CH` is `CH.conP`, so growth reads a *signal* channel as its
-   * catalyst and the two cannot be run on opposite sides of the bus. Harvest
-   * has to move.
+   *   CLOSED — `EnergyGrid` wrote `fields.data` three ways and all three now
+   *   go through the shader. `take` is the `harvest` kernel, a faithful port
+   *   of the block drain rather than the proportional share a parallel
+   *   rewrite would reach for; `addAt` rides the existing scatter with a
+   *   conserve flag, because energy is a count and has to survive the rim
+   *   where a scent density need not; `seedGround` is the `fill` pass, without
+   *   which the pond would have started barren on exactly the machines this
+   *   is for.
+   *
+   * So it opens now. Two things about that are worth knowing rather than
+   * rediscovering.
+   *
+   * It is one way. There is no path back to the CPU field except a device
+   * loss, which drops to it for good — a field that lived on the GPU on some
+   * frames and here on others would have to be copied between them, and the
+   * copy is sixteen megabytes each way, several times what running it here
+   * costs in the first place.
+   *
+   * And `fields.data` is still the array the two debug overlays paint from.
+   * They get `wantFieldReadback`, which `render.ts` sets from its own options,
+   * so the copy is paid while somebody is looking and not otherwise. Anything
+   * else that comes to read that array on this path is reading a stale copy,
+   * and this is the fourth time that has been the bug.
    *
    * Nothing calls this today, which is why the whole thing was invisible. It
    * wants either the growth pass in `field.wgsl` and the ground read back, or
@@ -2655,7 +2683,16 @@ export class Sim {
    */
   async openFieldGpu(): Promise<boolean> {
     if (this.fieldOnGpu) return true;
-    return false;
+    if (!(await fieldGpu.init(this.fields.cols))) return false;
+    /*
+     * Everything that writes the ground has to be told before the first frame,
+     * not on the frame it first tries: `seedGround` may already have run for
+     * this world, and a queued seed is only picked up by `gpuFieldStep`.
+     */
+    this.energy.deferAdds(true);
+    this.energy.seedGround();
+    this.fieldOnGpu = true;
+    return true;
   }
 
   /**
@@ -2841,6 +2878,10 @@ export class Sim {
       nativeSolver.useSamples(false);
       return;
     }
+    // Before the sample unpack rather than after, so a frame that is being
+    // watched shows the field the same passes just produced.
+    if (this.wantFieldReadback) await fieldGpu.readInto(this.fields);
+
     const out = nativeSolver.steerSamples;
     const got = fieldGpu.sampleData;
     const sStride = fieldGpu.sampleStride;

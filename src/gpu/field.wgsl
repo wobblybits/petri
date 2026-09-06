@@ -107,11 +107,17 @@ struct HarvestBlock {
 }
 
 @group(0) @binding(7) var<storage, read> hBlocks: array<HarvestBlock>;
-// Room in each body's tank, in the order its block feeds them.
-@group(0) @binding(8) var<storage, read> hRooms: array<f32>;
-// What each body actually got, same indexing. Read back and credited on the
-// next frame; see `Sim.gpuFieldStep`.
-@group(0) @binding(9) var<storage, read_write> hGot: array<f32>;
+/*
+ * Room in on each body's tank, what it got out, in the same slot.
+ *
+ * One buffer rather than two because WebGPU guarantees only eight storage
+ * buffers per compute stage and this pass would have been the ninth — the
+ * adapter that first ran it offered ten, which is exactly the kind of thing
+ * that works on the machine it was written on and nowhere else. In place is
+ * safe here: an entry belongs to one block, a block is one thread, so the
+ * thread that reads a slot is the only one that writes it.
+ */
+@group(0) @binding(8) var<storage, read_write> hFlow: array<f32>;
 
 // Matches `FLOW_EPS` in energy.ts: below this a take is not worth a cell walk.
 const FLOW_EPS: f32 = 1e-9;
@@ -412,9 +418,9 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
   let blk = hBlocks[b];
   let ch = u32(P.harvestCh);
   for (var e = 0u; e < blk.count; e++) {
-    var want = hRooms[blk.first + e];
+    var want = hFlow[blk.first + e];
     if (want <= FLOW_EPS) {
-      hGot[blk.first + e] = 0.0;
+      hFlow[blk.first + e] = 0.0;
       continue;
     }
     var got = 0.0;
@@ -434,9 +440,9 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
         want -= g;
       }
     }
-    hGot[blk.first + e] = got;
+    hFlow[blk.first + e] = got;
     if (got <= 0.0) {
-      for (var r = e + 1u; r < blk.count; r++) { hGot[blk.first + r] = 0.0; }
+      for (var r = e + 1u; r < blk.count; r++) { hFlow[blk.first + r] = 0.0; }
       break;
     }
   }

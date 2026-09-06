@@ -73,8 +73,7 @@ export class FieldGpu {
   private samples: GPUBuffer | null = null;
   private readback: GPUBuffer | null = null;
   private hBlocks: GPUBuffer | null = null;
-  private hRooms: GPUBuffer | null = null;
-  private hGot: GPUBuffer | null = null;
+  private hFlow: GPUBuffer | null = null;
   private hRead: GPUBuffer | null = null;
   private blockCap = 0;
   private entryCap = 0;
@@ -147,8 +146,7 @@ export class FieldGpu {
           { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: readonly },
           { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: storage },
           { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: readonly },
-          { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: readonly },
-          { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: storage },
+          { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: storage },
         ],
       });
       const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
@@ -261,15 +259,13 @@ export class FieldGpu {
       this.hBlocks = device.createBuffer({ size: this.blockCap * BLOCK_WORDS * 4, usage: st });
       this.blockData = new Uint32Array(this.blockCap * BLOCK_WORDS);
     }
-    if (nEntries > this.entryCap || !this.hRooms) {
+    if (nEntries > this.entryCap || !this.hFlow) {
       this.entryCap = Math.max(1024, nEntries * 2);
-      this.hRooms?.destroy();
-      this.hGot?.destroy();
+      this.hFlow?.destroy();
       this.hRead?.destroy();
-      this.hRooms = device.createBuffer({ size: this.entryCap * 4, usage: st });
-      this.hGot = device.createBuffer({
+      this.hFlow = device.createBuffer({
         size: this.entryCap * 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        usage: st | GPUBufferUsage.COPY_SRC,
       });
       this.hRead = device.createBuffer({
         size: this.entryCap * 4,
@@ -379,7 +375,7 @@ export class FieldGpu {
           harvest.blocks * BLOCK_WORDS * 4,
         );
         device.queue.writeBuffer(
-          this.hRooms!,
+          this.hFlow!,
           0,
           this.roomData.buffer,
           this.roomData.byteOffset,
@@ -405,8 +401,7 @@ export class FieldGpu {
               { binding: 5, resource: { buffer: this.probes! } },
               { binding: 6, resource: { buffer: this.samples! } },
               { binding: 7, resource: { buffer: this.hBlocks! } },
-              { binding: 8, resource: { buffer: this.hRooms! } },
-              { binding: 9, resource: { buffer: this.hGot! } },
+              { binding: 8, resource: { buffer: this.hFlow! } },
             ],
           }),
         );
@@ -452,7 +447,7 @@ export class FieldGpu {
         enc.copyBufferToBuffer(this.samples!, 0, this.readback!, 0, nProbe * SAMPLE_FLOATS * 4);
       }
       if (harvest.entries > 0) {
-        enc.copyBufferToBuffer(this.hGot!, 0, this.hRead!, 0, harvest.entries * 4);
+        enc.copyBufferToBuffer(this.hFlow!, 0, this.hRead!, 0, harvest.entries * 4);
       }
       device.queue.submit([enc.finish()]);
       if (nProbe > 0) {
@@ -471,6 +466,44 @@ export class FieldGpu {
     } catch (e) {
       this.lastError = String(e);
       return false;
+    }
+  }
+
+  /**
+   * Copy the live field into a `Fields`, for the CPU-side views that read it.
+   *
+   * Sixteen megabytes, so this is not something to do every frame — it exists
+   * because the scent overlay and the energy-grid overlay paint from
+   * `fields.data`, and both are opt-in. When nobody has them open nothing here
+   * runs, and when somebody does, one copy a frame is the price of looking.
+   *
+   * Allocates its own staging buffer rather than keeping one alive: holding
+   * sixteen megabytes of mapped memory for a debug view nobody has opened is
+   * the wrong default, and the allocation is nothing against the copy.
+   */
+  async readInto(fields: Fields): Promise<boolean> {
+    const device = this.device;
+    const live = this.aLive ? this.fieldA : this.fieldB;
+    if (!this.ready || !device || !live) return false;
+    const bytes = this.cells * CHANNELS * 4;
+    if (fields.data.length * 4 !== bytes) return false;
+    const rb = device.createBuffer({
+      size: bytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(live, 0, rb, 0, bytes);
+      device.queue.submit([enc.finish()]);
+      await rb.mapAsync(GPUMapMode.READ);
+      fields.data.set(new Float32Array(rb.getMappedRange()));
+      rb.unmap();
+      return true;
+    } catch (e) {
+      this.lastError = String(e);
+      return false;
+    } finally {
+      rb.destroy();
     }
   }
 
