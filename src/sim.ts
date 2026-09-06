@@ -616,7 +616,7 @@ export class Sim {
     }
     this.endFrame(params, t);
     if (this.fieldOnGpu) {
-      await this.gpuFieldStep(params);
+      await this.gpuFieldStep(params, t);
       Sim.phase('fieldGpu');
     }
   }
@@ -2589,7 +2589,7 @@ export class Sim {
    * smell is invisible at 60fps and much cheaper than stalling the pipeline to
    * map a buffer mid-frame.
    */
-  private async gpuFieldStep(params: Params): Promise<void> {
+  private async gpuFieldStep(params: Params, dt: number): Promise<void> {
     const list = this.forceList();
     const n = list.length;
     // Reserve before taking references, not after: `reserve` reallocates the
@@ -2657,13 +2657,33 @@ export class Sim {
       pro[o + 11] = this.tasteOf(a, 3);
     }
 
+    /*
+     * The same five passes `Sim.step` runs on the CPU, in the same order, with
+     * the same numbers. `decay` is handed the *rate* rather than the keep
+     * factor, because the shader resolves per-channel rates itself — one place
+     * that knows how a slider becomes four numbers, not two.
+     */
     const ok = await fieldGpu.step(
       this.fields,
       nDep,
       n,
       params.diffuse,
       params.diffuse * 0.65,
-      Math.max(0, 1 - params.decay),
+      params.decay,
+      {
+        ch: CH.energy,
+        r: params.energyRegrow * dt,
+        cap: this.energy.cellCap,
+        catCh: FERTILISE_CH,
+        gamma: params.fertilise,
+      },
+      {
+        u: CH.conP,
+        v: CH.dupP,
+        feed: params.reactFeed,
+        kill: params.reactKill,
+        dt,
+      },
     );
     if (!ok) {
       // The device went away mid-session. Fall back for good rather than

@@ -17,7 +17,14 @@ import { CHANNELS, type Fields } from '../fields.ts';
  * see the note at the top of field.wgsl for why.
  */
 
-const UNIFORM_BYTES = 64;
+/*
+ * 144, and the layout is dictated by WGSL rather than by taste: a `vec4f` must
+ * sit on a sixteen-byte boundary, so the scalars are grouped in fours. See
+ * `FieldParams` in field.wgsl, which this has to match exactly — a field
+ * written at the wrong offset reads as a plausible number rather than an
+ * error, which is the whole hazard of hand-packing a uniform.
+ */
+const UNIFORM_BYTES = 144;
 /** Floats per Deposit and per Probe in the shader's layout. */
 const DEPOSIT_FLOATS = 8;
 const PROBE_FLOATS = 12;
@@ -29,7 +36,16 @@ const PROBE_FLOATS = 12;
  */
 const FIXED_SCALE = 1e4;
 
-type Entry = 'clearAcc' | 'scatter' | 'applyAcc' | 'diffuse' | 'diffuse2' | 'decay' | 'gather';
+type Entry =
+  | 'clearAcc'
+  | 'scatter'
+  | 'applyAcc'
+  | 'diffuse'
+  | 'diffuse2'
+  | 'react'
+  | 'decay'
+  | 'grow'
+  | 'gather';
 
 export class FieldGpu {
   ready = false;
@@ -114,7 +130,9 @@ export class FieldGpu {
         'applyAcc',
         'diffuse',
         'diffuse2',
+        'react',
         'decay',
+        'grow',
         'gather',
       ] as const) {
         this.pipelines.set(
@@ -206,7 +224,9 @@ export class FieldGpu {
     nProbe: number,
     mix: number,
     mix2: number,
-    keep: number,
+    decayRate: number,
+    grow: { ch: number; r: number; cap: number; catCh: number; gamma: number },
+    react: { u: number; v: number; feed: number; kill: number; dt: number },
   ): Promise<boolean> {
     const device = this.device;
     if (!this.ready || !device || !this.fieldA || !this.fieldB || !this.acc) return false;
@@ -222,13 +242,36 @@ export class FieldGpu {
       f32[4] = fields.originX;
       f32[5] = fields.originY;
       f32[6] = fields.worldW;
-      f32[7] = mix;
-      f32[8] = mix2;
-      f32[9] = keep;
-      f32[10] = FIXED_SCALE;
-      f32[12] = fields.boundX;
-      f32[13] = fields.boundY;
-      f32[14] = fields.boundR;
+      f32[7] = FIXED_SCALE;
+      f32[8] = fields.boundX;
+      f32[9] = fields.boundY;
+      f32[10] = fields.boundR;
+      f32[11] = grow.ch;
+      /*
+       * Per-channel rates, resolved the same way `Fields` does: the slider is
+       * one number for the world and each channel scales it. Clamped at one,
+       * because a diffusion mix above it is a cell overshooting its own
+       * neighbours, which oscillates and then blows up.
+       */
+      for (let c = 0; c < 4; c++) {
+        const dr = fields.diffuseRate[c] > 0 ? fields.diffuseRate[c] : 0;
+        const kr = fields.decayRate[c] > 0 ? fields.decayRate[c] : 0;
+        const m1 = mix * dr;
+        const m2 = mix2 * dr;
+        const k = decayRate * kr;
+        f32[12 + c] = m1 > 1 ? 1 : m1;
+        f32[16 + c] = m2 > 1 ? 1 : m2;
+        f32[20 + c] = k >= 1 ? 0 : 1 - k;
+      }
+      f32[24] = grow.r;
+      f32[25] = grow.cap;
+      f32[26] = grow.gamma;
+      f32[27] = grow.catCh;
+      f32[28] = react.feed * react.dt;
+      f32[29] = (react.feed + react.kill) * react.dt;
+      f32[30] = react.dt;
+      f32[32] = react.u;
+      f32[33] = react.v;
       device.queue.writeBuffer(this.uniform!, 0, u);
       if (nDeposit > 0) {
         device.queue.writeBuffer(
@@ -284,7 +327,11 @@ export class FieldGpu {
       [live, other] = [other, live];
       run('diffuse2', this.cells, live, other);
       [live, other] = [other, live];
+      // Same order as the CPU: spread, react, decay, grow. `react` and `grow`
+      // both work in place on the live buffer, so neither swaps.
+      run('react', this.cells, live, other);
       run('decay', this.cells, live, other);
+      run('grow', this.cells, live, other);
       if (nProbe > 0) run('gather', nProbe, live, other);
       // Two swaps, so the live buffer is back where it started.
       void other;

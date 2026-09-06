@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHANNELS, Fields } from '../fields.ts';
+import { CH, CHANNELS, Fields } from '../fields.ts';
 
 /**
  * The field shaders' arithmetic, checked against `Fields`.
@@ -16,7 +16,68 @@ import { CHANNELS, Fields } from '../fields.ts';
 
 const FIXED_SCALE = 1e4;
 
-function mirrorDiffuse(src: Float32Array, cols: number, rows: number, m: number): Float32Array {
+/**
+ * `grow`, line for line. Logistic on one channel, optionally catalysed.
+ */
+function mirrorGrow(
+  src: Float32Array,
+  n: number,
+  ch: number,
+  r: number,
+  cap: number,
+  catCh: number,
+  gamma: number,
+): Float32Array {
+  const out = Float32Array.from(src);
+  if (r <= 0 || cap <= 0) return out;
+  for (let i = 0; i < n; i++) {
+    const k = i * CHANNELS + ch;
+    const e = out[k];
+    if (e <= 0 || e >= cap) continue;
+    let rr = r;
+    if (catCh >= 0 && catCh !== ch && gamma !== 0) {
+      rr = r * (1 + gamma * out[i * CHANNELS + catCh]);
+    }
+    if (rr <= 0) continue;
+    const next = e + rr * e * (1 - e / cap);
+    out[k] = next > cap ? cap : next;
+  }
+  return out;
+}
+
+/** `react`, line for line. Gray-Scott between two channels. */
+function mirrorReact(
+  src: Float32Array,
+  n: number,
+  uc: number,
+  vc: number,
+  feed: number,
+  kill: number,
+  dt: number,
+): Float32Array {
+  const out = Float32Array.from(src);
+  if (dt <= 0 || uc === vc) return out;
+  if (feed <= 0 && kill <= 0) return out;
+  const f = feed * dt;
+  const kv = (feed + kill) * dt;
+  for (let i = 0; i < n; i++) {
+    const u = out[i * CHANNELS + uc];
+    const v = out[i * CHANNELS + vc];
+    const uvv = u * v * v * dt;
+    const nu = u - uvv + f * (1 - u);
+    const nv = v + uvv - kv * v;
+    out[i * CHANNELS + uc] = nu > 0 ? nu : 0;
+    out[i * CHANNELS + vc] = nv > 0 ? nv : 0;
+  }
+  return out;
+}
+
+function mirrorDiffuse(
+  src: Float32Array,
+  cols: number,
+  rows: number,
+  m: number | number[],
+): Float32Array {
   const dst = new Float32Array(src.length);
   for (let idx = 0; idx < cols * rows; idx++) {
     const i = idx % cols;
@@ -28,7 +89,8 @@ function mirrorDiffuse(src: Float32Array, cols: number, rows: number, m: number)
       const b = i + 1 < cols ? src[(idx + 1) * CHANNELS + c] : self;
       const u = j > 0 ? src[(idx - cols) * CHANNELS + c] : self;
       const d = j + 1 < rows ? src[(idx + cols) * CHANNELS + c] : self;
-      dst[at + c] = (1 - m) * self + m * (a + b + u + d) * 0.25;
+      const mc = Array.isArray(m) ? m[c] : m;
+      dst[at + c] = (1 - mc) * self + mc * (a + b + u + d) * 0.25;
     }
   }
   return dst;
@@ -102,6 +164,27 @@ function mirrorSample(
 }
 
 /** A small field with a few blobs in it, so the passes have work to do. */
+/**
+ * Open the live box over the whole grid.
+ *
+ * `Fields` skips cells outside its box; the shader has no box at all and walks
+ * every cell. That is equivalent only where the box covers the grid — which it
+ * does in production, within seconds of a pond starting, because the field
+ * fills the dish. These comparisons force it so the two are looking at the
+ * same cells.
+ *
+ * `react` is the one pass where the difference would be visible rather than
+ * academic: its feed term is `f * (1 - u)`, which is non-zero at `u = 0`, so
+ * it puts substrate into empty cells. Everything else multiplies or scales
+ * what is already there and leaves a zero cell at zero.
+ */
+function openBox(f: Fields): Fields {
+  const cell = f.cellSize;
+  f.touchWorld(f.originX + cell * 0.5, f.originY + cell * 0.5);
+  f.touchWorld(f.originX + (f.cols - 0.5) * cell, f.originY + (f.rows - 0.5) * cell);
+  return f;
+}
+
 function seeded(): Fields {
   const f = new Fields(64);
   for (const [x, y, ch] of [
@@ -147,6 +230,73 @@ describe('field shader arithmetic', () => {
     let worst = 0;
     for (let i = 0; i < f.data.length; i++) worst = Math.max(worst, Math.abs(f.data[i] - mine[i]));
     expect(worst).toBeLessThan(1e-6);
+  });
+
+  it('diffuses each channel at its own rate, the way Fields does', () => {
+    // The shader takes `mix` as a vec4f and the host resolves slider times
+    // per-channel rate into it. This is the same resolution on the CPU side,
+    // and it is the one that matters: a channel diffusing at the wrong rate
+    // looks like a plausible field rather than an error.
+    const f = seeded();
+    f.diffuseRate[CH.energy] = 0.25;
+    f.diffuseRate[CH.aux] = 0;
+    const mix = 0.28;
+    const per = [0, 1, 2, 3].map((c) => Math.min(1, mix * f.diffuseRate[c]));
+    const mine = mirrorDiffuse(Float32Array.from(f.data), f.cols, f.rows, per);
+    f.diffuse(mix);
+    let worst = 0;
+    let peak = 0;
+    for (let i = 0; i < f.data.length; i++) {
+      peak = Math.max(peak, Math.abs(f.data[i]));
+      worst = Math.max(worst, Math.abs(f.data[i] - mine[i]));
+    }
+    expect(peak).toBeGreaterThan(0.5);
+    expect(worst / peak).toBeLessThan(1e-6);
+  });
+
+  it('decays each channel at its own rate', () => {
+    const f = seeded();
+    f.decayRate[CH.energy] = 0;
+    const rate = 0.018;
+    const mine = Float32Array.from(f.data);
+    for (let i = 0; i < mine.length; i++) {
+      const c = i % CHANNELS;
+      const r = rate * f.decayRate[c];
+      mine[i] *= r >= 1 ? 0 : 1 - r;
+    }
+    f.decay(rate);
+    let worst = 0;
+    for (let i = 0; i < f.data.length; i++) worst = Math.max(worst, Math.abs(f.data[i] - mine[i]));
+    expect(worst).toBeLessThan(1e-6);
+  });
+
+  it('grows the way Fields does, catalyst included', () => {
+    const f = openBox(seeded());
+    const cap = 0.4;
+    // Something below capacity everywhere, and a catalyst that varies.
+    for (let i = CH.energy; i < f.data.length; i += CHANNELS) f.data[i] = cap * 0.3;
+    const before = Float32Array.from(f.data);
+    const mine = mirrorGrow(before, f.cols * f.rows, CH.energy, 0.05, cap, CH.conP, 3);
+    f.grow(CH.energy, 0.05, cap, CH.conP, 3);
+    let worst = 0;
+    for (let i = 0; i < f.data.length; i++) worst = Math.max(worst, Math.abs(f.data[i] - mine[i]));
+    expect(worst, 'grow diverged from its mirror').toBeLessThan(1e-6);
+    // And it did something, or the comparison proves nothing.
+    let moved = 0;
+    for (let i = CH.energy; i < f.data.length; i += CHANNELS) {
+      if (Math.abs(f.data[i] - before[i]) > 1e-9) moved++;
+    }
+    expect(moved).toBeGreaterThan(100);
+  });
+
+  it('reacts the way Fields does', () => {
+    const f = openBox(seeded());
+    const before = Float32Array.from(f.data);
+    const mine = mirrorReact(before, f.cols * f.rows, CH.conP, CH.dupP, 0.037, 0.06, 0.5);
+    f.react(CH.conP, CH.dupP, 0.037, 0.06, 0.5);
+    let worst = 0;
+    for (let i = 0; i < f.data.length; i++) worst = Math.max(worst, Math.abs(f.data[i] - mine[i]));
+    expect(worst, 'react diverged from its mirror').toBeLessThan(1e-6);
   });
 
   it('scatters where Fields deposits, within fixed-point', () => {
