@@ -140,10 +140,7 @@ type Exp = {
   ): void;
   solver_flock_pairs(): number;
   solver_scent(): number;
-  solver_scent_tmp(): number;
   solver_scent_cap(): number;
-  solver_scent_diffuse(cols: number, rows: number, mix: number): void;
-  solver_scent_decay(n: number, keep: number): void;
   _initialize?: () => void;
 };
 
@@ -609,38 +606,6 @@ export class NativeSolver {
    */
   flockPairs(): number {
     return this.exp?.solver_flock_pairs() ?? -1;
-  }
-
-  /*
-   * Declined for a grid this size. These walk every cell and need the field
-   * copied both ways to do it, which on a million-cell grid costs far more
-   * than the arithmetic saves; the TS twin walks only the live box instead.
-   * Kept for small grids, and for whatever the GPU path ends up leaving here.
-   */
-  scentDiffuse(fields: Fields, mix: number): boolean {
-    const exp = this.exp;
-    if (!this.ready || !exp || !this.scent) return false;
-    const n = fields.cols * fields.rows;
-    if (n > 65_536) return false;
-    if (n * 4 > this.scentCap) return false;
-    this.scent.set(fields.data.subarray(0, n * 4));
-    this.setScentFrame(fields);
-    exp.solver_scent_diffuse(fields.cols, fields.rows, mix);
-    fields.data.set(this.scent.subarray(0, n * 4));
-    return true;
-  }
-
-  scentDecay(fields: Fields, keep: number): boolean {
-    const exp = this.exp;
-    if (!this.ready || !exp || !this.scent) return false;
-    if (fields.cols * fields.rows > 65_536) return false;
-    const n = fields.cols * fields.rows * 4;
-    if (n > this.scentCap) return false;
-    this.scent.set(fields.data.subarray(0, n));
-    this.setScentFrame(fields);
-    exp.solver_scent_decay(n, keep);
-    fields.data.set(this.scent.subarray(0, n));
-    return true;
   }
 }
 

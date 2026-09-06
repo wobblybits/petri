@@ -47,7 +47,7 @@ import { queryHit, queryDiscHit, SLOP, type Hit } from './collide.ts';
 import { closestTOnSegment, segmentsIntersect, WIRE_RADIUS, wireBowBudget, bounceOffDisk } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
-import { CH, FERTILISE_CH, Fields, worldBoundRadius } from './fields.ts';
+import { CH, FERTILISE_CH, FIELD_CELL, FIELD_CELLS, Fields, worldBoundRadius } from './fields.ts';
 import { Graph, ropeIsLive, wrapPos, type Wire } from './graph.ts';
 import type { Params } from './params.ts';
 import {
@@ -179,6 +179,17 @@ export function scentTurnBoost(trail: number): number {
 
 /** Monotonic, process-wide. Only ever compared for equality. */
 let nextSimId = 1;
+
+/**
+ * A contact pair as one number rather than a `"lo:hi"` string, which was
+ * built and hashed once per SAT contact per substep. Ids below 2^26 pack
+ * exactly, and the product stays inside the safe-integer range.
+ */
+const CONTACT_KEY_WIDTH = 67108864;
+
+function contactKey(a: number, b: number): number {
+  return a < b ? a * CONTACT_KEY_WIDTH + b : b * CONTACT_KEY_WIDTH + a;
+}
 
 /**
  * Energy two ends of a ready redex have put up toward their commute, held
@@ -384,11 +395,11 @@ export class Sim {
   private compBuf = new Int32Array(0);
   private slotBuf = new Int32Array(0);
   /** Pairs in contact last frame — a strike fires on onset, contact continues. */
-  private contactAudioPrev = new Set<string>();
-  private contactAudioNow = new Set<string>();
+  private contactAudioPrev = new Set<number>();
+  private contactAudioNow = new Set<number>();
   /** Wire/body bows this frame, keyed by `wireId:agentId`. */
   /** Bodies currently overlapping, keyed by canonical `lo:hi` id pair. */
-  contacts = new Map<string, LiveContact>();
+  contacts = new Map<number, LiveContact>();
   /** Crossing / overlapping ropes this frame. Geometry is not displaced. */
   /** Momentum lost to sound this frame, applied once after the substeps. */
   private radiated = new Map<number, { x: number; y: number }>();
@@ -526,12 +537,23 @@ export class Sim {
   /** Eased centre of mass. Rewrites delete agents, which jumps the true COM. */
   private home: { x: number; y: number } | null = null;
 
-  constructor(w: number, h: number) {
+  /**
+   * Cells a side of the field a new Sim gets, when the constructor is not
+   * told. The app leaves it at the world's full size; the test suite sets it
+   * to a quarter, which is a sixteenth of the diffusion work — the CPU
+   * field over a million cells was twenty milliseconds a frame in Node
+   * whatever the body count, and most of what the suite's half hour was
+   * spent on. The cell stays ten units either way, so it is a smaller dish
+   * and not a coarser one, and nothing about steering changes.
+   */
+  static defaultFieldCells = FIELD_CELLS;
+
+  constructor(w: number, h: number, fieldCells = Sim.defaultFieldCells) {
     this.w = Math.max(1, w);
     this.h = Math.max(1, h);
     this.coverW = this.w;
     this.coverH = this.h;
-    this.fields = new Fields();
+    this.fields = new Fields(fieldCells, fieldCells * FIELD_CELL);
     this.graph.onLatch = (ev) => {
       this.tally.latches++;
       audio.push(ev, this.graph, this.agents);
@@ -685,7 +707,18 @@ export class Sim {
     );
   }
 
-  step(dt: number, params: Params, view?: PanView | null): void {
+  /**
+   * Everything before the solve, shared by the two twins below. Returns the
+   * clamped frame step.
+   *
+   * One body rather than two copies, because two copies drifted: the async
+   * twin — the one the app runs — went a long time with no phase markers at
+   * all, so the clock was never reset at the top of a frame and the first
+   * marker to fire charged itself everything since the last one, and every
+   * profile anyone took was of the synchronous twin, which cannot use the
+   * GPU for either the field or the FAR solve.
+   */
+  private openFrame(dt: number, params: Params, view: PanView | null | undefined): number {
     Sim.phaseStart();
     const t = this.beginFrame(dt, params);
     this.collectRewriteFrozen();
@@ -700,6 +733,15 @@ export class Sim {
     Sim.phase('applyRopePaths');
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
     Sim.phase('syncRopeShape');
+    return t;
+  }
+
+  /**
+   * The synchronous frame: wasm or the JS twin, never the GPU. What the test
+   * suite and the experiment harness drive; the app runs `stepAsync`.
+   */
+  step(dt: number, params: Params, view?: PanView | null): void {
+    const t = this.openFrame(dt, params, view);
     if (this.solveFarNative(params, t)) {
       this.lastFarPath = 'wasm';
       this.finishIntegrate(t);
@@ -711,36 +753,9 @@ export class Sim {
     this.endFrame(params, t);
   }
 
-  /** Same as `step`, but will wait on the WebGPU FAR pass when WASM is not live. */
+  /** The frame that ships: the same as `step`, plus the GPU where it has one. */
   async stepAsync(dt: number, params: Params, view?: PanView | null): Promise<void> {
-    /*
-     * The same markers `step` carries, because this is the path that ships and
-     * it had none.
-     *
-     * Without `phaseStart` the phase clock is never reset at the top of a
-     * frame, so the first marker to fire charges itself everything since the
-     * last one — including all the time between frames. It read as
-     * `beginFrame:setup` at 5932ms against a 34ms frame, which is at least
-     * loud enough to notice. The quieter half is worse: seven phases here had
-     * no marker at all, so the solve and the rope work were charged to
-     * whatever ran next, and every profile anyone has taken of this
-     * simulation was of `step` — the synchronous twin, which cannot use the
-     * GPU for either the field or the FAR solve.
-     */
-    Sim.phaseStart();
-    const t = this.beginFrame(dt, params);
-    this.collectRewriteFrozen();
-    Sim.phase('collectRewriteFrozen');
-    this.assignPhysicsLod(view);
-    Sim.phase('assignPhysicsLod');
-    this.assignActivityLod(params);
-    Sim.phase('assignActivityLod');
-    this.graph.syncRest(this.time, params, this.wireDetailed);
-    Sim.phase('syncRest');
-    this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
-    Sim.phase('applyRopePaths');
-    this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
-    Sim.phase('syncRopeShape');
+    const t = this.openFrame(dt, params, view);
     /*
      * The GPU when `wantFarGpu` says it is worth the round trip, then wasm,
      * then the GPU again for the frames wasm turned down, then the TS twin.
@@ -773,7 +788,7 @@ export class Sim {
   private beginFrame(dt: number, params: Params): number {
     const t = clamp(dt, 0, 0.05);
     this.time += t;
-    this.components = this.graph.componentIds(this.agents);
+    this.components = this.graph.componentIds(this.agents, this.rosterVersion);
     this.trackHome(t);
     /*
      * One centre for the whole world grid, pinned once and never moved.
@@ -877,7 +892,7 @@ export class Sim {
     Sim.phase('harvestSlots');
     this.graph.snap(this.agents, this.w, this.h, params, this.time);
     Sim.phase('snap');
-    this.components = this.graph.componentIds(this.agents);
+    this.components = this.graph.componentIds(this.agents, this.rosterVersion);
     Sim.phase('components');
     // `pulseRequests` charges itself in four parts — seeding the need field,
     // relaxing it, moving energy down it, and the state update — because at
@@ -943,7 +958,7 @@ export class Sim {
     for (const id of tickUpkeepFast(this.agents.values(), this.agentStore, t, params.upkeep, this.energy)) {
       this.kill(id);
     }
-    this.components = this.graph.componentIds(this.agents);
+    this.components = this.graph.componentIds(this.agents, this.rosterVersion);
     Sim.phase('upkeep');
     /*
      * The GPU owns the field when it is available, and then none of this runs:
@@ -1248,11 +1263,19 @@ export class Sim {
   }
 
   /**
-   * The bodies, in the order every force pass indexes them by.
+   * The bodies, in the order every pass indexes them by: the roster's own,
+   * which is insertion order and so ascending id.
    *
-   * Rebuilt once a frame, not once a pass. Six passes each walking the agent
-   * Map into an array was 120k pushes a frame at pond scale, for a list that
-   * cannot change between them: nothing in the force phase spawns or kills.
+   * The one list. Rebuilt when the roster version moves and not otherwise,
+   * and every pass that wants a dense array of bodies reads it — the solve,
+   * the packs, the grids, flocking, the wire adjacency, the GPU unpack. It
+   * used to be rebuilt by six different methods from the same Map in the
+   * same order, and they agreed only because nothing enforced anything else;
+   * `wireAdjacency` and `unpackGenome` both assume this order, so one pass
+   * sorting or filtering the shared array would have corrupted both silently.
+   * Every writer of the roster bumps `rosterVersion` (`spawn`, `kill`,
+   * `clear`, and `noteRosterChange` for the two modules that write the Map
+   * directly), which is what makes the cache safe to share.
    */
   private forceList(): Agent[] {
     const list = this.agentList;
@@ -1797,14 +1820,10 @@ export class Sim {
       return;
     }
 
+    const list = this.forceList();
     const index = this.packIndex;
     index.clear();
-    const list = this.agentList;
-    list.length = 0;
-    for (const a of this.agents.values()) {
-      index.set(a.id, list.length);
-      list.push(a);
-    }
+    for (let i = 0; i < list.length; i++) index.set(list[i].id, i);
     const n = list.length;
     const adj = this.flockAdj;
     while (adj.length < n) adj.push([]);
@@ -2045,7 +2064,7 @@ export class Sim {
   dragStep(params: Params, dt: number, view?: PanView | null): void {
     if (!this.grabbed || dt <= 0) return;
     const h = dt / Sim.SUBSTEPS;
-    this.components = this.graph.componentIds(this.agents);
+    this.components = this.graph.componentIds(this.agents, this.rosterVersion);
     this.collectRewriteFrozen();
     this.assignPhysicsLod(view);
     this.assignActivityLod(params);
@@ -2283,9 +2302,7 @@ export class Sim {
     // Rope velocity is re-derived every substep, so a nudge of e px becomes
     // e/h — damping it once per frame is far too late to keep a slack rope calm.
     const ropeKeep = Math.exp(-Math.max(0, params.springDamp) * h);
-    const list = this.agentList;
-    list.length = 0;
-    for (const a of this.agents.values()) list.push(a);
+    const list = this.forceList();
     const n = list.length;
 
     // Hoisted once: every agent shares this one store, so a hot loop over
@@ -2513,9 +2530,7 @@ export class Sim {
     wires: Float32Array;
     nWires: number;
   } | null {
-    const list = this.agentList;
-    list.length = 0;
-    for (const a of this.agents.values()) list.push(a);
+    const list = this.forceList();
     const n = list.length;
     if (n === 0) return null;
     /*
@@ -2609,11 +2624,7 @@ export class Sim {
     const wires = nativeSolver.wires;
     if (!data || !wires) return false;
 
-    const list = this.agentList;
-    if (!this.forceBlock) {
-      list.length = 0;
-      for (const a of this.agents.values()) list.push(a);
-    }
+    const list = this.forceList();
     const n = list.length;
     if (n === 0) return true;
     const index = this.packIndex;
@@ -2715,7 +2726,7 @@ export class Sim {
     this.worldY = cy;
     this.home = { x: cx, y: cy };
     this.fields.cover(cx, cy);
-    this.worldR = worldBoundRadius(cx, cy, this.fields.originX, this.fields.originY);
+    this.worldR = worldBoundRadius(cx, cy, this.fields.originX, this.fields.originY, this.fields.worldW);
     this.fields.setWorldBound(cx, cy, this.worldR);
     this.energy.setBounds(cx, cy, this.worldR, this.fields.originX, this.fields.originY);
     /*
@@ -3101,6 +3112,12 @@ export class Sim {
      */
     const SENSE = this.agentStore.senseAll;
     const STEER = this.agentStore.steerAll;
+    // Scaled on the way in, the same way `updateState` scales its own
+    // sample, so `senseAll` means one thing on both paths. Channel 2 is the
+    // ground and reads against a full cell; the others against a strong
+    // local signal.
+    const sScale = 1 / SENSE_SCALE;
+    const gScale = this.groundScale;
     for (let i = 0; i < n; i++) {
       const o = i * sStride;
       const slot = list[i].slot;
@@ -3109,10 +3126,10 @@ export class Sim {
       STEER[to + 1] = got[o + 1];
       STEER[to + 2] = got[o + 2];
       const so = slot * 4;
-      SENSE[so] = got[o + 4];
-      SENSE[so + 1] = got[o + 5];
-      SENSE[so + 2] = got[o + 6];
-      SENSE[so + 3] = got[o + 7];
+      SENSE[so] = got[o + 4] * sScale;
+      SENSE[so + 1] = got[o + 5] * sScale;
+      SENSE[so + 2] = got[o + 6] * gScale;
+      SENSE[so + 3] = got[o + 7] * sScale;
     }
     this.steerFromSamples = true;
     Sim.phase('gpu:unpack');
@@ -3308,11 +3325,7 @@ export class Sim {
     if (!nativeSolver.ready || !nativeSolver.bodies || !nativeSolver.wiresNear || !nativeSolver.nodes) {
       return false;
     }
-    const list = this.agentList;
-    if (!this.forceBlock) {
-      list.length = 0;
-      for (const a of this.agents.values()) list.push(a);
-    }
+    const list = this.forceList();
     const n = list.length;
     if (n === 0) return true;
 
@@ -3539,7 +3552,7 @@ export class Sim {
     // A contact is the one wake signal that cannot be derived from topology:
     // it is how a moving body tells sleeping tissue that it is coming.
     if (this.sleepActive) this.hitWake.push(A.id, B.id);
-    const key = A.id < B.id ? `${A.id}:${B.id}` : `${B.id}:${A.id}`;
+    const key = contactKey(A.id, B.id);
     const m = mechanics ?? contactMechanics(A, B, hit);
     this.noteContact(A, B, hit.overlap, m.vT);
 
@@ -3578,7 +3591,7 @@ export class Sim {
     const lo = A.id < B.id ? A.id : B.id;
     const hi = A.id < B.id ? B.id : A.id;
     const signed = A.id < B.id ? vT : -vT;
-    const key = `${lo}:${hi}`;
+    const key = lo * CONTACT_KEY_WIDTH + hi;
     const prev = this.contacts.get(key);
     if (prev && prev.overlap >= overlap) return;
     this.contacts.set(key, { agentA: lo, agentB: hi, overlap, vT: signed });
@@ -3608,9 +3621,7 @@ export class Sim {
    * every substep, which keeps it exact rather than relying on a motion margin.
    */
   private rebuildBodyGrid(cellSize: number): Agent[] {
-    const list = this.agentList;
-    list.length = 0;
-    for (const a of this.agents.values()) list.push(a);
+    const list = this.forceList();
     const n = list.length;
     if (this.gx.length < n) {
       this.gx = new Array(n * 2);
@@ -4370,9 +4381,7 @@ export class Sim {
       }
     }
     if ((align <= 0 && sep <= 0) || dt <= 0) return;
-    const list = this.agentList;
-    list.length = 0;
-    for (const a of this.agents.values()) list.push(a);
+    const list = this.forceList();
     const n = list.length;
     if (n === 0) return;
 
@@ -5052,11 +5061,13 @@ export class Sim {
        */
       if (READS[slot]) {
         const so = slot * 4;
-        // On the GPU path `gpuFieldStep` filled these at the end of last
-        // frame, straight out of the buffer that holds the live field.
-        // `fields.data` is a stale copy there and sampling it reads garbage.
-        if (!this.fieldOnGpu) this.fields.sampleAll(X[slot], Y[slot], SENSE, so);
         /*
+         * On the GPU path `gpuFieldStep` filled these at the end of last
+         * frame, already scaled, straight out of the buffer that holds the
+         * live field; `fields.data` is a stale copy there and sampling it
+         * reads garbage. Here the sample is taken and scaled at the write,
+         * so the store holds the same thing on both paths.
+         *
          * Both scales bring an input onto the range the other four already
          * occupy. The ground is a quantity per cell, so a full cell reads one;
          * the signal channels are accumulated deposits, so a strong local
@@ -5064,10 +5075,13 @@ export class Sim {
          * times the mutation leverage of every other input gene and `phi` was
          * pinned across all but about 7% of its legal range.
          */
-        SENSE[so] *= sScale;
-        SENSE[so + 1] *= sScale;
-        SENSE[so + 3] *= sScale;
-        SENSE[so + CH.energy] *= gScale;
+        if (!this.fieldOnGpu) {
+          this.fields.sampleAll(X[slot], Y[slot], SENSE, so);
+          SENSE[so] *= sScale;
+          SENSE[so + 1] *= sScale;
+          SENSE[so + 3] *= sScale;
+          SENSE[so + CH.energy] *= gScale;
+        }
         x[IN_SENSE] = SENSE[so];
         x[IN_SENSE + 1] = SENSE[so + 1];
         x[IN_SENSE + 2] = SENSE[so + 2];

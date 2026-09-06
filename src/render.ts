@@ -424,9 +424,6 @@ function ghostAsAgent(g: Ghost): Agent {
   a.prevX = g.x;
   a.prevY = g.y;
   a.prevHeading = g.heading;
-  a.integVx = 0;
-  a.integVy = 0;
-  a.integOmega = 0;
   a.extra = 0;
   a.request = 0;
   a.recovering = false;

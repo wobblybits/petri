@@ -49,8 +49,14 @@ typedef v128_t v128;
  *
  * Raising MAX_BODIES therefore means re-running the arithmetic in
  * native/caps.test.ts, which fails if the statics no longer fit the heap.
+ *
+ * 65,536 since 2026-09-06, for a dish of fifty thousand: above the cap the
+ * FAR solve goes to the GPU kernel, which is about twice the time. The
+ * scent scratch buffer went the same day — the CPU diffusion here declined
+ * any grid over 65k cells and the world grid is a million — which is what
+ * paid for it.
  */
-#define MAX_BODIES 32768
+#define MAX_BODIES 65536
 #define MAX_WIRES (MAX_BODIES * 3 / 2)
 #define MAX_NODES (MAX_BODIES * 8)
 #define MAX_CELLS 65536
@@ -65,10 +71,10 @@ typedef v128_t v128;
  * camera window, because the steering pass samples it in here and a grid it
  * cannot hold means a body that smells nothing at all.
  *
- * This is 32 MB of statics for the two buffers, and the host copy in and out
- * is 16 MB a frame each way — which is the honest cost of running the field on
- * the CPU at this resolution, and the reason the GPU path is the one that
- * should carry it whenever there is a GPU.
+ * This is 16 MB of statics for the mirror, and the host copy in and out is
+ * up to 16 MB a frame each way — which is the honest cost of running the
+ * field on the CPU at this resolution, and the reason the GPU path is the
+ * one that should carry it whenever there is a GPU.
  */
 #define MAX_COLS 1024
 #define MAX_ROWS 1024
@@ -146,7 +152,6 @@ static uint8_t kind[MAX_BODIES];
 static uint8_t detailed[MAX_BODIES];
 static float delta[MAX_BODIES * 2];
 static float scent[MAX_SCENT];
-static float scent_tmp[MAX_SCENT];
 static int g_pairs = 0;
 
 static int32_t cell_of[MAX_BODIES];
@@ -1827,74 +1832,6 @@ void solver_declutter(int n, float reach, float at_reach, float cutoff,
   }
 }
 
-/*
- * Confinement: a soft pull back toward home for a body outside the world
- * bound. Outside `half` there is no world — no scent to steer by, no energy
- * to harvest — so a body that drifts past the edge would otherwise never
- * come back and simply starve where it stopped. The pull scales with how far
- * outside it is, so it is nothing at the boundary and firm a long way out: a
- * soft basin rather than a wall, and a net that wanders off gets walked home
- * instead of teleported.
- *
- * Used to also carry a cohesion pull (loners and tiny latches drawn toward
- * the flock's centre of mass), removed once measurement showed the default
- * left it permanently at 0 — a slider nothing used. Confinement is the part
- * that actually runs.
- *
- * Split into a `_range` entry point so a caller can hand out disjoint body
- * ranges to worker threads. Safe to do: every body here only ever reads its
- * own slot of `bodies` plus the shared (cx, cy) target and only ever writes
- * its own velocity, so two ranges never touch the same memory and the result
- * does not depend on how the ranges are scheduled. Not every pass in this
- * file has that shape — `flock_apply` and `near_contacts` mutate both ends
- * of a pair per iteration, so splitting those needs a different scheme
- * (per-thread accumulators, reduced afterward), not this one. See
- * confine-pool.ts for where this one actually gets split.
- */
-void solver_confine_range(int start, int end, float cx, float cy, float dt, float half, float edge) {
-  if (dt <= 0.f || edge <= 0.f || half <= 0.f) return;
-  if (start < 0) start = 0;
-  if (end > MAX_BODIES) end = MAX_BODIES;
-  if (end <= start) return;
-  for (int i = start; i < end; i++) {
-    float *p = bodies + i * STRIDE;
-    if (p[FAR_LOCKED] >= 0.5f) continue;
-    float dx = cx - p[FAR_X];
-    float dy = cy - p[FAR_Y];
-    /*
-     * Radial, not per axis. A square bound has four corners, and a corner is
-     * an attractor: on an edge one velocity component is cancelled and the
-     * body slides along the other, but in a corner both are cancelled and it
-     * is wedged. Measured, 21 of 60 free bodies released on a square boundary
-     * were sitting in corners a minute later and none had come back inside —
-     * which is exactly the Eras piling into the corners of the field.
-     *
-     * A circle of this radius is inscribed in the square grid, so nothing
-     * confined by it can leave the field, and a body pressed outward by its
-     * own swimming slides around the rim forever instead of collecting at
-     * four points.
-     *
-     * Saturating, not linear. The pull grows with the overshoot so it is
-     * nothing at the boundary, but a body a long way out should be walked
-     * home rather than fired there: unclamped, one 108,000 units past the
-     * edge was handed 38,000 px/s, which reads as the whole pond convulsing.
-     */
-    float dist = sqrtf(dx * dx + dy * dy);
-    float over = dist - half;
-    if (over > 0.f && dist > 1e-6f) {
-      if (over > half) over = half;
-      float k = (over * edge * dt) / dist;
-      p[FAR_VX] += dx * k;
-      p[FAR_VY] += dy * k;
-    }
-  }
-}
-
-void solver_confine(int n, float cx, float cy, float dt, float half, float edge) {
-  if (n > MAX_BODIES) n = MAX_BODIES;
-  solver_confine_range(0, n, cx, cy, dt, half, edge);
-}
-
 int32_t *solver_decl_comp(void) { return decl_comp; }
 uint8_t *solver_decl_sat(void) { return decl_sat; }
 float *solver_body_mass(void) { return body_mass; }
@@ -2386,90 +2323,4 @@ void solver_step_near(int n, int n_wires, float dt, int substeps,
 }
 
 float *solver_scent(void) { return scent; }
-float *solver_scent_tmp(void) { return scent_tmp; }
 int solver_scent_cap(void) { return MAX_SCENT; }
-
-void solver_scent_diffuse(int cols, int rows, float mix) {
-  if (mix <= 0.f || cols <= 0 || rows <= 0) return;
-  if (cols > MAX_COLS) cols = MAX_COLS;
-  if (rows > MAX_ROWS) rows = MAX_ROWS;
-  float m = mix;
-  float keep = 1.f - m;
-  int row_stride = cols * CHANNELS;
-  const float *src = scent;
-  float *dst = scent_tmp;
-  for (int j = 0; j < rows; j++) {
-    int has_up = j > 0;
-    int has_down = j < rows - 1;
-    for (int i = 0; i < cols; i++) {
-      int base = (j * cols + i) * CHANNELS;
-      if (scent_cell_out(i, j)) {
-#if HAVE_SIMD
-        wasm_v128_store(dst + base, wasm_f32x4_splat(0.f));
-#else
-        dst[base] = dst[base + 1] = dst[base + 2] = dst[base + 3] = 0.f;
-#endif
-        continue;
-      }
-      int dirichlet = scent_br > 0.f;
-      int left = (i > 0 && !(dirichlet && scent_cell_out(i - 1, j))) ? base - CHANNELS : -1;
-      int right = (i < cols - 1 && !(dirichlet && scent_cell_out(i + 1, j))) ? base + CHANNELS : -1;
-      int up = (has_up && !(dirichlet && scent_cell_out(i, j - 1))) ? base - row_stride : -1;
-      int down = (has_down && !(dirichlet && scent_cell_out(i, j + 1))) ? base + row_stride : -1;
-#if HAVE_SIMD
-      v128 self = wasm_v128_load(src + base);
-      v128 z = wasm_f32x4_splat(0.f);
-      v128 miss = dirichlet ? z : self;
-      v128 a = left >= 0 ? wasm_v128_load(src + left) : miss;
-      v128 b = right >= 0 ? wasm_v128_load(src + right) : miss;
-      v128 c = up >= 0 ? wasm_v128_load(src + up) : miss;
-      v128 e = down >= 0 ? wasm_v128_load(src + down) : miss;
-      v128 sum = wasm_f32x4_add(wasm_f32x4_add(a, b), wasm_f32x4_add(c, e));
-      v128 out = wasm_f32x4_add(wasm_f32x4_mul(wasm_f32x4_splat(keep), self),
-                                wasm_f32x4_mul(wasm_f32x4_splat(m * 0.25f), sum));
-      wasm_v128_store(dst + base, out);
-#else
-      for (int ch = 0; ch < CHANNELS; ch++) {
-        int k = base + ch;
-        float self = src[k];
-        float miss = dirichlet ? 0.f : self;
-        float a = left >= 0 ? src[left + ch] : miss;
-        float b = right >= 0 ? src[right + ch] : miss;
-        float c = up >= 0 ? src[up + ch] : miss;
-        float e = down >= 0 ? src[down + ch] : miss;
-        dst[k] = keep * self + m * (a + b + c + e) * 0.25f;
-      }
-#endif
-    }
-  }
-  memcpy(scent, scent_tmp, (size_t)cols * (size_t)rows * CHANNELS * sizeof(float));
-}
-
-void solver_scent_decay(int n, float keep) {
-  if (n <= 0) return;
-  if (n > MAX_SCENT) n = MAX_SCENT;
-  if (keep >= 1.f) return;
-  if (keep <= 0.f) {
-    memset(scent, 0, (size_t)n * sizeof(float));
-    return;
-  }
-#if HAVE_SIMD
-  v128 k4 = wasm_f32x4_splat(keep);
-  int i = 0;
-  for (; i + 4 <= n; i += 4) {
-    wasm_v128_store(scent + i, wasm_f32x4_mul(wasm_v128_load(scent + i), k4));
-  }
-  for (; i < n; i++) scent[i] *= keep;
-#else
-  for (int i = 0; i < n; i++) scent[i] *= keep;
-#endif
-  if (scent_br > 0.f && scent_cols > 0 && scent_rows > 0) {
-    for (int j = 0; j < scent_rows; j++) {
-      for (int i = 0; i < scent_cols; i++) {
-        if (!scent_cell_out(i, j)) continue;
-        float *c = scent + (size_t)(j * scent_cols + i) * CHANNELS;
-        c[0] = c[1] = c[2] = c[3] = 0.f;
-      }
-    }
-  }
-}

@@ -1,5 +1,3 @@
-import { nativeSolver } from './native/solver.ts';
-
 export const CH = {
   conP: 0,
   dupP: 1,
@@ -99,12 +97,18 @@ export const WORLD_BOUND_INSET = FIELD_CELL;
  * `FIELD_HALF` can poke up to half a cell past the tight edge. This is the
  * number the wall, the scent mask, the energy bound, and soup spawn share.
  */
-export function worldBoundRadius(cx: number, cy: number, originX: number, originY: number): number {
+export function worldBoundRadius(
+  cx: number,
+  cy: number,
+  originX: number,
+  originY: number,
+  extent = FIELD_EXTENT,
+): number {
   const inscribed = Math.min(
     cx - originX,
-    originX + FIELD_EXTENT - cx,
+    originX + extent - cx,
     cy - originY,
-    originY + FIELD_EXTENT - cy,
+    originY + extent - cy,
   );
   return Math.max(0, inscribed - WORLD_BOUND_INSET);
 }
@@ -122,7 +126,11 @@ export class Fields {
   /** Live-disk radius. `<= 0` means no Dirichlet mask and no wall. */
   boundR = 0;
   data: Float32Array;
-  tmp: Float32Array;
+  /**
+   * The diffusion ping-pong's other half, allocated the first time a pass
+   * needs it. Sixteen megabytes, and on the GPU path no pass ever does.
+   */
+  private tmp: Float32Array | null = null;
 
   /**
    * Per-channel multipliers on the global diffuse and decay rates.
@@ -155,25 +163,24 @@ export class Fields {
   readonly diffuseRate = new Float64Array([1, 1, 1, 1]);
   readonly decayRate = new Float64Array([1, 1, 1, 1]);
 
-  private uniform(rate: Float64Array): boolean {
-    return rate[0] === rate[1] && rate[1] === rate[2] && rate[2] === rate[3];
-  }
-
-  constructor(cells = FIELD_CELLS) {
+  /**
+   * `cells` a side over `extent` world units.
+   *
+   * The two are separate so a smaller dish can keep the same cell. The
+   * steering constants — the sensor spacing, the dead zone, the deposit
+   * normalisation — are tuned to a ten-unit cell (see `FIELD_CELL`), and a
+   * field that shrank its cell count over the full extent would be a
+   * coarser world, not a smaller one. `Sim` passes `cells * FIELD_CELL`;
+   * the default keeps `new Fields(n)` meaning what it always did for the
+   * kernel tests, a coarse grid over the whole world.
+   */
+  constructor(cells = FIELD_CELLS, extent = FIELD_EXTENT) {
     this.cols = cells;
     this.rows = cells;
-    this.worldW = FIELD_EXTENT;
-    this.worldH = FIELD_EXTENT;
+    this.worldW = extent;
+    this.worldH = extent;
     this.data = new Float32Array(this.cols * this.rows * CHANNELS);
-    this.tmp = new Float32Array(this.data.length);
   }
-
-  /**
-   * Scratch for `shiftCells`, which used to allocate a fresh buffer per scroll.
-   * Lazy: at 1024 squared this is 16 MB, and a Sim that never scrolls its field
-   * — every Sim in the test suite — should not pay for it.
-   */
-  private scroll: Float32Array | null = null;
 
   /*
    * The rectangle of cells that have ever been deposited into, plus a margin.
@@ -212,7 +219,7 @@ export class Fields {
 
   /** World units per cell. Fixed — this is the whole point of the rework. */
   get cellSize(): number {
-    return FIELD_EXTENT / this.cols;
+    return this.worldW / this.cols;
   }
 
   /**
@@ -226,10 +233,14 @@ export class Fields {
    */
   cover(cx: number, cy: number): void {
     const cell = this.cellSize;
-    const di = Math.round((cx - FIELD_HALF - this.originX) / cell);
-    const dj = Math.round((cy - FIELD_HALF - this.originY) / cell);
+    const half = this.worldW * 0.5;
+    const di = Math.round((cx - half - this.originX) / cell);
+    const dj = Math.round((cy - half - this.originY) / cell);
     if (di === 0 && dj === 0) return;
-    this.shiftCells(di, dj);
+    // Only a field holding something has anything to move. In practice this
+    // is called once, at the pin, before the first deposit — it used to
+    // allocate a second sixteen-megabyte buffer to copy a field of zeros.
+    if (this.hiI >= this.loI) this.shiftCells(di, dj);
     this.originX += di * cell;
     this.originY += dj * cell;
     // The box indexes cells, and the cells just moved under it.
@@ -244,7 +255,7 @@ export class Fields {
 
   clear(): void {
     this.data.fill(0);
-    this.tmp.fill(0);
+    this.tmp?.fill(0);
     this.hiI = -1;
     this.hiJ = -1;
     this.loI = 0;
@@ -379,27 +390,37 @@ export class Fields {
     return dx * dx + dy * dy > this.boundR * this.boundR;
   }
 
+  /**
+   * `new[j][i] = old[j + dj][i + di]`, in place.
+   *
+   * Rows are moved in the order that reads each source row before anything
+   * overwrites it — ascending when the source is below, descending when it
+   * is above — and within a row `copyWithin` has memmove semantics. The
+   * scratch buffer is zeroed rather than moved: the ping-pong's contract is
+   * that outside the live box both buffers are exactly zero, and a shifted
+   * scratch would carry stale cells into wherever the box grows next.
+   */
   private shiftCells(di: number, dj: number): void {
     const { cols, rows, data } = this;
-    let next = this.scroll;
-    if (!next || next.length !== data.length) {
-      next = new Float32Array(data.length);
-      this.scroll = next;
-    } else {
-      next.fill(0);
-    }
-    for (let j = 0; j < rows; j++) {
+    const rowLen = cols * CHANNELS;
+    const iLo = Math.max(0, -di);
+    const iHi = Math.min(cols, cols - di);
+    const j0 = dj > 0 ? 0 : rows - 1;
+    const j1 = dj > 0 ? rows : -1;
+    const step = dj > 0 ? 1 : -1;
+    for (let j = j0; j !== j1; j += step) {
       const sj = j + dj;
-      if (sj < 0 || sj >= rows) continue;
-      for (let i = 0; i < cols; i++) {
-        const si = i + di;
-        if (si < 0 || si >= cols) continue;
-        const src = (sj * cols + si) * CHANNELS;
-        const dst = (j * cols + i) * CHANNELS;
-        for (let ch = 0; ch < CHANNELS; ch++) next[dst + ch] = data[src + ch];
+      const dst = j * rowLen;
+      if (sj < 0 || sj >= rows || iHi <= iLo) {
+        data.fill(0, dst, dst + rowLen);
+        continue;
       }
+      const src = sj * rowLen;
+      data.copyWithin(dst + iLo * CHANNELS, src + (iLo + di) * CHANNELS, src + (iHi + di) * CHANNELS);
+      if (iLo > 0) data.fill(0, dst, dst + iLo * CHANNELS);
+      if (iHi < cols) data.fill(0, dst + iHi * CHANNELS, dst + rowLen);
     }
-    data.set(next);
+    this.tmp?.fill(0);
   }
 
   private cell(i: number, j: number, ch: number): number {
@@ -593,7 +614,6 @@ export class Fields {
    */
   diffuse(mix: number): void {
     if (mix <= 0) return;
-    if (this.uniform(this.diffuseRate) && nativeSolver.scentDiffuse(this, mix)) return;
     const dr = this.diffuseRate;
     const rate = (ch: number): number => {
       const r = mix * (dr[ch] > 0 ? dr[ch] : 0);
@@ -608,11 +628,11 @@ export class Fields {
     const k2 = 1 - m2;
     const k3 = 1 - m3;
     const { cols, rows } = this;
+    if (this.hiI < this.loI) return;
     const src = this.data;
-    const dst = this.tmp;
+    const dst = this.tmp ?? (this.tmp = new Float32Array(src.length));
     const rowStride = cols * CHANNELS;
 
-    if (this.hiI < this.loI) return;
     /*
      * Widen by a cell before diffusing, because a diffusion pass moves scent
      * exactly one cell and the box has to be somewhere for it to move into.
@@ -820,8 +840,6 @@ export class Fields {
   }
 
   decay(rate: number): void {
-    const k = Math.max(0, 1 - rate);
-    if (this.uniform(this.decayRate) && nativeSolver.scentDecay(this, k)) return;
     this.decayCells(rate);
   }
 

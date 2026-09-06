@@ -78,7 +78,7 @@ const SLIDE_DEADZONE = 1.5;
  * (slide = 0) so vibration can cross the surface without a scrape.
  */
 export function planContactMessage(
-  contacts: Map<string, LiveContact>,
+  contacts: Map<number, LiveContact>,
 ): Extract<WorkletInMessage, { type: 'contact' }> {
   const items: Extract<WorkletInMessage, { type: 'contact' }>['items'] = [];
   for (const c of contacts.values()) {

@@ -201,27 +201,6 @@ export class Agent {
     this.store.prevHeading[this.slot] = v;
   }
 
-  get integVx(): number {
-    return this.store.integVx[this.slot];
-  }
-  set integVx(v: number) {
-    this.store.integVx[this.slot] = v;
-  }
-
-  get integVy(): number {
-    return this.store.integVy[this.slot];
-  }
-  set integVy(v: number) {
-    this.store.integVy[this.slot] = v;
-  }
-
-  get integOmega(): number {
-    return this.store.integOmega[this.slot];
-  }
-  set integOmega(v: number) {
-    this.store.integOmega[this.slot] = v;
-  }
-
   /**
    * Energy on top of existence, in [−1, 1]. Positive is stock it can spend or
    * pass on, negative is debt it must settle before it can do either, and −1
@@ -346,12 +325,15 @@ export class Agent {
   }
 
   /**
-   * The four raw channel readings at this body's position.
+   * The four channel readings at this body's position, scaled as the genome
+   * reads them: signals by `1 / SENSE_SCALE`, the ground by `1 / cellCap`.
    *
-   * Only refreshed on frames where this body's `Wx` actually reads the field —
-   * sampling is four scattered reads into a very large array and most genomes
-   * multiply the result by zero. Stale otherwise, and deliberately not fed
-   * into the state when stale.
+   * Scaled at the write, on both paths, rather than raw here and scaled in
+   * place by the state pass — which left this holding scaled values on the
+   * CPU path and raw ones on the GPU path, depending on which pass had run
+   * last. On the CPU path it is only refreshed on frames where this body's
+   * `Wx` actually reads the field; stale otherwise, and not fed into the
+   * state when stale.
    */
   get sense(): Float64Array {
     const store = this.store;
@@ -548,9 +530,6 @@ export function cloneAgent(a: Agent): Agent {
   clone.prevX = a.prevX;
   clone.prevY = a.prevY;
   clone.prevHeading = a.prevHeading;
-  clone.integVx = a.integVx;
-  clone.integVy = a.integVy;
-  clone.integOmega = a.integOmega;
   clone.extra = a.extra;
   clone.request = a.request;
   clone.flockAlign = a.flockAlign;
@@ -1135,9 +1114,6 @@ export function createAgent(
   agent.prevX = x;
   agent.prevY = y;
   agent.prevHeading = heading;
-  agent.integVx = 0;
-  agent.integVy = 0;
-  agent.integOmega = 0;
   agent.csHeading = NaN;
   agent.csCos = 1;
   agent.csSin = 0;

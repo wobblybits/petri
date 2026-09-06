@@ -14,6 +14,54 @@ function soupKind(): AgentKind {
 
 export type PresetName = 'soup' | 'commute' | 'annihilate-con' | 'annihilate-dup' | 'oscillator';
 
+/**
+ * `n` points in a disk, on a jittered hexagonal lattice in a shuffled order.
+ *
+ * Uniform random placement put a tenth of a ten-thousand-body soup inside
+ * another body's radius, and the disc contact resolved the pile at speeds in
+ * the thousands for the first two seconds — the "flung apart" that showed up
+ * in every early census and had nothing to do with the solver. A lattice at
+ * the spacing the area affords, jittered by a fifth of it, never overlaps
+ * until the dish is genuinely fuller than its bodies can be.
+ *
+ * Shuffled, because ids are handed out in this order and a spatially sorted
+ * roster would make every id-ordered tie-break — harvest, latch — a
+ * left-to-right sweep across the dish. Falls back to random points for any
+ * shortfall at the rim.
+ */
+function latticeInDisk(cx: number, cy: number, r: number, n: number): { x: number; y: number }[] {
+  const pts: { x: number; y: number }[] = [];
+  if (n <= 0) return pts;
+  // Hex cells of side `s` tile at (sqrt(3)/2) s^2 each; aim for 15% more
+  // cells than bodies so the rim's partial cells still leave enough.
+  const s = Math.sqrt((Math.PI * r * r) / (0.8660254 * n * 1.15));
+  const rowH = s * 0.8660254;
+  const jitter = s * 0.2;
+  const inside = r * r;
+  for (let row = 0, y = -r; y <= r; row++, y += rowH) {
+    const x0 = row % 2 === 0 ? 0 : s * 0.5;
+    for (let x = -r + x0; x <= r; x += s) {
+      const px = x + (Math.random() * 2 - 1) * jitter;
+      const py = y + (Math.random() * 2 - 1) * jitter;
+      if (px * px + py * py > inside) continue;
+      pts.push({ x: cx + px, y: cy + py });
+    }
+  }
+  for (let i = pts.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = pts[i];
+    pts[i] = pts[j];
+    pts[j] = t;
+  }
+  while (pts.length < n) {
+    const theta = Math.random() * Math.PI * 2;
+    const rr = r * Math.sqrt(Math.random());
+    pts.push({ x: cx + Math.cos(theta) * rr, y: cy + Math.sin(theta) * rr });
+  }
+  pts.length = n;
+  return pts;
+}
+
 function plugAux(sim: Sim, agent: Agent, slot: PortSlot, params: Params): void {
   const root = stemWorld(agent, slot, sim.w, sim.h);
   const tip = portWorld(agent, slot, sim.w, sim.h);
@@ -38,18 +86,10 @@ export function loadPreset(sim: Sim, name: PresetName, params: Params): void {
     sim.pinWorld(cx, cy, params);
     const n = Math.min(params.soupCount, params.maxAgents);
     const radius = Math.max(0, sim.worldR - 24);
+    const pts = latticeInDisk(cx, cy, radius, n);
     for (let i = 0; i < n; i++) {
-      const kind = soupKind();
-      const theta = Math.random() * Math.PI * 2;
-      const r = radius * Math.sqrt(Math.random());
-      sim.spawn(
-        kind,
-        cx + Math.cos(theta) * r,
-        cy + Math.sin(theta) * r,
-        Math.random() * Math.PI * 2,
-        params,
-        true,
-      );
+      const p = pts[i];
+      sim.spawn(soupKind(), p.x, p.y, Math.random() * Math.PI * 2, params, true);
     }
     return;
   }

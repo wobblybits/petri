@@ -56,9 +56,6 @@ export class AgentStore {
   prevX!: Float64Array;
   prevY!: Float64Array;
   prevHeading!: Float64Array;
-  integVx!: Float64Array;
-  integVy!: Float64Array;
-  integOmega!: Float64Array;
   extra!: Float64Array;
   request!: Float64Array;
   flockAlign!: Float64Array;
@@ -273,9 +270,6 @@ export class AgentStore {
     this.prevX[slot] = 0;
     this.prevY[slot] = 0;
     this.prevHeading[slot] = 0;
-    this.integVx[slot] = 0;
-    this.integVy[slot] = 0;
-    this.integOmega[slot] = 0;
     this.extra[slot] = 0;
     this.request[slot] = 0;
     this.flockAlign[slot] = 0;
@@ -345,9 +339,6 @@ export class AgentStore {
     this.prevX = growF64(this.prevX);
     this.prevY = growF64(this.prevY);
     this.prevHeading = growF64(this.prevHeading);
-    this.integVx = growF64(this.integVx);
-    this.integVy = growF64(this.integVy);
-    this.integOmega = growF64(this.integOmega);
     this.extra = growF64(this.extra);
     this.request = growF64(this.request);
     this.flockAlign = growF64(this.flockAlign);

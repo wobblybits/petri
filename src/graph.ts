@@ -227,9 +227,6 @@ export class Graph {
   onLatch: ((ev: LatchEvent) => void) | null = null;
   /** Bumps whenever a wire is added or removed. Hop caches key off this. */
   version = 0;
-  private hops: Map<number, Map<number, number>> | null = null;
-  private hopsVersion = -1;
-  private hopsAgents = -1;
   private comps: Map<number, number> | null = null;
   private compsVersion = -1;
   private compsAgents = -1;
@@ -386,44 +383,7 @@ export class Graph {
 
   private bump(): void {
     this.version++;
-    this.hops = null;
     this.comps = null;
-  }
-
-  /** Shortest hop count along wires. Missing entry ⇒ not in the same component.
-   *  Flocking no longer reads this; it is kept for tests and debug. */
-  hopDistances(agents: Map<number, Agent>): Map<number, Map<number, number>> {
-    if (this.hops && this.hopsVersion === this.version && this.hopsAgents === agents.size) {
-      return this.hops;
-    }
-    const adj = new Map<number, number[]>();
-    for (const id of agents.keys()) adj.set(id, []);
-    for (const wire of this.wires.values()) {
-      if (!agents.has(wire.a.id) || !agents.has(wire.b.id)) continue;
-      if (wire.a.id === wire.b.id) continue;
-      adj.get(wire.a.id)!.push(wire.b.id);
-      adj.get(wire.b.id)!.push(wire.a.id);
-    }
-    const out = new Map<number, Map<number, number>>();
-    for (const start of agents.keys()) {
-      const dist = new Map<number, number>();
-      dist.set(start, 0);
-      const q = [start];
-      for (let i = 0; i < q.length; i++) {
-        const u = q[i];
-        const du = dist.get(u)!;
-        for (const v of adj.get(u) ?? []) {
-          if (dist.has(v)) continue;
-          dist.set(v, du + 1);
-          q.push(v);
-        }
-      }
-      out.set(start, dist);
-    }
-    this.hops = out;
-    this.hopsVersion = this.version;
-    this.hopsAgents = agents.size;
-    return out;
   }
 
   attach(a: PortRef, b: PortRef, latchLen: number, time: number): Wire | null {
@@ -925,9 +885,17 @@ export class Graph {
     return this.shrinkProgress(wire, time, params);
   }
 
-  /** Root id of each agent's connected component. */
-  componentIds(agents: Map<number, Agent>): Map<number, number> {
-    if (this.comps && this.compsVersion === this.version && this.compsAgents === agents.size) {
+  /**
+   * Root id of each agent's connected component.
+   *
+   * Cached on the graph version and on `roster`, which a caller that tracks
+   * one should pass: keyed on the agent count alone, a death and a birth in
+   * the same frame kept the size and handed back a map holding the dead id
+   * and missing the live one. The count is the fallback for callers without
+   * a version to hand.
+   */
+  componentIds(agents: Map<number, Agent>, roster = agents.size): Map<number, number> {
+    if (this.comps && this.compsVersion === this.version && this.compsAgents === roster) {
       return this.comps;
     }
     const parent = new Map<number, number>();
@@ -953,7 +921,7 @@ export class Graph {
     for (const id of agents.keys()) out.set(id, find(id));
     this.comps = out;
     this.compsVersion = this.version;
-    this.compsAgents = agents.size;
+    this.compsAgents = roster;
     return out;
   }
 

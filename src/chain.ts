@@ -15,8 +15,6 @@ export interface ChainNode {
   vy: number;
   prevX: number;
   prevY: number;
-  integVx: number;
-  integVy: number;
 }
 
 /**
@@ -68,7 +66,7 @@ export function sampleChain(c: Cubic, nLinks: number, w: number, h: number): Cha
     const p = bezierPoint(c.p0, c.p1, c.p2, c.p3, i / links);
     const x = wrap(p.x, w);
     const y = wrap(p.y, h);
-    nodes.push({ x, y, vx: 0, vy: 0, prevX: x, prevY: y, integVx: 0, integVy: 0 });
+    nodes.push({ x, y, vx: 0, vy: 0, prevX: x, prevY: y });
   }
   return nodes;
 }

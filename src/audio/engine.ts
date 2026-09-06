@@ -571,7 +571,7 @@ export class AudioEngine {
    * state, not an event, so it is resent every frame and stops the moment the
    * sim stops reporting it. `vT` is signed sliding speed in px/s.
    */
-  contacts: Map<string, LiveContact> | null = null;
+  contacts: Map<number, LiveContact> | null = null;
   /** Scraping wire pairs for this frame. Same contract as `contacts`. */
 
   frame(graph: Graph, agents: Map<number, Agent>, dt = 1 / 60, view?: PanView | null): void {
