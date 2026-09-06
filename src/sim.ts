@@ -649,6 +649,7 @@ export class Sim {
     // bodies to get there.
     const block = this.openForceBlock(params);
     this.refreshForceScratch(this.forceList());
+    this.refreshBound();
     Sim.phase('openForceBlock');
     this.steer(params, t);
     Sim.phase('steer');
@@ -1099,6 +1100,40 @@ export class Sim {
    * The arrays live in wasm memory, which every Sim in the process shares, so
    * ownership is tracked in the binding exactly as the flocking cache is.
    */
+  /** Topology this body's `bound` was last computed for; -1 forces a rebuild. */
+  private boundVersion = -1;
+  private boundRoster = -1;
+
+  /**
+   * Fill every body's `bound` — the fraction of its ports that are attached.
+   *
+   * Its own pass rather than a line inside `refreshForceScratch`, which is
+   * where the free-port bitmask is already built, because that one gives up
+   * early whenever the native solver is absent or the pond has outgrown its
+   * buffers. `BOUND` is a term in the chemistry now, so a body reading zero
+   * because a solver did not initialise would not be a missing optimisation,
+   * it would be a different genome expressing itself.
+   *
+   * Keyed on the graph and roster versions, which is exactly what port
+   * occupancy depends on — so this is free on the frames when nothing latched,
+   * detached or died, which is nearly all of them.
+   */
+  private refreshBound(): void {
+    if (this.boundVersion === this.graph.version && this.boundRoster === this.rosterVersion) {
+      return;
+    }
+    this.boundVersion = this.graph.version;
+    this.boundRoster = this.rosterVersion;
+    const g = this.graph;
+    const BOUND_OF = this.agentStore.bound;
+    for (const a of this.agents.values()) {
+      const slots = slotsFor(a.kind);
+      let filled = 0;
+      for (const slot of slots) if (!g.isFreeAt(a.id, slot)) filled++;
+      BOUND_OF[a.slot] = filled / slots.length;
+    }
+  }
+
   private refreshForceScratch(list: Agent[]): void {
     const n = list.length;
     this.scratchFresh = nativeSolver.scratchHolds(

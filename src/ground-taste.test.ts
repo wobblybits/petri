@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CH, CHANNELS } from './fields.ts';
-import { TASTE, seedChem, type Agent } from './agents.ts';
+import { TASTE, bareBody, seedChem, type Agent } from './agents.ts';
 import { defaultParams } from './params.ts';
 import { Sim, mixScent } from './sim.ts';
 import { nativeSolver } from './native/solver.ts';
@@ -46,7 +46,7 @@ function scarLeftOf(sim: Sim, x: number): void {
 describe('the ground as something to smell', () => {
   it('reads a full cell as 1, whatever the capacity is set to', () => {
     const params = defaultParams();
-    const a = { chem: seedChem('con', params), request: 0, extra: 0, energyCap: 1, trail: 0 } as unknown as Agent;
+    const a = bareBody(seedChem('con', params), { request: 0, extra: 0, trail: 0 });
     a.chem[TASTE + CH.energy] = 1;
     for (let k = 0; k < 4; k++) if (k !== CH.energy) a.chem[TASTE + k] = 0;
 
@@ -113,7 +113,7 @@ describe('the ground as something to smell', () => {
 
   it('lets avoidance work too, since taste is signed', () => {
     const params = defaultParams();
-    const a = { chem: seedChem('con', params), request: 0, extra: 0, energyCap: 1, trail: 0 } as unknown as Agent;
+    const a = bareBody(seedChem('con', params), { request: 0, extra: 0, trail: 0 });
     for (let k = 0; k < 4; k++) a.chem[TASTE + k] = 0;
     a.chem[TASTE + CH.energy] = -2;
     // Nothing in the pipeline clamps a negative weight on the ground away. A

@@ -149,3 +149,31 @@ describe('appetite', () => {
     expect(a.request).toBe(0);
   });
 });
+
+describe('port occupancy', () => {
+  it('tracks how much of a body is attached, and updates when that changes', () => {
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.rewriteDuration = 0;
+    const sim = new Sim(4000, 4000);
+    const a = sim.spawn('con', 2000, 2000, 0, params, true)!;
+    const b = sim.spawn('era', 2060, 2000, Math.PI, params, true)!;
+    sim.step(1 / 60, params);
+    expect(a.bound, 'nothing attached').toBe(0);
+    expect(b.bound).toBe(0);
+
+    // A Con has three ports, so one wire is a third of it. An Era has one, so
+    // the same wire is the whole of it.
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    sim.step(1 / 60, params);
+    expect(a.bound).toBeCloseTo(1 / 3, 9);
+    expect(b.bound).toBe(1);
+
+    // And it comes back when the socket reopens, which is the case the whole
+    // dimension exists for.
+    for (const w of [...sim.graph.wires.keys()]) sim.graph.detach(w);
+    sim.step(1 / 60, params);
+    expect(a.bound).toBe(0);
+    expect(b.bound).toBe(0);
+  });
+});

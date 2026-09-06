@@ -18,7 +18,7 @@ import {
 } from './energy.ts';
 import { nativeSolver } from './native/solver.ts';
 import { CH, FIELD_CELLS, FIELD_EXTENT } from './fields.ts';
-import { EMIT } from './agents.ts';
+import { EMIT, bareBody } from './agents.ts';
 import { angleDelta } from './wrap.ts';
 import { AGENT_BAND, WIRE_HAIRLINE_PX, WIRE_STROKE_PX, wiresDrawable } from './audio/lod.ts';
 
@@ -55,9 +55,7 @@ describe('scent steering', () => {
     // mixScent reads through the body, because the weights are modulated by
     // its inner state; a bare genome is not enough to ask the question with.
     const body = (kind: 'con' | 'dup' | 'era') =>
-      ({ chem: seedChem(kind, params), request: 0, extra: 0, energyCap: 1, trail: 0 }) as unknown as Parameters<
-        typeof mixScent
-      >[0];
+      bareBody(seedChem(kind, params)) as unknown as Parameters<typeof mixScent>[0];
     const dup = body('dup');
     const con = body('con');
     const era = body('era');

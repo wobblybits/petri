@@ -16,7 +16,7 @@ import type { AgentKind } from './agents.ts';
  * Thirty-two is a structural fact about the chem layout (emit/taste, then a
  * slopes, four channels each), not a tunable — safe to duplicate.
  */
-const CHEM_LEN = 32;
+const CHEM_LEN = 40;
 
 export const KIND_CODE: Record<AgentKind, number> = { era: KIND_ERA, dup: KIND_DUP, con: KIND_CON };
 export const CODE_KIND: AgentKind[] = [];
@@ -98,6 +98,15 @@ export class AgentStore {
    */
   born!: Int32Array;
   lineage!: Int32Array;
+  /**
+   * Fraction of this body's ports that are attached, 0 to 1.
+   *
+   * Derived from the graph, cached here because `chemState` reads it per
+   * channel per body and walking the wire adjacency that often would cost more
+   * than the whole state vector. Refreshed by `Sim.refreshBound` only when the
+   * topology actually changes, which is what it depends on.
+   */
+  bound!: Float64Array;
 
   /** Slots < highWater have been allocated at least once (live or freed). */
   private highWater = 0;
@@ -187,6 +196,7 @@ export class AgentStore {
     this.csSin[slot] = 0;
     this.born[slot] = 0;
     this.lineage[slot] = 0;
+    this.bound[slot] = 0;
   }
 
   private growTo(newCapacity: number): void {
@@ -250,6 +260,7 @@ export class AgentStore {
     this.csSin = growF64(this.csSin);
     this.born = growI32(this.born);
     this.lineage = growI32(this.lineage);
+    this.bound = growF64(this.bound);
 
     this.capacity = newCapacity;
     if (oldCapacity > 0) this.generation++;

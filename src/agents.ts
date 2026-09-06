@@ -310,6 +310,14 @@ export class Agent {
     this.store.lineage[this.slot] = v;
   }
 
+  /** Fraction of this body's ports that are attached. See `BOUND`. */
+  get bound(): number {
+    return this.store.bound[this.slot];
+  }
+  set bound(v: number) {
+    this.store.bound[this.slot] = v;
+  }
+
   /**
    * Set when the body falls into debt, cleared when it is back on its feet.
    *
@@ -451,6 +459,7 @@ export function cloneAgent(a: Agent): Agent {
   clone.pinned = a.pinned;
   clone.born = a.born;
   clone.lineage = a.lineage;
+  clone.bound = a.bound;
   clone.stun = a.stun;
   clone.drive = a.drive;
   clone.trail = a.trail;
@@ -632,7 +641,7 @@ export function portLocal(kind: AgentKind, slot: PortSlot): Vec2 {
  * hold. Bounding the state instead means `CHEM_SLOPE_MAX` actually caps what a
  * slope can do, which is what makes the mutation range mean something.
  */
-export const STATE_DIMS = 3;
+export const STATE_DIMS = 4;
 /**
  * The neighbourhood's unmet need, 0..1. Aggregated by `spreadRequests` over
  * the wire graph and decayed per hop, so this is emphatically *not* the body's
@@ -662,6 +671,31 @@ export const FULL = 1;
  * likes what it smells, or one that goes blind when overwhelmed.
  */
 export const HERE = 2;
+/**
+ * How much of this body is attached: filled ports over total, 0 to 1.
+ *
+ * The dimension that lets a channel mean two different things in one lifetime.
+ *
+ * A port's scent is only doing latching work while that port is open. Once it
+ * is matched the seeded meaning — Con emits ch0 and seeks ch1, which is what
+ * makes a redex — has done its job, and the channel is free to carry anything
+ * the lineage has drifted onto. When a neighbour dies and the socket reopens,
+ * the latching meaning is wanted again, and at exactly the moment it becomes
+ * useful: an open port is how two nets can fuse. Without a way to read its own
+ * occupancy a body cannot tell those two regimes apart, so its channels have to
+ * mean one thing forever and every signal competes with mate-finding.
+ *
+ * It is also the only dimension that says anything about *position in a net*.
+ * `NEED` is the neighbourhood's, `FULL` and `HERE` are strictly local; none of
+ * them distinguishes an interior body from one on the boundary. That
+ * distinction is where differentiated tissue would have to start, and there is
+ * no net-level reproduction to build organs any other way — only die-off
+ * reopening sockets and nets fusing.
+ *
+ * An Era has one port, so its `BOUND` is 0 or 1 and nothing between; a Con or
+ * Dup has three and can be anywhere on thirds.
+ */
+export const BOUND = 3;
 
 /** Squash to (-1, 1). Cheaper than `tanh` and the same shape; see the note on
  *  `CHEM_SLOPE_MAX` for why bounded and *signed* is the requirement. */
@@ -681,7 +715,33 @@ export function chemState(a: StateBody, d: number): number {
     const f = a.extra / cap;
     return f <= 0 ? 0 : f >= 1 ? 1 : f;
   }
-  return soft(a.trail);
+  if (d === HERE) return soft(a.trail);
+  return a.bound;
+}
+
+/**
+ * A bare body carrying just the fields `chemState` reads, for tests that want
+ * to poke a genome without building a `Sim`.
+ *
+ * It exists because the alternative kept going wrong. Tests were writing
+ * `{ chem, request } as unknown as Agent`, and every time the state vector
+ * grew, that cast turned what should have been a compile error into
+ * `undefined` arithmetic — `chemState` returned NaN, `effEmit`'s `v > 0` was
+ * false, and the whole thing surfaced as a *zero* emit weight in some other
+ * file, twice. Going through here means adding a dimension breaks the build at
+ * this one function instead.
+ */
+export function bareBody(chem: Float32Array, over: Partial<StateBody> = {}): Agent {
+  const body: StateBody & { chem: Float32Array } = {
+    chem,
+    request: 0,
+    extra: 0,
+    energyCap: 1,
+    trail: 0,
+    bound: 0,
+    ...over,
+  };
+  return body as unknown as Agent;
 }
 
 /** What `chemState` reads. Loose, so tests can hand it an object literal. */
@@ -690,6 +750,7 @@ export type StateBody = {
   extra: number;
   energyCap: number;
   trail: number;
+  bound: number;
 };
 
 /**
@@ -857,6 +918,7 @@ export function createAgent(
   // being able to count them.
   agent.born = 0;
   agent.lineage = id;
+  agent.bound = 0;
   agent.stun = 0;
   agent.drive = params.stepSpeed;
   agent.trail = 0;
