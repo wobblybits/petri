@@ -139,24 +139,27 @@ describe('scent genome', () => {
     expect(effEmit(a, 0), 'emitting a negative amount is not a thing').toBe(0);
   });
 
-  it('charges a body for the voice it uses', () => {
+  /*
+   * What used to be "charges a body for the voice it uses".
+   *
+   * `emitCost` is gone: the unit-sum budget does the same job and does it
+   * better. A per-second rent on amplitude is the handicap-principle version
+   * of honesty — signals are trusted because they are wasteful — and the
+   * current reading of signalling theory is that what actually maintains
+   * honesty at equilibrium is a condition-dependent *trade-off*, not a cost.
+   * The budget is exactly that trade-off: a body has one unit, so saying one
+   * thing costs it another, and since the ground is in the same budget,
+   * feeding the dish costs it being heard. Two mechanisms for one property,
+   * and the one that was off by default was the redundant one.
+   */
+  it('spends one unit of voice however it is distributed', () => {
     const params = defaultParams();
-    params.spawnInterval = 0;
-    params.upkeep = 0;
-    params.ambientEnergy = 0;
-    params.rewriteDuration = 0;
-    const run = (cost: number): number => {
-      params.emitCost = cost;
-      const sim = new Sim(800, 600);
-      const a = sim.spawn('con', 400, 300, 0, params, true)!;
-      a.extra = 1;
-      for (let f = 0; f < 120; f++) sim.step(1 / 60, params);
-      return sim.agents.get(a.id)!.extra;
-    };
-    const free = run(0);
-    const paid = run(0.02);
-    expect(free, 'nothing else should be draining it').toBeCloseTo(1, 3);
-    expect(paid, `paid ${paid.toFixed(4)} vs free ${free.toFixed(4)}`).toBeLessThan(free - 0.01);
+    for (const kind of ['con', 'dup', 'era'] as const) {
+      const c = seedChem(kind, params);
+      let sum = 0;
+      for (let k = 0; k < 4; k++) sum += c[EMIT + k];
+      expect(sum, `${kind} does not spend exactly one unit`).toBeCloseTo(1, 6);
+    }
   });
 
   it('lets taste go negative, which the fixed weights never could', () => {

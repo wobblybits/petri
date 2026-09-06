@@ -4,6 +4,17 @@ export interface Params {
   deposit: number;
   diffuse: number;
   decay: number;
+  /**
+   * Global gain on how strongly anything smelled moves a body.
+   *
+   * Stays global, and stays. It looks redundant with the magnitude of a body's
+   * own taste weights — two knobs for one quantity — but they are not the same
+   * kind of knob. This is a property of the *world*, like `diffuse` or
+   * `deposit`: how much chemotaxis drives anything at all here. Taste is a
+   * property of a body: what it cares about, relative to what its neighbours
+   * care about. Folding this into the seeds would make "smell matters less in
+   * this pond" unexpressible without editing every genome in it.
+   */
   sense: number;
   attractStrong: number;
   attractMedium: number;
@@ -223,21 +234,6 @@ export interface Params {
   /** Extra drained per second. 0 = off. Hitting −1 kills the agent. */
   upkeep: number;
   /**
-   * Energy per second a body pays for a full unit of voice. 0 = free.
-   *
-   * What makes a signal honest. Emission is otherwise costless, and a costless
-   * signal is cheap talk: there is no reason not to advertise whatever draws
-   * the most attention, so selection has nothing to grip and the weights drift
-   * without meaning. Charging for amplitude is the handicap — a body that
-   * cannot afford to shout does not, so loudness carries information about the
-   * body rather than only about what it wants.
-   *
-   * Off by default. Turning it on is a real change to the economy: emit is
-   * normalised to one unit at birth, so this is the per-second rent on saying
-   * anything at all, against an upkeep of 0.015.
-   */
-  emitCost: number;
-  /**
    * Extra per second per unit of speed, charged for moving.
    *
    * What ties a net's energy to its locomotion, and so what lets a net have a
@@ -440,7 +436,6 @@ export function defaultParams(): Params {
     energyDiffuse: 0.05,
     energyRegrow: 0.04,
     upkeep: 0.015,
-    emitCost: 0,
     swimCost: 0,
     farmRate: 0,
     forageAsk: 0,
@@ -465,17 +460,21 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'diffuse', label: 'Diffuse', min: 0, max: 1, step: 0.01 },
   { key: 'decay', label: 'Decay', min: 0, max: 0.08, step: 0.001 },
   { key: 'sense', label: 'Sense', min: 0, max: 1200, step: 10 },
-  { key: 'attractStrong', label: 'Strong attract', min: 0, max: 3, step: 0.05 },
-  { key: 'attractMedium', label: 'Medium attract', min: 0, max: 2, step: 0.05 },
-  { key: 'attractFood', label: 'Food attract', min: -2, max: 4, step: 0.05 },
+  // Seeds, not settings. These four are read once by `seedChem` and never
+  // again — they decide what a *newly spawned* body starts as, and moving them
+  // does nothing to anything already alive. Everything above and below changes
+  // the world continuously.
+  { key: 'attractStrong', label: 'Strong attract (seed)', min: 0, max: 3, step: 0.05 },
+  { key: 'attractMedium', label: 'Medium attract (seed)', min: 0, max: 2, step: 0.05 },
+  { key: 'attractFood', label: 'Food attract (seed)', min: -2, max: 4, step: 0.05 },
   { key: 'sensorAngle', label: 'Sensor arc', min: 0.1, max: 1.2, step: 0.02 },
   { key: 'stepSpeed', label: 'Step speed', min: 10, max: 180, step: 1 },
   { key: 'swimTau', label: 'Swim persistence', min: 0.1, max: 4, step: 0.05 },
   { key: 'swimNoise', label: 'Swim noise', min: 0, max: 2, step: 0.05 },
   { key: 'drag', label: 'Fluid drag', min: 0, max: 4, step: 0.05 },
   { key: 'angDrag', label: 'Spin damp', min: 0, max: 8, step: 0.05 },
-  { key: 'flockAlign', label: 'Flock align', min: 0, max: 16, step: 0.1 },
-  { key: 'flockSep', label: 'Flock separate', min: 0, max: 120, step: 1 },
+  { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
+  { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },
   { key: 'snapRadius', label: 'Snap reach', min: 4, max: 48, step: 1 },
   { key: 'snapArc', label: 'Snap arc', min: 0.08, max: 1.2, step: 0.02 },
   { key: 'wireShrink', label: 'Wire shrink', min: 0.1, max: 3, step: 0.05 },
@@ -505,13 +504,12 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'energyDiffuse', label: 'Ground spread', min: 0, max: 0.5, step: 0.005 },
   { key: 'energyRegrow', label: 'Ground regrow', min: 0, max: 0.4, step: 0.005 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
-  { key: 'emitCost', label: 'Emit cost', min: 0, max: 0.05, step: 0.001 },
   { key: 'swimCost', label: 'Swim cost', min: 0, max: 0.002, step: 0.00005 },
   { key: 'farmRate', label: 'Farm rate', min: 0, max: 0.02, step: 0.0005 },
   { key: 'forageAsk', label: 'Forage ask', min: 0, max: 0.5, step: 0.01 },
   { key: 'rescueTo', label: 'Rescue fill', min: 0, max: 1, step: 0.05 },
   { key: 'debtCap', label: 'Debt cap', min: -2.5, max: -0.05, step: 0.05 },
   { key: 'requestDecay', label: 'Demand decay', min: 0.5, max: 0.98, step: 0.01 },
-  { key: 'transportRecoil', label: 'Pump recoil', min: 0, max: 200, step: 5 },
-  { key: 'transportThrust', label: 'Pump thrust', min: 0, max: 1, step: 0.05 },
+  { key: 'transportRecoil', label: 'Pump recoil (seed)', min: 0, max: 200, step: 5 },
+  { key: 'transportThrust', label: 'Pump thrust (seed)', min: 0, max: 1, step: 0.05 },
 ];

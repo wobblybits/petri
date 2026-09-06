@@ -142,7 +142,6 @@ params.rewriteDuration = 0;
 params.stepSpeed = 0;
 params.swimNoise = 0;
 params.upkeep = 0;
-params.emitCost = 0;
 params.ambientEnergy = 1e6;
 
 const sim = new Sim(800, 600);

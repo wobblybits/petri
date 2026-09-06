@@ -723,25 +723,7 @@ export class Sim {
     this.tickRewrites(params, t);
     Sim.phase('rewrites');
     /*
-     * Rent on being heard, charged before rent on existing.
-     *
-     * A body pays for the voice it actually uses — the sum of its effective
-     * emit weights, which is one at birth and moves with both breeding and its
-     * neighbourhood's need. This is what stops emission being cheap talk: a
-     * signal nobody pays for carries no information about the signaller, only
-     * about what it would like you to do.
-     */
-    if (params.emitCost > 0) {
-      const rent = params.emitCost * t;
-      for (const a of this.agents.values()) {
-        if (a.locked) continue;
-        let voice = 0;
-        for (let c = 0; c < 4; c++) voice += effEmit(a, c);
-        if (voice > 0) a.extra -= rent * voice;
-      }
-    }
-    /*
-     * Rent on moving, charged like the rent on being heard.
+     * Rent on moving.
      *
      * Per unit of speed rather than per unit of distance, which is the same
      * thing over a frame and reads better against the other per-second costs.
@@ -3283,6 +3265,17 @@ export class Sim {
    * there is not, or the one kind-independent signal in the field stops being
    * true. Emitting it from a filled port would advertise a socket that is not
    * there and every latch-seeking body in range would come and find nothing.
+   *
+   * Its magnitude is still the hardcoded 0.7, and the plan was to make that a
+   * gene — `E[aux][BOUND]`, so a body advertises its sockets as loudly as its
+   * lineage has learned to. It is not done here because the clean version is
+   * not obvious: a body's ch3 voice is already emitted from its principal, so
+   * a second genetic ch3 term at the port positions is either double-counting
+   * or a separate gene, and "separate gene" is not the subsumption it was
+   * billed as. The position genuinely cannot be folded in — "the socket is
+   * *here*" is information a body-centred voice cannot carry — so what is left
+   * to move is one scalar, and it can wait for a reason to be a particular
+   * shape rather than being changed because it was on a list.
    */
   private deposit(params: Params): void {
     for (const agent of this.agents.values()) {

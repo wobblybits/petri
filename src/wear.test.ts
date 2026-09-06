@@ -23,7 +23,6 @@ function quiet(): Params {
   p.snapRadius = 0;
   p.upkeep = 0;
   p.ambientEnergy = 0;
-  p.emitCost = 0;
   p.flockAlign = 0;
   p.flockSep = 0;
   p.stepSpeed = 0;
