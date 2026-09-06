@@ -220,6 +220,34 @@ export interface Params {
    * a grazed patch can draw on its neighbours, and so how big a dead zone a
    * net can make before it has to move.
    */
+  /**
+   * Gray-Scott feed and kill, between the two signal channels. Both 0 = off.
+   *
+   * `u + 2v -> 3v` run on `CH.conP` (substrate) and `CH.dupP` (activator).
+   * Without it every channel is a decaying hill around whoever is emitting, so
+   * what a body smells is always *who is there* — the field carries information
+   * but holds none of its own. A reaction puts maxima where nobody is standing,
+   * fronts that travel, and regions just used up and briefly unusable, so
+   * "over there" can start to mean something no emitter is saying.
+   *
+   * The ground is deliberately not one of the two. `CH.energy` is a conserved
+   * quantity the economy balances, and a reaction that converts it would create
+   * and destroy food as a side effect of signalling.
+   *
+   * Two things have to be arranged before this does anything but wash flat, and
+   * both are yours. The species must diffuse at different rates — Gray-Scott
+   * wants the substrate at roughly twice the activator, and `diffuseRate` is
+   * where that lives; equal rates have no instability to find. And the pair
+   * sits in a thin sliver of its own plane, roughly F in [0.01, 0.09] against
+   * k in [0.045, 0.07], with anything worth looking at inside a fraction of
+   * that. A default picked without a screen in front of it would be a uniform
+   * wash that looked like the code not working, which is why both ship at zero.
+   *
+   * Note `decay` still acts on both channels, so the effective kill is
+   * `decay + reactKill` rather than `reactKill` alone.
+   */
+  reactFeed: number;
+  reactKill: number;
   energyDiffuse: number;
   /**
    * Logistic regrowth rate, per second, toward `ambientEnergy` per cell.
@@ -433,6 +461,8 @@ export function defaultParams(): Params {
     spawnInterval: 0.5,
     energyCell: 40,
     ambientEnergy: 1.0,
+    reactFeed: 0,
+    reactKill: 0,
     energyDiffuse: 0.05,
     energyRegrow: 0.04,
     upkeep: 0.015,
@@ -501,6 +531,8 @@ export const SLIDERS: SliderSpec[] = [
   // scent field's cell for the two grids to line up (see EnergyGrid).
   { key: 'energyCell', label: 'Energy cell', min: FIELD_CELL, max: 160, step: FIELD_CELL },
   { key: 'ambientEnergy', label: 'Ambient energy', min: 0, max: 2, step: 0.05 },
+  { key: 'reactFeed', label: 'React feed', min: 0, max: 0.1, step: 0.001 },
+  { key: 'reactKill', label: 'React kill', min: 0, max: 0.08, step: 0.001 },
   { key: 'energyDiffuse', label: 'Ground spread', min: 0, max: 0.5, step: 0.005 },
   { key: 'energyRegrow', label: 'Ground regrow', min: 0, max: 0.4, step: 0.005 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },

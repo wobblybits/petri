@@ -790,6 +790,10 @@ export class Sim {
       this.tuneChannels(params);
       this.fields.diffuse(params.diffuse);
       this.fields.diffuse(params.diffuse * 0.65);
+      // After the spreading and before the decay: Gray-Scott's own kill term
+      // is `feed + kill`, and `decay` then acts on both channels on top of it,
+      // so the effective kill is larger than `reactKill` alone.
+      this.fields.react(CH.conP, CH.dupP, params.reactFeed, params.reactKill, t);
       this.fields.decay(params.decay);
       // After the passes that move it, so a cell grows from what it kept
       // rather than from what it was about to lose.
@@ -2538,6 +2542,15 @@ export class Sim {
    * per-channel rates never reach the shader, and the pond mines a CPU array
    * the GPU is not looking at down to nothing — silently, and only on machines
    * that have a GPU.
+   *
+   * A fourth thing joins that list since this comment was written, and it is
+   * the quietest of them: `updateState` samples the field on the CPU, through
+   * `Fields.sampleAll` and so out of `fields.data`. With the field on the GPU
+   * that array is a stale copy, so any body whose genome has evolved a non-zero
+   * `Wx` sense weight reads garbage — silently, only on machines with a device,
+   * and only once evolution has moved a gene off its seed. The coupling
+   * therefore runs both ways: if the field moves to the GPU the state pass has
+   * to follow it, or lose its sense inputs.
    *
    * Nothing calls this today, which is why the whole thing was invisible. It
    * wants either the growth pass in `field.wgsl` and the ground read back, or

@@ -954,6 +954,37 @@ export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: n
  * the four children of one commute end up with four different profiles
  * instead of two blends and two copies.
  */
+/**
+ * How far outside the interval between two parents a blended child may land.
+ *
+ * Plain `lerp(a, b, random())` draws a child uniformly *between* its parents,
+ * and that shrinks the spread of the population every time it runs: the mean of
+ * two draws has half the variance of one. Half of every commute's offspring are
+ * Con children and blend, and since `inheritChem` blends all 134 genes the same
+ * way, that is a variance sink sitting directly upstream of the entire genome —
+ * and variance is the thing selection has to grip. It is Jenkin's swamping
+ * objection to Darwin, running in half the population, and the answer in real
+ * genetics was particulate inheritance.
+ *
+ * Assorting everything like a Dup child would fix it, but throws away a
+ * distinction that means something: a Con combines its inputs and a Dup copies
+ * them, which is what those nodes actually do. Widening the draw keeps both.
+ * At 0.5 the child is drawn from `[a - 0.5(b-a), b + 0.5(b-a)]`, which is the
+ * standard BLX-alpha operator and is tuned to hold offspring variance roughly
+ * equal to parental variance rather than halving it. A child can now land
+ * outside what either parent had, which is also the only way a blending lineage
+ * can explore past the range its ancestors already spanned.
+ *
+ * Every consumer clamps afterwards — `TRAIT_RANGE` for the scalars, the matrix
+ * bounds for the genome — so widening the draw cannot put a value out of range.
+ */
+const BLEND_WIDEN = 0.5;
+
+/** A blend that does not collapse the population's spread. See `BLEND_WIDEN`. */
+function blend(a: number, b: number): number {
+  return lerp(a, b, -BLEND_WIDEN + Math.random() * (1 + 2 * BLEND_WIDEN));
+}
+
 function nudgeTrait(value: number, range: { min: number; max: number; mutate: number }): number {
   const mutated = value + (Math.random() * 2 - 1) * range.mutate;
   return Math.min(range.max, Math.max(range.min, mutated));
@@ -974,7 +1005,7 @@ function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent): void {
       ? Math.random() < 0.5
         ? conParent[key]
         : dupParent[key]
-      : lerp(conParent[key], dupParent[key], Math.random());
+      : blend(conParent[key], dupParent[key]);
     child[key] = nudgeTrait(combined, range);
   }
   inheritChem(child, conParent, dupParent, assort);
@@ -1009,7 +1040,7 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, assort: boolean): voi
   for (let k = 0; k < CHEM_LEN; k++) {
     const a = con.chem[k];
     const b = dup.chem[k];
-    const combined = assort ? (Math.random() < 0.5 ? a : b) : lerp(a, b, Math.random());
+    const combined = assort ? (Math.random() < 0.5 ? a : b) : blend(a, b);
     c[k] = combined + (Math.random() * 2 - 1) * CHEM_MUTATE;
   }
   /*
