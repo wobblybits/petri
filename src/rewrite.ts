@@ -1,4 +1,4 @@
-import { CHEM_LEN, EMIT, E_OUT, STATE_DIMS, TASTE, T_OUT, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
+import { CHEM_LEN, EMIT, E_OUT, refreshReadsField, STATE_DIMS, TASTE, T_OUT, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
 import type { AgentStore } from './agent-store.ts';
 import { DEBT_CAP_MAX, EXTRA_CAP } from './energy.ts';
 import { otherEnd, type Graph } from './graph.ts';
@@ -1130,6 +1130,8 @@ export function commitRewrite(
     if (breed) {
       if (conParent && dupParent) inheritTraits(ag, conParent, dupParent);
       else if (eraParent) inheritFromClone(ag, eraParent);
+      // Inheritance rewrote `chem`, so the cached sense gate is stale.
+      refreshReadsField(ag);
     }
     agents.set(s.id, ag);
   }

@@ -3,14 +3,12 @@ import {
   CHEM_LEN,
   EMIT,
   E_OUT,
-  FULL,
   F_BASE,
   HEAD_SCALE,
   L_BASE,
-  HERE,
   IN_DEMAND,
   IN_DIMS,
-  NEED,
+  IN_SENSE,
   P_BASE,
   STATE_DIMS,
   TASTE,
@@ -523,6 +521,12 @@ export function cloneAgent(a: Agent): Agent {
   clone.born = a.born;
   clone.lineage = a.lineage;
   clone.bound = a.bound;
+  // A clone that does not clone these is a body with someone else's genome and
+  // a blank mind. Latent — only native-parity tests call this today — but the
+  // next caller (a designer ghost, a rollback) would get it silently.
+  clone.h.set(a.h);
+  clone.sense.set(a.sense);
+  refreshReadsField(clone);
   clone.stun = a.stun;
   clone.drive = a.drive;
   clone.trail = a.trail;
@@ -684,15 +688,12 @@ export function portLocal(kind: AgentKind, slot: PortSlot): Vec2 {
 
 export {
   B_STATE,
-  BOUND,
   CHEM_LEN,
   EMIT,
   E_OUT,
-  FULL,
   F_BASE,
   F_OUT,
   HEAD_SCALE,
-  HERE,
   L_BASE,
   L_OUT,
   IN_BOUND,
@@ -700,9 +701,9 @@ export {
   IN_DIMS,
   IN_FULL,
   IN_SENSE,
-  NEED,
   P_BASE,
   P_OUT,
+  SENSE_SCALE,
   STATE_DIMS,
   TASTE,
   T_OUT,
@@ -712,68 +713,49 @@ export {
 } from './chem-layout.ts';
 
 
-/** Squash to (-1, 1). Cheaper than `tanh` and the same shape; see the note on
- *  `CHEM_SLOPE_MAX` for why bounded and *signed* is the requirement. */
-function soft(x: number): number {
-  return x / (1 + (x < 0 ? -x : x));
-}
-
-/** One dimension of the inner state. See `STATE_DIMS`. */
-export function chemState(a: StateBody, d: number): number {
-  if (d === NEED) {
-    const r = a.request;
-    return r <= 0 ? 0 : r >= 1 ? 1 : r;
-  }
-  if (d === FULL) {
-    const cap = a.energyCap;
-    if (!(cap > 0)) return 0;
-    const f = a.extra / cap;
-    return f <= 0 ? 0 : f >= 1 ? 1 : f;
-  }
-  if (d === HERE) return soft(a.trail);
-  return a.bound;
-}
 
 /**
- * A bare body carrying just the fields `chemState` reads, for tests that want
- * to poke a genome without building a `Sim`.
+ * A bare body carrying just what `effEmit` and `effTaste` read, for tests that
+ * want to poke a genome without building a `Sim`.
  *
  * It exists because the alternative kept going wrong. Tests were writing
- * `{ chem, request } as unknown as Agent`, and every time the state vector
- * grew, that cast turned what should have been a compile error into
- * `undefined` arithmetic — `chemState` returned NaN, `effEmit`'s `v > 0` was
- * false, and the whole thing surfaced as a *zero* emit weight in some other
- * file, twice. Going through here means adding a dimension breaks the build at
- * this one function instead.
+ * `{ chem, request } as unknown as Agent`, and every time the shape changed
+ * that cast turned what should have been a compile error into `undefined`
+ * arithmetic, surfacing as a *zero* emit weight in some other file. Twice.
+ * Going through here means the next change breaks the build at one function.
  */
-export function bareBody(
-  chem: Float32Array,
-  over: Partial<StateBody> & { h?: number[] } = {},
-): Agent {
-  const { h, ...rest } = over;
-  const body: StateBody & { chem: Float32Array; h: Float64Array; sense: Float64Array } = {
+export function bareBody(chem: Float32Array, over: { h?: number[] } = {}): Agent {
+  return {
     chem,
-    request: 0,
-    extra: 0,
-    energyCap: 1,
-    trail: 0,
-    bound: 0,
-    h: Float64Array.from(h ?? new Array(STATE_DIMS).fill(0)),
+    h: Float64Array.from(over.h ?? new Array(STATE_DIMS).fill(0)),
     sense: new Float64Array(4),
-    ...rest,
-  };
-  return body as unknown as Agent;
+  } as unknown as Agent;
 }
 
-/** What `chemState` reads. Loose, so tests can hand it an object literal. */
-export type StateBody = {
-  request: number;
-  extra: number;
-  energyCap: number;
-  trail: number;
-  bound: number;
-};
 
+
+/**
+ * Recompute the cached "does this genome look at the field" flag.
+ *
+ * Must be called after anything writes `chem`. That is birth — `createAgent`
+ * and `inheritChem` — plus `cloneAgent` and whatever tests poke directly. A
+ * stale `false` here is a body that has evolved sense weights and cannot see,
+ * which would look exactly like the weights not working.
+ */
+export function refreshReadsField(a: Agent): void {
+  const ch = a.chem;
+  let reads = 0;
+  for (let d = 0; d < STATE_DIMS && !reads; d++) {
+    const wi = W_IN + d * IN_DIMS + IN_SENSE;
+    for (let c = 0; c < 4; c++) {
+      if (ch[wi + c] !== 0) {
+        reads = 1;
+        break;
+      }
+    }
+  }
+  a.store.readsField[a.slot] = reads;
+}
 
 /** One row of an output head: `base + row . h`. */
 export function head(a: Agent, matrix: number, base: number, row: number): number {
@@ -1044,6 +1026,7 @@ export function createAgent(
   agent.born = 0;
   agent.lineage = id;
   agent.bound = 0;
+  refreshReadsField(agent);
   agent.stun = 0;
   agent.drive = params.stepSpeed;
   agent.trail = 0;

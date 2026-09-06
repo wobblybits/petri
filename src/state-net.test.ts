@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CH } from './fields.ts';
-import { B_STATE, IN_BOUND, IN_DEMAND, IN_DIMS, IN_FULL, IN_SENSE, L_BASE, L_OUT, STATE_DIMS, W_IN, W_NET, W_SELF } from './agents.ts';
+import { B_STATE, IN_BOUND, IN_DEMAND, IN_DIMS, IN_FULL, IN_SENSE, L_BASE, L_OUT, STATE_DIMS, W_IN, W_NET, W_SELF, refreshReadsField } from './agents.ts';
 import { defaultParams } from './params.ts';
 import { Sim } from './sim.ts';
 
@@ -24,11 +24,24 @@ function pond(): { sim: Sim; params: ReturnType<typeof defaultParams> } {
   return { sim: new Sim(10000, 10000), params };
 }
 
-/** Zero every weight, so a test only sees the one path it sets. */
+/**
+ * Zero every weight, so a test only sees the one path it sets.
+ *
+ * Anything that writes `chem` outside birth has to refresh the cached
+ * "does this genome read the field" flag — `updateState` trusts it and will
+ * skip sampling for a body that has just been given sense weights, which looks
+ * exactly like the weights not working.
+ */
 function blank(sim: Sim): void {
   for (const a of sim.agents.values()) {
     for (let k = W_IN; k < B_STATE + STATE_DIMS; k++) a.chem[k] = 0;
+    refreshReadsField(a);
   }
+}
+
+/** Call after poking `Wx`'s sense columns by hand. See `blank`. */
+function rewire(a: ReturnType<Sim['spawn']>): void {
+  refreshReadsField(a!);
 }
 
 
@@ -69,6 +82,7 @@ describe('the state network', () => {
     sim.step(1 / 60, params);
     blank(sim);
     a.chem[W_IN + 0 * IN_DIMS + IN_SENSE + CH.energy] = 1;
+    rewire(a);
     for (let f = 0; f < 10; f++) sim.step(1 / 60, params);
     expect(a.sense[CH.energy], 'full ground should read about 1').toBeCloseTo(1, 1);
     expect(a.h[0]).toBeGreaterThan(0.3);

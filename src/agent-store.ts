@@ -133,6 +133,16 @@ export class AgentStore {
    */
   emitAll!: Float64Array;
   tasteAll!: Float64Array;
+  /**
+   * Whether this body's genome reads the scent field at all.
+   *
+   * `updateState` re-derived it every body every frame — sixteen `Float32`
+   * reads to answer a question whose answer cannot change, because a genome is
+   * fixed for a body's life. All three kinds seed with every `Wx` sense column
+   * at zero, so for a fresh pond the answer is always no and the whole gate was
+   * overhead. Set by `refreshReadsField` whenever `chem` is written.
+   */
+  readsField!: Uint8Array;
   /** This frame's locomotion head: cruise speed and turn gain, per body. */
   cruise!: Float64Array;
   turn!: Float64Array;
@@ -228,6 +238,7 @@ export class AgentStore {
     this.bound[slot] = 0;
     this.hAll.fill(0, slot * STATE_W, slot * STATE_W + STATE_W);
     this.senseAll.fill(0, slot * SENSE_W, slot * SENSE_W + SENSE_W);
+    this.readsField[slot] = 0;
     this.cruise[slot] = 0;
     this.turn[slot] = 0;
     this.emitAll.fill(0, slot * 4, slot * 4 + 4);
@@ -302,6 +313,7 @@ export class AgentStore {
     const newSense = new Float64Array(newCapacity * SENSE_W);
     if (this.senseAll) newSense.set(this.senseAll.subarray(0, live * SENSE_W));
     this.senseAll = newSense;
+    this.readsField = growU8(this.readsField);
     this.cruise = growF64(this.cruise);
     this.turn = growF64(this.turn);
     const newEmit = new Float64Array(newCapacity * 4);

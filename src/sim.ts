@@ -24,6 +24,7 @@ import {
   IN_DIMS,
   IN_FULL,
   IN_SENSE,
+  SENSE_SCALE,
   STATE_DIMS,
   W_IN,
   W_NET,
@@ -4263,6 +4264,8 @@ export class Sim {
     const X = store.x;
     const Y = store.y;
     const gScale = this.groundScale;
+    const sScale = 1 / SENSE_SCALE;
+    const READS = store.readsField;
     const x = this.stateInput;
     const mean = this.stateMean;
     const EMITS = store.emitAll;
@@ -4286,19 +4289,20 @@ export class Sim {
        * rather than left reading a stale `SENSE`, so behaviour never depends
        * on when a body last happened to sample.
        */
-      let reads = false;
-      for (let d = 0; d < S && !reads; d++) {
-        const wi = g + W_IN + d * IN_DIMS + IN_SENSE;
-        for (let c = 0; c < 4; c++) {
-          if (CHEM[wi + c] !== 0) {
-            reads = true;
-            break;
-          }
-        }
-      }
-      if (reads) {
+      if (READS[slot]) {
         const so = slot * 4;
         this.fields.sampleAll(X[slot], Y[slot], SENSE, so);
+        /*
+         * Both scales bring an input onto the range the other four already
+         * occupy. The ground is a quantity per cell, so a full cell reads one;
+         * the signal channels are accumulated deposits, so a strong local
+         * reading reads about one. Without the second, a sense gene had seven
+         * times the mutation leverage of every other input gene and `phi` was
+         * pinned across all but about 7% of its legal range.
+         */
+        SENSE[so] *= sScale;
+        SENSE[so + 1] *= sScale;
+        SENSE[so + 3] *= sScale;
         SENSE[so + CH.energy] *= gScale;
         x[IN_SENSE] = SENSE[so];
         x[IN_SENSE + 1] = SENSE[so + 1];

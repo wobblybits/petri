@@ -18,101 +18,79 @@
  */
 
 /**
- * The inner state a body's chemistry is modulated by.
+ * The width of `h`, the recurrent state.
  *
- * It was one number — `request` — and everything a body could condition on
- * had to be expressible as "how badly does my neighbourhood need energy". So a
- * lineage could evolve to shout when its net was hungry and nothing else: not
- * to go quiet when it was itself full, not to hunt harder when it liked where
- * it was standing, not any rule with two clauses in it. One input is a gain
- * knob, not a controller.
+ * Its dimensions have no names and cannot: whatever a lineage makes them mean
+ * is the point of having them. They are bounded — `phi` keeps every one inside
+ * (-1, 1) — and that is load-bearing rather than tidiness. A weight multiplies
+ * its input, so an unbounded state against a bounded weight is the same
+ * unbounded product; bounding the state is what makes `CHEM_SLOPE_MAX` cap
+ * anything and the mutation range mean something.
  *
- * Three, now, and the three are chosen to be about different things — which
- * matters more than how many there are, because two inputs that move together
- * buy nothing a single one did not. `NEED` is the neighbourhood's, spread over
- * the wires. `FULL` is this body's own and nobody else's. `HERE` is about the
- * world rather than the body at all.
- *
- * Each is bounded, and that is load-bearing rather than tidiness. A slope
- * multiplies its input, so an unbounded state and a bounded weight is the same
- * unbounded product — one runaway body would emit a number the field cannot
- * hold. Bounding the state instead means `CHEM_SLOPE_MAX` actually caps what a
- * slope can do, which is what makes the mutation range mean something.
+ * One dimension is spoken for at seed. `h[0]` is wired to carry `IN_DEMAND`
+ * and the ground's taste weight is wired to read `h[0]`, which is what makes a
+ * fresh body seek food when its neighbourhood is hungry and ignore it
+ * otherwise. A second seeded pathway that also picked dim 0 would collide with
+ * that silently.
  */
 export const STATE_DIMS = 4;
-/**
- * The neighbourhood's unmet need, 0..1. Aggregated by `spreadRequests` over
- * the wire graph and decayed per hop, so this is emphatically *not* the body's
- * own hunger — it is what the net around it is short of. Emitting on it turns
- * a gradient that only travels along wires into one that travels through
- * space, so a starving net can call to a forager that is not attached to it.
- */
-export const NEED = 0;
-/**
- * How full this body's own tank is, 0 (at or below break-even) to 1 (at its
- * own `energyCap`). The private counterpart to `NEED`: a body can now tell the
- * difference between "I am hungry" and "my net is hungry", which is the
- * distinction every rule about when to forage and when to give away turns on.
- */
-export const FULL = 1;
-/**
- * How much this body likes where it is standing, squashed to (-1, 1).
- *
- * Its own `trail` — everything it can smell, already weighted by its own taste
- * — through `x / (1 + |x|)`. Signed, because a body can be somewhere it is
- * repelled by, and that is a different situation from being somewhere dull,
- * and the two should be able to drive different behaviour.
- *
- * The one dimension that is about the world. It is also the one that closes a
- * loop: taste feeds the trail, the trail feeds the state, and the state feeds
- * taste. A lineage can evolve a body whose sense of smell sharpens the more it
- * likes what it smells, or one that goes blind when overwhelmed.
- */
-export const HERE = 2;
-/**
- * How much of this body is attached: filled ports over total, 0 to 1.
- *
- * The dimension that lets a channel mean two different things in one lifetime.
- *
- * A port's scent is only doing latching work while that port is open. Once it
- * is matched the seeded meaning — Con emits ch0 and seeks ch1, which is what
- * makes a redex — has done its job, and the channel is free to carry anything
- * the lineage has drifted onto. When a neighbour dies and the socket reopens,
- * the latching meaning is wanted again, and at exactly the moment it becomes
- * useful: an open port is how two nets can fuse. Without a way to read its own
- * occupancy a body cannot tell those two regimes apart, so its channels have to
- * mean one thing forever and every signal competes with mate-finding.
- *
- * It is also the only dimension that says anything about *position in a net*.
- * `NEED` is the neighbourhood's, `FULL` and `HERE` are strictly local; none of
- * them distinguishes an interior body from one on the boundary. That
- * distinction is where differentiated tissue would have to start, and there is
- * no net-level reproduction to build organs any other way — only die-off
- * reopening sockets and nets fusing.
- *
- * An Era has one port, so its `BOUND` is 0 or 1 and nothing between; a Con or
- * Dup has three and can be anywhere on thirds.
- */
-export const BOUND = 3;
 
 /**
- * The input vector `x` the state is driven by: the four raw channel readings
- * at this body's position, then the three physical facts about it.
+ * The input vector `x`: four raw channel readings at this body's position,
+ * then three facts about the body itself.
  *
- * `DEMAND` is in here as an *input* and deliberately not as part of `h`. It is
- * the energy-shortfall field — a max-relaxation of what bodies are actually
- * short of, which is what makes it a potential `flowCharges` can move energy
- * down. Let a genome decide what to put in it and selection drives "ask
- * maximally" within a few generations; the field goes flat, and a flat field
- * moves nothing. A lineage can still evolve to *broadcast* its hunger — `Wx`
- * picking this up and `E` putting it on a channel — it simply cannot lie to
- * the transport layer about it.
+ * These are the named, bounded, differently-sourced components — `h`'s are
+ * none of those things. What matters is that the three body facts are about
+ * different things, because two inputs that move together buy nothing a single
+ * one did. `IN_DEMAND` is the neighbourhood's unmet need, spread along the
+ * wires and decayed per hop. `IN_FULL` is this body's own tank and nobody
+ * else's, so a body can tell "I am hungry" from "my net is hungry" — the
+ * distinction every rule about when to forage and when to give away turns on.
+ * `IN_BOUND` is how much of it is attached, which is the only one that says
+ * anything about position in a net, and the one that lets a channel mean
+ * something different once a port is matched.
+ *
+ * `IN_DEMAND` is an input and deliberately not part of `h`. It is a
+ * max-relaxation of what bodies are actually short of, which is what makes it
+ * a potential `flowCharges` can move energy down. Let a genome decide what to
+ * put in it and selection drives "ask maximally" within a few generations, the
+ * field goes flat, and a flat field moves nothing. A lineage can still evolve
+ * to *broadcast* its hunger — `Wx` reading this, `E` putting it on a channel —
+ * it simply cannot lie to the transport layer about it.
+ *
+ * All seven are scaled to roughly the same range before they are read; see
+ * `SENSE_SCALE`.
  */
 export const IN_SENSE = 0;
 export const IN_FULL = 4;
 export const IN_BOUND = 5;
 export const IN_DEMAND = 6;
 export const IN_DIMS = 7;
+
+/**
+ * What one unit of a signal channel reading is worth, on the way into `x`.
+ *
+ * The other four inputs are already about [0,1] — `IN_FULL`, `IN_BOUND` and
+ * `IN_DEMAND` are clamped, and the ground is divided by `cellCap`. The three
+ * signal channels were passed raw, and they are not on that scale at all.
+ *
+ * Two things followed, and both cost the sense genes their usefulness. One
+ * `CHEM_MUTATE` step moved the pre-activation by about seven times as much
+ * through a sense weight as through any other input weight, so those genes had
+ * seven times the leverage per mutation of everything beside them. And `phi`
+ * is half-saturated by a weight of 0.14 and effectively pinned past 0.6, so
+ * roughly seven per cent of the gene's legal range carried information and the
+ * rest was flat — deaf to pinned in a few steps, with nothing in between to
+ * select over.
+ *
+ * That is the same defect `HEAD_SCALE` cures on the output side, and this is
+ * the same cure. Measured over soups of 60, 400 and 2000 bodies at 600 frames,
+ * the p90 reading at a body's own position is 4.16, 4.24 and 4.53 — flat
+ * across a thirty-fold range of pond size, which is what makes it a sensible
+ * anchor. So a strong local signal reads about 1, the median reads near zero,
+ * and a genuinely loud spot can still saturate, which it should be able to.
+ */
+export const SENSE_SCALE = 4.3;
 
 /**
  * `chem` layout.
