@@ -612,10 +612,106 @@ export class Fields {
       if (a0 > this.loI) dst.fill(0, rowBase + this.loI * CHANNELS, rowBase + a0 * CHANNELS);
       if (b0 < this.hiI) dst.fill(0, rowBase + (b0 + 1) * CHANNELS, rowBase + (this.hiI + 1) * CHANNELS);
       if (b0 < a0) continue;
-      let base = rowBase + a0 * CHANNELS;
-      for (let i = a0; i <= b0; i++, base += CHANNELS) {
-        const left = i > sLo[j] ? base - CHANNELS : -1;
-        const right = i < sHi[j] ? base + CHANNELS : -1;
+      /*
+       * Split into edge and interior.
+       *
+       * `iLo`..`iHi` is the run where a cell provably has all four neighbours:
+       * inside its own row's span by one on each side, and inside the spans of
+       * the rows above and below. Every cell in it took thirty-two branches —
+       * four neighbours by four channels — to re-establish something constant
+       * across the whole run.
+       *
+       * The arithmetic below is identical and in the same order, so this is
+       * the same pass; what goes is the checking. It is nearly all of the work,
+       * because a row of the dish is around a thousand cells and its two edges
+       * are one apiece.
+       */
+      const rowLo = sLo[j];
+      const rowHi = sHi[j];
+      let iLo = a0 > rowLo + 1 ? a0 : rowLo + 1;
+      if (iLo < upLo) iLo = upLo;
+      if (iLo < dnLo) iLo = dnLo;
+      let iHi = b0 < rowHi - 1 ? b0 : rowHi - 1;
+      if (iHi > upHi) iHi = upHi;
+      if (iHi > dnHi) iHi = dnHi;
+      if (iHi < iLo) {
+        iLo = a0;
+        iHi = a0 - 1;
+      }
+      for (let i = a0, base = rowBase + (a0) * CHANNELS; i <= iLo - 1; i++, base += CHANNELS) {
+        const left = i > rowLo ? base - CHANNELS : -1;
+        const right = i < rowHi ? base + CHANNELS : -1;
+        const up = i >= upLo && i <= upHi ? base - rowStride : -1;
+        const down = i >= dnLo && i <= dnHi ? base + rowStride : -1;
+        /*
+         * Unrolled over the four channels, because they no longer share a
+         * rate and reading one out of an array per channel per cell is the
+         * whole of what per-channel rates would otherwise cost. Measured over
+         * a 1024^2 pass: 15.9 ms through a Float32Array, 14.9 ms through a
+         * Float64Array, 9.5 ms with the rates as locals. The array is small
+         * enough to sit in L1 either way — what it costs is the load itself,
+         * eight of them per cell, and unrolling is how they go away.
+         *
+         * Same shape as the one-rate version it replaces, in the same order,
+         * so at a rate of 1 every cell lands on the same bits it used to.
+         */
+        const s0 = src[base];
+        const s1 = src[base + 1];
+        const s2 = src[base + 2];
+        const s3 = src[base + 3];
+        const l = left >= 0;
+        const r = right >= 0;
+        const u = up >= 0;
+        const w = down >= 0;
+        dst[base] =
+          k0 * s0 +
+          m0 *
+            ((l ? src[left] : dirichlet ? 0 : s0) +
+              (r ? src[right] : dirichlet ? 0 : s0) +
+              (u ? src[up] : dirichlet ? 0 : s0) +
+              (w ? src[down] : dirichlet ? 0 : s0)) *
+            0.25;
+        dst[base + 1] =
+          k1 * s1 +
+          m1 *
+            ((l ? src[left + 1] : dirichlet ? 0 : s1) +
+              (r ? src[right + 1] : dirichlet ? 0 : s1) +
+              (u ? src[up + 1] : dirichlet ? 0 : s1) +
+              (w ? src[down + 1] : dirichlet ? 0 : s1)) *
+            0.25;
+        dst[base + 2] =
+          k2 * s2 +
+          m2 *
+            ((l ? src[left + 2] : dirichlet ? 0 : s2) +
+              (r ? src[right + 2] : dirichlet ? 0 : s2) +
+              (u ? src[up + 2] : dirichlet ? 0 : s2) +
+              (w ? src[down + 2] : dirichlet ? 0 : s2)) *
+            0.25;
+        dst[base + 3] =
+          k3 * s3 +
+          m3 *
+            ((l ? src[left + 3] : dirichlet ? 0 : s3) +
+              (r ? src[right + 3] : dirichlet ? 0 : s3) +
+              (u ? src[up + 3] : dirichlet ? 0 : s3) +
+              (w ? src[down + 3] : dirichlet ? 0 : s3)) *
+            0.25;
+      }
+      for (let i = iLo, base = rowBase + iLo * CHANNELS; i <= iHi; i++, base += CHANNELS) {
+        const l = base - CHANNELS;
+        const r = base + CHANNELS;
+        const u = base - rowStride;
+        const w = base + rowStride;
+        dst[base] = k0 * src[base] + m0 * (src[l] + src[r] + src[u] + src[w]) * 0.25;
+        dst[base + 1] =
+          k1 * src[base + 1] + m1 * (src[l + 1] + src[r + 1] + src[u + 1] + src[w + 1]) * 0.25;
+        dst[base + 2] =
+          k2 * src[base + 2] + m2 * (src[l + 2] + src[r + 2] + src[u + 2] + src[w + 2]) * 0.25;
+        dst[base + 3] =
+          k3 * src[base + 3] + m3 * (src[l + 3] + src[r + 3] + src[u + 3] + src[w + 3]) * 0.25;
+      }
+      for (let i = iHi + 1, base = rowBase + (iHi + 1) * CHANNELS; i <= b0; i++, base += CHANNELS) {
+        const left = i > rowLo ? base - CHANNELS : -1;
+        const right = i < rowHi ? base + CHANNELS : -1;
         const up = i >= upLo && i <= upHi ? base - rowStride : -1;
         const down = i >= dnLo && i <= dnHi ? base + rowStride : -1;
         /*
