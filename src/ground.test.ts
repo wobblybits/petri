@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CH, CHANNELS, Fields } from './fields.ts';
+import { CH, CHANNELS, FERTILISE_CH, Fields } from './fields.ts';
 import { EnergyGrid } from './energy.ts';
 import { defaultParams } from './params.ts';
 import { Sim } from './sim.ts';
@@ -223,5 +223,92 @@ describe('ground through the sim', () => {
     const { key } = g.index(0, 0);
     expect(g.take(key, 0.4)).toBeCloseTo(0.4, 9);
     expect(g.getCell(0, 0)).toBeCloseTo(0.6, 9);
+  });
+});
+
+/**
+ * The fertiliser term: `r * (1 + fertilise * C)` on the growth rate.
+ *
+ * What it buys over `farmRate` is a reason for two lineages to need each other.
+ * Farming moves stock from a tank onto the dish, and the body that invests is
+ * the body that gets it back. This is catalysis — a lineage emitting on the
+ * fertiliser channel creates nothing, it makes the ground recover faster
+ * wherever it stands, bounded by the same carrying capacity. It cannot feed
+ * itself that way; it can only make its patch worth more to somebody else.
+ */
+describe('fertiliser', () => {
+  /** A dish grazed to a fraction of capacity, so growth has room to act. */
+  function grazed(): Fields {
+    const f = dish();
+    for (let i = CH.energy; i < f.data.length; i += CHANNELS) {
+      if (f.data[i] > 0) f.data[i] = CAP * 0.25;
+    }
+    return f;
+  }
+
+  /** Lay the catalyst across the whole dish at `c`. */
+  function spread(f: Fields, c: number): void {
+    const { lo, hi } = (f as unknown as { spans(): { lo: Int32Array; hi: Int32Array } }).spans();
+    for (let j = 0; j < f.rows; j++) {
+      for (let i = lo[j]; i <= hi[j]; i++) {
+        f.data[(j * f.cols + i) * CHANNELS + FERTILISE_CH] = c;
+      }
+    }
+  }
+
+  it('grows the ground faster where the catalyst is', () => {
+    const bare = grazed();
+    const fed = grazed();
+    spread(fed, 1);
+    for (let i = 0; i < 200; i++) {
+      bare.grow(CH.energy, 0.01, CAP, FERTILISE_CH, 3);
+      fed.grow(CH.energy, 0.01, CAP, FERTILISE_CH, 3);
+    }
+    expect(total(fed), 'the catalyst did nothing').toBeGreaterThan(total(bare) * 1.05);
+  });
+
+  it('does nothing at all when the dial is off', () => {
+    const a = grazed();
+    const b = grazed();
+    spread(a, 1);
+    spread(b, 1);
+    for (let i = 0; i < 50; i++) {
+      a.grow(CH.energy, 0.01, CAP, FERTILISE_CH, 0);
+      b.grow(CH.energy, 0.01, CAP);
+    }
+    expect(total(a)).toBeCloseTo(total(b), 9);
+  });
+
+  it('never grows past capacity, catalyst or not', () => {
+    const f = grazed();
+    spread(f, 4);
+    for (let i = 0; i < 500; i++) f.grow(CH.energy, 0.05, CAP, FERTILISE_CH, 8);
+    let worst = 0;
+    for (let i = CH.energy; i < f.data.length; i += CHANNELS) {
+      if (f.data[i] > worst) worst = f.data[i];
+    }
+    expect(worst, 'catalysis raised the ceiling').toBeLessThanOrEqual(CAP + 1e-9);
+  });
+
+  it('lets an inhibitor stall growth but never run it backwards', () => {
+    // A negative gamma is a body that poisons the ground around it, which is a
+    // thing a lineage should be able to become. Ground destroyed by being
+    // smelled at would be a hole in the conservation the economy depends on,
+    // so the effective rate clamps at zero rather than going negative.
+    const f = grazed();
+    spread(f, 1);
+    const before = total(f);
+    for (let i = 0; i < 200; i++) f.grow(CH.energy, 0.01, CAP, FERTILISE_CH, -5);
+    expect(total(f), 'an inhibitor destroyed ground').toBeGreaterThanOrEqual(before - 1e-6);
+  });
+
+  it('refuses to catalyse a channel with itself', () => {
+    const a = grazed();
+    const b = grazed();
+    for (let i = 0; i < 50; i++) {
+      a.grow(CH.energy, 0.01, CAP, CH.energy, 5);
+      b.grow(CH.energy, 0.01, CAP);
+    }
+    expect(total(a)).toBeCloseTo(total(b), 9);
   });
 });

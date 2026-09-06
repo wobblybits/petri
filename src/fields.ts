@@ -36,6 +36,21 @@ export const CHANNELS = 4;
  */
 export const VOICE = [CH.conP, CH.dupP, CH.aux] as const;
 
+/**
+ * The channel whose presence accelerates the ground's regrowth — the fertiliser
+ * signal. See `params.fertilise`.
+ *
+ * A voice channel rather than `CH.aux`, because it has to be a *choice*. Every
+ * free port lays a flat marker into aux whatever its genome says, so
+ * fertility keyed on aux would be a property of having sockets rather than
+ * something a lineage decides to spend its voice on — and the whole point is
+ * that farming and being heard come out of the same unit budget.
+ *
+ * A constant rather than a slider: an integer channel index in the parameter
+ * list invites configurations that mean nothing. Change it here.
+ */
+export const FERTILISE_CH: number = CH.conP;
+
 /*
  * The world grid, shared by the scent field and the energy grid.
  *
@@ -854,24 +869,55 @@ export class Fields {
    * spreads out by diffusion instead, and stops growing until it is under
    * capacity again.
    *
+   * The result is clamped at `cap` because a single explicit step can overshoot
+   * it. `E + r*E*(1 - E/K)` only stays under `K` while `r` is small, and at the
+   * shipped regrowth rate times a frame it is very small — but the fertiliser
+   * term multiplies `r` by `1 + gamma*C`, which makes an instability that was
+   * latent reachable. A cell at 0.9 of capacity with a strong catalyst
+   * overshoots to 1.05 in one step, and a carrying capacity that a body can
+   * push past by smelling at it is not a carrying capacity.
+   *
    * `r` is per frame, already multiplied by dt by the caller — this pass has
    * no idea what a second is.
    */
-  grow(ch: number, r: number, cap: number): void {
+  grow(ch: number, r: number, cap: number, catCh = -1, gamma = 0): void {
     if (!(r > 0) || !(cap > 0)) return;
     if (this.hiI < this.loI) return;
     const d = this.data;
     const { cols } = this;
     const { lo: sLo, hi: sHi } = this.spans();
     const invCap = 1 / cap;
+    const catalysed = catCh >= 0 && catCh !== ch && gamma !== 0;
     for (let j = this.loJ; j <= this.hiJ; j++) {
       const rowBase = j * cols * CHANNELS;
       const a0 = sLo[j] > this.loI ? sLo[j] : this.loI;
       const b0 = sHi[j] < this.hiI ? sHi[j] : this.hiI;
-      for (let i = a0, k = rowBase + a0 * CHANNELS + ch; i <= b0; i++, k += CHANNELS) {
-        const e = d[k];
-        if (e <= 0 || e >= cap) continue;
-        d[k] = e + r * e * (1 - e * invCap);
+      // Two loops rather than a flag inside one; see the note on `decayCells`
+      // for what a loop-invariant branch per cell costs.
+      if (catalysed) {
+        const off = catCh - ch;
+        for (let i = a0, k = rowBase + a0 * CHANNELS + ch; i <= b0; i++, k += CHANNELS) {
+          const e = d[k];
+          if (e <= 0 || e >= cap) continue;
+          /*
+           * The catalyst scales the *rate*, never the outcome. Clamped at zero
+           * so that a negative gamma — an inhibitor, which is a thing a lineage
+           * should be able to become — can stall regrowth but never run it
+           * backwards. Growth that could go negative would be a body destroying
+           * ground by smelling at it, and the ground is conserved.
+           */
+          const rr = r * (1 + gamma * d[k + off]);
+          if (rr <= 0) continue;
+          const next = e + rr * e * (1 - e * invCap);
+          d[k] = next > cap ? cap : next;
+        }
+      } else {
+        for (let i = a0, k = rowBase + a0 * CHANNELS + ch; i <= b0; i++, k += CHANNELS) {
+          const e = d[k];
+          if (e <= 0 || e >= cap) continue;
+          const next = e + r * e * (1 - e * invCap);
+          d[k] = next > cap ? cap : next;
+        }
       }
     }
   }

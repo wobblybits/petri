@@ -45,7 +45,7 @@ import { queryHit, queryDiscHit, SLOP, type Hit } from './collide.ts';
 import { closestTOnSegment, segmentsIntersect, WIRE_RADIUS, wireBowBudget, bounceOffDisk } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
-import { CH, Fields, worldBoundRadius } from './fields.ts';
+import { CH, FERTILISE_CH, Fields, worldBoundRadius } from './fields.ts';
 import { Graph, ropeIsLive, wrapPos, type Wire } from './graph.ts';
 import type { Params } from './params.ts';
 import {
@@ -806,7 +806,13 @@ export class Sim {
       Sim.phase('field:decay');
       // After the passes that move it, so a cell grows from what it kept
       // rather than from what it was about to lose.
-      this.fields.grow(CH.energy, params.energyRegrow * t, this.energy.cellCap);
+      this.fields.grow(
+        CH.energy,
+        params.energyRegrow * t,
+        this.energy.cellCap,
+        FERTILISE_CH,
+        params.fertilise,
+      );
       Sim.phase('field:grow');
     }
     this.autoSpawn(params, t);

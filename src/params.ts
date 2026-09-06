@@ -259,6 +259,34 @@ export interface Params {
    * back into the seam of ore it used to be.
    */
   energyRegrow: number;
+  /**
+   * How much the fertiliser channel accelerates regrowth, per unit of it.
+   *
+   * Growth becomes `r * (1 + fertilise * C) * E * (1 - E/K)`, where `C` is
+   * `FERTILISE_CH`. What this buys that `farmRate` does not is a *reason for
+   * two lineages to need each other*.
+   *
+   * Farming moves stock from a tank onto the dish: one body's investment, and
+   * the returner is the same body. This is catalysis — a lineage that emits on
+   * the fertiliser channel creates no energy at all, it makes the ground
+   * recover faster wherever it happens to be. It cannot feed itself that way
+   * any more than it already could, because the growth it accelerates is
+   * bounded by the same carrying capacity. What it can do is make the patch it
+   * stands in worth more to *somebody else*, and a grazer that stays near a
+   * fertiliser does better than one that does not. That is mutualism out of
+   * two genes and no new machinery.
+   *
+   * Negative is an inhibitor, which a lineage should be able to become — a
+   * body that poisons the ground around it denies a competitor more than it
+   * costs itself. The effective rate is clamped at zero, so an inhibitor can
+   * stall regrowth but never run it backwards; ground destroyed by being
+   * smelled at would be a hole in the conservation the economy depends on.
+   *
+   * Off by default, like every dial that changes what energy does. This one
+   * needs `energyRegrow` non-zero to mean anything at all — it scales a rate,
+   * and scaling zero is zero.
+   */
+  fertilise: number;
   /** Extra drained per second. 0 = off. Hitting −1 kills the agent. */
   upkeep: number;
   /**
@@ -342,6 +370,19 @@ export interface Params {
    * two parents' fills; an erase clones the Era's fill with a mutation nudge.
    */
   rescueTo: number;
+  /**
+   * What a fresh body's `assort` starts at: how likely each gene of its
+   * children is copied whole from one parent rather than blended.
+   *
+   * 0.5 and not by accident. `assortChance` offsets by the child's kind, so at
+   * 0.5 a Con child blends every gene and a Dup child assorts every gene —
+   * exactly the absolute rule this replaces. Nothing changes until the trait
+   * drifts, and then both kinds move together.
+   *
+   * A seed like the other heritable traits: read once by `createAgent`, never
+   * again.
+   */
+  assortBias: number;
   /**
    * Extra at which a fresh body dies. Always negative — a debt depth, never
    * a second positive cap. The live value lives on the body as `debtCap` and
@@ -465,11 +506,13 @@ export function defaultParams(): Params {
     reactKill: 0,
     energyDiffuse: 0.05,
     energyRegrow: 0.04,
+    fertilise: 0,
     upkeep: 0.015,
     swimCost: 0,
     farmRate: 0,
     forageAsk: 0,
     rescueTo: 0.9,
+    assortBias: 0.5,
     debtCap: -1,
     requestDecay: 0.95,
     transportRecoil: 100,
@@ -535,11 +578,13 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'reactKill', label: 'React kill', min: 0, max: 0.08, step: 0.001 },
   { key: 'energyDiffuse', label: 'Ground spread', min: 0, max: 0.5, step: 0.005 },
   { key: 'energyRegrow', label: 'Ground regrow', min: 0, max: 0.4, step: 0.005 },
+  { key: 'fertilise', label: 'Fertilise', min: -2, max: 8, step: 0.1 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
   { key: 'swimCost', label: 'Swim cost', min: 0, max: 0.002, step: 0.00005 },
   { key: 'farmRate', label: 'Farm rate', min: 0, max: 0.02, step: 0.0005 },
   { key: 'forageAsk', label: 'Forage ask', min: 0, max: 0.5, step: 0.01 },
   { key: 'rescueTo', label: 'Rescue fill', min: 0, max: 1, step: 0.05 },
+  { key: 'assortBias', label: 'Assortment (seed)', min: 0, max: 1, step: 0.05 },
   { key: 'debtCap', label: 'Debt cap', min: -2.5, max: -0.05, step: 0.05 },
   { key: 'requestDecay', label: 'Demand decay', min: 0.5, max: 0.98, step: 0.01 },
   { key: 'transportRecoil', label: 'Pump recoil (seed)', min: 0, max: 200, step: 5 },
