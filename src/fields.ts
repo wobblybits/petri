@@ -519,25 +519,31 @@ export class Fields {
   /**
    * One diffusion pass.
    *
-   * **Memory-bound, not compute-bound. Arithmetic tricks do not help here.**
-   * Measured at 1024^2: 9.2 ms a pass, moving about 96 MB — five neighbour
-   * reads and one write of sixteen bytes per cell — which is ~10.4 GB/s and so
-   * close to what the machine will do. Hoisting the per-row span out of the
-   * inner loop changed 9.17 ms to 9.18: V8 already does it, because `sLo` is
-   * provably not written inside the loop.
+   * **The single most expensive thing in the frame at the sizes anyone runs.**
+   * It is a fixed cost — the field fills the dish within seconds however few
+   * bodies are in it, so both passes always walk the whole disk. At 325 bodies
+   * that is 70% of the frame; at 4575, still a quarter. The 20k stress profile,
+   * where it looks like a minor phase, is nobody's actual case.
    *
-   * That is the opposite of the genome pass in `Sim.updateState`, which looked
-   * similar and was not: there the trip counts were compile-time constants and
-   * unrolling took it from 41 ms to 16. Here the loop is already unrolled over
-   * the channels and the remaining one has a long body, so there is nothing
-   * for the JIT to be losing.
+   * It is *not* memory-bound, though this comment claimed so for a while. That
+   * reading came from counting five neighbour reads a cell as five cache
+   * misses, which a stencil does not have — the rows above and below are
+   * already resident. Unique traffic is nearer 26 MB a pass at ~2.9 GB/s, well
+   * inside what the machine gives. What it spends on instead is deciding
+   * things: see the edge/interior split below.
    *
-   * What would actually help is fewer passes. `Sim` runs two — at `mix` and
+   * Two things measured and *not* worth doing. Hoisting the per-row span out
+   * of the inner loop changed 9.17 ms to 9.18 — V8 already does it, since
+   * `sLo` is provably not written inside the loop. And fusing `decay` with
+   * `grow` to save a traversal was neutral; see the note there.
+   *
+   * What is still on the table is fewer passes. `Sim` runs two — at `mix` and
    * `0.65 * mix` — and two successive Jacobi steps compose into a single
    * thirteen-point stencil, which would halve the write traffic and the
-   * ping-pong. It is exact in real arithmetic, it is not exact in float, and
-   * the boundary handling against the disk mask gets a good deal harder at two
-   * cells of reach. Worth doing only with a reason and a parity test.
+   * ping-pong. Exact in real arithmetic, not in float, and the boundary
+   * handling against the disk mask gets a good deal harder at two cells of
+   * reach. Worth doing only with a reason and a parity test — the field hash
+   * over a fixed-frame soup is the parity test to use.
    *
    * Written the long way on purpose: the readable version called a closure four
    * times per channel per cell, which on a 160x107x4 grid is half a million
