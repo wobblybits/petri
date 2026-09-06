@@ -1,0 +1,205 @@
+// The genome: one small recurrent network per body, over the wire graph.
+//
+//     x  = [ sense(4) , FULL , BOUND , DEMAND ]                    in R^7
+//     h <- phi( Wx.x + Wh.h + Wn.mean(h of wired neighbours) + b )  in R^4
+//     emit  = normalise(relu( E.h + e0 ))                          in R^4
+//     taste = T.h + t0                                             in R^4
+//     [cruise,turn] = L.h + l0, and the same shape for F and P
+//
+// A line-for-line port of `Sim.updateState`, and it has to stay one: the CPU
+// version is the reference, `genome-kernel.test.ts` mirrors this against it,
+// and the layout constants below are `chem-layout.ts` transcribed. Changing
+// the genome's shape means changing all three.
+//
+// Everything is in *list order*, not slot order — the host packs `hPrev` and
+// the adjacency the same way it builds them, so nothing here has to know what
+// a slot is except to find the genome, which is why `slot` is an input.
+
+const STATE_DIMS: u32 = 4u;
+const IN_DIMS: u32 = 7u;
+
+// chem-layout.ts, derived the same way and in the same order.
+const EMIT: u32 = 0u;
+const TASTE: u32 = 4u;
+const E_OUT: u32 = 8u;
+const T_OUT: u32 = 24u;
+const W_IN: u32 = 40u;
+const W_SELF: u32 = 68u;
+const W_NET: u32 = 84u;
+const B_STATE: u32 = 100u;
+const F_OUT: u32 = 104u;
+const F_BASE: u32 = 112u;
+const P_OUT: u32 = 114u;
+const P_BASE: u32 = 122u;
+const L_OUT: u32 = 124u;
+const L_BASE: u32 = 132u;
+
+// Floats written per body: h(4), emit(4), taste(4), then the six heads.
+const OUT_STRIDE: u32 = 18u;
+
+struct GenomeParams {
+  n: u32,
+  chemLen: u32,
+  senseScale: f32,   // 1 / SENSE_SCALE
+  groundScale: f32,  // 1 / cellCap
+  // HEAD_SCALE, in the order the heads are written out.
+  sCruise: f32,
+  sTurn: f32,
+  sAlign: f32,
+  sSep: f32,
+  sThrust: f32,
+  sRecoil: f32,
+  energyCh: f32,
+  pad0: f32,
+}
+
+@group(0) @binding(0) var<uniform> G: GenomeParams;
+// The field probe's output. Two vec4f a body; the second is the raw four
+// channels under it, which is what the sense columns read.
+@group(0) @binding(1) var<storage, read> samples: array<vec4f>;
+@group(0) @binding(2) var<storage, read> chem: array<f32>;
+// This frame's state, in list order. Read only: every body reads its
+// neighbours' *previous* state, so the pass cannot write here.
+@group(0) @binding(3) var<storage, read> hPrev: array<f32>;
+// Two vec4f a body: [full, bound, demand, readsField] then [slot, _, _, _].
+@group(0) @binding(4) var<storage, read> inputs: array<vec4f>;
+@group(0) @binding(5) var<storage, read> adjOff: array<u32>;
+@group(0) @binding(6) var<storage, read> adjNei: array<u32>;
+@group(0) @binding(7) var<storage, read_write> outv: array<f32>;
+
+// Bounded, signed, and no reflecting barrier at zero. Chosen over tanh on
+// measurement: 0.373ms against 0.581 for 80k calls.
+fn phi(v: f32) -> f32 {
+  return v / (1.0 + abs(v));
+}
+
+fn clampf(v: f32, lo: f32, hi: f32) -> f32 {
+  return min(max(v, lo), hi);
+}
+
+/** One row of an output head: `base[row] + matrix[row] . h`. */
+fn headAt(g: u32, matrix: u32, base: u32, row: u32, h: vec4f) -> f32 {
+  let o = g + matrix + row * STATE_DIMS;
+  return chem[g + base + row]
+    + chem[o] * h.x + chem[o + 1u] * h.y + chem[o + 2u] * h.z + chem[o + 3u] * h.w;
+}
+
+@compute @workgroup_size(64)
+fn state(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= G.n) { return; }
+
+  let facts = inputs[i * 2u];
+  let slot = u32(inputs[i * 2u + 1u].x);
+  let g = slot * G.chemLen;
+
+  /*
+   * The sense columns, or zero.
+   *
+   * `readsField` is the same gate the CPU uses, and it means the same thing
+   * here even though the sample is already computed: the inputs are *zeroed*
+   * rather than left holding a stale reading, so behaviour never depends on
+   * when a body last happened to sample. The two scales bring the four onto
+   * the range the other three inputs already occupy — without them a sense
+   * gene has seven times the mutation leverage of every other input gene.
+   */
+  var s = vec4f(0.0);
+  if (facts.w > 0.5) {
+    let raw = samples[i * 2u + 1u];
+    s = raw * G.senseScale;
+    let ec = u32(G.energyCh);
+    s[ec] = raw[ec] * G.groundScale;
+  }
+
+  let x0 = s.x;
+  let x1 = s.y;
+  let x2 = s.z;
+  let x3 = s.w;
+  let x4 = facts.x;  // FULL, already clamped by the host
+  let x5 = facts.y;  // BOUND
+  let x6 = facts.z;  // DEMAND, already clamped
+
+  let po = i * STATE_DIMS;
+  let p = vec4f(hPrev[po], hPrev[po + 1u], hPrev[po + 2u], hPrev[po + 3u]);
+
+  /*
+   * The neighbour mean, gathered once for the body rather than once per
+   * output dimension — the obvious way round costs four times as much,
+   * because each of the four dimensions re-walks the whole adjacency.
+   *
+   * Mean and not sum: a sum scales with degree, so a hub saturates `phi` and
+   * a leaf barely moves for a reason that is not about position. `BOUND`
+   * carries degree already, bounded and on purpose.
+   */
+  var m = vec4f(0.0);
+  let lo = adjOff[i];
+  let hi = adjOff[i + 1u];
+  let deg = hi - lo;
+  if (deg > 0u) {
+    for (var e = lo; e < hi; e++) {
+      let b = adjNei[e] * STATE_DIMS;
+      m += vec4f(hPrev[b], hPrev[b + 1u], hPrev[b + 2u], hPrev[b + 3u]);
+    }
+    m = m / f32(deg);
+  }
+
+  var h = vec4f(0.0);
+  for (var d = 0u; d < STATE_DIMS; d++) {
+    let wi = g + W_IN + d * IN_DIMS;
+    let ws = g + W_SELF + d * STATE_DIMS;
+    let wn = g + W_NET + d * STATE_DIMS;
+    let v = chem[g + B_STATE + d]
+      + chem[wi] * x0 + chem[wi + 1u] * x1 + chem[wi + 2u] * x2 + chem[wi + 3u] * x3
+      + chem[wi + 4u] * x4 + chem[wi + 5u] * x5 + chem[wi + 6u] * x6
+      + chem[ws] * p.x + chem[ws + 1u] * p.y + chem[ws + 2u] * p.z + chem[ws + 3u] * p.w
+      + chem[wn] * m.x + chem[wn + 1u] * m.y + chem[wn + 2u] * m.z + chem[wn + 3u] * m.w;
+    h[d] = phi(v);
+  }
+
+  // Emit: relu, then normalised to a unit budget. That budget is the honesty
+  // mechanism — feeding the dish and being heard come out of the same purse —
+  // and this is the only place all four channels are known at once, so it is
+  // the only place it can be enforced.
+  var emit = vec4f(0.0);
+  var sum = 0.0;
+  for (var c = 0u; c < 4u; c++) {
+    let o = g + E_OUT + c * STATE_DIMS;
+    let v = chem[g + EMIT + c]
+      + chem[o] * h.x + chem[o + 1u] * h.y + chem[o + 2u] * h.z + chem[o + 3u] * h.w;
+    let w = max(v, 0.0);
+    emit[c] = w;
+    sum += w;
+  }
+  if (sum > 1e-6) { emit = emit / sum; }
+
+  // Taste is signed and not normalised: a taste weight is compared against
+  // other taste weights rather than spent, so there is no budget.
+  var taste = vec4f(0.0);
+  for (var c = 0u; c < 4u; c++) {
+    let o = g + T_OUT + c * STATE_DIMS;
+    taste[c] = chem[g + TASTE + c]
+      + chem[o] * h.x + chem[o + 1u] * h.y + chem[o + 2u] * h.z + chem[o + 3u] * h.w;
+  }
+
+  let o = i * OUT_STRIDE;
+  outv[o] = h.x;
+  outv[o + 1u] = h.y;
+  outv[o + 2u] = h.z;
+  outv[o + 3u] = h.w;
+  outv[o + 4u] = emit.x;
+  outv[o + 5u] = emit.y;
+  outv[o + 6u] = emit.z;
+  outv[o + 7u] = emit.w;
+  outv[o + 8u] = taste.x;
+  outv[o + 9u] = taste.y;
+  outv[o + 10u] = taste.z;
+  outv[o + 11u] = taste.w;
+  // Clamped to the ranges the heritable versions were bred inside: those
+  // bounds are about what the forces survive, not about what a genome may say.
+  outv[o + 12u] = clampf(headAt(g, L_OUT, L_BASE, 0u, h) * G.sCruise, 0.0, 180.0);
+  outv[o + 13u] = clampf(headAt(g, L_OUT, L_BASE, 1u, h) * G.sTurn, 0.0, 8.0);
+  outv[o + 14u] = clampf(headAt(g, F_OUT, F_BASE, 0u, h) * G.sAlign, -8.0, 16.0);
+  outv[o + 15u] = clampf(headAt(g, F_OUT, F_BASE, 1u, h) * G.sSep, -60.0, 120.0);
+  outv[o + 16u] = clampf(headAt(g, P_OUT, P_BASE, 0u, h) * G.sThrust, 0.0, 1.0);
+  outv[o + 17u] = clampf(headAt(g, P_OUT, P_BASE, 1u, h) * G.sRecoil, 0.0, 200.0);
+}
