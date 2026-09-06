@@ -171,7 +171,14 @@ export default defineConfig({
   build: {
     // Worklet must be a real file URL — never inline raw source as a data: URL.
     assetsInlineLimit: 0,
-    rollupOptions: isDemo ? { input: path.resolve(root, 'demo.html') } : undefined,
+    rollupOptions: isDemo
+      ? { input: path.resolve(root, 'demo.html') }
+      : {
+          input: {
+            main: path.resolve(root, 'index.html'),
+            design: path.resolve(root, 'design.html'),
+          },
+        },
   },
   test: {
     /*

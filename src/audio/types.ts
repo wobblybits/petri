@@ -209,6 +209,7 @@ export type WorkletInMessage =
   | { type: 'topology'; topo: NetTopology }
   | { type: 'latch'; topo: NetTopology; wireId: number; gain: number }
   | { type: 'impulse'; wireId: number; end: 0 | 1; gain: number }
+  | { type: 'pluck'; wireId: number; gain: number; at?: number; width?: number }
   | { type: 'junction'; agentId: number; gain: number }
   | {
       /** A real contact: a force of `peak` newtons-ish held for `dur` samples. */

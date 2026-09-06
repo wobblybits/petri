@@ -356,6 +356,7 @@ export interface AgentState {
 export type WorkletMessage =
   | { type: 'topology'; topo: NetTopology }
   | { type: 'impulse'; wireId: number; end: 0 | 1; gain: number }
+  | { type: 'pluck'; wireId: number; gain: number; at?: number; width?: number }
   | { type: 'junction'; agentId: number; gain: number }
   | { type: 'strike'; agentId: number; peak: number; dur: number; sharp: number }
   | { type: 'contact'; items: { agentA: number; agentB: number; load: number; slide: number }[] }
@@ -902,6 +903,10 @@ export class WaveguideNet {
       }
       if (msg.type === 'impulse') {
         this.injectImpulse(msg.wireId, msg.end, msg.gain);
+        return;
+      }
+      if (msg.type === 'pluck') {
+        this.injectPluck(msg.wireId, msg.gain, msg.at, msg.width);
         return;
       }
       if (msg.type === 'junction') {

@@ -12,7 +12,7 @@ import { buildTopology } from './topology.ts';
 import { LodSelector } from './lod.ts';
 import { setSampleRate } from './presets.ts';
 import { makeReverbIR } from './reverb.ts';
-import type { AudioEvent, LiveContact, NetTopology, PanView, WaveSnapshot, WorkletInMessage } from './types.ts';
+import type { AudioEvent, ContactItem, LiveContact, NetTopology, PanView, WaveSnapshot, WorkletInMessage } from './types.ts';
 import workletUrl from './worklet/net-processor.ts?url';
 import workerUrl from './worklet/net-worker.ts?url';
 import { AudioRing, ringBytes } from './ring.ts';
@@ -106,6 +106,13 @@ export class AudioEngine {
   private readonly contactedLast = new Array<boolean>(SHARD_COUNT).fill(false);
   private readonly airedLast = new Array<boolean>(SHARD_COUNT).fill(false);
   onPost: ((msg: WorkletInMessage) => void) | null = null;
+  private topologySent = false;
+  private readonly playQueue: { msg: WorkletInMessage; slot?: number }[] = [];
+  /**
+   * Extra contact the pointer is holding this frame, merged into the sim's
+   * pairs so a scrape can bow without replacing collisions.
+   */
+  pointerContact: ContactItem | null = null;
   /** Latest traveling-wave snapshot from the worklet. Null until the first one. */
   private wavePacked: Float32Array | null = null;
   private waveIndex = new Map<number, number>();
@@ -177,11 +184,45 @@ export class AudioEngine {
 
   setMuted(m: boolean): void {
     this.muted = m;
+    if (m) this.pointerContact = null;
     // Ramp rather than step: a jump on master.gain is an audible click.
     if (this.master && this.ctx) {
       this.master.gain.setTargetAtTime(m ? 0 : 1, this.ctx.currentTime, 0.02);
     }
     this.post({ type: 'gain', master: m ? 0 : 1 });
+  }
+
+  playStrike(agentId: number, peak: number, dur: number, sharp: number): void {
+    this.sendPlay({ type: 'strike', agentId, peak, dur, sharp }, this.slotOf(agentId));
+  }
+
+  playPluck(wireId: number, gain: number, at?: number, width?: number): void {
+    const w = this.graph?.wires.get(wireId);
+    this.sendPlay({ type: 'pluck', wireId, gain, at, width }, w ? this.slotOf(w.a.id) : undefined);
+  }
+
+  playImpulse(wireId: number, end: 0 | 1, gain: number): void {
+    const w = this.graph?.wires.get(wireId);
+    this.sendPlay({ type: 'impulse', wireId, end, gain }, w ? this.slotOf(w.a.id) : undefined);
+  }
+
+  playJunction(agentId: number, gain: number): void {
+    this.sendPlay({ type: 'junction', agentId, gain }, this.slotOf(agentId));
+  }
+
+  private sendPlay(msg: WorkletInMessage, slot?: number): void {
+    if (this.muted) return;
+    if (!this.armed || !this.topologySent) {
+      this.playQueue.push({ msg, slot });
+      return;
+    }
+    this.post(msg, slot);
+  }
+
+  private flushPlay(): void {
+    if (!this.armed || !this.topologySent || this.muted) return;
+    const q = this.playQueue.splice(0);
+    for (const it of q) this.post(it.msg, it.slot);
   }
 
   push(ev: AudioEvent, graph: Graph, agents: Map<number, Agent>): void {
@@ -560,6 +601,8 @@ export class AudioEngine {
     this.drainEvents();
     this.syncContacts(slots);
     this.syncAir(agents, slots);
+    this.topologySent = true;
+    this.flushPlay();
   }
 
   private syncShard(slot: number, topo: NetTopology): void {
@@ -614,22 +657,23 @@ export class AudioEngine {
   }
 
   private syncContacts(slots: number): void {
-    if (this.contacts && (this.contacts.size > 0 || this.contactedLast.some(Boolean))) {
-      const msg = planContactMessage(this.contacts);
+    const extra = this.pointerContact;
+    if (this.contacts?.size || extra || this.contactedLast.some(Boolean)) {
+      const msg = this.contacts ? planContactMessage(this.contacts) : { type: 'contact' as const, items: [] };
+      const items = extra ? msg.items.concat(extra) : msg.items;
       const parts = this.sharded
-        ? partitionPairs(msg.items, this.shardOf, SHARD_COUNT)
-        : [msg.items];
+        ? partitionPairs(items, this.shardOf, SHARD_COUNT)
+        : [items];
       for (let s = 0; s < slots; s++) {
-        const items = parts[s] ?? [];
-        const cKey = contactKeyOf(items);
+        const part = parts[s] ?? [];
+        const cKey = contactKeyOf(part);
         if (cKey !== this.contactKeys[s]) {
           this.contactKeys[s] = cKey;
-          this.post({ type: 'contact', items }, s);
+          this.post({ type: 'contact', items: part }, s);
         }
-        this.contactedLast[s] = items.length > 0;
+        this.contactedLast[s] = part.length > 0;
       }
     }
-
   }
 
   private syncAir(agents: Map<number, Agent>, slots: number): void {
@@ -661,6 +705,8 @@ export class AudioEngine {
     this.airedLast.fill(false);
     this.contactedLast.fill(false);
     this.events.length = 0;
+    this.playQueue.length = 0;
+    this.topologySent = false;
     this.lastAgent.clear();
     this.lastWire.clear();
     this.wavePacked = null;
@@ -671,6 +717,7 @@ export class AudioEngine {
   /** @internal Arm for unit tests without Web Audio. */
   armWithoutAudio(): void {
     this.armed = true;
+    this.topologySent = true;
     this.node = { port: { postMessage: () => {} } } as unknown as AudioWorkletNode;
   }
 

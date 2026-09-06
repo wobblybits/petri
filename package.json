@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "demo": "vite --open /demo.html",
+    "design": "vite --open /design.html",
     "wasm": "native/build.sh",
     "build": "tsc && vite build",
     "build:demo": "tsc && VITE_APP=demo vite build",

@@ -907,3 +907,22 @@ describe('stereo placement', () => {
     for (const p of power) expect(Math.abs(p - first)).toBeLessThan(first * 0.02);
   });
 });
+
+describe('AudioEngine play helpers', () => {
+  it('posts a pluck with at and width', () => {
+    const engine = new AudioEngine();
+    engine.armWithoutAudio();
+    const sim = new Sim(200, 160);
+    const params = defaultParams();
+    const a = sim.spawn('era', 30, 80, 0, params, true)!;
+    const b = sim.spawn('era', 120, 80, Math.PI, params, true)!;
+    sim.wire(a.id, 'p', b.id, 'p', params);
+    engine.frame(sim.graph, sim.agents);
+    const posted: WorkletInMessage[] = [];
+    engine.onPost = (m) => posted.push(m);
+    const wire = [...sim.graph.wires.values()][0]!;
+    engine.playPluck(wire.id, 0.8, 0.3, 0.4);
+    const pluck = posted.find((m) => m.type === 'pluck');
+    expect(pluck).toEqual({ type: 'pluck', wireId: wire.id, gain: 0.8, at: 0.3, width: 0.4 });
+  });
+});

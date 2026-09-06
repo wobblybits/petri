@@ -508,6 +508,24 @@ function argmaxAbs(xs: ArrayLike<number>): number {
   return b;
 }
 
+describe('pluck position', () => {
+  it('a pluck message at a different at writes a different delay shape', () => {
+    const ring = (at: number, width: number) => {
+      const net = new WaveguideNet();
+      net.handle({ type: 'topology', topo: sampleTopo(1, 10, 20, 128) });
+      net.handle({ type: 'pluck', wireId: 1, gain: 1, at, width });
+      return collect(net, 256);
+    };
+    const near = ring(0.15, 0.25);
+    const far = ring(0.7, 0.25);
+    expect(peak(near)).toBeGreaterThan(0);
+    expect(peak(far)).toBeGreaterThan(0);
+    let diff = 0;
+    for (let i = 0; i < near.length; i++) diff += Math.abs(near[i]! - far[i]!);
+    expect(diff).toBeGreaterThan(0.01);
+  });
+});
+
 describe('traveling-wave snapshot', () => {
   it('omits a silent wire and tags bins in the header', () => {
     const net = new WaveguideNet();
