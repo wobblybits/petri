@@ -301,4 +301,3 @@ describe('the genome shader computes what updateState computes', () => {
   });
 });
 
-const rawScratch = new Float64Array(4);

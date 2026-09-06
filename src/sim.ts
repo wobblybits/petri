@@ -87,6 +87,7 @@ import type { CollisionEvent, LiveContact, PanView, RewriteEvent } from './audio
 import { AGENT_BAND, LOD_FAR, LodSelector, agentKey, apparentPx, onScreen, wiresDrawable } from './audio/lod.ts';
 import { farGpu } from './gpu/far-gpu.ts';
 import { fieldGpu } from './gpu/field-gpu.ts';
+import { genomeGpu } from './gpu/genome-gpu.ts';
 import { FAR, FAR_STRIDE, packFarWire } from './gpu/far-kernel.ts';
 import {
   KIND_CON,
@@ -432,6 +433,22 @@ export class Sim {
    * anyway.
    */
   wantFieldReadback = false;
+  /**
+   * True once the genome pass has moved to the GPU as well.
+   *
+   * Separate from `fieldOnGpu` and strictly downstream of it: the pass reads
+   * the field probe's own output buffer for its sense inputs, so there is
+   * nothing for it to read until the field is there. When it is on,
+   * `updateState` stops computing and starts unpacking.
+   */
+  private genomeOnGpu = false;
+  /** True once a genome pass has been dispatched and not yet unpacked. */
+  private genomePending = false;
+  /** Reused staging for the genome pass's neighbour lists. */
+  private readonly genomeAdj = new WireAdjacency();
+  private readonly genomeIndex = new Map<number, number>();
+  private genomeSlotBuf = new Int32Array(0);
+  private genomeCount = 0;
   /**
    * Physics detail. When a view is passed, FAR agents keep disc contacts and a
    * chord constraint but skip SAT, rope XPBD, wire clearance, and Hertzian.
@@ -2719,6 +2736,15 @@ export class Sim {
     this.energy.deferAdds(true);
     this.energy.seedGround();
     this.fieldOnGpu = true;
+    /*
+     * And the genome, which is strictly downstream: it reads the probe's own
+     * output buffer for its sense inputs, so there is nothing for it to read
+     * until the field is here. If it declines, the field still runs and
+     * `updateState` keeps doing the arithmetic — the two are independent in
+     * that direction.
+     */
+    const dev = fieldGpu.gpuDevice;
+    if (dev && (await genomeGpu.init(dev))) this.genomeOnGpu = true;
     return true;
   }
 
@@ -2969,6 +2995,119 @@ export class Sim {
       }
       nativeSolver.useSamples(true);
     }
+    Sim.phase('gpu:unpack');
+
+    if (this.genomeOnGpu) await this.gpuGenomeStep(list, n);
+  }
+
+  /**
+   * Hand the genome pass a frame, in the same list order everything else uses.
+   *
+   * Runs after the field's, and has to: its sense inputs are the raw channel
+   * readings `gather` just wrote, in a buffer it borrows rather than a
+   * readback it waits for. The four numbers that would have been the most
+   * expensive thing to ship never cross the bus.
+   *
+   * Like the field's samples, what comes back is spent at the top of the next
+   * frame — `updateState` unpacks it where it used to compute it. So `h`
+   * advances exactly one step per frame either way, and the inputs are a
+   * frame older than the CPU pass would have read, which is the same bargain
+   * steering and smell already take.
+   */
+  private async gpuGenomeStep(list: Agent[], n: number): Promise<void> {
+    const samples = fieldGpu.sampleBuffer;
+    if (!samples || n === 0) return;
+    const store = this.agentStore;
+    /*
+     * Rebuilt here rather than borrowing `pulseRequests`'s copy: rewrites,
+     * deaths and spawns all happen between that pass and this one, so the
+     * indices in it may no longer describe this list.
+     */
+    const index = this.genomeIndex;
+    index.clear();
+    let maxSlot = 0;
+    for (let i = 0; i < n; i++) {
+      index.set(list[i].id, i);
+      if (list[i].slot > maxSlot) maxSlot = list[i].slot;
+    }
+    const adj = this.genomeAdj;
+    adj.build(n, index, () => this.graph.wires.values());
+    const nNei = adj.off[n];
+
+    const chemFloats = (maxSlot + 1) * CHEM_LEN;
+    /*
+     * Uploaded every frame, and that is a deliberate first cut rather than an
+     * oversight. A genome changes only at birth, so the table could be pushed
+     * on a version bump — but every path that writes `chem` would have to
+     * remember to bump it (`seedChem`, `inheritChem`, `cloneAgent`, the
+     * designer, whatever pokes it next), and a missed bump is a body running
+     * somebody else's genome, silently. At five thousand bodies this is 2.7MB
+     * a frame; if it shows up in the ledger, that is the trade to revisit.
+     */
+    genomeGpu.reserve(n, nNei, chemFloats);
+    genomeGpu.uploadChem(store.chemAll, chemFloats);
+
+    const H = store.hAll;
+    const hData = genomeGpu.hData;
+    const inputData = genomeGpu.inputData;
+    const EXTRA = store.extra;
+    const CAP = store.energyCap;
+    const REQUEST = store.request;
+    const BOUND_OF = store.bound;
+    const READS = store.readsField;
+    for (let i = 0; i < n; i++) {
+      const slot = list[i].slot;
+      const ho = slot * STATE_DIMS;
+      const po = i * STATE_DIMS;
+      hData[po] = H[ho];
+      hData[po + 1] = H[ho + 1];
+      hData[po + 2] = H[ho + 2];
+      hData[po + 3] = H[ho + 3];
+      const o = i * 8;
+      const cap = CAP[slot];
+      const full = cap > 0 ? EXTRA[slot] / cap : 0;
+      inputData[o] = full <= 0 ? 0 : full >= 1 ? 1 : full;
+      inputData[o + 1] = BOUND_OF[slot];
+      const r = REQUEST[slot];
+      inputData[o + 2] = r <= 0 ? 0 : r >= 1 ? 1 : r;
+      inputData[o + 3] = READS[slot];
+      inputData[o + 4] = slot;
+    }
+    const offData = genomeGpu.offData;
+    for (let i = 0; i <= n; i++) offData[i] = adj.off[i];
+    const neiData = genomeGpu.neiData;
+    for (let e = 0; e < nNei; e++) neiData[e] = adj.nei[e];
+    Sim.phase('gpu:packGenome');
+
+    const ok = await genomeGpu.run(samples, n, nNei, this.groundScale, CH.energy);
+    if (!ok) {
+      // Back to the CPU pass for good; nothing is owed, since `updateState`
+      // recomputes from the store either way.
+      this.genomeOnGpu = false;
+      this.genomePending = false;
+      return;
+    }
+    this.genomeSlots(list, n);
+    this.genomePending = true;
+    Sim.phase('gpu:genome');
+  }
+
+  /**
+   * Remember which body each list position was, for the unpack a frame later.
+   *
+   * Slot *and* id, because `AgentStore.release` does not clear a freed slot's
+   * id — it drops the mapping and puts the slot on the free list. So a stale
+   * slot still reads as whatever died there, and only the id says whether the
+   * body that earned these results is still the one standing in that slot.
+   */
+  private genomeSlots(list: Agent[], n: number): void {
+    if (this.genomeSlotBuf.length < n * 2) this.genomeSlotBuf = new Int32Array(n * 4);
+    const b = this.genomeSlotBuf;
+    for (let i = 0; i < n; i++) {
+      b[i * 2] = list[i].slot;
+      b[i * 2 + 1] = list[i].id;
+    }
+    this.genomeCount = n;
   }
 
   /**
@@ -4703,6 +4842,10 @@ export class Sim {
   private updateState(list: Agent[], adj: WireAdjacency): void {
     const n = list.length;
     if (n === 0) return;
+    if (this.genomeOnGpu) {
+      this.unpackGenome();
+      return;
+    }
     const store = this.agentStore;
     const H = store.hAll;
     const SENSE = store.senseAll;
@@ -4942,6 +5085,58 @@ export class Sim {
     }
   }
 
+
+  /**
+   * Spend the genome pass the shader ran at the end of the last frame.
+   *
+   * The store fields written here are exactly the ones `updateState` writes,
+   * so every consumer downstream — the flock packing, the pair force,
+   * `recoil`, the scent deposit, `state-hash` — reads what it always read and
+   * has no idea the arithmetic moved.
+   *
+   * Slots are checked against the list the dispatch was packed from, not the
+   * list now: a body that died between the two would otherwise have its
+   * results paid to whichever body inherited its slot. That is the same
+   * hazard `creditHarvest` guards, and here it is reachable rather than
+   * theoretical, because rewrites settle between the dispatch and this.
+   */
+  private unpackGenome(): void {
+    if (!this.genomePending) return;
+    this.genomePending = false;
+    const out = genomeGpu.outData;
+    const stride = genomeGpu.outStride;
+    const store = this.agentStore;
+    const H = store.hAll;
+    const EMITS = store.emitAll;
+    const TASTES = store.tasteAll;
+    const slots = this.genomeSlotBuf;
+    const live = store.id;
+    for (let i = 0; i < this.genomeCount; i++) {
+      const slot = slots[i * 2];
+      if (live[slot] !== slots[i * 2 + 1]) continue;
+      const o = i * stride;
+      const ho = slot * STATE_DIMS;
+      H[ho] = out[o];
+      H[ho + 1] = out[o + 1];
+      H[ho + 2] = out[o + 2];
+      H[ho + 3] = out[o + 3];
+      const eo = slot * 4;
+      EMITS[eo] = out[o + 4];
+      EMITS[eo + 1] = out[o + 5];
+      EMITS[eo + 2] = out[o + 6];
+      EMITS[eo + 3] = out[o + 7];
+      TASTES[eo] = out[o + 8];
+      TASTES[eo + 1] = out[o + 9];
+      TASTES[eo + 2] = out[o + 10];
+      TASTES[eo + 3] = out[o + 11];
+      store.cruise[slot] = out[o + 12];
+      store.turn[slot] = out[o + 13];
+      store.flockAlign[slot] = out[o + 14];
+      store.flockSep[slot] = out[o + 15];
+      store.transportThrust[slot] = out[o + 16];
+      store.transportRecoil[slot] = out[o + 17];
+    }
+  }
 
   /**
    * The sender's own `transportRecoil` is the kick's size — it is the one

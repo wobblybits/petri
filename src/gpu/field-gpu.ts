@@ -95,12 +95,45 @@ export class FieldGpu {
   roomData = new Float32Array(0);
   gotData = new Float32Array(0);
 
+  /**
+   * Build the field on a device, once.
+   *
+   * The guard is not an optimisation. Without it every call requested a fresh
+   * adapter and device — and `Sim.openFieldGpu` runs once per Sim, so a preset
+   * reload or a second pond got device B while every capacity counter here
+   * still said the buffers were big enough, so they were never rebuilt and the
+   * field went on using device A's memory. Worse, `GenomeGpu` then held a
+   * different device again, and WebGPU rejects a bind group that mixes two:
+   * "[Buffer] is associated with [Device], and cannot be used with [Device]".
+   * That lands in the uncaptured-error scope rather than any try/catch, so the
+   * dispatch quietly does nothing and every body reads a genome of zeros —
+   * on the second pond of a session and never the first.
+   *
+   * A device is also not free to abandon: the old one and all its buffers
+   * stayed alive, once per Sim, for the life of the tab.
+   */
   async init(cells: number): Promise<boolean> {
+    // `this.cells` is the total, `cells` the side; comparing them directly
+    // would rebuild every time on any grid but a 1x1.
+    if (this.ready && this.device && this.cells === cells * cells) return true;
     const nav = navigator as Navigator & { gpu?: GPU };
     if (!nav.gpu) {
       this.lastError = 'no navigator.gpu';
       return false;
     }
+    // A rebuild is a new device, so nothing allocated against the old one may
+    // be reused. Zeroing the caps is what forces `ensureLists` to notice.
+    this.depositCap = 0;
+    this.probeCap = 0;
+    this.blockCap = 0;
+    this.entryCap = 0;
+    this.deposits = null;
+    this.probes = null;
+    this.samples = null;
+    this.readback = null;
+    this.hBlocks = null;
+    this.hFlow = null;
+    this.hRead = null;
     try {
       const adapter = await nav.gpu.requestAdapter();
       if (!adapter) {
@@ -545,6 +578,22 @@ export class FieldGpu {
 
   get sampleStride(): number {
     return SAMPLE_FLOATS;
+  }
+
+  /**
+   * The device and the probe's output buffer, for the genome pass.
+   *
+   * It is a second pipeline on the same device and it reads the raw channel
+   * readings `gather` leaves here — the whole point of that being a shared
+   * buffer rather than a readback is that the pass which needs it runs on the
+   * same side of the bus.
+   */
+  get gpuDevice(): GPUDevice | null {
+    return this.device;
+  }
+
+  get sampleBuffer(): GPUBuffer | null {
+    return this.samples;
   }
 }
 

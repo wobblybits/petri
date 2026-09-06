@@ -54,8 +54,32 @@ export class GenomeGpu {
     return OUT_STRIDE;
   }
 
+  /**
+   * Build the pipeline on `device`, rebuilding if it is not the one we hold.
+   *
+   * The device check is the whole point of this signature. `FieldGpu.init`
+   * has no ready guard — every call requests a fresh adapter and device and
+   * rebuilds its buffers — and `Sim.openFieldGpu` calls it once per Sim, so a
+   * preset reload or a second Sim gives the field a new device while this
+   * kept the first. The bind group then mixes the two, and WebGPU rejects it
+   * with "[Buffer] is associated with [Device], and cannot be used with
+   * [Device]" — into the uncaptured-error scope, not into any try/catch here,
+   * so `run` returns true having dispatched nothing and every body reads a
+   * genome of zeros. Silent, and only after the second pond.
+   */
   async init(device: GPUDevice): Promise<boolean> {
-    if (this.ready) return true;
+    if (this.ready && this.device === device) return true;
+    this.ready = false;
+    this.bodyCap = 0;
+    this.neiCap = 0;
+    this.chemCap = 0;
+    this.chem = null;
+    this.hPrev = null;
+    this.inputs = null;
+    this.adjOff = null;
+    this.adjNei = null;
+    this.out = null;
+    this.read = null;
     try {
       const module = device.createShaderModule({ code: shader });
       const storage = { type: 'storage' } as const;
