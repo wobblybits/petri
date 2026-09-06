@@ -818,10 +818,21 @@ export class Sim {
      * happen there. `gpuFieldStep` does it at the end of `stepAsync`, because
      * it has to await and this does not.
      */
+    /*
+     * Outside the branch, because both paths need it. `field-gpu.ts` resolves
+     * the shader's per-channel rates by reading `fields.diffuseRate` and
+     * `fields.decayRate` — the arrays this writes — so leaving it in here gave
+     * the GPU path a `Fields` still holding its constructed defaults of all
+     * ones. The ground would have decayed at the full scent rate instead of
+     * not at all, and diffused at 1 rather than at `energyDiffuse`, which is
+     * the exact failure the note on `openFieldGpu` warns about: the shader
+     * gaining the capacity for per-channel rates is not the same as anything
+     * feeding it.
+     */
+    this.tuneChannels(params);
     if (!this.fieldOnGpu) {
       if (!this.scentWriteNative(params)) this.deposit(params);
       Sim.phase('scentWrite');
-      this.tuneChannels(params);
       this.fields.diffuse(params.diffuse);
       Sim.phase('field:diffuse1');
       this.fields.diffuse(params.diffuse * 0.65);
@@ -2576,25 +2587,46 @@ export class Sim {
    * currently cannot succeed.
    *
    * Not an oversight left in — a tripwire in front of one. The GPU holds the
-   * live field in its own textures and only ever ships deposits and probes
-   * across; `fields.data` is a CPU copy nobody syncs back. Everything that
-   * made energy a resource rather than a seam of ore is on the CPU side of
-   * that line: `grow` and `tuneChannels` both sit inside `if
-   * (!this.fieldOnGpu)`, and `EnergyGrid`'s `take` and `addAt` read and write
-   * `fields.data` directly. Turn this on as it stands and the ground stops
-   * regrowing, channel 2 starts decaying at the scent rate because the
-   * per-channel rates never reach the shader, and the pond mines a CPU array
-   * the GPU is not looking at down to nothing — silently, and only on machines
-   * that have a GPU.
+   * live field in its own buffers and only ever ships deposits and probes
+   * across; `fields.data` is a CPU copy nobody syncs back. Anything reading or
+   * writing that array is on the wrong side of the line.
    *
-   * A fourth thing joins that list since this comment was written, and it is
-   * the quietest of them: `updateState` samples the field on the CPU, through
-   * `Fields.sampleAll` and so out of `fields.data`. With the field on the GPU
-   * that array is a stale copy, so any body whose genome has evolved a non-zero
-   * `Wx` sense weight reads garbage — silently, only on machines with a device,
-   * and only once evolution has moved a gene off its seed. The coupling
-   * therefore runs both ways: if the field moves to the GPU the state pass has
-   * to follow it, or lose its sense inputs.
+   * Two of the four hazards this note used to list are closed, and saying so
+   * matters: a stale list of blockers reads as a list of *reasons*, and two
+   * struck through make the rest look struck through too.
+   *
+   *   CLOSED (323e3c9) — the ground stopped regrowing, because `grow` had no
+   *   shader. `field.wgsl` has one now, fertiliser catalyst and capacity clamp
+   *   included, and `gpuFieldStep` feeds it.
+   *
+   *   CLOSED — channel 2 decayed at the scent rate, because per-channel rates
+   *   never reached the shader. The uniform carries `mix`/`mix2`/`keep` as
+   *   `vec4f` and `field-gpu.ts` resolves them the way `Fields` does. Note
+   *   what this took beyond the shader: `tuneChannels` writes those rates and
+   *   was itself inside `if (!this.fieldOnGpu)`, so the capacity existed while
+   *   nothing fed it. It is hoisted out of the branch now. A shader that can
+   *   express something is not a path that does.
+   *
+   *   OPEN — `EnergyGrid`'s `take` and `addAt` read and write `fields.data`
+   *   directly. This is the load-bearing one. Turn this on as it stands and
+   *   the pond mines a CPU array the GPU is not looking at down to nothing,
+   *   while farming, death yield and rewrite leftovers land in an array
+   *   nothing reads: the whole economy quietly detaches from the field it is
+   *   supposed to be an economy of. Harvest has to move to the shader with it.
+   *
+   *   OPEN, and the quietest — `updateState` samples the field on the CPU,
+   *   through `Fields.sampleAll` and so out of `fields.data`. That array would
+   *   be a stale copy, so any body whose genome has evolved a non-zero `Wx`
+   *   sense weight reads garbage: silently, only on machines with a device,
+   *   and only once evolution has moved a gene off its seed. The coupling runs
+   *   both ways — if the field moves the state pass has to follow it, or lose
+   *   its sense inputs.
+   *
+   * The two open ones are not independent of each other, either. Splitting the
+   * ground back off onto its own CPU array would close the first without a
+   * harvest shader, but `FERTILISE_CH` is `CH.conP` — growth reads a *signal*
+   * channel as its catalyst — so the ground and the scent field are coupled by
+   * design and cannot be run on opposite sides of the bus.
    *
    * Nothing calls this today, which is why the whole thing was invisible. It
    * wants either the growth pass in `field.wgsl` and the ground read back, or
