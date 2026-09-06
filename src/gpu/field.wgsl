@@ -9,7 +9,7 @@
 // Layout matches Fields exactly: FIELD_CELLS squared, four channels
 // interleaved per cell, origin at home minus half the extent.
 
-// 144 bytes. Every vec4f sits on a sixteen-byte boundary because WGSL demands
+// 160 bytes. Every vec4f sits on a sixteen-byte boundary because WGSL demands
 // it, which is why the scalars are grouped in fours rather than in the order
 // anyone would write them down.
 struct FieldParams {
@@ -42,12 +42,26 @@ struct FieldParams {
   reactV: f32,
   nBlocks: u32,
   harvestCh: f32,
+  fillCh: f32,
+  fillValue: f32,
+  pad3: f32,
+  pad4: f32,
 }
 
 // A world position and what to add there, per channel.
+//
+// `conserve` picks which of the two adds `Fields` has. A scent deposit is a
+// *density*: the host has already scaled it by cell area, and a share landing
+// in a cell the disk rejects is simply not deposited. Energy is a *count*, and
+// a unit of it has to survive however the grid is cut — so its share is spread
+// over whichever cells will take it. See `Fields.addAt`: a point inside the
+// disk can still straddle cells whose centres are outside it, because the
+// bound test asks about the point and the mask asks about the centre, and a
+// conserved channel is exactly where a small unbounded leak is unaffordable.
 struct Deposit {
   pos: vec2f,
-  pad: vec2f,
+  conserve: f32,
+  pad: f32,
   w: vec4f,
 }
 
@@ -136,6 +150,32 @@ fn scatter(@builtin(global_invocation_id) gid: vec3u) {
   let j0 = i32(floor(g.y));
   let tx = g.x - f32(i0);
   let ty = g.y - f32(j0);
+
+  // Renormalise over the cells that will actually take it. Only for a
+  // conserved channel, and only the rim ever has a total below one — but that
+  // is where the whole leak lives, and it gets worse the closer to the wall a
+  // body dies.
+  var norm = 1.0;
+  if (d.conserve > 0.5) {
+    var legal = 0.0;
+    for (var dj = 0; dj < 2; dj++) {
+      for (var di = 0; di < 2; di++) {
+        let i = i0 + di;
+        let j = j0 + dj;
+        if (i < 0 || j < 0 || i >= i32(P.cols) || j >= i32(P.rows)) { continue; }
+        if (cellOut(i, j)) { continue; }
+        var wx = 1.0 - tx;
+        if (di == 1) { wx = tx; }
+        var wy = 1.0 - ty;
+        if (dj == 1) { wy = ty; }
+        legal += wx * wy;
+      }
+    }
+    // Outside in every sense; `Fields.addAt` drops it here too.
+    if (legal <= 0.0) { return; }
+    norm = 1.0 / legal;
+  }
+
   for (var dj = 0; dj < 2; dj++) {
     for (var di = 0; di < 2; di++) {
       let i = i0 + di;
@@ -146,7 +186,7 @@ fn scatter(@builtin(global_invocation_id) gid: vec3u) {
       if (di == 1) { wx = tx; }
       var wy = 1.0 - ty;
       if (dj == 1) { wy = ty; }
-      let w = wx * wy;
+      let w = wx * wy * norm;
       let base = (u32(j) * P.cols + u32(i)) * 4u;
       for (var c = 0u; c < 4u; c++) {
         let v = d.w[c] * w;
@@ -400,4 +440,27 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
       break;
     }
   }
+}
+
+/*
+ * Lay one channel down across the disk, which is how a world starts with
+ * ground in it.
+ *
+ * `Fields.fillDisk` writes the CPU array, and on this side of the bus that
+ * would seed a copy nobody reads — the pond would start barren, on machines
+ * with a device only, which is exactly the class of failure the note on
+ * `openFieldGpu` exists to keep out. Same shape as `fillDisk`: the value
+ * inside the disk and nothing written outside it, since the mask keeps those
+ * cells at zero anyway.
+ */
+@compute @workgroup_size(64)
+fn fill(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= P.cols * P.rows) { return; }
+  let x = i32(i % P.cols);
+  let y = i32(i / P.cols);
+  if (cellOut(x, y)) { return; }
+  var v = src[i];
+  v[u32(P.fillCh)] = P.fillValue;
+  src[i] = v;
 }

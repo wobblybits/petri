@@ -2687,7 +2687,10 @@ export class Sim {
      */
     const plan = this.harvestPlan;
     plan.build(this.agents.values(), this.agentStore, this.energy);
-    fieldGpu.reserve(n * 3, n, plan.nBlocks, plan.nEntries);
+    // Three ports a body, plus whatever died, farmed, spilled or was refunded
+    // this frame and had nowhere to put it.
+    const nAdds = this.energy.pendingAdds;
+    fieldGpu.reserve(n * 3 + nAdds, n, plan.nBlocks, plan.nEntries);
     const dep = fieldGpu.depositData;
     const pro = fieldGpu.probeData;
     const dStride = fieldGpu.depositStride;
@@ -2709,6 +2712,7 @@ export class Sim {
         const o = nDep * dStride;
         dep[o] = w.x;
         dep[o + 1] = w.y;
+        dep[o + 2] = 0; // a density; `depositScale` is already in `amt`
         if (slot === 'p') {
           const eo = a.slot * 4;
           dep[o + 4] = amt * EMITS[eo];
@@ -2724,6 +2728,32 @@ export class Sim {
         nDep++;
       }
     }
+
+    /*
+     * The frame's queued energy adds, on the same scatter as the voices.
+     *
+     * `conserve` is what separates them. A voice is a density and the host has
+     * already multiplied in `depositScale`; these are counts, handed over raw,
+     * and the shader spreads each over whichever of its four cells the disk
+     * will take rather than dropping the share that falls outside. That rim
+     * behaviour is the whole difference between `Fields.deposit` and
+     * `Fields.addAt`, and it is the one a conserved channel cannot do without.
+     */
+    const seed = this.energy.pendingSeed;
+    this.energy.pendingSeed = null;
+    const pend = this.energy.pendingData;
+    for (let k = 0; k < nAdds; k++) {
+      const o = nDep * dStride;
+      dep[o] = pend[k * 3];
+      dep[o + 1] = pend[k * 3 + 1];
+      dep[o + 2] = 1;
+      dep[o + 4] = 0;
+      dep[o + 5] = 0;
+      dep[o + 6] = pend[k * 3 + 2];
+      dep[o + 7] = 0;
+      nDep++;
+    }
+    this.energy.clearPending();
 
     const arc = params.sensorAngle;
     const sd = params.sensorDist;
@@ -2799,6 +2829,7 @@ export class Sim {
         dt,
       },
       { ch: CH.energy, blocks: plan.nBlocks, entries: plan.nEntries },
+      seed === null ? null : { ch: CH.energy, value: seed },
     );
     if (!ok) {
       // The device went away mid-session. Fall back for good rather than

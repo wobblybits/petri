@@ -361,6 +361,42 @@ export class EnergyGrid {
     this.cells.clear();
   }
 
+  /*
+   * Queued adds, for when the field is not ours to write.
+   *
+   * With the field on the GPU, `fields.data` is a stale copy, so an `addAt`
+   * done here would land where nothing reads it — a corpse, a farmer's
+   * deposit, a producer's spill and a rewrite's leftovers would all quietly
+   * stop existing. They are queued instead and handed to the shader's
+   * `scatter` at the end of the frame, which is the same bilinear
+   * renormalised add done on the right side of the bus.
+   *
+   * x, y, amount triples. Grown, never shrunk, and refilled from zero each
+   * frame: a pond kills a handful of bodies a frame, not thousands.
+   */
+  private pending = new Float64Array(0);
+  private nPending = 0;
+  private deferring = false;
+
+  /** Queue `addAt` rather than writing it. Set once, when the field moves. */
+  deferAdds(on: boolean): void {
+    this.deferring = on;
+    this.nPending = 0;
+  }
+
+  get pendingAdds(): number {
+    return this.nPending;
+  }
+
+  /** x, y, amount triples, `pendingAdds` of them. */
+  get pendingData(): Float64Array {
+    return this.pending;
+  }
+
+  clearPending(): void {
+    this.nPending = 0;
+  }
+
   /** Field cells per energy cell, along one axis. */
   get span(): number {
     return Math.max(1, Math.round(this.cellSize / FIELD_CELL));
@@ -380,10 +416,23 @@ export class EnergyGrid {
     return this.ambient / (s * s);
   }
 
-  /** Lay down full ground across the disk. Field-backed only. */
+  /**
+   * Lay down full ground across the disk. Field-backed only.
+   *
+   * Deferred like `addAt` and for the same reason: with the field on the GPU
+   * this would seed a copy nobody reads and the pond would start barren.
+   * `Sim.gpuFieldStep` picks the request up and dispatches `fill`.
+   */
   seedGround(): void {
+    if (this.deferring) {
+      this.pendingSeed = this.cellCap;
+      return;
+    }
     this.fields?.fillDisk(CH.energy, this.cellCap);
   }
+
+  /** The value a deferred `seedGround` asked for, or null. */
+  pendingSeed: number | null = null;
 
   /**
    * The field cells under energy cell `(i, j)`: `[fi, fi + span)` squared,
@@ -532,6 +581,19 @@ export class EnergyGrid {
   addAt(x: number, y: number, amount: number): void {
     if (amount === 0) return;
     if (!this.inBounds(x, y)) return;
+    if (this.deferring) {
+      const o = this.nPending * 3;
+      if (o + 3 > this.pending.length) {
+        const next = new Float64Array(Math.max(768, this.pending.length * 2));
+        next.set(this.pending);
+        this.pending = next;
+      }
+      this.pending[o] = x;
+      this.pending[o + 1] = y;
+      this.pending[o + 2] = amount;
+      this.nPending++;
+      return;
+    }
     const f = this.fields;
     if (f) {
       // Into the one field cell it happened in, not spread across the block.

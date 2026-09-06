@@ -18,13 +18,13 @@ import { CHANNELS, type Fields } from '../fields.ts';
  */
 
 /*
- * 144, and the layout is dictated by WGSL rather than by taste: a `vec4f` must
+ * 160, and the layout is dictated by WGSL rather than by taste: a `vec4f` must
  * sit on a sixteen-byte boundary, so the scalars are grouped in fours. See
  * `FieldParams` in field.wgsl, which this has to match exactly — a field
  * written at the wrong offset reads as a plausible number rather than an
  * error, which is the whole hazard of hand-packing a uniform.
  */
-const UNIFORM_BYTES = 144;
+const UNIFORM_BYTES = 160;
 /** Floats per Deposit and per Probe in the shader's layout. */
 const DEPOSIT_FLOATS = 8;
 const PROBE_FLOATS = 12;
@@ -55,6 +55,7 @@ type Entry =
   | 'decay'
   | 'grow'
   | 'harvest'
+  | 'fill'
   | 'gather';
 
 export class FieldGpu {
@@ -161,6 +162,7 @@ export class FieldGpu {
         'decay',
         'grow',
         'harvest',
+        'fill',
         'gather',
       ] as const) {
         this.pipelines.set(
@@ -298,6 +300,7 @@ export class FieldGpu {
     grow: { ch: number; r: number; cap: number; catCh: number; gamma: number },
     react: { u: number; v: number; feed: number; kill: number; dt: number },
     harvest: { ch: number; blocks: number; entries: number },
+    fill: { ch: number; value: number } | null,
   ): Promise<boolean> {
     const device = this.device;
     if (!this.ready || !device || !this.fieldA || !this.fieldB || !this.acc) return false;
@@ -346,6 +349,8 @@ export class FieldGpu {
       f32[33] = react.v;
       u32[34] = harvest.blocks;
       f32[35] = harvest.ch;
+      f32[36] = fill ? fill.ch : 0;
+      f32[37] = fill ? fill.value : 0;
       device.queue.writeBuffer(this.uniform!, 0, u);
       if (nDeposit > 0) {
         device.queue.writeBuffer(
@@ -411,6 +416,9 @@ export class FieldGpu {
 
       let live = this.aLive ? this.fieldA : this.fieldB;
       let other = this.aLive ? this.fieldB : this.fieldA;
+      // Before everything: a seed is the world being laid down, not a thing
+      // that happens to it, so this frame's passes should act on the result.
+      if (fill) run('fill', this.cells, live, other);
       if (nDeposit > 0) {
         run('scatter', nDeposit, live, other);
         run('applyAcc', this.cells, live, other);

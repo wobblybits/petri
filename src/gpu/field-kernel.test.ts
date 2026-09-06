@@ -248,6 +248,50 @@ function mirrorHarvest(
   return got;
 }
 
+/**
+ * `scatter` in conserve mode, which is the energy add rather than the scent
+ * one, plus the disk mask the plain mirror above does not model.
+ *
+ * Returns the total that actually landed, because that is the property under
+ * test: a *quantity* has to survive the rim, where a point inside the disk can
+ * straddle cells whose centres are outside it.
+ */
+function mirrorScatterConserve(
+  f: Fields,
+  ch: number,
+  x: number,
+  y: number,
+  amount: number,
+): void {
+  const cols = f.cols;
+  const gx = ((x - f.originX) / f.worldW) * cols;
+  const gy = ((y - f.originY) / f.worldW) * cols;
+  const i0 = Math.floor(gx);
+  const j0 = Math.floor(gy);
+  const tx = gx - i0;
+  const ty = gy - j0;
+  const legalW = (di: number, dj: number): number => {
+    const i = i0 + di;
+    const j = j0 + dj;
+    if (i < 0 || j < 0 || i >= cols || j >= f.rows) return 0;
+    if (f.cellOut(i, j)) return 0;
+    return (di ? tx : 1 - tx) * (dj ? ty : 1 - ty);
+  };
+  let legal = 0;
+  for (let dj = 0; dj < 2; dj++) for (let di = 0; di < 2; di++) legal += legalW(di, dj);
+  if (legal <= 0) return;
+  const norm = 1 / legal;
+  for (let dj = 0; dj < 2; dj++) {
+    for (let di = 0; di < 2; di++) {
+      const w = legalW(di, dj) * norm;
+      if (w === 0) continue;
+      const k = ((j0 + dj) * cols + (i0 + di)) * CHANNELS + ch;
+      // Through the same fixed point the shader's atomics force.
+      f.data[k] += Math.round(amount * w * FIXED_SCALE) / FIXED_SCALE;
+    }
+  }
+}
+
 /** A small field with a few blobs in it, so the passes have work to do. */
 /**
  * Open the live box over the whole grid.
@@ -470,6 +514,61 @@ describe('field shader arithmetic', () => {
     expect(worstRaw / peak, `raw channels off by ${((worstRaw / peak) * 100).toFixed(4)}%`)
       .toBeLessThan(1e-6);
     expect(worstSteer / peak, 'the steering scalar moved').toBeLessThan(1e-6);
+  });
+
+  it('lands the whole of a quantity at the rim, the way Fields.addAt does', () => {
+    // The difference between the two adds `Fields` has, and the one that only
+    // shows at the wall. A scent deposit may lose the share that falls in a
+    // cell the disk rejects; energy may not, and the leak is unbounded and
+    // worse the closer to the edge a body dies.
+    //
+    // Note what the reference does *not* claim: a point whose four cells are
+    // all outside the mask is dropped outright, by both, and deliberately —
+    // it is outside in every sense. So the assertion is parity with `addAt`,
+    // not conservation in the abstract.
+    const ref = new Fields();
+    const mine = new Fields();
+    const naive = new Fields();
+    const cx = ref.originX + ref.worldW * 0.5;
+    const cy = ref.originY + ref.worldW * 0.5;
+    const r = ref.worldW * 0.25;
+    for (const f of [ref, mine, naive]) f.setWorldBound(cx, cy, r);
+
+    const N = 400;
+    const AMT = 0.75;
+    for (let k = 0; k < N; k++) {
+      const a = (k / N) * Math.PI * 2;
+      // Just inside the wall, where the four straddled cells disagree about
+      // whether they are in the disk.
+      const px = cx + Math.cos(a) * (r - 8);
+      const py = cy + Math.sin(a) * (r - 8);
+      ref.addAt(CH.energy, px, py, AMT);
+      mirrorScatterConserve(mine, CH.energy, px, py, AMT);
+      // What the shader did before the conserve branch: drop the share that
+      // falls outside instead of spreading it over what is left.
+      naive.deposit(CH.energy, px, py, AMT / naive.depositScale);
+    }
+
+    const total = (f: Fields): number => {
+      let t = 0;
+      for (let i = CH.energy; i < f.data.length; i += CHANNELS) t += f.data[i];
+      return t;
+    };
+    const refTotal = total(ref);
+    let worst = 0;
+    for (let i = CH.energy; i < ref.data.length; i += CHANNELS) {
+      worst = Math.max(worst, Math.abs(ref.data[i] - mine.data[i]));
+    }
+
+    expect(refTotal, 'nothing landed, so there is nothing being compared')
+      .toBeGreaterThan(N * AMT * 0.5);
+    expect(total(mine), 'the shader would have banked a different amount')
+      .toBeCloseTo(refTotal, 2);
+    expect(worst, 'it landed in different cells').toBeLessThan(1e-3);
+    // And the test can tell the difference: without the renormalisation this
+    // rim loses energy, which is the whole reason the branch exists.
+    expect(total(naive), 'the un-renormalised add leaked nothing, so this proves nothing')
+      .toBeLessThan(refTotal - 1);
   });
 
   it('grazes a block exactly as EnergyGrid.take does, body after body', () => {
