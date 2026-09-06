@@ -163,6 +163,18 @@ static uint8_t disc_nfill[MAX_BODIES];
 static int32_t decl_comp[MAX_BODIES];
 static uint8_t steer_flags[MAX_BODIES];
 static uint8_t port_free[MAX_BODIES];
+/*
+ * Per-body cruise speed and turn gain.
+ *
+ * These were `sparams[SP_STEP_SPEED]` and `sparams[SP_TURN_RATE]`, one value
+ * for the whole pond. They are an output head of the body's own genome now, so
+ * a body can swim differently because of what it is carrying or what it can
+ * smell, which no global could express. The sparam slots stay where they are
+ * rather than being renumbered — every index below them is a hardcoded number
+ * on both sides of the wall.
+ */
+static float body_cruise[MAX_BODIES];
+static float body_turn[MAX_BODIES];
 static int32_t steer_pwire[MAX_BODIES * 2];
 static float steer_noise[MAX_BODIES * 3];
 static float body_drive[MAX_BODIES];
@@ -1542,6 +1554,8 @@ static void port_world(int i, int slot, float *px, float *py) {
  * from a seeded Math.random and the determinism harness keeps working.
  */
 uint8_t *solver_port_free(void) { return port_free; }
+float *solver_body_cruise(void) { return body_cruise; }
+float *solver_body_turn(void) { return body_turn; }
 
 /** Bilinear splat into one channel. Mirrors Fields.deposit. */
 /*
@@ -1687,8 +1701,7 @@ void solver_steer(int n, float dt) {
   float arc = sparams[SP_SENSOR_ANGLE];
   float sdist = sparams[SP_SENSOR_DIST];
   float gain = 0.35f + sparams[SP_SENSE] / 500.f;
-  float turnRate = sparams[SP_TURN_RATE];
-  float stepSpeed = sparams[SP_STEP_SPEED];
+
   float tau = fmaxf(0.05f, sparams[SP_SWIM_TAU]);
   for (int i = 0; i < n; i++) {
     float *p = bodies + i * STRIDE;
@@ -1739,10 +1752,12 @@ void solver_steer(int n, float dt) {
     body_trail[i] = trail;
     float slow = slow_factor(trail);
     float boost = turn_boost(trail);
+    float turnRate = body_turn[i];
     float kp = turnRate * 6.f * boost;
     float kd = (turnRate * 2.f) / sqrtf(boost);
     if (!(steer_flags[i] & SF_P_FREE)) continue;
     p[FAR_OMEGA] += (kp * err - kd * p[FAR_OMEGA]) * dt;
+    float stepSpeed = body_cruise[i];
     if (stepSpeed <= 0.f) continue;
     float cruise = stepSpeed * slow;
     float r = steer_noise[i * 3] + steer_noise[i * 3 + 1] + steer_noise[i * 3 + 2] - 1.5f;

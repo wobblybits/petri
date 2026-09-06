@@ -94,6 +94,8 @@ type Exp = {
   solver_scent_frame(cols: number, rows: number, ox: number, oy: number, ww: number, wh: number, cx: number, cy: number, r: number): void;
   solver_deposit(n: number, amount: number): void;
   solver_port_free(): number;
+  solver_body_cruise(): number;
+  solver_body_turn(): number;
   solver_declutter(n: number, reach: number, atReach: number, cutoff: number, floorFrac: number, dt: number): void;
   solver_confine(n: number, cx: number, cy: number, dt: number, half: number, edge: number): void;
   solver_world_bound(cx: number, cy: number, r: number): void;
@@ -190,6 +192,9 @@ export class NativeSolver {
   /** Per-body flocking temperament; a pair uses the mean. */
   flockAlign: Float32Array | null = null;
   flockSep: Float32Array | null = null;
+  /** Per-body locomotion, the `L` head's two rows. Was a pair of sparams. */
+  bodyCruise: Float32Array | null = null;
+  bodyTurn: Float32Array | null = null;
   /** Per-body chemistry, mirroring Agent.chem. Four weights each. */
   bodyEmit: Float32Array | null = null;
   bodyTaste: Float32Array | null = null;
@@ -251,6 +256,8 @@ export class NativeSolver {
       this.declSat = new Uint8Array(mem.buffer, exp.solver_decl_sat(), this.bodyCap);
       this.bodyMass = new Float32Array(mem.buffer, exp.solver_body_mass(), this.bodyCap);
       this.flockMass = new Float32Array(mem.buffer, exp.solver_flock_mass(), this.bodyCap);
+      this.bodyCruise = new Float32Array(mem.buffer, exp.solver_body_cruise(), this.bodyCap);
+      this.bodyTurn = new Float32Array(mem.buffer, exp.solver_body_turn(), this.bodyCap);
       this.flockAlign = new Float32Array(mem.buffer, exp.solver_flock_align(), this.bodyCap);
       this.flockSep = new Float32Array(mem.buffer, exp.solver_flock_sep(), this.bodyCap);
       this.bodyEmit = new Float32Array(mem.buffer, exp.solver_body_emit(), this.bodyCap * 4);

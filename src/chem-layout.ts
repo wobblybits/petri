@@ -169,7 +169,18 @@ export const F_BASE = F_OUT + 2 * STATE_DIMS;
 /** `P`, state -> transport. Two rows: thrust, then recoil. */
 export const P_OUT = F_BASE + 2;
 export const P_BASE = P_OUT + 2 * STATE_DIMS;
-export const CHEM_LEN = P_BASE + 2;
+/**
+ * `L`, state -> locomotion. Two rows: cruise, then turn.
+ *
+ * Unlike `F` and `P`, this one does not replace a heritable scalar — there
+ * never was one. `stepSpeed` and `turnRate` were global params, the same for
+ * every body in the pond, so this *adds* per-body variation rather than
+ * relocating it. A body could not previously swim differently because it was
+ * hungry, however far its lineage had drifted.
+ */
+export const L_OUT = P_BASE + 2;
+export const L_BASE = L_OUT + 2 * STATE_DIMS;
+export const CHEM_LEN = L_BASE + 2;
 
 /**
  * What one unit of a head's output is worth, per row.
@@ -190,4 +201,6 @@ export const HEAD_SCALE = {
   sep: 60,
   thrust: 1,
   recoil: 100,
+  cruise: 40,
+  turn: 2,
 } as const;

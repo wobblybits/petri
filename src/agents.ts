@@ -6,6 +6,7 @@ import {
   FULL,
   F_BASE,
   HEAD_SCALE,
+  L_BASE,
   HERE,
   IN_DEMAND,
   IN_DIMS,
@@ -363,6 +364,15 @@ export class Agent {
     return this._sense!;
   }
 
+  /** This frame's locomotion head: cruise speed and turn gain. */
+  get cruise(): number {
+    return this.store.cruise[this.slot];
+  }
+
+  get turn(): number {
+    return this.store.turn[this.slot];
+  }
+
   /** Fraction of this body's ports that are attached. See `BOUND`. */
   get bound(): number {
     return this.store.bound[this.slot];
@@ -683,6 +693,8 @@ export {
   F_OUT,
   HEAD_SCALE,
   HERE,
+  L_BASE,
+  L_OUT,
   IN_BOUND,
   IN_DEMAND,
   IN_DIMS,
@@ -946,6 +958,8 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
   c[F_BASE + 1] = params.flockSep / HEAD_SCALE.sep;
   c[P_BASE] = params.transportThrust / HEAD_SCALE.thrust;
   c[P_BASE + 1] = params.transportRecoil / HEAD_SCALE.recoil;
+  c[L_BASE] = params.stepSpeed / HEAD_SCALE.cruise;
+  c[L_BASE + 1] = params.turnRate / HEAD_SCALE.turn;
   if (kind === 'con') {
     c[EMIT] = 1;
     c[TASTE + 1] = M;

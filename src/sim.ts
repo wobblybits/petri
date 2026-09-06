@@ -15,6 +15,8 @@ import {
   F_BASE,
   F_OUT,
   HEAD_SCALE,
+  L_BASE,
+  L_OUT,
   P_BASE,
   P_OUT,
   IN_BOUND,
@@ -3362,6 +3364,10 @@ export class Sim {
     const noise = nativeSolver.steerNoise;
     const drive = nativeSolver.bodyDrive;
     const taste = nativeSolver.bodyTaste;
+    const cruiseArr = nativeSolver.bodyCruise;
+    const turnArr = nativeSolver.bodyTurn;
+    const CRUISE_OF = this.agentStore.cruise;
+    const TURN_OF = this.agentStore.turn;
     const trail = nativeSolver.bodyTrail;
     const kinds = nativeSolver.kind;
     const sc = nativeSolver.scale;
@@ -3393,6 +3399,10 @@ export class Sim {
         }
         drive[i] = a.drive;
         for (let c = 0; c < 4; c++) taste[i * 4 + c] = this.tasteOf(a, c);
+        if (cruiseArr && turnArr) {
+          cruiseArr[i] = CRUISE_OF[a.slot];
+          turnArr[i] = TURN_OF[a.slot];
+        }
         // Drawn host-side so a seeded run stays reproducible; the solver only
         // consumes them.
         noise[i * 3] = Math.random();
@@ -3415,6 +3425,10 @@ export class Sim {
         }
         drive[i] = a.drive;
         for (let c = 0; c < 4; c++) taste[i * 4 + c] = this.tasteOf(a, c);
+        if (cruiseArr && turnArr) {
+          cruiseArr[i] = CRUISE_OF[a.slot];
+          turnArr[i] = TURN_OF[a.slot];
+        }
         const pw = this.graph.wireAtSlot(a.id, 'p');
         let pj = -1;
         let pslot = 0;
@@ -3481,6 +3495,8 @@ export class Sim {
     const PINNED = store.pinned;
     const STUN = store.stun;
     const ID = store.id;
+    const CRUISE_JS = store.cruise;
+    const TURN_JS = store.turn;
 
     for (const agent of list) {
       const s = agent.slot;
@@ -3571,18 +3587,20 @@ export class Sim {
       TRAIL[s] = trail;
       const slow = scentSlowFactor(trail);
       const turnBoost = scentTurnBoost(trail);
-      const kp = params.turnRate * 6 * turnBoost;
-      const kd = (params.turnRate * 2) / Math.sqrt(turnBoost);
+      const bodyTurn = TURN_JS[s];
+      const kp = bodyTurn * 6 * turnBoost;
+      const kd = (bodyTurn * 2) / Math.sqrt(turnBoost);
       const principalFree = this.graph.isFreeAt(aId, 'p');
       if (principalFree) {
         OMEGA[s] += (kp * err - kd * OMEGA[s]) * dt;
       }
-      if (principalFree && params.stepSpeed > 0) {
+      const bodyCruise = CRUISE_JS[s];
+      if (principalFree && bodyCruise > 0) {
         // Active Ornstein-Uhlenbeck propulsion: the drive decays toward cruise
         // with a persistence time while coloured noise kicks it. A swimmer
         // surges and eases the way a crawling cell does, where the servo this
         // replaces — drive velocity straight at a setpoint — reads mechanical.
-        const cruise = params.stepSpeed * slow;
+        const cruise = bodyCruise * slow;
         const tau = Math.max(0.05, params.swimTau);
         const kick =
           params.swimNoise * cruise * Math.sqrt(dt / tau) *
@@ -4236,6 +4254,8 @@ export class Sim {
     const mean = this.stateMean;
     const EMITS = store.emitAll;
     const TASTES = store.tasteAll;
+    const CRUISE = store.cruise;
+    const TURN = store.turn;
     const FA = store.flockAlign;
     const FS = store.flockSep;
     const TT = store.transportThrust;
@@ -4353,6 +4373,8 @@ export class Sim {
       emitVector(CHEM, g, H, ho, EMITS, slot * 4);
       tasteVector(CHEM, g, H, ho, TASTES, slot * 4);
 
+      CRUISE[slot] = clamp(headAt(CHEM, g, L_OUT, L_BASE, 0, H, ho, S) * HEAD_SCALE.cruise, 0, 180);
+      TURN[slot] = clamp(headAt(CHEM, g, L_OUT, L_BASE, 1, H, ho, S) * HEAD_SCALE.turn, 0, 8);
       FA[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 0, H, ho, S) * HEAD_SCALE.align, -8, 16);
       FS[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 1, H, ho, S) * HEAD_SCALE.sep, -60, 120);
       TT[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 0, H, ho, S) * HEAD_SCALE.thrust, 0, 1);

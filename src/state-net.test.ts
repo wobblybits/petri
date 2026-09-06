@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CH } from './fields.ts';
-import { B_STATE, IN_BOUND, IN_DEMAND, IN_DIMS, IN_FULL, IN_SENSE, STATE_DIMS, W_IN, W_NET, W_SELF } from './agents.ts';
+import { B_STATE, IN_BOUND, IN_DEMAND, IN_DIMS, IN_FULL, IN_SENSE, L_BASE, L_OUT, STATE_DIMS, W_IN, W_NET, W_SELF } from './agents.ts';
 import { defaultParams } from './params.ts';
 import { Sim } from './sim.ts';
 
@@ -30,6 +30,7 @@ function blank(sim: Sim): void {
     for (let k = W_IN; k < B_STATE + STATE_DIMS; k++) a.chem[k] = 0;
   }
 }
+
 
 describe('the state network', () => {
   it('stays at zero when every weight is zero', () => {
@@ -163,5 +164,55 @@ describe('the state network', () => {
       expect(Number.isFinite(a.h[d])).toBe(true);
       expect(Math.abs(a.h[d]), 'phi should have held it inside one').toBeLessThan(1);
     }
+  });
+});
+
+describe('the locomotion head', () => {
+  it('gives a seeded body exactly the sliders it always had', () => {
+    const { sim, params } = pond();
+    const a = sim.spawn('con', 5000, 5000, 0, params, true)!;
+    sim.step(1 / 60, params);
+    expect(a.cruise).toBeCloseTo(params.stepSpeed, 4);
+    expect(a.turn).toBeCloseTo(params.turnRate, 4);
+  });
+
+  it('lets one body swim while another beside it does not', () => {
+    // The thing a global `stepSpeed` could never express. Same pond, same
+    // frame, two genomes.
+    const { sim, params } = pond();
+    params.swimNoise = 0;
+    const fast = sim.spawn('con', 5000, 5000, 0, params, true)!;
+    const still = sim.spawn('con', 5000, 5400, 0, params, true)!;
+    sim.step(1 / 60, params);
+    still.chem[L_BASE] = 0;
+    const x0 = still.x;
+    const f0 = fast.x;
+    for (let f = 0; f < 120; f++) sim.step(1 / 60, params);
+    expect(still.cruise, 'it should have stopped wanting to swim').toBeCloseTo(0, 6);
+    expect(Math.abs(fast.x - f0), 'the other one should still be going').toBeGreaterThan(
+      Math.abs(still.x - x0),
+    );
+  });
+
+  it('drives locomotion from state, not just from the base', () => {
+    const { sim, params } = pond();
+    // Barren, or setting `extra` to zero does nothing: harvest runs before
+    // `updateState`, so a hungry body on full ground is full again by the time
+    // `FULL` is read.
+    params.ambientEnergy = 0;
+    const a = sim.spawn('con', 5000, 5000, 0, params, true)!;
+    sim.step(1 / 60, params);
+    blank(sim);
+    a.chem[L_BASE] = 0;
+    // Swim only when full: the rule a global speed cannot hold.
+    a.chem[W_IN + 0 * IN_DIMS + IN_FULL] = 1;
+    a.chem[L_OUT + 0 * STATE_DIMS + 0] = 2;
+    a.extra = 0;
+    for (let f = 0; f < 20; f++) sim.step(1 / 60, params);
+    const hungry = a.cruise;
+    a.extra = a.energyCap;
+    for (let f = 0; f < 20; f++) sim.step(1 / 60, params);
+    expect(hungry, 'an empty body should not have been moving').toBeCloseTo(0, 4);
+    expect(a.cruise, 'a full one should').toBeGreaterThan(5);
   });
 });

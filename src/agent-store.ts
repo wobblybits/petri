@@ -133,6 +133,9 @@ export class AgentStore {
    */
   emitAll!: Float64Array;
   tasteAll!: Float64Array;
+  /** This frame's locomotion head: cruise speed and turn gain, per body. */
+  cruise!: Float64Array;
+  turn!: Float64Array;
 
   /** Slots < highWater have been allocated at least once (live or freed). */
   private highWater = 0;
@@ -225,6 +228,8 @@ export class AgentStore {
     this.bound[slot] = 0;
     this.hAll.fill(0, slot * STATE_W, slot * STATE_W + STATE_W);
     this.senseAll.fill(0, slot * SENSE_W, slot * SENSE_W + SENSE_W);
+    this.cruise[slot] = 0;
+    this.turn[slot] = 0;
     this.emitAll.fill(0, slot * 4, slot * 4 + 4);
     this.tasteAll.fill(0, slot * 4, slot * 4 + 4);
   }
@@ -297,6 +302,8 @@ export class AgentStore {
     const newSense = new Float64Array(newCapacity * SENSE_W);
     if (this.senseAll) newSense.set(this.senseAll.subarray(0, live * SENSE_W));
     this.senseAll = newSense;
+    this.cruise = growF64(this.cruise);
+    this.turn = growF64(this.turn);
     const newEmit = new Float64Array(newCapacity * 4);
     if (this.emitAll) newEmit.set(this.emitAll.subarray(0, live * 4));
     this.emitAll = newEmit;
