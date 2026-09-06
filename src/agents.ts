@@ -442,6 +442,21 @@ export class Agent {
     this.store.rescueTo[this.slot] = v;
   }
 
+  /**
+   * How particulate this lineage's inheritance is, 0 to 1.
+   *
+   * Not read by the body itself — it is read when the body *breeds*, to decide
+   * per gene whether a child copies one parent whole or blends the two. See
+   * `assortChance`, which offsets it by the child's kind so that the seeded
+   * 0.5 reproduces the old absolute Con-blends/Dup-assorts rule.
+   */
+  get assort(): number {
+    return this.store.assort[this.slot];
+  }
+  set assort(v: number) {
+    this.store.assort[this.slot] = v;
+  }
+
   /** How much of a kick this body's own pumps hand off instead of keeping. */
   get transportThrust(): number {
     return this.store.transportThrust[this.slot];
@@ -546,6 +561,7 @@ export function cloneAgent(a: Agent): Agent {
   clone.energyCap = a.energyCap;
   clone.debtCap = a.debtCap;
   clone.rescueTo = a.rescueTo;
+  clone.assort = a.assort;
   clone.transportThrust = a.transportThrust;
   clone.transportRecoil = a.transportRecoil;
   clone.csHeading = a.csHeading;
@@ -1113,6 +1129,7 @@ export function createAgent(
   agent.energyCap = extraCapFor(kind);
   agent.debtCap = params.debtCap;
   agent.rescueTo = params.rescueTo;
+  agent.assort = params.assortBias;
   agent.transportThrust = params.transportThrust;
   agent.transportRecoil = params.transportRecoil;
   return agent;

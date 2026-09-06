@@ -889,6 +889,7 @@ export const TRAIT_KEYS = [
   'energyCap',
   'debtCap',
   'rescueTo',
+  'assort',
 ] as const;
 export type TraitKey = (typeof TRAIT_KEYS)[number];
 
@@ -930,6 +931,13 @@ export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: n
    */
   debtCap: { min: -2.5, max: DEBT_CAP_MAX, mutate: 0.12 },
   rescueTo: { min: 0, max: 1, mutate: 0.06 },
+  /*
+   * The whole range, because both ends are meaningful: 0 is a lineage that
+   * blends every gene of every child, 1 is one that copies each from a single
+   * parent. It is seeded in the middle so that the kind offset in
+   * `assortChance` reproduces the old absolute rule exactly.
+   */
+  assort: { min: 0, max: 1, mutate: 0.05 },
 };
 
 /**
@@ -990,8 +998,34 @@ function nudgeTrait(value: number, range: { min: number; max: number; mutate: nu
   return Math.min(range.max, Math.max(range.min, mutated));
 }
 
+/**
+ * How likely a single gene is copied whole from one parent, rather than blended
+ * between the two.
+ *
+ * This was `child.kind === 'dup'` — absolute, and a property of the calculus
+ * rather than of the lineage. The rationale was good (a Con combines its
+ * inputs, a Dup copies them) but it made the *mode* of inheritance the one
+ * thing about a body that could never evolve, in a system whose whole premise
+ * is that nothing should be true by fiat. Blending and assortment have very
+ * different consequences for how fast variance is lost and how easily two
+ * lines can pull apart, and which suits a lineage is exactly the sort of
+ * question selection is for.
+ *
+ * The parents' mean `assort`, offset by half a unit either way by the child's
+ * kind and clamped. At the seeded 0.5 that is 0 for a Con child and 1 for a
+ * Dup child — precisely the old rule — so nothing changes until the trait
+ * drifts, and when it does both kinds move together while keeping their
+ * relationship. A lineage that walks `assort` up becomes wholly particulate;
+ * one that walks it down blends even its Dup children.
+ */
+function assortChance(child: Agent, conParent: Agent, dupParent: Agent): number {
+  const mean = (conParent.assort + dupParent.assort) * 0.5;
+  const p = child.kind === 'dup' ? mean + 0.5 : mean - 0.5;
+  return p <= 0 ? 0 : p >= 1 ? 1 : p;
+}
+
 function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent): void {
-  const assort = child.kind === 'dup';
+  const chance = assortChance(child, conParent, dupParent);
   // Depth is one past the deeper parent, so a line's generation count does not
   // reset every time it crosses with a fresher one. Which line the child is
   // *of* follows the Con — arbitrary between two parents, but it has to be one
@@ -1001,14 +1035,15 @@ function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent): void {
   child.lineage = conParent.lineage;
   for (const key of TRAIT_KEYS) {
     const range = TRAIT_RANGE[key];
-    const combined = assort
-      ? Math.random() < 0.5
-        ? conParent[key]
-        : dupParent[key]
-      : blend(conParent[key], dupParent[key]);
+    const combined =
+      Math.random() < chance
+        ? Math.random() < 0.5
+          ? conParent[key]
+          : dupParent[key]
+        : blend(conParent[key], dupParent[key]);
     child[key] = nudgeTrait(combined, range);
   }
-  inheritChem(child, conParent, dupParent, assort);
+  inheritChem(child, conParent, dupParent, chance);
 }
 
 /** Copy one parent onto the child, then the same mutation nudge commute uses. */
@@ -1018,7 +1053,9 @@ function inheritFromClone(child: Agent, parent: Agent): void {
   for (const key of TRAIT_KEYS) {
     child[key] = nudgeTrait(parent[key], TRAIT_RANGE[key]);
   }
-  inheritChem(child, parent, parent, true);
+  // One parent, so blending and assorting are the same thing; 1 is the cheaper
+  // of the two and says what is happening.
+  inheritChem(child, parent, parent, 1);
 }
 
 /**
@@ -1035,12 +1072,12 @@ function inheritFromClone(child: Agent, parent: Agent): void {
  * avoidance, and a body that flees what it can smell is a behaviour the fixed
  * weights could never express.
  */
-function inheritChem(child: Agent, con: Agent, dup: Agent, assort: boolean): void {
+function inheritChem(child: Agent, con: Agent, dup: Agent, chance: number): void {
   const c = child.chem;
   for (let k = 0; k < CHEM_LEN; k++) {
     const a = con.chem[k];
     const b = dup.chem[k];
-    const combined = assort ? (Math.random() < 0.5 ? a : b) : blend(a, b);
+    const combined = Math.random() < chance ? (Math.random() < 0.5 ? a : b) : blend(a, b);
     c[k] = combined + (Math.random() * 2 - 1) * CHEM_MUTATE;
   }
   /*

@@ -79,6 +79,8 @@ export class AgentStore {
   energyCap!: Float64Array;
   debtCap!: Float64Array;
   rescueTo!: Float64Array;
+  /** How particulate this lineage's inheritance is. See `assortChance`. */
+  assort!: Float64Array;
   transportThrust!: Float64Array;
   transportRecoil!: Float64Array;
   csHeading!: Float64Array;
@@ -231,6 +233,7 @@ export class AgentStore {
     this.energyCap[slot] = 0;
     this.debtCap[slot] = 0;
     this.rescueTo[slot] = 0;
+    this.assort[slot] = 0;
     this.transportThrust[slot] = 0;
     this.transportRecoil[slot] = 0;
     this.csHeading[slot] = 0;
@@ -302,6 +305,7 @@ export class AgentStore {
     this.energyCap = growF64(this.energyCap);
     this.debtCap = growF64(this.debtCap);
     this.rescueTo = growF64(this.rescueTo);
+    this.assort = growF64(this.assort);
     this.transportThrust = growF64(this.transportThrust);
     this.transportRecoil = growF64(this.transportRecoil);
     this.csHeading = growF64(this.csHeading);

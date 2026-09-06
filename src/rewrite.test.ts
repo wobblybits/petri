@@ -663,6 +663,73 @@ describe('heritable traits', () => {
     }
   });
 
+  /*
+   * Assortment is a trait now, not a fact about the calculus.
+   *
+   * The rule was `child.kind === 'dup'` — absolute, and the one thing about a
+   * body that could never evolve, in a system whose premise is that nothing
+   * should be true by fiat. Blending and assortment differ sharply in how fast
+   * variance is lost and how easily two lines can pull apart, which is exactly
+   * the sort of question selection is for.
+   *
+   * `assortChance` takes the parents' mean and offsets it by the child's kind,
+   * so the seeded 0.5 reproduces the old rule exactly and nothing moves until
+   * the trait drifts. The test above this one is the proof of that: it asserts
+   * the old behaviour and still passes untouched.
+   */
+  it('assorts every gene when the lineage has drifted all the way up', () => {
+    const { sim, params } = oscillatorPair();
+    const dup = [...sim.agents.values()].find((a) => a.kind === 'dup')!;
+    const con = [...sim.agents.values()].find((a) => a.kind === 'con')!;
+    dup.requestDecay = 0.55;
+    con.requestDecay = 0.95;
+    // 1.0 on both parents puts a Con child at 0.5 and a Dup child at 1 — so
+    // every Dup gene is copied whole, and half of a Con's are.
+    dup.assort = 1;
+    con.assort = 1;
+
+    const before = new Set(sim.agents.keys());
+    const rw = beginRewrite(dup, con, sim.graph, sim.agents, sim.w, sim.h, 1);
+    sim.nextId = commitRewrite(rw, sim.agents, sim.graph, params, sim.nextId, sim.time, sim.w, sim.h, sim.agentStore);
+    const children = [...sim.agents.values()].filter((a) => !before.has(a.id));
+    const mutate = TRAIT_RANGE.requestDecay.mutate;
+    for (const c of children.filter((a) => a.kind === 'dup')) {
+      const near =
+        Math.abs(c.requestDecay - dup.requestDecay) <= mutate + 1e-9 ||
+        Math.abs(c.requestDecay - con.requestDecay) <= mutate + 1e-9;
+      expect(near, `dup child ${c.requestDecay} should copy a parent whole`).toBe(true);
+    }
+  });
+
+  it('blends a Dup child too, once the lineage has drifted all the way down', () => {
+    // The other end, and the one the old rule could not express at all: a
+    // lineage for which even duplication combines rather than copies.
+    const { sim, params } = oscillatorPair();
+    const dup = [...sim.agents.values()].find((a) => a.kind === 'dup')!;
+    const con = [...sim.agents.values()].find((a) => a.kind === 'con')!;
+    dup.requestDecay = 0.55;
+    con.requestDecay = 0.95;
+    dup.assort = 0;
+    con.assort = 0;
+
+    const before = new Set(sim.agents.keys());
+    const rw = beginRewrite(dup, con, sim.graph, sim.agents, sim.w, sim.h, 1);
+    sim.nextId = commitRewrite(rw, sim.agents, sim.graph, params, sim.nextId, sim.time, sim.w, sim.h, sim.agentStore);
+    const children = [...sim.agents.values()].filter((a) => !before.has(a.id));
+    const dups = children.filter((a) => a.kind === 'dup');
+    expect(dups).toHaveLength(2);
+    // At 0 both kinds blend, so a Dup child is no longer pinned near either
+    // parent's exact value — it lands somewhere across the widened span.
+    const pinned = dups.every((c) => {
+      const m = TRAIT_RANGE.requestDecay.mutate;
+      return (
+        Math.abs(c.requestDecay - dup.requestDecay) <= m + 1e-9 ||
+        Math.abs(c.requestDecay - con.requestDecay) <= m + 1e-9
+      );
+    });
+    expect(pinned, 'both Dup children still copied a parent whole').toBe(false);
+  });
+
   it('clones an Era through erase, with a mutation nudge', () => {
     const sim = new Sim(320, 240);
     const params = defaultParams();

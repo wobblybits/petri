@@ -57,7 +57,7 @@ export function stateHash(sim: Sim): string {
       a.x, a.y, a.vx, a.vy, a.heading, a.omega,
       a.extra, a.request, a.recovering ? 1 : 0,
       a.scale, a.alpha, a.stun, a.drive, a.trail, a.mass,
-      a.requestDecay, a.energyCap, a.debtCap, a.rescueTo, a.transportThrust, a.transportRecoil,
+      a.requestDecay, a.energyCap, a.debtCap, a.rescueTo, a.assort, a.transportThrust, a.transportRecoil,
     ]) {
       h.num(v);
     }
