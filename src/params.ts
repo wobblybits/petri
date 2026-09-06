@@ -490,7 +490,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'diffuse', label: 'Diffuse', min: 0, max: 1, step: 0.01 },
   { key: 'decay', label: 'Decay', min: 0, max: 0.08, step: 0.001 },
   { key: 'sense', label: 'Sense', min: 0, max: 1200, step: 10 },
-  // Seeds, not settings. These four are read once by `seedChem` and never
+  // Seeds, not settings. These are read once by `seedChem` and never
   // again — they decide what a *newly spawned* body starts as, and moving them
   // does nothing to anything already alive. Everything above and below changes
   // the world continuously.

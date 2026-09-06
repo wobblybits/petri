@@ -310,7 +310,7 @@ export class Agent {
    *
    * Read by nothing the sim does. They are here so that "did this change
    * help?" is a question with an answer. Every heritable trait in this project
-   * drifts as well as adapts, and with `CHEM_MUTATE` across thirty-two genes
+   * drifts as well as adapts, and with `CHEM_MUTATE` across a genome this size
    * the drift is not small — a genome that has moved away from its seed, which
    * is all `chem-evolution` can currently show, is equally consistent with
    * selection and with a random walk. Telling those apart needs to know how

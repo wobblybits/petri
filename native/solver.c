@@ -1453,8 +1453,16 @@ static float port_exit_angle(int i, int slot, float tx, float ty) {
 #define SP_STEP_SPEED 9
 #define SP_SWIM_TAU 10
 #define SP_SWIM_NOISE 11
-#define SP_ATTRACT_STRONG 12
-#define SP_ATTRACT_MEDIUM 13
+/*
+ * 12 and 13 were `attractStrong` and `attractMedium`. The host packed them
+ * across every frame and nothing here ever read them: they are seeds, seen
+ * once by `seedChem` when a body is made and never again. The slots stay
+ * reserved rather than being reclaimed, because every index above them is a
+ * hardcoded number on both sides of this wall and renumbering to recover two
+ * floats is how that kind of thing goes wrong.
+ */
+#define SP_UNUSED_12 12
+#define SP_UNUSED_13 13
 /* Normalised sensor asymmetry that earns a full-arc turn. Passed in rather
  * than defined here: a constant that has to agree across the wasm wall and is
  * written down twice eventually disagrees, which is how the deposit

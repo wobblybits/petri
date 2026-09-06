@@ -720,8 +720,12 @@ export class Sim {
     this.graph.snap(this.agents, this.w, this.h, params, this.time);
     Sim.phase('snap');
     this.components = this.graph.componentIds(this.agents);
+    Sim.phase('components');
+    // `pulseRequests` charges itself in four parts — seeding the need field,
+    // relaxing it, moving energy down it, and the state update — because at
+    // one marker it was the second-largest phase in the frame and there was no
+    // way to tell which quarter of it was the cost.
     this.pulseRequests(params);
-    Sim.phase('pulseRequests');
     this.startRewrites(params);
     this.tickRewrites(params, t);
     Sim.phase('rewrites');
@@ -3470,8 +3474,9 @@ export class Sim {
     sp[9] = params.stepSpeed;
     sp[10] = params.swimTau;
     sp[11] = params.swimNoise;
-    sp[12] = params.attractStrong;
-    sp[13] = params.attractMedium;
+    // 12 and 13 are dead: they carried `attractStrong`/`attractMedium`, which
+    // are seeds read once by `seedChem` and by nothing in the solver. The slots
+    // stay reserved; see the note in solver.c.
     sp[14] = SENSE_SPAN;
     nativeSolver.steer(n, dt);
     for (let i = 0; i < n; i++) {
@@ -4189,9 +4194,11 @@ export class Sim {
     }
     const adj = this.wireAdj;
     adj.build(list.length, index, () => this.graph.wires.values());
+    Sim.phase('pulse:seed');
     spreadRequestsFast(list, this.agentStore, adj);
+    Sim.phase('pulse:spread');
     flowChargesFast(list, this.agentStore, adj, (from, to, amount) => this.recoil(from, to, amount));
-    Sim.phase('pulseRequests');
+    Sim.phase('pulse:flow');
     this.updateState(list, adj);
     Sim.phase('state');
   }

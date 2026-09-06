@@ -1064,6 +1064,20 @@ export function flowCharges(
   return moved;
 }
 
+/*
+ * Scratch for `flowChargesFast`, which ran three allocations a frame: the
+ * donor list, a `Set` of who had already been given to, and the closure the
+ * sort compares with. At twenty thousand bodies most of them are donors, so
+ * that is a twenty-thousand-element array and a `Set` of the same order,
+ * rebuilt sixty times a second and thrown away.
+ *
+ * Grown, never shrunk, and shared — there is one pond per `Sim` and this pass
+ * is not reentrant.
+ */
+let flowDonors = new Int32Array(0);
+let flowSlot = new Int32Array(0);
+let flowTaken = new Uint8Array(0);
+
 /** Store-based twin of `flowCharges` — see `harvestSlotsFast`'s note. */
 export function flowChargesFast(
   list: Agent[],
@@ -1071,39 +1085,56 @@ export function flowChargesFast(
   adj: WireAdjacency,
   onMoved?: (from: Agent, to: Agent, amount: number) => void,
 ): number {
+  const n = list.length;
   const { off, nei } = adj;
   const LOCKED = store.locked;
   const REQUEST = store.request;
   const EXTRA = store.extra;
   const CAP = store.energyCap;
   const ID = store.id;
-  const donors: number[] = [];
-  for (let i = 0; i < list.length; i++) {
+  if (flowDonors.length < n) {
+    flowDonors = new Int32Array(n);
+    flowSlot = new Int32Array(n);
+    flowTaken = new Uint8Array(n);
+  }
+  const donors = flowDonors;
+  /*
+   * Slots resolved once, up front, because the sort comparator ran twice per
+   * comparison and each `list[i].slot` is a property access through the
+   * flyweight. At twenty thousand donors that is a few hundred thousand
+   * comparisons and four such accesses in each.
+   */
+  const slotOf = flowSlot;
+  const taken = flowTaken;
+  taken.fill(0, 0, n);
+  let count = 0;
+  for (let i = 0; i < n; i++) {
     const s = list[i].slot;
+    slotOf[i] = s;
     if (LOCKED[s]) continue;
     // spareEnergy(a) > FLOW_EPS, inlined: spareEnergy is `extra > 0 ? extra
     // : 0`, and FLOW_EPS > 0, so the comparison is equivalent to extra
     // itself exceeding FLOW_EPS.
-    if (EXTRA[s] > FLOW_EPS) donors.push(i);
+    if (EXTRA[s] > FLOW_EPS) donors[count++] = i;
   }
   // Neediest donor first, so a body that is itself being fed passes on what it
   // does not need in the same frame rather than sitting on it.
-  donors.sort(
-    (p, q) => REQUEST[list[q].slot] - REQUEST[list[p].slot] || ID[list[p].slot] - ID[list[q].slot],
-  );
-  const taken = new Set<number>();
+  donors
+    .subarray(0, count)
+    .sort((p, q) => REQUEST[slotOf[q]] - REQUEST[slotOf[p]] || ID[slotOf[p]] - ID[slotOf[q]]);
   let moved = 0;
-  for (const di of donors) {
-    const ds = list[di].slot;
+  for (let d = 0; d < count; d++) {
+    const di = donors[d];
+    const ds = slotOf[di];
     let bestIdx = -1;
     let bestSlot = -1;
     let bestR = REQUEST[ds];
     for (let k = off[di]; k < off[di + 1]; k++) {
       const ni = nei[k];
-      if (taken.has(ni)) continue;
+      if (taken[ni]) continue;
       const other = list[ni];
       if (!other) continue;
-      const os = other.slot;
+      const os = slotOf[ni];
       if (LOCKED[os]) continue;
       if (REQUEST[os] > bestR) {
         bestIdx = ni;
@@ -1117,7 +1148,7 @@ export function flowChargesFast(
     if (give <= FLOW_EPS) continue;
     EXTRA[ds] -= give;
     EXTRA[bestSlot] += give;
-    taken.add(bestIdx);
+    taken[bestIdx] = 1;
     moved += give;
     onMoved?.(list[di], list[bestIdx], give);
   }

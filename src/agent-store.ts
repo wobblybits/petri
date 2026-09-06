@@ -61,12 +61,14 @@ export class AgentStore {
   flockAlign!: Float64Array;
   flockSep!: Float64Array;
   /**
-   * `chem`, all agents': slot `i`'s 32 floats live at `chemAll[i*32 .. i*32+32)`.
+   * `chem`, all agents': slot `i`'s `CHEM_LEN` floats live at
+   * `chemAll[i*CHEM_LEN .. (i+1)*CHEM_LEN)`. The width comes from
+   * `chem-layout.ts` and is not written down here — see the note above.
    *
    * Float32, not Float64 like every other field here: this matches the
    * original plain-object `Agent`'s own `chem: Float32Array` (a deliberate
-   * memory tradeoff predating this store, since it's 16 floats per agent
-   * rather than one). Storing it at full float64 precision instead would be
+   * memory tradeoff predating this store, when it was sixteen floats a body
+   * rather than the current 134). Storing it at full float64 precision would be
    * a real, if tiny, behavior change from what Phase 1 promises to preserve
    * exactly — confirmed by a stateHash before/after mismatch that traced
    * back to exactly this.
@@ -86,7 +88,7 @@ export class AgentStore {
    * Ancestry, which nothing in the sim reads — it exists to be measured.
    *
    * Every heritable trait in this project drifts as well as adapts, and with
-   * `CHEM_MUTATE` on thirty-two genes the drift is not small. Nothing here
+   * `CHEM_MUTATE` across a genome this size the drift is not small. Nothing here
    * could previously tell the two apart: a test could show a genome had moved
    * away from its seed, which is what the scent-genome test does, and that is
    * equally consistent with selection and with a random walk. `born` and
@@ -101,10 +103,11 @@ export class AgentStore {
   /**
    * Fraction of this body's ports that are attached, 0 to 1.
    *
-   * Derived from the graph, cached here because `chemState` reads it per
-   * channel per body and walking the wire adjacency that often would cost more
-   * than the whole state vector. Refreshed by `Sim.refreshBound` only when the
-   * topology actually changes, which is what it depends on.
+   * Derived from the graph, cached here because `updateState` reads it per
+   * body per frame as `IN_BOUND` and walking the wire adjacency that often
+   * would cost more than the state update itself. Refreshed by
+   * `Sim.refreshBound` only when the topology actually changes, which is what
+   * it depends on.
    */
   bound!: Float64Array;
   /**
