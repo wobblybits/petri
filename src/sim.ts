@@ -4339,19 +4339,85 @@ export class Sim {
         for (let k = 0; k < S; k++) mean[k] /= deg;
       }
 
+      /*
+       * Unrolled over the four state dimensions and the fifteen weights each
+       * reads. `STATE_DIMS` and `IN_DIMS` are compile-time constants, and the
+       * loop overhead around sixty multiply-adds is most of what this pass
+       * costs — the same finding, and the same fix, as the channel loop in
+       * `Fields.diffuse`.
+       *
+       * A neighbour mean of zero when there are no neighbours rather than a
+       * branch inside the arithmetic: `Wn` times nothing is nothing, and the
+       * branch was per dimension.
+       */
       const po = i * S;
       const ho = slot * S;
-      for (let d = 0; d < S; d++) {
-        let v = CHEM[g + B_STATE + d];
-        const wi = g + W_IN + d * IN_DIMS;
-        for (let k = 0; k < IN_DIMS; k++) v += CHEM[wi + k] * x[k];
-        const ws = g + W_SELF + d * S;
-        for (let k = 0; k < S; k++) v += CHEM[ws + k] * prev[po + k];
-        if (deg > 0) {
-          const wn = g + W_NET + d * S;
-          for (let k = 0; k < S; k++) v += CHEM[wn + k] * mean[k];
-        }
-        H[ho + d] = v / (1 + (v < 0 ? -v : v));
+      const p0 = prev[po];
+      const p1 = prev[po + 1];
+      const p2 = prev[po + 2];
+      const p3 = prev[po + 3];
+      const m0 = deg > 0 ? mean[0] : 0;
+      const m1 = deg > 0 ? mean[1] : 0;
+      const m2 = deg > 0 ? mean[2] : 0;
+      const m3 = deg > 0 ? mean[3] : 0;
+      const x0 = x[0];
+      const x1 = x[1];
+      const x2 = x[2];
+      const x3 = x[3];
+      const x4 = x[4];
+      const x5 = x[5];
+      const x6 = x[6];
+      const gi = g + W_IN;
+      const gs = g + W_SELF;
+      const gn = g + W_NET;
+      const gb = g + B_STATE;
+      {
+        const wi = gi + 0;
+        const ws = gs + 0;
+        const wn = gn + 0;
+        const v =
+          CHEM[gb + 0] +
+          CHEM[wi] * x0 + CHEM[wi + 1] * x1 + CHEM[wi + 2] * x2 + CHEM[wi + 3] * x3 +
+          CHEM[wi + 4] * x4 + CHEM[wi + 5] * x5 + CHEM[wi + 6] * x6 +
+          CHEM[ws] * p0 + CHEM[ws + 1] * p1 + CHEM[ws + 2] * p2 + CHEM[ws + 3] * p3 +
+          CHEM[wn] * m0 + CHEM[wn + 1] * m1 + CHEM[wn + 2] * m2 + CHEM[wn + 3] * m3;
+        H[ho + 0] = v / (1 + (v < 0 ? -v : v));
+      }
+      {
+        const wi = gi + 7;
+        const ws = gs + 4;
+        const wn = gn + 4;
+        const v =
+          CHEM[gb + 1] +
+          CHEM[wi] * x0 + CHEM[wi + 1] * x1 + CHEM[wi + 2] * x2 + CHEM[wi + 3] * x3 +
+          CHEM[wi + 4] * x4 + CHEM[wi + 5] * x5 + CHEM[wi + 6] * x6 +
+          CHEM[ws] * p0 + CHEM[ws + 1] * p1 + CHEM[ws + 2] * p2 + CHEM[ws + 3] * p3 +
+          CHEM[wn] * m0 + CHEM[wn + 1] * m1 + CHEM[wn + 2] * m2 + CHEM[wn + 3] * m3;
+        H[ho + 1] = v / (1 + (v < 0 ? -v : v));
+      }
+      {
+        const wi = gi + 14;
+        const ws = gs + 8;
+        const wn = gn + 8;
+        const v =
+          CHEM[gb + 2] +
+          CHEM[wi] * x0 + CHEM[wi + 1] * x1 + CHEM[wi + 2] * x2 + CHEM[wi + 3] * x3 +
+          CHEM[wi + 4] * x4 + CHEM[wi + 5] * x5 + CHEM[wi + 6] * x6 +
+          CHEM[ws] * p0 + CHEM[ws + 1] * p1 + CHEM[ws + 2] * p2 + CHEM[ws + 3] * p3 +
+          CHEM[wn] * m0 + CHEM[wn + 1] * m1 + CHEM[wn + 2] * m2 + CHEM[wn + 3] * m3;
+        H[ho + 2] = v / (1 + (v < 0 ? -v : v));
+      }
+      {
+        const wi = gi + 21;
+        const ws = gs + 12;
+        const wn = gn + 12;
+        const v =
+          CHEM[gb + 3] +
+          CHEM[wi] * x0 + CHEM[wi + 1] * x1 + CHEM[wi + 2] * x2 + CHEM[wi + 3] * x3 +
+          CHEM[wi + 4] * x4 + CHEM[wi + 5] * x5 + CHEM[wi + 6] * x6 +
+          CHEM[ws] * p0 + CHEM[ws + 1] * p1 + CHEM[ws + 2] * p2 + CHEM[ws + 3] * p3 +
+          CHEM[wn] * m0 + CHEM[wn + 1] * m1 + CHEM[wn + 2] * m2 + CHEM[wn + 3] * m3;
+        H[ho + 3] = v / (1 + (v < 0 ? -v : v));
       }
 
       /*
@@ -4796,7 +4862,11 @@ function headAt(
   dims: number,
 ): number {
   const o = g + matrix + row * dims;
-  let v = chem[g + base + row];
-  for (let d = 0; d < dims; d++) v += chem[o + d] * h[ho + d];
-  return v;
+  return (
+    chem[g + base + row] +
+    chem[o] * h[ho] +
+    chem[o + 1] * h[ho + 1] +
+    chem[o + 2] * h[ho + 2] +
+    chem[o + 3] * h[ho + 3]
+  );
 }

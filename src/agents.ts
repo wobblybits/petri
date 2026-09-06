@@ -793,15 +793,51 @@ export function head(a: Agent, matrix: number, base: number, row: number): numbe
  * amplified back out of noise — the same rule `inheritChem` uses on the bases.
  */
 export function emitVector(chem: Float32Array, g: number, h: Float64Array, ho: number, out: Float64Array, oo: number): void {
+  // Unrolled for the same reason the state update is: four channels by four
+  // dimensions is a compile-time shape, and the loop around sixteen
+  // multiply-adds costs more than the arithmetic.
+  const h0 = h[ho];
+  const h1 = h[ho + 1];
+  const h2 = h[ho + 2];
+  const h3 = h[ho + 3];
   let sum = 0;
-  for (let c = 0; c < 4; c++) {
-    const o = g + E_OUT + c * STATE_DIMS;
-    let v = chem[g + EMIT + c];
-    for (let d = 0; d < STATE_DIMS; d++) v += chem[o + d] * h[ho + d];
-    if (v < 0) v = 0;
-    out[oo + c] = v;
-    sum += v;
+  {
+    const o = g + E_OUT + 0;
+    const v =
+      chem[g + EMIT + 0] +
+      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+    const w = v > 0 ? v : 0;
+    out[oo + 0] = w;
+    sum += w;
   }
+  {
+    const o = g + E_OUT + 4;
+    const v =
+      chem[g + EMIT + 1] +
+      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+    const w = v > 0 ? v : 0;
+    out[oo + 1] = w;
+    sum += w;
+  }
+  {
+    const o = g + E_OUT + 8;
+    const v =
+      chem[g + EMIT + 2] +
+      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+    const w = v > 0 ? v : 0;
+    out[oo + 2] = w;
+    sum += w;
+  }
+  {
+    const o = g + E_OUT + 12;
+    const v =
+      chem[g + EMIT + 3] +
+      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+    const w = v > 0 ? v : 0;
+    out[oo + 3] = w;
+    sum += w;
+  }
+
   // Reciprocal once rather than four divides; this runs per body per frame.
   if (sum > 1e-6) {
     const inv = 1 / sum;
@@ -812,11 +848,37 @@ export function emitVector(chem: Float32Array, g: number, h: Float64Array, ho: n
 /** The taste vector. Signed, and not normalised — a taste weight is compared
  *  against other taste weights rather than spent, so there is no budget. */
 export function tasteVector(chem: Float32Array, g: number, h: Float64Array, ho: number, out: Float64Array, oo: number): void {
-  for (let c = 0; c < 4; c++) {
-    const o = g + T_OUT + c * STATE_DIMS;
-    let v = chem[g + TASTE + c];
-    for (let d = 0; d < STATE_DIMS; d++) v += chem[o + d] * h[ho + d];
-    out[oo + c] = v;
+  const h0 = h[ho];
+  const h1 = h[ho + 1];
+  const h2 = h[ho + 2];
+  const h3 = h[ho + 3];
+  {
+    const o = g + T_OUT + 0;
+    const v =
+      chem[g + TASTE + 0] +
+      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+    out[oo + 0] = v;
+  }
+  {
+    const o = g + T_OUT + 4;
+    const v =
+      chem[g + TASTE + 1] +
+      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+    out[oo + 1] = v;
+  }
+  {
+    const o = g + T_OUT + 8;
+    const v =
+      chem[g + TASTE + 2] +
+      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+    out[oo + 2] = v;
+  }
+  {
+    const o = g + T_OUT + 12;
+    const v =
+      chem[g + TASTE + 3] +
+      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+    out[oo + 3] = v;
   }
 }
 
