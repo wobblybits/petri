@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CH, CHANNELS, Fields } from './fields.ts';
+import { CH, CHANNELS, FIELD_CELL, Fields } from './fields.ts';
 
 /**
  * A field that computes, rather than four that only remember.
@@ -15,7 +15,14 @@ import { CH, CHANNELS, Fields } from './fields.ts';
  * reaction off.
  */
 
-const AT = { x: 5000, y: 5000 };
+/**
+ * A quarter-size dish, same ten-unit cell. Everything asserted here is
+ * per-cell — a reaction rate, a conservation, a clamp — and a full-world
+ * field made the two whole-array comparisons below the slowest tests in the
+ * suite, twenty seconds each for the matcher to walk four million floats.
+ */
+const DISH = 256;
+const AT = { x: 1280, y: 1280 };
 const U = CH.conP;
 const V = CH.dupP;
 
@@ -31,7 +38,7 @@ const V = CH.dupP;
  * simply decays. Which looks exactly like the kernel being wrong.
  */
 function seeded(radius = 1200): Fields {
-  const f = new Fields();
+  const f = new Fields(DISH, DISH * FIELD_CELL);
   f.setWorldBound(AT.x, AT.y, radius);
   f.fillDisk(U, 1);
   const cs = f.cellSize;
@@ -48,6 +55,14 @@ function seeded(radius = 1200): Fields {
   return f;
 }
 
+/** Index of the first cell that differs, or -1. `toEqual` on a field walks
+ *  every float through the matcher and took twenty seconds a call. */
+function firstDiff(a: Float32Array, b: Float32Array): number {
+  if (a.length !== b.length) return Math.min(a.length, b.length);
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return i;
+  return -1;
+}
+
 function total(f: Fields, ch: number): number {
   let s = 0;
   for (let i = ch; i < f.data.length; i += CHANNELS) s += f.data[i];
@@ -59,14 +74,14 @@ describe('cross-channel reaction', () => {
     const f = seeded();
     const before = f.data.slice();
     f.react(U, V, 0, 0, 1);
-    expect(f.data).toEqual(before);
+    expect(firstDiff(f.data, before)).toBe(-1);
   });
 
   it('refuses to react a channel with itself', () => {
     const f = seeded();
     const before = f.data.slice();
     f.react(U, U, 0.037, 0.06, 1);
-    expect(f.data).toEqual(before);
+    expect(firstDiff(f.data, before)).toBe(-1);
   });
 
   it('converts substrate into activator where both are present', () => {

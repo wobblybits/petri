@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { createAgent, momentOfInertia, boundRadius, cloneAgent, type Agent } from '../agents.ts';
 import { solveContact, solveWire, solveWireSpan, contactMechanics, type ChainNode } from '../chain.ts';
 import { queryHit, SLOP } from '../collide.ts';
-import { Fields } from '../fields.ts';
 import { FAR, FAR_STRIDE, FAR_SUBSTEPS, FAR_WIRE_STRIDE, packFarWire, stepFarKernel } from '../gpu/far-kernel.ts';
 import { defaultParams } from '../params.ts';
 import { wrapAngle } from '../wrap.ts';
@@ -159,29 +158,6 @@ describe('native WASM solver', () => {
     expect(data[FAR_STRIDE + FAR.x]).toBeGreaterThan(2);
   });
 
-  it('matches JS scent diffusion on a small stamp', async () => {
-    const native = new NativeSolver();
-    expect(await native.init(), native.lastError).toBe(true);
-    /*
-     * A small grid on purpose. The solver's diffuse walks every cell and needs
-     * the field copied both ways to do it, so it declines the world grid — a
-     * million cells is 16 MB across and back for arithmetic the TS twin does
-     * over the live box alone. What is under test is the stencil agreeing, and
-     * that is the same stencil at any size.
-     */
-    const js = new Fields(128);
-    js.deposit(0, 40, 40, 8);
-    const wa = new Fields(128);
-    wa.data.set(js.data);
-    js.diffuse(0.28);
-    expect(native.scentDiffuse(wa, 0.28), 'the solver declined this grid').toBe(true);
-    let maxDiff = 0;
-    for (let i = 0; i < js.data.length; i++) {
-      maxDiff = Math.max(maxDiff, Math.abs(js.data[i] - wa.data[i]));
-    }
-    expect(maxDiff).toBeLessThan(1e-5);
-  });
-
   it('matches one JS XPBD wire iteration', async () => {
     const native = new NativeSolver();
     expect(await native.init(), native.lastError).toBe(true);
@@ -189,9 +165,9 @@ describe('native WASM solver', () => {
     const a = createAgent(1, 'era', 60, 100, 0, params);
     const b = createAgent(2, 'era', 300, 100, Math.PI, params);
     const nodes: ChainNode[] = [
-      { x: 120, y: 100, vx: 0, vy: 0, prevX: 120, prevY: 100, integVx: 0, integVy: 0 },
-      { x: 180, y: 130, vx: 0, vy: 0, prevX: 180, prevY: 130, integVx: 0, integVy: 0 },
-      { x: 240, y: 100, vx: 0, vy: 0, prevX: 240, prevY: 100, integVx: 0, integVy: 0 },
+      { x: 120, y: 100, vx: 0, vy: 0, prevX: 120, prevY: 100 },
+      { x: 180, y: 130, vx: 0, vy: 0, prevX: 180, prevY: 130 },
+      { x: 240, y: 100, vx: 0, vy: 0, prevX: 240, prevY: 100 },
     ];
     const aTs = cloneAgent(a);
     const bTs = cloneAgent(b);

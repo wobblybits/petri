@@ -13,7 +13,7 @@ import {
 import { defaultParams } from './params.ts';
 
 function node(x: number, y: number): ChainNode {
-  return { x, y, vx: 0, vy: 0, prevX: x, prevY: y, integVx: 0, integVy: 0 };
+  return { x, y, vx: 0, vy: 0, prevX: x, prevY: y };
 }
 
 const firm: WireStiffness = { scale: 1, slack: 1 };

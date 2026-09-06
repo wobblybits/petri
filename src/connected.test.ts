@@ -9,7 +9,11 @@ function frozenLive(): Params {
   const params = defaultParams();
   params.snapRadius = 0;
   params.snapWell = 0;
-  params.rewriteDuration = 30;
+  // No rewrites at all, not slow ones. A thirty-second rewrite still begins
+  // hauling its pair together on its first frame, and the Eras wired to the
+  // pair are towed along at a steady 30 px/s — which this file then read as
+  // a net that could not settle. The topology is meant to hold still here.
+  params.rewriteDuration = 0;
   params.spawnInterval = 0;
   return params;
 }
@@ -23,6 +27,9 @@ function frozenPassive(): Params {
   params.flockSep = 0;
   params.deposit = 0;
   params.sense = 0;
+  // The transport pump is a motor too: a pair pumping energy recoils along
+  // the wire, which is the swimming stroke. A passive net has it off.
+  params.transportRecoil = 0;
   return params;
 }
 

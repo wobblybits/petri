@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CH, CHANNELS, Fields } from './fields.ts';
+import { CH, CHANNELS, FIELD_CELL, Fields } from './fields.ts';
 
 /**
  * Per-channel diffuse and decay rates.
@@ -16,11 +16,16 @@ import { CH, CHANNELS, Fields } from './fields.ts';
  * for no reason anybody could later find.
  */
 
+/**
+ * A quarter-size dish, same ten-unit cell; everything here is per-cell and
+ * the full world only made each frame sixteen times slower.
+ */
+const DISH = 256;
 /** Somewhere inside the grid, away from the rim, in world units. */
-const AT = { x: 5000, y: 5000 };
+const AT = { x: 1280, y: 1280 };
 
 function seeded(): Fields {
-  const f = new Fields();
+  const f = new Fields(DISH, DISH * FIELD_CELL);
   for (let ch = 0; ch < CHANNELS; ch++) f.deposit(ch, AT.x, AT.y, 10);
   return f;
 }
@@ -114,16 +119,23 @@ describe('per-channel field rates', () => {
     const before = total(f, CH.aux);
     // The deposit is bilinear across four cells; with no diffusion and no
     // decay those four cells are the whole channel, forever.
-    const touched: number[] = [];
+    const touched = new Uint8Array(f.data.length / CHANNELS);
     for (let i = 0; i < f.data.length; i += CHANNELS) {
-      if (f.data[i + CH.aux] !== 0) touched.push(i);
+      if (f.data[i + CH.aux] !== 0) touched[i / CHANNELS] = 1;
     }
     for (let i = 0; i < 60; i++) frame(f);
     expect(total(f, CH.aux)).toBeCloseTo(before, 5);
+    // A mask, not `includes` on a list inside a loop over every cell; and
+    // one matcher call for the whole grid rather than one per cell.
+    let changed = -1;
     for (let i = 0; i < f.data.length; i += CHANNELS) {
-      const still = f.data[i + CH.aux] !== 0;
-      expect(still, `cell ${i / CHANNELS} changed occupancy`).toBe(touched.includes(i));
+      const still = f.data[i + CH.aux] !== 0 ? 1 : 0;
+      if (still !== touched[i / CHANNELS]) {
+        changed = i / CHANNELS;
+        break;
+      }
     }
+    expect(changed, `cell ${changed} changed occupancy`).toBe(-1);
   });
 
   it('clamps a rate that would overshoot instead of going unstable', () => {

@@ -100,18 +100,24 @@ export const SCENARIOS: Scenario[] = [
    * between neighbouring bodies would show up.
    */
   {
-    name: 'soup, part-zoomed (mixed LOD)',
+    name: 'brick, part-zoomed (mixed LOD)',
     frames: 300,
-    build: (sim, params) => loadPreset(sim, 'soup', params),
+    build: (sim, params) => brick(sim, params, 8),
     tune: (p) => {
-      p.soupCount = 60;
+      p.spawnInterval = 0;
+      p.snapRadius = 0;
     },
-    // A small viewport over one corner, not a zoom level. Zoom alone no longer
-    // separates this from "no view": the scent field stopped resizing itself
-    // to the camera, and at any zoom where the whole soup is on screen every
-    // body is detailed either way. Showing only part of the pond is what
-    // actually splits the population between the two tiers.
-    view: { x: 300, y: 200, zoom: 1, viewW: 400, viewH: 300 },
+    // A viewport over the left half of a wired brick, at a zoom where a body
+    // on screen is above the detailed band and one off screen is FAR, so the
+    // tier line runs through the middle of a net and wires cross it. That is
+    // the case worth pinning, and it has to be a *wired* scene: this used to
+    // be the soup, whose sixty bodies are scattered across a world disk ten
+    // thousand units wide and never touch — so a soup half-viewed hashes
+    // identically to a soup with no view, since a lone body integrates the
+    // same on either tier, and a 400x300 window at zoom 1 held no body at
+    // all and hashed identically to the FAR scene. The distinctness guard
+    // below reported both, correctly, for weeks.
+    view: { x: 280, y: 382, zoom: 0.6, viewW: 120, viewH: 240 },
   },
   {
     name: 'soup, zoomed out (FAR)',

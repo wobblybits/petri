@@ -200,8 +200,10 @@ export default defineConfig({
      * it is not a regression to tune away here.
      */
     testTimeout: 150_000,
-    // Applied to both projects: seeds Math.random and resets the Sim statics
-    // per test, so a file's result does not depend on which file ran before it.
+    // Applied to every project: seeds Math.random and resets the Sim statics
+    // and the wasm caches per test, so a file's result does not depend on
+    // which file ran before it. The correctness projects add a second setup
+    // file that shrinks the dish; see src/test-setup-small-field.ts.
     setupFiles: ['./src/test-setup.ts'],
     // Two projects, because they need opposite things from the runner.
     //
@@ -217,6 +219,7 @@ export default defineConfig({
           name: 'suite',
           include: ['src/**/*.test.ts'],
           exclude: ['**/node_modules/**', '**/dist/**', 'src/**/*.perf.test.ts', ...SOAK],
+          setupFiles: ['./src/test-setup.ts', './src/test-setup-small-field.ts'],
         },
       },
       /*
@@ -233,6 +236,7 @@ export default defineConfig({
           name: 'soak',
           include: SOAK,
           testTimeout: 300_000,
+          setupFiles: ['./src/test-setup.ts', './src/test-setup-small-field.ts'],
         },
       },
       {

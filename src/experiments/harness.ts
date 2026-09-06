@@ -51,6 +51,14 @@ export interface TrialSpec {
   sampleEvery?: number;
   /** World size handed to `Sim`; the disk is the field's, this is only the spawn box. */
   world?: { w: number; h: number };
+  /**
+   * Field cells a side. The production dish is 1024 (10,240 units); a trial
+   * pays the CPU field's fixed cost every frame, so a smaller dish is the
+   * difference between a sweep that finishes and one that does not. 512 is
+   * a quarter of the work and holds a few thousand bodies at the spacing a
+   * pond settles to.
+   */
+  fieldCells?: number;
 }
 
 export interface Sample {
@@ -183,7 +191,7 @@ export function runTrial(spec: TrialSpec): Trial {
     const params: Params = { ...defaultParams(), ...(spec.params ?? {}) };
     params.soupCount = spec.soupCount;
     const world = spec.world ?? { w: 1600, h: 1200 };
-    const sim = new Sim(world.w, world.h);
+    const sim = new Sim(world.w, world.h, spec.fieldCells ?? 512);
     loadPreset(sim, 'soup', params);
     const dt = spec.dt ?? 1 / 60;
     const every = spec.sampleEvery ?? 5;

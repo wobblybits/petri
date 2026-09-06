@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CH, CHANNELS, FERTILISE_CH, Fields } from './fields.ts';
+import { CH, CHANNELS, FERTILISE_CH, FIELD_CELL, Fields } from './fields.ts';
 import { EnergyGrid } from './energy.ts';
 import { defaultParams } from './params.ts';
 import { Sim } from './sim.ts';
@@ -21,10 +21,12 @@ import { Sim } from './sim.ts';
  */
 
 const CAP = 0.0625;
-const AT = { x: 5000, y: 5000 };
+/** A quarter-size dish, same ten-unit cell; the growth law is per-cell. */
+const DISH = 256;
+const AT = { x: 1280, y: 1280 };
 
 function dish(radius = 1200): Fields {
-  const f = new Fields();
+  const f = new Fields(DISH, DISH * FIELD_CELL);
   f.setWorldBound(AT.x, AT.y, radius);
   f.decayRate[CH.energy] = 0;
   f.fillDisk(CH.energy, CAP);
@@ -123,7 +125,7 @@ describe('ground', () => {
     // it — silently, and worse the closer to the edge it got.
     const r = 1200;
     for (const d of [0, 0.5, 0.9, 0.99]) {
-      const f = new Fields();
+      const f = new Fields(DISH, DISH * FIELD_CELL);
       f.setWorldBound(AT.x, AT.y, r);
       const before = total(f);
       f.addAt(CH.energy, AT.x + r * d, AT.y, 5);
@@ -132,9 +134,9 @@ describe('ground', () => {
   });
 
   it('drops a deposit that lands outside the dish entirely', () => {
-    const f = new Fields();
+    const f = new Fields(DISH, DISH * FIELD_CELL);
     f.setWorldBound(AT.x, AT.y, 1200);
-    f.addAt(CH.energy, AT.x + 4000, AT.y, 5);
+    f.addAt(CH.energy, AT.x + 1250, AT.y, 5);
     expect(total(f)).toBe(0);
   });
 

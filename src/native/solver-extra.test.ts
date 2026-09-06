@@ -25,7 +25,7 @@ function cloneNodes(nodes: ChainNode[]): ChainNode[] {
 }
 
 function makeNode(x: number, y: number): ChainNode {
-  return { x, y, vx: 0, vy: 0, prevX: x, prevY: y, integVx: 0, integVy: 0 };
+  return { x, y, vx: 0, vy: 0, prevX: x, prevY: y };
 }
 
 function slotCode(slot: 'p' | 'l' | 'r'): number {

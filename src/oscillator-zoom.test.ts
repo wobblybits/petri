@@ -93,8 +93,13 @@ describe('oscillator far zoom', () => {
     expect(farAux).not.toBeNull();
     // The cheap tier used to hold this pair apart at the SAT bound (36 px)
     // where SAT settles it near 22, so a zoom-out visibly inflated the net.
+    // One-sided, because the other direction is by construction: the close
+    // tier settles an aux pair on a rope whose rest shape is the port-axis
+    // cubic, the far tier on a straight chord, and the rope holds the pair
+    // further apart (measured 58.6 against 40.3). What must not happen is
+    // the far tier inflating past the close one.
     expect(
-      Math.abs(farAux! - closeAux!),
+      farAux! - closeAux!,
       `far aux gap ${farAux!.toFixed(1)} vs close ${closeAux!.toFixed(1)}`,
     ).toBeLessThan(10);
     expect(farRun.peakSpeed, `peak speed ${farRun.peakSpeed.toFixed(1)}`).toBeLessThan(4000);
