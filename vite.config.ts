@@ -153,6 +153,8 @@ const SOAK = [
   'src/determinism.test.ts',
   'src/connected.test.ts',
   'src/oscillator-zoom.test.ts',
+  // Two tests that run a soup for a minute each to hear that it keeps sounding.
+  'src/audio/integration.test.ts',
 ];
 
 /** Pages serves index.html; Vite's demo input is demo.html. */
