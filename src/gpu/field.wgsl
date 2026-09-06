@@ -285,18 +285,30 @@ fn sampleAt(p: vec2f) -> vec4f {
   return out;
 }
 
-// Three samples per body, each collapsed against its taste weights. This is
-// the whole of what steering needs from the field — the reason the field can
-// stay here and only a handful of scalars per body go back.
+// Two vec4f per body.
+//
+// The first is the three sensor readings steering wants, each collapsed
+// against the body's taste weights — the reason the field can stay here and
+// only a handful of scalars per body go back.
+//
+// The second is the raw four channels under the body, which is a different
+// consumer with a different need: the genome's `Wx` sense columns multiply
+// each channel by its own weight, so a taste-collapsed scalar cannot serve
+// them. `Sim.updateState` used to get this from `Fields.sampleAll` on the CPU,
+// out of an array the GPU never writes to — the quietest of the reasons
+// `openFieldGpu` refuses. It costs nothing to add here: `own` is already
+// sampled for the third scalar above.
 @compute @workgroup_size(64)
 fn gather(@builtin(global_invocation_id) gid: vec3u) {
   let k = gid.x;
   if (k >= P.nProbe) { return; }
   let pr = probes[k];
-  samples[k] = vec4f(
+  let own = sampleAt(pr.own);
+  samples[k * 2u] = vec4f(
     dot(pr.taste, sampleAt(pr.left)),
     dot(pr.taste, sampleAt(pr.right)),
-    dot(pr.taste, sampleAt(pr.own)),
+    dot(pr.taste, own),
     0.0,
   );
+  samples[k * 2u + 1u] = own;
 }

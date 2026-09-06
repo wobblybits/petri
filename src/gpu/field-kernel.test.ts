@@ -163,6 +163,43 @@ function mirrorSample(
   return out;
 }
 
+/**
+ * The shader's `gather`, which packs two different consumers into one
+ * readback: three taste-collapsed sensor readings for the solver, then the
+ * raw four channels under the body for the genome's `Wx` sense columns.
+ *
+ * The second half is the part worth mirroring. It is what lets
+ * `Sim.updateState` stop calling `Fields.sampleAll` — reading a CPU array the
+ * GPU never writes to was the quietest of the four reasons `openFieldGpu`
+ * refuses, and the only one that fails silently, on machines with a device,
+ * and only once evolution has moved a sense gene off its seed.
+ */
+function mirrorGather(
+  field: Float32Array,
+  cols: number,
+  rows: number,
+  originX: number,
+  originY: number,
+  extent: number,
+  p: { lx: number; ly: number; rx: number; ry: number; ox: number; oy: number; taste: number[] },
+): number[] {
+  const at = (x: number, y: number): number[] =>
+    mirrorSample(field, cols, rows, originX, originY, extent, x, y);
+  const dot = (a: number[], b: number[]): number =>
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+  const own = at(p.ox, p.oy);
+  return [
+    dot(p.taste, at(p.lx, p.ly)),
+    dot(p.taste, at(p.rx, p.ry)),
+    dot(p.taste, own),
+    0,
+    own[0],
+    own[1],
+    own[2],
+    own[3],
+  ];
+}
+
 /** A small field with a few blobs in it, so the passes have work to do. */
 /**
  * Open the live box over the whole grid.
@@ -343,5 +380,47 @@ describe('field shader arithmetic', () => {
     expect(peak, 'sampled only empty space').toBeGreaterThan(0.5);
     expect(worst / peak, `worst sample off by ${((worst / peak) * 100).toFixed(4)}%`)
       .toBeLessThan(1e-6);
+  });
+
+  it('hands back the raw channels the genome reads, not just the taste scalars', () => {
+    // The parity that lets `updateState` stop sampling on the CPU. A
+    // taste-collapsed scalar cannot stand in for these: `Wx` multiplies each
+    // channel by its own weight, so the four have to survive separately.
+    const f = seeded();
+    const taste = [0.7, -1.3, 0.2, 2.1];
+    const ref = new Float64Array(4);
+    let worstRaw = 0;
+    let worstSteer = 0;
+    let peak = 0;
+    for (let k = 0; k < 40; k++) {
+      const ox = 150 + ((k * 41) % 500);
+      const oy = 150 + ((k * 67) % 500);
+      const got = mirrorGather(f.data, f.cols, f.rows, f.originX, f.originY, f.worldW, {
+        lx: ox - 18,
+        ly: oy - 12,
+        rx: ox + 18,
+        ry: oy - 12,
+        ox,
+        oy,
+        taste,
+      });
+
+      // Second half against the call it replaces, channel for channel.
+      f.sampleAll(ox, oy, ref, 0);
+      for (let c = 0; c < CHANNELS; c++) {
+        peak = Math.max(peak, Math.abs(ref[c]));
+        worstRaw = Math.max(worstRaw, Math.abs(ref[c] - got[4 + c]));
+      }
+
+      // And the first half still says what steering was already told, so the
+      // widening did not disturb the consumer that was already there.
+      let own = 0;
+      for (let c = 0; c < CHANNELS; c++) own += ref[c] * taste[c];
+      worstSteer = Math.max(worstSteer, Math.abs(own - got[2]));
+    }
+    expect(peak, 'sampled only empty space').toBeGreaterThan(0.5);
+    expect(worstRaw / peak, `raw channels off by ${((worstRaw / peak) * 100).toFixed(4)}%`)
+      .toBeLessThan(1e-6);
+    expect(worstSteer / peak, 'the steering scalar moved').toBeLessThan(1e-6);
   });
 });

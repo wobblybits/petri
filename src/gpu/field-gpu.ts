@@ -29,6 +29,13 @@ const UNIFORM_BYTES = 144;
 const DEPOSIT_FLOATS = 8;
 const PROBE_FLOATS = 12;
 /**
+ * Floats per body coming back: three taste-collapsed sensor readings for
+ * steering, then the raw four channels under the body for the genome's sense
+ * columns. See `gather` in field.wgsl for why both, and why the second is
+ * free.
+ */
+const SAMPLE_FLOATS = 8;
+/**
  * Fixed point for the deposit accumulator. WGSL atomics are integer only, so
  * a scatter with collisions has to accumulate in integers. Scent values run to
  * a few tens, deposits to fractions of one, and an i32 has nine digits — 1e4
@@ -196,15 +203,15 @@ export class FieldGpu {
       this.readback?.destroy();
       this.probes = device.createBuffer({ size: this.probeCap * PROBE_FLOATS * 4, usage: st });
       this.samples = device.createBuffer({
-        size: this.probeCap * 4 * 4,
+        size: this.probeCap * SAMPLE_FLOATS * 4,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
       });
       this.readback = device.createBuffer({
-        size: this.probeCap * 4 * 4,
+        size: this.probeCap * SAMPLE_FLOATS * 4,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
       });
       this.probeData = new Float32Array(this.probeCap * PROBE_FLOATS);
-      this.sampleData = new Float32Array(this.probeCap * 4);
+      this.sampleData = new Float32Array(this.probeCap * SAMPLE_FLOATS);
     }
   }
 
@@ -337,12 +344,13 @@ export class FieldGpu {
       void other;
 
       if (nProbe > 0) {
-        enc.copyBufferToBuffer(this.samples!, 0, this.readback!, 0, nProbe * 16);
+        enc.copyBufferToBuffer(this.samples!, 0, this.readback!, 0, nProbe * SAMPLE_FLOATS * 4);
       }
       device.queue.submit([enc.finish()]);
       if (nProbe > 0) {
-        await this.readback!.mapAsync(GPUMapMode.READ, 0, nProbe * 16);
-        this.sampleData.set(new Float32Array(this.readback!.getMappedRange(0, nProbe * 16)));
+        const bytes = nProbe * SAMPLE_FLOATS * 4;
+        await this.readback!.mapAsync(GPUMapMode.READ, 0, bytes);
+        this.sampleData.set(new Float32Array(this.readback!.getMappedRange(0, bytes)));
         this.readback!.unmap();
       }
       return true;
@@ -386,6 +394,10 @@ export class FieldGpu {
 
   get probeStride(): number {
     return PROBE_FLOATS;
+  }
+
+  get sampleStride(): number {
+    return SAMPLE_FLOATS;
   }
 }
 

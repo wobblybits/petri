@@ -2614,19 +2614,20 @@ export class Sim {
    *   nothing reads: the whole economy quietly detaches from the field it is
    *   supposed to be an economy of. Harvest has to move to the shader with it.
    *
-   *   OPEN, and the quietest — `updateState` samples the field on the CPU,
-   *   through `Fields.sampleAll` and so out of `fields.data`. That array would
-   *   be a stale copy, so any body whose genome has evolved a non-zero `Wx`
-   *   sense weight reads garbage: silently, only on machines with a device,
-   *   and only once evolution has moved a gene off its seed. The coupling runs
-   *   both ways — if the field moves the state pass has to follow it, or lose
-   *   its sense inputs.
+   *   CLOSED — `updateState` sampled the field on the CPU, through
+   *   `Fields.sampleAll` and so out of `fields.data`, which would have been a
+   *   stale copy: any body whose genome had evolved a non-zero `Wx` sense
+   *   weight read garbage, silently, only on machines with a device, and only
+   *   once evolution had moved a gene off its seed. `gather` now returns the
+   *   raw four channels under each body alongside the three taste-collapsed
+   *   scalars, and `gpuFieldStep` writes them into the store, so the state
+   *   pass takes its sense from wherever the field actually lives.
    *
-   * The two open ones are not independent of each other, either. Splitting the
-   * ground back off onto its own CPU array would close the first without a
-   * harvest shader, but `FERTILISE_CH` is `CH.conP` — growth reads a *signal*
-   * channel as its catalyst — so the ground and the scent field are coupled by
-   * design and cannot be run on opposite sides of the bus.
+   * Splitting the ground back off onto its own CPU array would close the one
+   * remaining blocker without a harvest shader, and it does not work:
+   * `FERTILISE_CH` is `CH.conP`, so growth reads a *signal* channel as its
+   * catalyst and the two cannot be run on opposite sides of the bus. Harvest
+   * has to move.
    *
    * Nothing calls this today, which is why the whole thing was invisible. It
    * wants either the growth pass in `field.wgsl` and the ground read back, or
@@ -2755,11 +2756,41 @@ export class Sim {
     }
     const out = nativeSolver.steerSamples;
     const got = fieldGpu.sampleData;
+    const sStride = fieldGpu.sampleStride;
+    /*
+     * Two consumers, one readback.
+     *
+     * The first three floats are the taste-collapsed sensor readings the
+     * solver steers on. The next four are the raw channels under the body,
+     * which is what `updateState`'s `Wx` sense columns want — it used to get
+     * them from `Fields.sampleAll`, out of a CPU array the GPU never writes,
+     * and that was the quietest of the reasons `openFieldGpu` refuses.
+     *
+     * Written straight into the store by slot rather than kept in list order,
+     * because that is how `updateState` indexes everything else and it runs
+     * against a list it rebuilds for itself.
+     *
+     * A frame late, like the steering samples and for the same reason: this
+     * runs after `endFrame`, so what lands here is read at the top of the next
+     * frame. A body born in between finds its slot holding whatever the last
+     * occupant left, which is why `createAgent` zeroes it — one frame of no
+     * smell for a newborn, against a stall every frame for everyone.
+     */
+    const SENSE = this.agentStore.senseAll;
+    for (let i = 0; i < n; i++) {
+      const o = i * sStride;
+      const so = list[i].slot * 4;
+      SENSE[so] = got[o + 4];
+      SENSE[so + 1] = got[o + 5];
+      SENSE[so + 2] = got[o + 6];
+      SENSE[so + 3] = got[o + 7];
+    }
     if (out) {
       for (let i = 0; i < n; i++) {
-        out[i * 3] = got[i * 4];
-        out[i * 3 + 1] = got[i * 4 + 1];
-        out[i * 3 + 2] = got[i * 4 + 2];
+        const o = i * sStride;
+        out[i * 3] = got[o];
+        out[i * 3 + 1] = got[o + 1];
+        out[i * 3 + 2] = got[o + 2];
       }
       nativeSolver.useSamples(true);
     }
@@ -4523,7 +4554,10 @@ export class Sim {
        */
       if (READS[slot]) {
         const so = slot * 4;
-        this.fields.sampleAll(X[slot], Y[slot], SENSE, so);
+        // On the GPU path `gpuFieldStep` filled these at the end of last
+        // frame, straight out of the buffer that holds the live field.
+        // `fields.data` is a stale copy there and sampling it reads garbage.
+        if (!this.fieldOnGpu) this.fields.sampleAll(X[slot], Y[slot], SENSE, so);
         /*
          * Both scales bring an input onto the range the other four already
          * occupy. The ground is a quantity per cell, so a full cell reads one;
