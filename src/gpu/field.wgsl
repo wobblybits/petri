@@ -37,11 +37,11 @@ struct FieldParams {
   reactF: f32,
   reactKV: f32,
   reactDt: f32,
-  pad0: f32,
+  pad0: f32,  // reserved; keeps reactU on its own sixteen-byte boundary
   reactU: f32,
   reactV: f32,
-  pad1: f32,
-  pad2: f32,
+  nBlocks: u32,
+  harvestCh: f32,
 }
 
 // A world position and what to add there, per channel.
@@ -69,6 +69,38 @@ struct Probe {
 @group(0) @binding(4) var<storage, read> deposits: array<Deposit>;
 @group(0) @binding(5) var<storage, read> probes: array<Probe>;
 @group(0) @binding(6) var<storage, read_write> samples: array<vec4f>;
+
+/*
+ * Harvest, which is grazing rather than sampling and so needs its own shape.
+ *
+ * An energy cell is a block of field cells — `EnergyGrid.span` squared, which
+ * is sixteen at the shipped sizes — and the bodies standing in one block eat
+ * from it in turn. Both of those orderings are load-bearing, so the host does
+ * the binning (it already builds exactly this list, to group bodies by cell)
+ * and hands over one work item per occupied block with its bodies already in
+ * order. One thread per block, blocks independent, no atomics needed: two
+ * bodies never contend because they are never in the same thread's block.
+ */
+struct HarvestBlock {
+  fi: u32,
+  fj: u32,
+  wi: u32,
+  wj: u32,
+  first: u32,
+  count: u32,
+  pad0: u32,
+  pad1: u32,
+}
+
+@group(0) @binding(7) var<storage, read> hBlocks: array<HarvestBlock>;
+// Room in each body's tank, in the order its block feeds them.
+@group(0) @binding(8) var<storage, read> hRooms: array<f32>;
+// What each body actually got, same indexing. Read back and credited on the
+// next frame; see `Sim.gpuFieldStep`.
+@group(0) @binding(9) var<storage, read_write> hGot: array<f32>;
+
+// Matches `FLOW_EPS` in energy.ts: below this a take is not worth a cell walk.
+const FLOW_EPS: f32 = 1e-9;
 
 fn cellOf(p: vec2f) -> vec2f {
   let g = (p - vec2f(P.originX, P.originY)) / P.extent;
@@ -311,4 +343,61 @@ fn gather(@builtin(global_invocation_id) gid: vec3u) {
     0.0,
   );
   samples[k * 2u + 1u] = own;
+}
+
+/*
+ * A frame of grazing, and a faithful port of `EnergyGrid.take` rather than the
+ * obvious parallel one.
+ *
+ * The obvious one gives every body a proportional share of its block. That is
+ * wrong here, and wrong in a way the CPU version says out loud: draining cells
+ * one at a time leaves an uneven floor, and an uneven floor is what diffusion
+ * has a gradient to work against. A flat share keeps the block uniform and
+ * there is nothing left to flow. So this walks the block in raster order,
+ * emptying each cell before moving to the next, exactly as `take` does.
+ *
+ * The scan restarts at the top of the block for each body rather than carrying
+ * a cursor, which is also what `take` does — cells already emptied are skipped
+ * by the `have <= 0` test, so a fresh scan finds the same place a cursor would.
+ * `wi * wj` is sixteen.
+ *
+ * `if (got <= 0)` ends the block: the ground under it is gone and every body
+ * still queued gets nothing. Their entries are zeroed rather than left, since
+ * the buffer outlives a frame.
+ */
+@compute @workgroup_size(64)
+fn harvest(@builtin(global_invocation_id) gid: vec3u) {
+  let b = gid.x;
+  if (b >= P.nBlocks) { return; }
+  let blk = hBlocks[b];
+  let ch = u32(P.harvestCh);
+  for (var e = 0u; e < blk.count; e++) {
+    var want = hRooms[blk.first + e];
+    if (want <= FLOW_EPS) {
+      hGot[blk.first + e] = 0.0;
+      continue;
+    }
+    var got = 0.0;
+    for (var y = 0u; y < blk.wj; y++) {
+      if (want <= FLOW_EPS) { break; }
+      for (var x = 0u; x < blk.wi; x++) {
+        if (want <= FLOW_EPS) { break; }
+        let idx = (blk.fj + y) * P.cols + (blk.fi + x);
+        var v = src[idx];
+        let have = v[ch];
+        if (have <= 0.0) { continue; }
+        var g = want;
+        if (have < want) { g = have; }
+        v[ch] = have - g;
+        src[idx] = v;
+        got += g;
+        want -= g;
+      }
+    }
+    hGot[blk.first + e] = got;
+    if (got <= 0.0) {
+      for (var r = e + 1u; r < blk.count; r++) { hGot[blk.first + r] = 0.0; }
+      break;
+    }
+  }
 }

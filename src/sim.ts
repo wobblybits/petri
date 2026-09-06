@@ -64,6 +64,7 @@ import {
   EnergyGrid,
   flowChargesFast,
   harvestSlotsFast,
+  HarvestPlan,
   payToward,
   rescueNeed,
   redexNeed,
@@ -407,6 +408,16 @@ export class Sim {
    */
   private readonly escrow = new Map<number, RedexEscrow>();
   /**
+   * Who grazes which block this frame. Reused rather than rebuilt, and shared
+   * by both field paths so the binning has one implementation.
+   *
+   * On the GPU path it is built at the end of a frame and spent at the top of
+   * the next, so it is a frame older than it looks — see `creditHarvest`.
+   */
+  private readonly harvestPlan = new HarvestPlan();
+  /** True once a GPU harvest has been dispatched and not yet credited. */
+  private harvestPending = false;
+  /**
    * Physics detail. When a view is passed, FAR agents keep disc contacts and a
    * chord constraint but skip SAT, rope XPBD, wire clearance, and Hertzian.
    * Missing view = everyone NEAR, which is what tests and a paused layout want.
@@ -743,7 +754,16 @@ export class Sim {
     // Rent-last is only safe *because* of the headroom: at cap == share it
     // leaves every body a hair in debt the moment it commutes.
     this.energy.configure(params.energyCell, params.ambientEnergy);
-    harvestSlotsFast(this.agents.values(), this.agentStore, this.energy);
+    /*
+     * On the GPU path the grazing itself happened at the end of the last
+     * frame, in the shader, against the field the shader owns. All that is
+     * left here is to pay it out — and this is the right place for that, not
+     * the top of the tick: `tickUpkeepFast` kills at `debtCap`, so crediting
+     * after upkeep would let a body die owing itself a meal it had already
+     * been served.
+     */
+    if (this.fieldOnGpu) this.creditHarvest();
+    else harvestSlotsFast(this.agents.values(), this.agentStore, this.energy, this.harvestPlan);
     Sim.phase('harvestSlots');
     this.graph.snap(this.agents, this.w, this.h, params, this.time);
     Sim.phase('snap');
@@ -2659,7 +2679,15 @@ export class Sim {
     // at the array they replaced. Done the wrong way round this writes every
     // deposit and probe into a discarded buffer and the GPU reads zeros —
     // silently, because nothing about it is an error.
-    fieldGpu.reserve(n * 3, n);
+    /*
+     * Built here, at the end of the frame, and spent at the top of the next.
+     *
+     * The binning is a walk over bodies rather than over the field, so it is
+     * CPU work whichever side the field lives on; what crosses is the answer.
+     */
+    const plan = this.harvestPlan;
+    plan.build(this.agents.values(), this.agentStore, this.energy);
+    fieldGpu.reserve(n * 3, n, plan.nBlocks, plan.nEntries);
     const dep = fieldGpu.depositData;
     const pro = fieldGpu.probeData;
     const dStride = fieldGpu.depositStride;
@@ -2720,6 +2748,30 @@ export class Sim {
     }
 
     /*
+     * Six per block here, eight per block there: the shader's `HarvestBlock`
+     * carries two words of padding so a block is a round 32 bytes, which is
+     * the only reason this is a transcode rather than a `set`.
+     */
+    if (plan.nBlocks > 0) {
+      const blk = fieldGpu.blockData;
+      const bStride = fieldGpu.blockStride;
+      const src = plan.blocks;
+      for (let b = 0; b < plan.nBlocks; b++) {
+        const so = b * 6;
+        const bo = b * bStride;
+        blk[bo] = src[so];
+        blk[bo + 1] = src[so + 1];
+        blk[bo + 2] = src[so + 2];
+        blk[bo + 3] = src[so + 3];
+        blk[bo + 4] = src[so + 4];
+        blk[bo + 5] = src[so + 5];
+      }
+      const rooms = fieldGpu.roomData;
+      for (let e = 0; e < plan.nEntries; e++) rooms[e] = plan.rooms[e];
+      this.harvestPending = true;
+    }
+
+    /*
      * The same five passes `Sim.step` runs on the CPU, in the same order, with
      * the same numbers. `decay` is handed the *rate* rather than the keep
      * factor, because the shader resolves per-channel rates itself — one place
@@ -2746,10 +2798,14 @@ export class Sim {
         kill: params.reactKill,
         dt,
       },
+      { ch: CH.energy, blocks: plan.nBlocks, entries: plan.nEntries },
     );
     if (!ok) {
       // The device went away mid-session. Fall back for good rather than
-      // leaving the field frozen on whatever the GPU last held.
+      // leaving the field frozen on whatever the GPU last held. Nothing
+      // grazed, so nothing is owed: drop the pending credit or the next
+      // frame pays out of a buffer the GPU never wrote.
+      this.harvestPending = false;
       this.fieldOnGpu = false;
       nativeSolver.useSamples(false);
       return;
@@ -4281,6 +4337,42 @@ export class Sim {
     const give = amount < room ? amount : room;
     if (give > 0) a.extra += give;
     if (amount - give > 0) this.energy.addAt(a.x, a.y, amount - give);
+  }
+
+  /**
+   * Pay out the grazing the shader did at the end of the last frame.
+   *
+   * The plan was built then, from `extra` as it stood at the end of that
+   * frame, and nothing between there and here touches `extra` — harvest is
+   * the first thing in `endFrame` that does. So the room each body was
+   * credited against is exactly the room it would have had if the take had
+   * happened now: the pipelining is exact, not an approximation anyone has to
+   * budget error for.
+   *
+   * The id check is not currently reachable and is here because the invariant
+   * it guards is a scheduling one. A plan spans a frame boundary, and if a
+   * body ever comes to die or be born between the dispatch and this, the slot
+   * it vacated would be paid its meal. Silent, and it would look like a
+   * conservation leak somewhere else entirely.
+   */
+  private creditHarvest(): void {
+    if (!this.harvestPending) return;
+    this.harvestPending = false;
+    const plan = this.harvestPlan;
+    const got = fieldGpu.gotData;
+    const store = this.agentStore;
+    const EXTRA = store.extra;
+    const CAP = store.energyCap;
+    const IDS = store.id;
+    for (let e = 0; e < plan.nEntries; e++) {
+      const g = got[e];
+      if (!(g > 0)) continue;
+      const slot = plan.slots[e];
+      if (IDS[slot] !== plan.ids[e]) continue;
+      const cap = CAP[slot];
+      const next = EXTRA[slot] + g;
+      EXTRA[slot] = next > cap ? cap : next;
+    }
   }
 
   /**

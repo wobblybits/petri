@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CH, CHANNELS, Fields } from '../fields.ts';
+import { EnergyGrid } from '../energy.ts';
+import { defaultParams } from '../params.ts';
 
 /**
  * The field shaders' arithmetic, checked against `Fields`.
@@ -198,6 +200,52 @@ function mirrorGather(
     own[2],
     own[3],
   ];
+}
+
+/**
+ * The shader's `harvest`, transcribed.
+ *
+ * This is the mirror that matters most in the file. Every other kernel is a
+ * stencil or a scale — arithmetic that is obviously the same on both sides.
+ * This one is a hand-port of a *sequential* CPU loop, with an early exit and
+ * a nested scan whose order is the whole point, and there is no WebGPU under
+ * Node to check it against. Drains the block in raster order, restarting the
+ * scan per body, exactly as `EnergyGrid.take` does.
+ */
+function mirrorHarvest(
+  field: Float32Array,
+  cols: number,
+  ch: number,
+  blk: { fi: number; fj: number; wi: number; wj: number },
+  rooms: number[],
+): number[] {
+  const FLOW_EPS = 1e-9;
+  const got: number[] = [];
+  for (let e = 0; e < rooms.length; e++) {
+    let want = rooms[e];
+    if (want <= FLOW_EPS) {
+      got.push(0);
+      continue;
+    }
+    let g = 0;
+    for (let y = 0; y < blk.wj && want > FLOW_EPS; y++) {
+      for (let x = 0; x < blk.wi && want > FLOW_EPS; x++) {
+        const idx = ((blk.fj + y) * cols + (blk.fi + x)) * CHANNELS + ch;
+        const have = field[idx];
+        if (have <= 0) continue;
+        const take = have < want ? have : want;
+        field[idx] = have - take;
+        g += take;
+        want -= take;
+      }
+    }
+    got.push(g);
+    if (g <= 0) {
+      while (got.length < rooms.length) got.push(0);
+      break;
+    }
+  }
+  return got;
 }
 
 /** A small field with a few blobs in it, so the passes have work to do. */
@@ -422,5 +470,84 @@ describe('field shader arithmetic', () => {
     expect(worstRaw / peak, `raw channels off by ${((worstRaw / peak) * 100).toFixed(4)}%`)
       .toBeLessThan(1e-6);
     expect(worstSteer / peak, 'the steering scalar moved').toBeLessThan(1e-6);
+  });
+
+  it('grazes a block exactly as EnergyGrid.take does, body after body', () => {
+    // Two fields seeded alike, one drained through `take` and one through the
+    // mirror, cell for cell afterwards. Anything the port got wrong about
+    // order shows up as a different *floor*, not a different total: a flat
+    // proportional share takes the same energy and leaves the block uniform,
+    // which is the one outcome this ordering exists to prevent.
+    const params = defaultParams();
+    params.ambientEnergy = 1;
+    // Full resolution, not the coarse field the arithmetic tests use: an
+    // energy cell is `energyCell / FIELD_CELL` field cells across, so the two
+    // lattices only agree when the field has its real cell size.
+    const ref = new Fields();
+    const mine = new Fields();
+    const grid = new EnergyGrid(params.energyCell, params.ambientEnergy);
+    grid.bind(ref);
+    grid.configure(params.energyCell, params.ambientEnergy);
+    // Seeded through `setCell`, which spreads a cell's worth evenly over its
+    // block, rather than through `fillDisk` — the disk mask needs bounds this
+    // test has no reason to pin, and an empty block would make the comparison
+    // below pass by having nothing to compare.
+    const { i, j, key } = grid.index(ref.originX + ref.worldW * 0.5, ref.originY + ref.worldW * 0.5);
+    grid.setCell(i, j, 1);
+    mine.data.set(ref.data);
+    const rect = grid.blockRect(i, j)!;
+    expect(rect.wi * rect.wj, 'the block should span more than one field cell')
+      .toBeGreaterThan(1);
+
+    // More appetite than the block holds, so the early exit is exercised too.
+    const rooms = [0.02, 0.5, 0.003, 4, 0.1];
+    expect(grid.getCell(i, j), 'the block should have something in it').toBeCloseTo(1, 6);
+    const got = mirrorHarvest(mine.data, mine.cols, CH.energy, rect, rooms);
+    const want = rooms.map((r) => grid.take(key, r));
+
+    for (let e = 0; e < rooms.length; e++) {
+      expect(got[e], `body ${e} took a different amount`).toBeCloseTo(want[e], 6);
+    }
+    let worst = 0;
+    for (let y = 0; y < rect.wj; y++) {
+      for (let x = 0; x < rect.wi; x++) {
+        const k = ((rect.fj + y) * ref.cols + (rect.fi + x)) * CHANNELS + CH.energy;
+        worst = Math.max(worst, Math.abs(ref.data[k] - mine.data[k]));
+      }
+    }
+    expect(worst, 'the block was left in a different state').toBeLessThan(1e-7);
+  });
+
+  it('leaves an uneven floor, which is the reason for the ordering', () => {
+    // Guarding the mechanism rather than the arithmetic. `take`'s comment says
+    // a flat share would keep the block uniform and leave diffusion nothing to
+    // work against; this is what makes that claim testable, and what would
+    // fail if the shader were ever "simplified" into a proportional share.
+    const params = defaultParams();
+    params.ambientEnergy = 1;
+    const f = new Fields();
+    const grid = new EnergyGrid(params.energyCell, params.ambientEnergy);
+    grid.bind(f);
+    grid.configure(params.energyCell, params.ambientEnergy);
+    const { i, j } = grid.index(f.originX + f.worldW * 0.5, f.originY + f.worldW * 0.5);
+    grid.setCell(i, j, 1);
+    const rect = grid.blockRect(i, j)!;
+
+    const before: number[] = [];
+    for (let y = 0; y < rect.wj; y++) {
+      for (let x = 0; x < rect.wi; x++) {
+        before.push(f.data[((rect.fj + y) * f.cols + (rect.fi + x)) * CHANNELS + CH.energy]);
+      }
+    }
+    // A nibble: less than the block holds, so some cells survive untouched.
+    mirrorHarvest(f.data, f.cols, CH.energy, rect, [before[0] * 2.5]);
+    const after: number[] = [];
+    for (let y = 0; y < rect.wj; y++) {
+      for (let x = 0; x < rect.wi; x++) {
+        after.push(f.data[((rect.fj + y) * f.cols + (rect.fi + x)) * CHANNELS + CH.energy]);
+      }
+    }
+    expect(Math.min(...after), 'nothing was emptied').toBe(0);
+    expect(Math.max(...after), 'everything was emptied').toBeGreaterThan(0);
   });
 });

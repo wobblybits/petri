@@ -35,6 +35,8 @@ const PROBE_FLOATS = 12;
  * free.
  */
 const SAMPLE_FLOATS = 8;
+/** u32 per HarvestBlock in the shader's layout. */
+const BLOCK_WORDS = 8;
 /**
  * Fixed point for the deposit accumulator. WGSL atomics are integer only, so
  * a scatter with collisions has to accumulate in integers. Scent values run to
@@ -52,6 +54,7 @@ type Entry =
   | 'react'
   | 'decay'
   | 'grow'
+  | 'harvest'
   | 'gather';
 
 export class FieldGpu {
@@ -68,6 +71,12 @@ export class FieldGpu {
   private probes: GPUBuffer | null = null;
   private samples: GPUBuffer | null = null;
   private readback: GPUBuffer | null = null;
+  private hBlocks: GPUBuffer | null = null;
+  private hRooms: GPUBuffer | null = null;
+  private hGot: GPUBuffer | null = null;
+  private hRead: GPUBuffer | null = null;
+  private blockCap = 0;
+  private entryCap = 0;
   private cells = 0;
   private depositCap = 0;
   private probeCap = 0;
@@ -77,6 +86,14 @@ export class FieldGpu {
   depositData = new Float32Array(0);
   probeData = new Float32Array(0);
   sampleData = new Float32Array(0);
+  /**
+   * Harvest staging, filled by the caller before `step`. One entry per
+   * (block, body) pair in the order that block feeds its bodies; `blockData`
+   * indexes into it. See `harvest` in field.wgsl.
+   */
+  blockData = new Uint32Array(0);
+  roomData = new Float32Array(0);
+  gotData = new Float32Array(0);
 
   async init(cells: number): Promise<boolean> {
     const nav = navigator as Navigator & { gpu?: GPU };
@@ -128,6 +145,9 @@ export class FieldGpu {
           { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: readonly },
           { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: readonly },
           { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: storage },
+          { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: readonly },
+          { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: readonly },
+          { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: storage },
         ],
       });
       const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
@@ -140,6 +160,7 @@ export class FieldGpu {
         'react',
         'decay',
         'grow',
+        'harvest',
         'gather',
       ] as const) {
         this.pipelines.set(
@@ -180,8 +201,14 @@ export class FieldGpu {
   }
 
   /** Size the staging arrays before the caller writes into them. */
-  reserve(nDeposit: number, nProbe: number): void {
-    if (this.device) this.ensureLists(nDeposit, nProbe);
+  reserve(nDeposit: number, nProbe: number, nBlocks = 0, nEntries = 0): void {
+    if (!this.device) return;
+    this.ensureLists(nDeposit, nProbe);
+    this.ensureHarvest(nBlocks, nEntries);
+  }
+
+  get blockStride(): number {
+    return BLOCK_WORDS;
   }
 
   private ensureLists(nDeposit: number, nProbe: number): void {
@@ -216,6 +243,42 @@ export class FieldGpu {
   }
 
   /**
+   * Harvest lists. Separate from `ensureLists` because they are sized by
+   * occupied blocks and hungry bodies rather than by population — a full pond
+   * of sated bodies harvests nothing at all — and because they must exist at
+   * some non-zero size even then: the bind group is built once and every
+   * dispatch uses it, so a null binding would fail every pass and not just
+   * this one.
+   */
+  private ensureHarvest(nBlocks: number, nEntries: number): void {
+    const device = this.device!;
+    const st = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+    if (nBlocks > this.blockCap || !this.hBlocks) {
+      this.blockCap = Math.max(1024, nBlocks * 2);
+      this.hBlocks?.destroy();
+      this.hBlocks = device.createBuffer({ size: this.blockCap * BLOCK_WORDS * 4, usage: st });
+      this.blockData = new Uint32Array(this.blockCap * BLOCK_WORDS);
+    }
+    if (nEntries > this.entryCap || !this.hRooms) {
+      this.entryCap = Math.max(1024, nEntries * 2);
+      this.hRooms?.destroy();
+      this.hGot?.destroy();
+      this.hRead?.destroy();
+      this.hRooms = device.createBuffer({ size: this.entryCap * 4, usage: st });
+      this.hGot = device.createBuffer({
+        size: this.entryCap * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+      this.hRead = device.createBuffer({
+        size: this.entryCap * 4,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      this.roomData = new Float32Array(this.entryCap);
+      this.gotData = new Float32Array(this.entryCap);
+    }
+  }
+
+  /**
    * One frame of field: scatter the deposits, fold them in, diffuse twice,
    * decay, and gather the probes. Returns false if the GPU is not available,
    * in which case the caller keeps doing it on the CPU.
@@ -234,11 +297,13 @@ export class FieldGpu {
     decayRate: number,
     grow: { ch: number; r: number; cap: number; catCh: number; gamma: number },
     react: { u: number; v: number; feed: number; kill: number; dt: number },
+    harvest: { ch: number; blocks: number; entries: number },
   ): Promise<boolean> {
     const device = this.device;
     if (!this.ready || !device || !this.fieldA || !this.fieldB || !this.acc) return false;
     try {
       this.ensureLists(nDeposit, nProbe);
+      this.ensureHarvest(harvest.blocks, harvest.entries);
       const u = new ArrayBuffer(UNIFORM_BYTES);
       const u32 = new Uint32Array(u);
       const f32 = new Float32Array(u);
@@ -279,6 +344,8 @@ export class FieldGpu {
       f32[30] = react.dt;
       f32[32] = react.u;
       f32[33] = react.v;
+      u32[34] = harvest.blocks;
+      f32[35] = harvest.ch;
       device.queue.writeBuffer(this.uniform!, 0, u);
       if (nDeposit > 0) {
         device.queue.writeBuffer(
@@ -296,6 +363,22 @@ export class FieldGpu {
           this.probeData.buffer,
           this.probeData.byteOffset,
           nProbe * PROBE_FLOATS * 4,
+        );
+      }
+      if (harvest.blocks > 0) {
+        device.queue.writeBuffer(
+          this.hBlocks!,
+          0,
+          this.blockData.buffer,
+          this.blockData.byteOffset,
+          harvest.blocks * BLOCK_WORDS * 4,
+        );
+        device.queue.writeBuffer(
+          this.hRooms!,
+          0,
+          this.roomData.buffer,
+          this.roomData.byteOffset,
+          harvest.entries * 4,
         );
       }
 
@@ -316,6 +399,9 @@ export class FieldGpu {
               { binding: 4, resource: { buffer: this.deposits! } },
               { binding: 5, resource: { buffer: this.probes! } },
               { binding: 6, resource: { buffer: this.samples! } },
+              { binding: 7, resource: { buffer: this.hBlocks! } },
+              { binding: 8, resource: { buffer: this.hRooms! } },
+              { binding: 9, resource: { buffer: this.hGot! } },
             ],
           }),
         );
@@ -339,6 +425,17 @@ export class FieldGpu {
       run('react', this.cells, live, other);
       run('decay', this.cells, live, other);
       run('grow', this.cells, live, other);
+      /*
+       * Last, and after the field passes rather than before them.
+       *
+       * On the CPU harvest is the first thing in `endFrame` and the field
+       * passes are the last, so a frame's grazing sees the field as the
+       * previous frame's passes left it. This runs at the end of a frame and
+       * is credited at the top of the next, so putting it after the passes
+       * here lands on exactly the same field state — the pipelining is exact
+       * rather than approximate, which is the whole reason it is safe.
+       */
+      if (harvest.blocks > 0) run('harvest', harvest.blocks, live, other);
       if (nProbe > 0) run('gather', nProbe, live, other);
       // Two swaps, so the live buffer is back where it started.
       void other;
@@ -346,12 +443,21 @@ export class FieldGpu {
       if (nProbe > 0) {
         enc.copyBufferToBuffer(this.samples!, 0, this.readback!, 0, nProbe * SAMPLE_FLOATS * 4);
       }
+      if (harvest.entries > 0) {
+        enc.copyBufferToBuffer(this.hGot!, 0, this.hRead!, 0, harvest.entries * 4);
+      }
       device.queue.submit([enc.finish()]);
       if (nProbe > 0) {
         const bytes = nProbe * SAMPLE_FLOATS * 4;
         await this.readback!.mapAsync(GPUMapMode.READ, 0, bytes);
         this.sampleData.set(new Float32Array(this.readback!.getMappedRange(0, bytes)));
         this.readback!.unmap();
+      }
+      if (harvest.entries > 0) {
+        const bytes = harvest.entries * 4;
+        await this.hRead!.mapAsync(GPUMapMode.READ, 0, bytes);
+        this.gotData.set(new Float32Array(this.hRead!.getMappedRange(0, bytes)));
+        this.hRead!.unmap();
       }
       return true;
     } catch (e) {

@@ -389,7 +389,15 @@ export class EnergyGrid {
    * The field cells under energy cell `(i, j)`: `[fi, fi + span)` squared,
    * clipped to the grid. Empty when the block falls outside it.
    */
-  private block(i: number, j: number): { fi: number; fj: number; wi: number; wj: number } | null {
+  /**
+   * The field cells one energy cell stands on, clipped to the grid.
+   *
+   * Public because the GPU harvest needs exactly this rect — the shader is
+   * handed `(fi, fj, wi, wj)` rather than deriving it, so there is one place
+   * that knows how an energy cell maps onto field cells instead of two that
+   * have to agree.
+   */
+  blockRect(i: number, j: number): { fi: number; fj: number; wi: number; wj: number } | null {
     const f = this.fields;
     if (!f) return null;
     const s = this.span;
@@ -467,7 +475,7 @@ export class EnergyGrid {
     if (this.inexhaustible) return this.ambient;
     const f = this.fields;
     if (f) {
-      const b = this.block(i, j);
+      const b = this.blockRect(i, j);
       if (!b) return 0;
       const d = f.data;
       let sum = 0;
@@ -498,7 +506,7 @@ export class EnergyGrid {
       // has a gradient to work against. Taking a flat share off every cell
       // would keep the block uniform and there would be nothing to flow.
       const { i, j } = decodeKey(key);
-      const b = this.block(i, j);
+      const b = this.blockRect(i, j);
       if (!b) return 0;
       const d = f.data;
       let got = 0;
@@ -539,7 +547,7 @@ export class EnergyGrid {
   setCell(i: number, j: number, amount: number): void {
     const f = this.fields;
     if (f) {
-      const b = this.block(i, j);
+      const b = this.blockRect(i, j);
       if (!b) return;
       // Spread evenly: the block is one cell as far as this API is concerned.
       const each = amount / (b.wi * b.wj);
@@ -645,33 +653,125 @@ export function harvestSlots(agents: Iterable<SlotBody>, grid: EnergyGrid): void
  * doesn't have a store to hand. `sim.ts` does, every frame, for every
  * agent, which is what makes the accessor overhead worth cutting here.
  */
-export function harvestSlotsFast(agents: Iterable<Agent>, store: AgentStore, grid: EnergyGrid): void {
-  const LOCKED = store.locked;
+/**
+ * Who eats from which block, and in what order.
+ *
+ * Lifted out of `harvestSlotsFast` because the GPU needs the same answer and
+ * must not compute it a second way. The binning is a walk over bodies rather
+ * than over the field, so it stays on the CPU either way; what the shader
+ * gets is this, already sorted.
+ *
+ * Both orderings here are load-bearing. Bodies within a block eat in id
+ * order, and `EnergyGrid.take` empties the block's field cells one at a time
+ * rather than taking a flat share — see the note there about the uneven floor
+ * being what diffusion has a gradient to work against.
+ *
+ * Reused frame to frame; `build` overwrites rather than reallocating.
+ */
+export class HarvestPlan {
+  /** Six per block: fi, fj, wi, wj, first, count. */
+  blocks = new Int32Array(0);
+  /** Body slot per entry, in the order its block feeds them. */
+  slots = new Int32Array(0);
+  /**
+   * The agent id in that slot when the plan was built.
+   *
+   * Only the GPU path needs this, and it needs it because a plan built at the
+   * end of one frame is credited at the top of the next. Nothing between the
+   * two touches the roster today, but "nothing between them today" is the kind
+   * of invariant that a later reordering breaks silently and expensively —
+   * energy paid into whichever body inherited the slot.
+   */
+  ids = new Int32Array(0);
+  /** Room in that body's tank when the frame's grazing began. */
+  rooms = new Float64Array(0);
+  /** The energy-cell key per block, which the CPU runner needs and the GPU does not. */
+  keys = new Float64Array(0);
+  nBlocks = 0;
+  nEntries = 0;
+  private readonly bins = new Map<number, number[]>();
+
+  build(agents: Iterable<Agent>, store: AgentStore, grid: EnergyGrid): void {
+    const LOCKED = store.locked;
+    const EXTRA = store.extra;
+    const CAP = store.energyCap;
+    const X = store.x;
+    const Y = store.y;
+    const ID = store.id;
+    const bins = this.bins;
+    bins.clear();
+    this.nBlocks = 0;
+    this.nEntries = 0;
+    for (const a of agents) {
+      const s = a.slot;
+      if (LOCKED[s]) continue;
+      if (EXTRA[s] >= CAP[s] - EXTRA_FULL_EPS) continue;
+      const x = X[s];
+      const y = Y[s];
+      // Off the map is barren, not merely empty: no ambient either.
+      if (!grid.inBounds(x, y)) continue;
+      const { key } = grid.index(x, y);
+      let list = bins.get(key);
+      if (!list) {
+        list = [];
+        bins.set(key, list);
+      }
+      list.push(s);
+    }
+    if (bins.size === 0) return;
+
+    let entries = 0;
+    for (const list of bins.values()) entries += list.length;
+    if (this.blocks.length < bins.size * 6) this.blocks = new Int32Array(bins.size * 12);
+    if (this.keys.length < bins.size) this.keys = new Float64Array(bins.size * 2);
+    if (this.slots.length < entries) {
+      this.slots = new Int32Array(entries * 2);
+      this.ids = new Int32Array(entries * 2);
+      this.rooms = new Float64Array(entries * 2);
+    }
+    const B = this.blocks;
+    for (const [key, list] of bins) {
+      const { i, j } = decodeKey(key);
+      const rect = grid.blockRect(i, j);
+      // A block clipped away entirely feeds nobody; drop it rather than
+      // emitting a zero-sized rect for the shader to skip.
+      if (!rect) continue;
+      list.sort((a, b) => ID[a] - ID[b]);
+      const bo = this.nBlocks * 6;
+      B[bo] = rect.fi;
+      B[bo + 1] = rect.fj;
+      B[bo + 2] = rect.wi;
+      B[bo + 3] = rect.wj;
+      B[bo + 4] = this.nEntries;
+      B[bo + 5] = list.length;
+      this.keys[this.nBlocks] = key;
+      this.nBlocks++;
+      for (const slot of list) {
+        this.slots[this.nEntries] = slot;
+        this.ids[this.nEntries] = ID[slot];
+        this.rooms[this.nEntries] = CAP[slot] - EXTRA[slot];
+        this.nEntries++;
+      }
+    }
+  }
+}
+
+/**
+ * Run a plan against the CPU field, crediting as it goes.
+ *
+ * The shader's `harvest` is a line-for-line port of this loop; keep them in
+ * step. `field-kernel.test.ts` holds the mirror that checks they are.
+ */
+export function runHarvestPlan(plan: HarvestPlan, store: AgentStore, grid: EnergyGrid): void {
   const EXTRA = store.extra;
   const CAP = store.energyCap;
-  const X = store.x;
-  const Y = store.y;
-  const ID = store.id;
-  const hungry = new Map<number, number[]>();
-  for (const a of agents) {
-    const s = a.slot;
-    if (LOCKED[s]) continue;
-    if (EXTRA[s] >= CAP[s] - EXTRA_FULL_EPS) continue;
-    const x = X[s];
-    const y = Y[s];
-    // Off the map is barren, not merely empty: no ambient either.
-    if (!grid.inBounds(x, y)) continue;
-    const { key } = grid.index(x, y);
-    let list = hungry.get(key);
-    if (!list) {
-      list = [];
-      hungry.set(key, list);
-    }
-    list.push(s);
-  }
-  for (const [key, list] of hungry) {
-    list.sort((a, b) => ID[a] - ID[b]);
-    for (const s of list) {
+  const B = plan.blocks;
+  for (let b = 0; b < plan.nBlocks; b++) {
+    const first = B[b * 6 + 4];
+    const count = B[b * 6 + 5];
+    const key = plan.keys[b];
+    for (let e = 0; e < count; e++) {
+      const s = plan.slots[first + e];
       const cap = CAP[s];
       const room = cap - EXTRA[s];
       if (room <= EXTRA_FULL_EPS) continue;
@@ -680,6 +780,28 @@ export function harvestSlotsFast(agents: Iterable<Agent>, store: AgentStore, gri
       EXTRA[s] = Math.min(cap, EXTRA[s] + got);
     }
   }
+}
+
+/**
+ * Store-based twin of `harvestSlots`, for sim.ts's per-frame hot path.
+ * Identical behavior, reading and writing `AgentStore`'s arrays directly by
+ * slot instead of through `Agent`'s accessors.
+ *
+ * Not just `harvestSlots` sped up in place: `energy.test.ts` builds
+ * `SlotBody`-shaped plain object literals directly (not real `Agent`
+ * instances) to exercise this logic in isolation, so `harvestSlots` keeps
+ * its `Iterable<SlotBody>` signature for that and any other caller that
+ * doesn't have a store to hand. `sim.ts` does, every frame, for every
+ * agent, which is what makes the accessor overhead worth cutting here.
+ */
+export function harvestSlotsFast(
+  agents: Iterable<Agent>,
+  store: AgentStore,
+  grid: EnergyGrid,
+  plan: HarvestPlan = new HarvestPlan(),
+): void {
+  plan.build(agents, store, grid);
+  runHarvestPlan(plan, store, grid);
 }
 
 /**
