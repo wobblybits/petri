@@ -1,7 +1,6 @@
 import { CHEM_LEN, EMIT, E_OUT, STATE_DIMS, TASTE, T_OUT, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
 import type { AgentStore } from './agent-store.ts';
 import { DEBT_CAP_MAX, EXTRA_CAP } from './energy.ts';
-import { CH, VOICE } from './fields.ts';
 import { otherEnd, type Graph } from './graph.ts';
 import type { Params } from './params.ts';
 import {
@@ -1014,23 +1013,23 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, assort: boolean): voi
     c[k] = combined + (Math.random() * 2 - 1) * CHEM_MUTATE;
   }
   /*
-   * The voice is spread across the channels that carry it, which is no longer
-   * all four: `CH.energy` holds the ground and nothing emits into it. Zeroing
-   * its two genes rather than leaving them to drift is what keeps the budget
-   * honest — normalising over four slots while only three can be heard would
-   * let a lineage bank a quarter of its unit somewhere silent, and the whole
-   * point of the unit sum is that saying one thing costs you another.
+   * One unit of voice across all four channels, the ground included.
+   *
+   * The ground is in the budget even though nothing says it, because farming
+   * is a thing a body spends itself on and the budget is what makes that a
+   * choice. A lineage that feeds the ground has given up being heard for it,
+   * which is exactly the condition-dependent trade-off that keeps signalling
+   * honest without any separate cost term — and it means an Era's production
+   * competes with an Era's voice rather than being free on top of it.
    */
-  c[EMIT + CH.energy] = 0;
-  for (let d = 0; d < STATE_DIMS; d++) c[E_OUT + CH.energy * STATE_DIMS + d] = 0;
   let sum = 0;
-  for (const k0 of VOICE) {
+  for (let k0 = 0; k0 < 4; k0++) {
     const k = EMIT + k0;
     if (c[k] < 0) c[k] = 0;
     sum += c[k];
   }
   // A body with nothing left to say is mute, not amplified from noise.
-  if (sum > 1e-6) for (const k0 of VOICE) c[EMIT + k0] /= sum;
+  if (sum > 1e-6) for (let k0 = 0; k0 < 4; k0++) c[EMIT + k0] /= sum;
   for (let k = TASTE; k < TASTE + 4; k++) {
     c[k] = Math.min(CHEM_TASTE_MAX, Math.max(-CHEM_TASTE_MAX, c[k]));
   }

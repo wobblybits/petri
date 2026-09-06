@@ -25,7 +25,15 @@ export const CH = {
 
 export const CHANNELS = 4;
 
-/** The channels a body's voice is spread across — everything but `energy`. */
+/**
+ * The channels that carry a *signal* — everything but the ground.
+ *
+ * Not the same set as the emit budget, which is all four. A body can spend its
+ * voice on the ground (that is farming: stock converted into ground, see
+ * `params.farmRate`), but the ground is a substance rather than something
+ * anybody is saying, so `peak` and anything asking "is this pond audible"
+ * wants these three.
+ */
 export const VOICE = [CH.conP, CH.dupP, CH.aux] as const;
 
 /*

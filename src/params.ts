@@ -260,6 +260,30 @@ export interface Params {
    */
   swimCost: number;
   /**
+   * Extra per second a body converts into ground, per unit of voice it spends
+   * on `CH.energy`. 0 = off.
+   *
+   * Farming. One for one at the point of transfer — nothing is created here,
+   * stock simply moves from a tank onto the dish. What makes it worth doing is
+   * what happens next: `grow` is logistic, so growth is proportional to what is
+   * already in a cell and **zero is a fixed point**. A cell grazed to the floor
+   * can never recover on its own; seeding it with anything at all restarts the
+   * growth, and the ground carries it back toward capacity. Investing a little
+   * in a scar returns much more than it cost, bounded by the dish's own
+   * capacity so it is production rather than a mint.
+   *
+   * That is what an Era is for under this economy — one port, cannot commute,
+   * pays no rent — and why `seedChem` puts an Era's whole unit of voice here.
+   * It also means production is now a *phenotype* competing for the same
+   * budget as being heard, rather than a rule keyed on kind.
+   *
+   * Off by default, like every other dial that changes what energy is spent
+   * on, and this one wants care: an Era's income from `ERA_UPKEEP_RATIO` is
+   * about 0.003/s at the default upkeep, so a rate much above that makes a
+   * seeded Era spend faster than it earns and starve.
+   */
+  farmRate: number;
+  /**
    * How loudly a body asks for energy on account of liking where it is.
    *
    * The other half of the motor. A price on swimming alone gives a net a fuel
@@ -412,12 +436,13 @@ export function defaultParams(): Params {
     soupCount: 10000,
     spawnInterval: 0.5,
     energyCell: 40,
-    ambientEnergy: 1,
+    ambientEnergy: 1.0,
     energyDiffuse: 0.05,
     energyRegrow: 0.04,
     upkeep: 0.015,
     emitCost: 0,
     swimCost: 0,
+    farmRate: 0,
     forageAsk: 0,
     rescueTo: 0.9,
     debtCap: -1,
@@ -482,6 +507,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
   { key: 'emitCost', label: 'Emit cost', min: 0, max: 0.05, step: 0.001 },
   { key: 'swimCost', label: 'Swim cost', min: 0, max: 0.002, step: 0.00005 },
+  { key: 'farmRate', label: 'Farm rate', min: 0, max: 0.02, step: 0.0005 },
   { key: 'forageAsk', label: 'Forage ask', min: 0, max: 0.5, step: 0.01 },
   { key: 'rescueTo', label: 'Rescue fill', min: 0, max: 1, step: 0.05 },
   { key: 'debtCap', label: 'Debt cap', min: -2.5, max: -0.05, step: 0.05 },

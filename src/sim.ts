@@ -27,6 +27,7 @@ import {
   W_NET,
   W_SELF,
   effEmit,
+  emitEnergy,
   effTaste,
   flockGain,
   stemOffsetInto,
@@ -754,6 +755,35 @@ export class Sim {
         if (a.locked || !this.graph.isFreeAt(a.id, 'p')) continue;
         const speed = Math.hypot(a.vx, a.vy);
         if (speed > 0) a.extra -= rent * speed;
+      }
+    }
+    /*
+     * Farming: stock converted into ground, one for one.
+     *
+     * Nothing is created at the transfer — this moves energy out of a tank and
+     * onto the dish. The return comes from `grow` afterwards, which is
+     * logistic and so proportional to what a cell already holds: a cell grazed
+     * to zero is stuck there forever, and seeding it with anything restarts
+     * growth that carries it back toward capacity. Investing in a scar returns
+     * much more than it cost, and the dish's capacity bounds the whole thing,
+     * so it is production and not a mint.
+     *
+     * Capped at what the body actually has above break-even. A body cannot
+     * farm itself into debt, which would turn the most useful thing in the
+     * economy into a way to die.
+     */
+    if (params.farmRate > 0) {
+      const rate = params.farmRate * t;
+      for (const a of this.agents.values()) {
+        if (a.locked) continue;
+        const w = emitEnergy(a);
+        if (w <= 0) continue;
+        const want = rate * w;
+        const have = a.extra > 0 ? a.extra : 0;
+        const give = want < have ? want : have;
+        if (give <= 0) continue;
+        a.extra -= give;
+        this.energy.addAt(a.x, a.y, give);
       }
     }
     for (const id of this.contactDamage(params, t)) this.kill(id);

@@ -774,13 +774,15 @@ export function head(a: Agent, matrix: number, base: number, row: number): numbe
 }
 
 /**
- * Emit weight for one channel. Never negative.
+ * Emit weight for one *signal* channel. Never negative.
  *
- * Silent on `CH.energy`, unconditionally and here rather than at the three
- * places that lay a deposit — that channel holds the ground, and a body able
- * to emit into it would be minting food from nothing at five units a port a
- * frame. One choke point, because a fourth deposit path would otherwise be a
- * very quiet way to break the economy.
+ * Still zero on `CH.energy`, and still here rather than at the three places
+ * that lay a deposit. The ground is now something a body can spend its voice
+ * on — see `emitEnergy` — but it must never reach the field through the scent
+ * deposit path, because that path multiplies by `params.deposit`, which is
+ * five. A body emitting a whole unit would put five units of food a frame into
+ * the world out of nothing. Farming goes through the economy instead, at its
+ * own rate and paid for; this stays the choke point that keeps the two apart.
  */
 export function effEmit(a: Agent, c: number): number {
   if (c === CH.energy) return 0;
@@ -788,6 +790,26 @@ export function effEmit(a: Agent, c: number): number {
   const h = a.h;
   const o = E_OUT + c * STATE_DIMS;
   let v = ch[EMIT + c];
+  for (let d = 0; d < STATE_DIMS; d++) v += ch[o + d] * h[d];
+  return v > 0 ? v : 0;
+}
+
+/**
+ * What this body is putting into the ground: its emit weight on `CH.energy`.
+ *
+ * Separate from `effEmit` because it is not a signal and does not travel the
+ * same road. The weight comes out of the same unit-sum budget as the three
+ * things a body can say, which is the whole reason this is safe to allow:
+ * spending voice on farming trades directly against being heard, so a body
+ * that feeds the ground cannot also shout. That trade-off is what makes the
+ * signalling honest — no separate cost term needed, and the tank pays for the
+ * energy itself.
+ */
+export function emitEnergy(a: Agent): number {
+  const ch = a.chem;
+  const h = a.h;
+  const o = E_OUT + CH.energy * STATE_DIMS;
+  let v = ch[EMIT + CH.energy];
   for (let d = 0; d < STATE_DIMS; d++) v += ch[o + d] * h[d];
   return v > 0 ? v : 0;
 }
@@ -907,6 +929,20 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
      * then: one erase past the seed, mutation and the renormalisation give a
      * child a full unit spread across the three channels that carry.
      */
+    /*
+     * An Era's one unit of voice goes into the ground.
+     *
+     * It said nothing at all for a while, because its seeded channel became
+     * the ground and nothing emits onto the ground through the scent path.
+     * Farming is what an Era is *for* under this economy: one port, cannot
+     * commute, pays no rent. Its whole job is to be somewhere useful, and the
+     * useful thing to do with stock is put it where the logistic term can
+     * multiply it — seeding a scarred cell restarts growth that a depleted
+     * cell can never restart on its own.
+     *
+     * Inert until `farmRate` is turned on, like every other economy dial.
+     */
+    c[EMIT + CH.energy] = 1;
     c[TASTE] = S;
     c[TASTE + 1] = S;
     c[TASTE + 3] = M;
