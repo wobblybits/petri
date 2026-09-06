@@ -794,16 +794,20 @@ export class Sim {
       Sim.phase('scentWrite');
       this.tuneChannels(params);
       this.fields.diffuse(params.diffuse);
+      Sim.phase('field:diffuse1');
       this.fields.diffuse(params.diffuse * 0.65);
+      Sim.phase('field:diffuse2');
       // After the spreading and before the decay: Gray-Scott's own kill term
       // is `feed + kill`, and `decay` then acts on both channels on top of it,
       // so the effective kill is larger than `reactKill` alone.
       this.fields.react(CH.conP, CH.dupP, params.reactFeed, params.reactKill, t);
+      Sim.phase('field:react');
       this.fields.decay(params.decay);
+      Sim.phase('field:decay');
       // After the passes that move it, so a cell grows from what it kept
       // rather than from what it was about to lose.
       this.fields.grow(CH.energy, params.energyRegrow * t, this.energy.cellCap);
-      Sim.phase('fields');
+      Sim.phase('field:grow');
     }
     this.autoSpawn(params, t);
     Sim.phase('autoSpawn');
