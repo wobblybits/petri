@@ -779,6 +779,21 @@ export class Fields {
     this.decayCells(rate);
   }
 
+  /*
+   * Fusing this with `grow` into one traversal was tried and is not worth it.
+   *
+   * They walk the same eight hundred thousand cells and the second reads what
+   * the first just wrote, so one pass looks obviously better. Measured, the
+   * two separate passes are 3.17 ms and the fused one 3.13 — inside the noise
+   * — and a first attempt that also skipped channels whose keep was exactly 1
+   * came out at 3.67, because five loop-invariant branches per cell cost more
+   * than the walk they saved.
+   *
+   * The reason is that these are not traversal-bound: a multiply and a store
+   * per channel is little enough that the second walk is nearly free once the
+   * rows are resident. `diffuse` is the pass where the per-cell work is large
+   * enough for structure to matter, and it is where the wins have been.
+   */
   private decayCells(rate: number): void {
     if (this.hiI < this.loI) return;
     const d = this.data;
