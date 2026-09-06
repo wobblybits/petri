@@ -1,4 +1,4 @@
-import { B_STATE, CHEM_LEN, EMIT, E_OUT, STATE_DIMS, TASTE, T_OUT, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
+import { CHEM_LEN, EMIT, E_OUT, STATE_DIMS, TASTE, T_OUT, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
 import type { AgentStore } from './agent-store.ts';
 import { DEBT_CAP_MAX, EXTRA_CAP } from './energy.ts';
 import { CH, VOICE } from './fields.ts';
@@ -867,14 +867,27 @@ function snapshotTargets(
   ];
 }
 
-/** The heritable fields a Con+Dup commute recombines into its children. */
+/**
+ * The heritable *scalars* a Con+Dup commute recombines into its children.
+ *
+ * Four now, not eight. Flocking and transport left because they became output
+ * heads — `F.h + f0` and `P.h + p0` — and so are inherited through the genome
+ * like everything else the network computes, rather than as numbers of their
+ * own. What is left here is physiology: how deep a tank goes, how far into
+ * debt a body can run, how full a rescue fills it, and how well it conducts
+ * demand. Those are properties of a body, not decisions it makes, and none of
+ * them should depend on its mood.
+ *
+ * The bases keep the property the old ranges were shaped around. `f0` seeds
+ * from a slider that ships at zero for alignment, and nothing clamps it at
+ * zero on the way through inheritance — a floor would reflect, so a gene
+ * sitting at off would have half its mutations absorbed and drift upward
+ * whether or not anything selected for it. `flockGain` still does the clamping
+ * where the force reads it, which is the same arrangement as before.
+ */
 export const TRAIT_KEYS = [
   'requestDecay',
   'energyCap',
-  'transportThrust',
-  'transportRecoil',
-  'flockAlign',
-  'flockSep',
   'debtCap',
   'rescueTo',
 ] as const;
@@ -918,22 +931,6 @@ export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: n
    */
   debtCap: { min: -2.5, max: DEBT_CAP_MAX, mutate: 0.12 },
   rescueTo: { min: 0, max: 1, mutate: 0.06 },
-  transportThrust: { min: 0, max: 1, mutate: 0.08 },
-  transportRecoil: { min: 0, max: 200, mutate: 12 },
-  /*
-   * These two float below zero on purpose, and are clamped where they are
-   * used rather than where they are bred — see `flockGain`.
-   *
-   * Clamping a trait at its own floor makes that floor reflect: a body sitting
-   * at zero has half its mutations absorbed and half moving up, so the trait
-   * drifts upward whether or not anything selects for it. `flockAlign` ships
-   * off precisely so that alignment has to emerge, and a reflecting barrier
-   * hands it to every lineage for free. Letting the gene go negative gives the
-   * random walk somewhere to go in both directions, so switched-off stays
-   * switched-off until something actually favours turning it on.
-   */
-  flockAlign: { min: -8, max: 16, mutate: 0.6 },
-  flockSep: { min: -60, max: 120, mutate: 5 },
 };
 
 /**
@@ -1060,7 +1057,13 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, assort: boolean): voi
   for (let k = E_OUT; k < E_OUT + 4 * STATE_DIMS; k++) {
     c[k] = Math.min(CHEM_SLOPE_MAX, Math.max(-CHEM_SLOPE_MAX, c[k]));
   }
-  for (let k = T_OUT; k < B_STATE + STATE_DIMS; k++) {
+  /*
+   * Everything from `T` to the end of the genome, which is the state matrices
+   * and both output heads. They are all dimensionless — `HEAD_SCALE` is what
+   * turns a head gene into a force — so one bound covers them, and every gene
+   * in the genome gets a mutation step that means the same thing.
+   */
+  for (let k = T_OUT; k < CHEM_LEN; k++) {
     c[k] = Math.min(CHEM_TASTE_MAX, Math.max(-CHEM_TASTE_MAX, c[k]));
   }
 }

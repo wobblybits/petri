@@ -12,6 +12,11 @@ import {
   stemOffset,
   B_STATE,
   CHEM_LEN,
+  F_BASE,
+  F_OUT,
+  HEAD_SCALE,
+  P_BASE,
+  P_OUT,
   IN_BOUND,
   IN_DEMAND,
   IN_DIMS,
@@ -4189,6 +4194,10 @@ export class Sim {
     const gScale = this.groundScale;
     const x = this.stateInput;
     const mean = this.stateMean;
+    const FA = store.flockAlign;
+    const FS = store.flockSep;
+    const TT = store.transportThrust;
+    const TR = store.transportRecoil;
     for (let i = 0; i < n; i++) {
       const slot = slotOf[i];
       const g = slot * CHEM_LEN;
@@ -4265,6 +4274,27 @@ export class Sim {
         }
         H[ho + d] = v / (1 + (v < 0 ? -v : v));
       }
+
+      /*
+       * The output heads, off this frame's state.
+       *
+       * Written into the same store fields the traits used to live in, so
+       * every consumer downstream — the native flock packing, the JS pair
+       * force, `recoil`, `state-hash` — reads what it always read and does not
+       * need to know these stopped being constants. What changed is that they
+       * are now a phenotype computed from `h` rather than a number a body
+       * carries for life, so a lineage can shoal while fed and scatter while
+       * starving instead of having to pick one.
+       *
+       * Clamped to the ranges the heritable versions were bred inside, because
+       * those bounds were about what the *forces* survive, not about what the
+       * genome was allowed to say. Alignment past its ceiling is negative
+       * damping; separation past its own has no equilibrium to settle at.
+       */
+      FA[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 0, H, ho, S) * HEAD_SCALE.align, -8, 16);
+      FS[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 1, H, ho, S) * HEAD_SCALE.sep, -60, 120);
+      TT[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 0, H, ho, S) * HEAD_SCALE.thrust, 0, 1);
+      TR[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 1, H, ho, S) * HEAD_SCALE.recoil, 0, 200);
     }
   }
 
@@ -4645,4 +4675,27 @@ function rewriteAudio(
     wireId,
     leftovers,
   };
+}
+
+/**
+ * One row of an output head, read straight out of the store arrays.
+ *
+ * The twin of `agents.ts`'s `head`, which goes through `Agent.chem` and
+ * `Agent.h`. This one exists for `updateState`'s inner loop, where those two
+ * accessors are the whole cost — see the note on reading `chemAll` directly.
+ */
+function headAt(
+  chem: Float32Array,
+  g: number,
+  matrix: number,
+  base: number,
+  row: number,
+  h: Float64Array,
+  ho: number,
+  dims: number,
+): number {
+  const o = g + matrix + row * dims;
+  let v = chem[g + base + row];
+  for (let d = 0; d < dims; d++) v += chem[o + d] * h[ho + d];
+  return v;
 }

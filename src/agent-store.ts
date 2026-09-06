@@ -1,4 +1,5 @@
 import { KIND_CON, KIND_DUP, KIND_ERA } from './native/solver.ts';
+import { CHEM_LEN, STATE_DIMS as STATE_W } from './chem-layout.ts';
 import type { AgentKind } from './agents.ts';
 
 /*
@@ -10,15 +11,11 @@ import type { AgentKind } from './agents.ts';
  * inventing a second one — the two are already the same concept, just for
  * different memory.
  *
- * `chem` is a duplicate of agents.ts's CHEM_LEN rather than an import, to
- * keep the dependency direction one-way: agents.ts builds its flyweight on
- * top of this module, so this module cannot import back from agents.ts.
- * Thirty-two is a structural fact about the chem layout (emit/taste, then a
- * slopes, four channels each), not a tunable — safe to duplicate.
+ * `chem`'s width comes from `chem-layout.ts`, which exists so that it can.
+ * It used to be hand-copied here, on the grounds that a structural fact is
+ * safe to duplicate; it drifted twice in one session and the second time
+ * shipped a `RangeError` out of every spawn.
  */
-const CHEM_LEN = 104;
-/** Width of the recurrent state `h`, and of one body's cached scent reading. */
-const STATE_W = 4;
 const SENSE_W = 4;
 
 export const KIND_CODE: Record<AgentKind, number> = { era: KIND_ERA, dup: KIND_DUP, con: KIND_CON };
