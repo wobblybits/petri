@@ -6,7 +6,10 @@ import {
   inSnapArc,
   momentOfInertia,
   poseHeld,
+  ERA_SLOTS,
+  NODE_SLOTS,
   portWorld,
+  portWorldInto,
   slotsFor,
   stemRoot,
   stemOffset,
@@ -415,6 +418,8 @@ export class Sim {
    * the next, so it is a frame older than it looks — see `creditHarvest`.
    */
   private readonly harvestPlan = new HarvestPlan();
+  /** Reused by the GPU deposit pack; see `portWorldInto`. */
+  private readonly portScratch = { x: 0, y: 0 };
   /** True once a GPU harvest has been dispatched and not yet credited. */
   private harvestPending = false;
   /**
@@ -635,13 +640,34 @@ export class Sim {
 
   /** Same as `step`, but will wait on the WebGPU FAR pass when WASM is not live. */
   async stepAsync(dt: number, params: Params, view?: PanView | null): Promise<void> {
+    /*
+     * The same markers `step` carries, because this is the path that ships and
+     * it had none.
+     *
+     * Without `phaseStart` the phase clock is never reset at the top of a
+     * frame, so the first marker to fire charges itself everything since the
+     * last one — including all the time between frames. It read as
+     * `beginFrame:setup` at 5932ms against a 34ms frame, which is at least
+     * loud enough to notice. The quieter half is worse: seven phases here had
+     * no marker at all, so the solve and the rope work were charged to
+     * whatever ran next, and every profile anyone has taken of this
+     * simulation was of `step` — the synchronous twin, which cannot use the
+     * GPU for either the field or the FAR solve.
+     */
+    Sim.phaseStart();
     const t = this.beginFrame(dt, params);
     this.collectRewriteFrozen();
+    Sim.phase('collectRewriteFrozen');
     this.assignPhysicsLod(view);
+    Sim.phase('assignPhysicsLod');
     this.assignActivityLod(params);
+    Sim.phase('assignActivityLod');
     this.graph.syncRest(this.time, params, this.wireDetailed);
+    Sim.phase('syncRest');
     this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
+    Sim.phase('applyRopePaths');
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
+    Sim.phase('syncRopeShape');
     /*
      * The GPU when `wantFarGpu` says it is worth the round trip, then wasm,
      * then the GPU again for the frames wasm turned down, then the TS twin.
@@ -663,6 +689,7 @@ export class Sim {
       this.lastFarPath = 'js';
       this.solve(params, t);
     }
+    Sim.phase('solve');
     this.endFrame(params, t);
     if (this.fieldOnGpu) {
       await this.gpuFieldStep(params, t);
@@ -2724,6 +2751,7 @@ export class Sim {
      */
     const plan = this.harvestPlan;
     plan.build(this.agents.values(), this.agentStore, this.energy);
+    Sim.phase('gpu:plan');
     // Three ports a body, plus whatever died, farmed, spilled or was refunded
     // this frame and had nowhere to put it.
     const nAdds = this.energy.pendingAdds;
@@ -2737,15 +2765,24 @@ export class Sim {
     const scale = this.fields.depositScale;
     const amt = params.deposit * scale;
     let nDep = 0;
+    /*
+     * Two shared constants rather than `slotsFor(a.kind)`, which builds a
+     * fresh array per body and then a fresh iterator to walk it. Five thousand
+     * bodies is ten thousand objects a frame for a value that has exactly two
+     * possible answers.
+     */
+    const scratch = this.portScratch;
     for (let i = 0; i < n; i++) {
       const a = list[i];
       if (a.locked) continue;
-      for (const slot of slotsFor(a.kind)) {
+      const ports = a.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
+      for (let pi = 0; pi < ports.length; pi++) {
+        const slot = ports[pi];
         // See `deposit`: a voice carries whether or not the port is attached,
         // an aux marker does not.
         const free = this.graph.isFreeAt(a.id, slot);
         if (slot !== 'p' && !free) continue;
-        const w = portWorld(a, slot, this.w, this.h);
+        const w = portWorldInto(a, slot, this.w, this.h, scratch);
         const o = nDep * dStride;
         dep[o] = w.x;
         dep[o + 1] = w.y;
@@ -2765,6 +2802,8 @@ export class Sim {
         nDep++;
       }
     }
+
+    Sim.phase('gpu:packDeposit');
 
     /*
      * The frame's queued energy adds, on the same scatter as the voices.
@@ -2792,6 +2831,8 @@ export class Sim {
     }
     this.energy.clearPending();
 
+    Sim.phase('gpu:packAdds');
+
     const arc = params.sensorAngle;
     const sd = params.sensorDist;
     for (let i = 0; i < n; i++) {
@@ -2813,6 +2854,8 @@ export class Sim {
       pro[o + 10] = this.tasteOf(a, 2);
       pro[o + 11] = this.tasteOf(a, 3);
     }
+
+    Sim.phase('gpu:packProbe');
 
     /*
      * Six per block here, eight per block there: the shader's `HarvestBlock`
@@ -2844,6 +2887,8 @@ export class Sim {
      * factor, because the shader resolves per-channel rates itself — one place
      * that knows how a slider becomes four numbers, not two.
      */
+    Sim.phase('gpu:packBlocks');
+
     const ok = await fieldGpu.step(
       this.fields,
       nDep,
@@ -2878,6 +2923,8 @@ export class Sim {
       nativeSolver.useSamples(false);
       return;
     }
+    Sim.phase('gpu:dispatch');
+
     // Before the sample unpack rather than after, so a frame that is being
     // watched shows the field the same passes just produced.
     if (this.wantFieldReadback) await fieldGpu.readInto(this.fields);

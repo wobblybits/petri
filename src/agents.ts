@@ -596,6 +596,17 @@ export function portKey(p: PortRef): number {
   return portKeyAt(p.id, p.slot);
 }
 
+/*
+ * Frozen and shared, because `slotsFor` builds a fresh array on every call and
+ * a `for...of` over it builds a fresh iterator. Once a body a frame that is
+ * nothing; once a body in the GPU deposit pack, at five thousand bodies, it is
+ * ten thousand short-lived objects for a value with two possible answers.
+ * Callers that only iterate should reach for these; `slotsFor` stays for the
+ * ones that want a list of their own.
+ */
+export const ERA_SLOTS: readonly PortSlot[] = Object.freeze(['p'] as PortSlot[]);
+export const NODE_SLOTS: readonly PortSlot[] = Object.freeze(['p', 'l', 'r'] as PortSlot[]);
+
 export function slotsFor(kind: AgentKind): PortSlot[] {
   return kind === 'era' ? ['p'] : ['p', 'l', 'r'];
 }
@@ -1264,6 +1275,46 @@ export function portOffset(agent: Agent, slot: PortSlot): Vec2 {
 export function portWorld(agent: Agent, slot: PortSlot, w: number, h: number): Vec2 {
   const o = portOffset(agent, slot);
   return { x: wrap(agent.x + o.x, w), y: wrap(agent.y + o.y, h) };
+}
+
+const portWorldScratch: Vec2 = { x: 0, y: 0 };
+
+/**
+ * `portWorld` writing into `out`, and flattened for the same reason
+ * `stemOffsetInto` is.
+ *
+ * The allocating chain is four objects a call: `stemRoot` makes one,
+ * `portLocal` copies it into a second, `rotate` returns a third, and
+ * `portWorld` builds the result. The GPU deposit pack walks every port of
+ * every body, so on a pond of five thousand that is sixty thousand
+ * short-lived objects a frame — measured at 5.95 ms, which was the largest
+ * single piece of the field phase and none of it arithmetic.
+ *
+ * `wrap` is the identity — the world stopped being toroidal — so it is gone
+ * here rather than sitting in the hot path hoping the JIT removes it. `w` and
+ * `h` stay in the signature so the shape is obvious if wrapping comes back,
+ * which is the convention `stemWorldInto` already set.
+ */
+export function portWorldInto(
+  agent: Agent,
+  slot: PortSlot,
+  w: number,
+  h: number,
+  out: Vec2,
+): Vec2 {
+  const root = stemRootInto(agent.kind, slot, portWorldScratch);
+  const ex = agent.kind === 'era' || slot === 'p' ? PORT_EXTRUDE : -PORT_EXTRUDE;
+  const scale = agent.scale;
+  const lx = (root.x + ex) * scale;
+  const ly = root.y * scale;
+  const heading = agent.heading;
+  const c = Math.cos(heading);
+  const sn = Math.sin(heading);
+  void w;
+  void h;
+  out.x = agent.x + lx * c - ly * sn;
+  out.y = agent.y + lx * sn + ly * c;
+  return out;
 }
 
 export function stemOffset(agent: Agent, slot: PortSlot): Vec2 {
