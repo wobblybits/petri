@@ -394,7 +394,7 @@ export class Sim {
   spawnAcc = 0;
   agents = new Map<number, Agent>();
   agentStore = new AgentStore();
-  graph = new Graph();
+  graph: Graph;
   fields: Fields;
   rewrites: Rewrite[] = [];
   energy = new EnergyGrid(48, 0.1);
@@ -612,6 +612,7 @@ export class Sim {
     this.coverW = this.w;
     this.coverH = this.h;
     this.fields = new Fields(fieldCells, fieldCells * FIELD_CELL);
+    this.graph = new Graph(this.agentStore);
     this.graph.onLatch = (ev) => {
       this.tally.latches++;
       audio.push(ev, this.graph, this.agents);
@@ -651,6 +652,9 @@ export class Sim {
   clear(): void {
     this.agents.clear();
     this.agentStore = new AgentStore();
+    // Port occupancy lives in the store, so the graph follows it. Ordered
+    // before `clear`, which blanks occupancy on whichever store it holds.
+    this.graph.useStore(this.agentStore);
     this.graph.clear();
     this.rewrites = [];
     // Not `refundEscrows`: the bodies and the ground are both being thrown
@@ -978,7 +982,7 @@ export class Sim {
     if (params.swimCost > 0) {
       const rent = params.swimCost * t;
       for (const a of this.agents.values()) {
-        if (a.locked || !this.graph.isFreeAt(a.id, 'p')) continue;
+        if (a.locked || !this.graph.isFreeAtSlot(a.slot, 0)) continue;
         const speed = Math.hypot(a.vx, a.vy);
         if (speed > 0) a.extra -= rent * speed;
       }
@@ -1561,20 +1565,26 @@ export class Sim {
     const g = this.graph;
     const BOUND_OF = this.agentStore.bound;
     for (const a of this.agents.values()) {
-      const slots = a.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
+      const n = a.kind === 'era' ? 1 : 3;
+      const sl = a.slot;
       let filled = 0;
-      for (let k = 0; k < slots.length; k++) if (!g.isFreeAt(a.id, slots[k])) filled++;
-      BOUND_OF[a.slot] = filled / slots.length;
+      for (let k = 0; k < n; k++) if (!g.isFreeAtSlot(sl, k)) filled++;
+      BOUND_OF[sl] = filled / n;
     }
   }
 
-  /** Bit per unattached port: principal 1, left 2, right 4. */
+  /**
+   * Bit per unattached port: principal 1, left 2, right 4.
+   *
+   * By slot, not by id: this is asked of every body by both GPU packs, and
+   * the caller is holding the body when it asks.
+   */
   private freePortMask(a: Agent): number {
     const g = this.graph;
-    const id = a.id;
-    const p = g.isFreeAt(id, 'p') ? 1 : 0;
+    const sl = a.slot;
+    const p = g.isFreeAtSlot(sl, 0) ? 1 : 0;
     if (a.kind === 'era') return p;
-    return p | (g.isFreeAt(id, 'l') ? 2 : 0) | (g.isFreeAt(id, 'r') ? 4 : 0);
+    return p | (g.isFreeAtSlot(sl, 1) ? 2 : 0) | (g.isFreeAtSlot(sl, 2) ? 4 : 0);
   }
 
   /**
@@ -1661,7 +1671,7 @@ export class Sim {
       const a = list[i];
       // Bit 0 is "principal port free". Bit 2 is stun, which is per-frame and
       // written by the steer pass on top of this.
-      const pFree = g.isFreeAt(a.id, 'p');
+      const pFree = g.isFreeAtSlot(a.slot, 0);
       flags[i] = pFree ? 1 : 0;
       sat[i] = g.portsFilledAt(a) ? 1 : 0;
       // Bitmask of free ports, for the scent deposit in endFrame. Built here
@@ -4402,7 +4412,7 @@ export class Sim {
       for (let i = 0; i < n; i++) {
         const a = list[i];
         const sl = a.slot;
-        const pFree = this.graph.isFreeAt(a.id, 'p');
+        const pFree = this.graph.isFreeAtSlot(sl, 0);
         flags[i] = (pFree ? 1 : 0) | (STUN_OF[sl] > 0 ? 4 : 0);
         if (packed) {
           kinds[i] = KIND_OF[sl];

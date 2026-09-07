@@ -83,6 +83,22 @@ export class AgentStore {
   assort!: Float64Array;
   transportThrust!: Float64Array;
   transportRecoil!: Float64Array;
+  /**
+   * Which wire holds each of this body's three ports, or -1 for a free one.
+   * Three entries a body: `slot * 3 + 0/1/2` for principal, left, right.
+   *
+   * The graph owns the meaning; the store owns the storage, because the
+   * question "is this port free" is asked of a *slot* tens of thousands of
+   * times a frame — the latch pass asks it of every port of every body, and
+   * both GPU packs ask it again for the free-port mask. It was a `Map` keyed
+   * on `agentId * 3 + slot`, and at thirty thousand bodies the latch pass
+   * alone spent 3.8 ms a frame hashing into it.
+   *
+   * Living here also closes a hazard rather than opening one: `clearSlot`
+   * runs when a slot is recycled, so a newborn cannot inherit a corpse's
+   * wires the way it could when the map was keyed on an id nobody cleared.
+   */
+  portWire!: Int32Array;
   csHeading!: Float64Array;
   csCos!: Float64Array;
   csSin!: Float64Array;
@@ -314,6 +330,9 @@ export class AgentStore {
    * views.
    */
   private clearSlot(slot: number): void {
+    this.portWire[slot * 3] = -1;
+    this.portWire[slot * 3 + 1] = -1;
+    this.portWire[slot * 3 + 2] = -1;
     this.id[slot] = 0;
     this.kindCode[slot] = 0;
     this.x[slot] = 0;
@@ -423,6 +442,11 @@ export class AgentStore {
     this.assort = growF64(this.assort);
     this.transportThrust = growF64(this.transportThrust);
     this.transportRecoil = growF64(this.transportRecoil);
+    // Three a body, and -1 rather than 0 is the free marker, so a fresh tail
+    // cannot read as "port held by wire 0".
+    const newPortWire = new Int32Array(newCapacity * 3).fill(-1);
+    if (this.portWire) newPortWire.set(this.portWire.subarray(0, live * 3));
+    this.portWire = newPortWire;
     this.csHeading = growF64(this.csHeading);
     this.csCos = growF64(this.csCos);
     this.csSin = growF64(this.csSin);

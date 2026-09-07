@@ -2,9 +2,9 @@ import {
   ERA_SLOTS,
   NODE_SLOTS,
   poseHeld,
-  portKey,
   portFrameInto,
   portKeyAt,
+  slotIndex,
   slotsFor,
   stemWorldInto,
   syncHeadingCosSin,
@@ -26,6 +26,7 @@ import {
 } from './chain.ts';
 import { bezierPointInto } from './curve.ts';
 import { segmentsInterfere, WIRE_RADIUS } from './geom.ts';
+import type { AgentStore } from './agent-store.ts';
 import { BoxGrid, PairGrid } from './grid.ts';
 import type { Params } from './params.ts';
 import { clamp, easeInOut, lerp, wrap, type Vec2 } from './wrap.ts';
@@ -233,11 +234,41 @@ export class Graph {
     this.nCands = n + 1;
   }
 
+  constructor(store: AgentStore) {
+    this.store = store;
+  }
+
+  /**
+   * Follow the sim onto a new store.
+   *
+   * `Sim.clear` builds a fresh `AgentStore` rather than emptying the old one,
+   * and deliberately: an `Agent` is a flyweight over a slot, so anything still
+   * holding one from the old pond — a selection, a test comparing before with
+   * after — keeps reading the old pond's numbers instead of silently aliasing
+   * whichever body lands in that slot next. Port occupancy lives in the store,
+   * so the graph has to be told.
+   */
+  useStore(store: AgentStore): void {
+    this.store = store;
+  }
+
   /** Birth length floor, as a fraction of wireMinRest. */
   static BIRTH_FLOOR = 0.2;
 
   wires = new Map<number, Wire>();
-  portWire = new Map<number, number>();
+  /**
+   * Where port occupancy lives: `store.portWire`, three entries a body, -1
+   * for a free port. See the note on that field for why it is stored by slot
+   * and not by agent id.
+   *
+   * The methods below come in two forms on purpose. `isFree(port)` and
+   * friends take an id, resolve it through the store's `idToSlot`, and are
+   * for the paths that mutate the graph — a latch, a detach, a rewrite — of
+   * which there are hundreds a frame. `isFreeAtSlot` and `portWireAtSlot`
+   * take a slot the caller already has, and are for the loops that ask about
+   * every port of every body, of which there are hundreds of thousands.
+   */
+  private store: AgentStore;
   nextWireId = 1;
   onLatch: ((ev: LatchEvent) => void) | null = null;
   /** Bumps whenever a wire is added or removed. Hop caches key off this. */
@@ -355,43 +386,63 @@ export class Graph {
 
   clear(): void {
     this.wires.clear();
-    this.portWire.clear();
+    this.store.portWire.fill(-1);
     this.sealed.clear();
     this.bump();
   }
 
+  /** The wire on a port named by slot, or -1. The hot form: no id lookup. */
+  portWireAtSlot(storeSlot: number, code: number): number {
+    return this.store.portWire[storeSlot * 3 + code];
+  }
+
+  /** `isFree` for a caller that already holds the body's slot. */
+  isFreeAtSlot(storeSlot: number, code: number): boolean {
+    return this.store.portWire[storeSlot * 3 + code] < 0;
+  }
+
+  /** The wire id on a port, or -1 for a free port or an id nobody lives at. */
+  private wireIdAt(id: number, slot: PortSlot): number {
+    const at = this.store.slotFor(id);
+    if (at === undefined) return -1;
+    return this.store.portWire[at * 3 + slotIndex(slot)];
+  }
+
+  private setWireAt(id: number, slot: PortSlot, wireId: number): void {
+    const at = this.store.slotFor(id);
+    if (at === undefined) return;
+    this.store.portWire[at * 3 + slotIndex(slot)] = wireId;
+  }
+
   wireAt(port: PortRef): Wire | undefined {
-    const id = this.portWire.get(portKey(port));
-    if (id === undefined) return undefined;
+    const id = this.wireIdAt(port.id, port.slot);
+    if (id < 0) return undefined;
     return this.wires.get(id);
   }
 
   isFree(port: PortRef): boolean {
-    return !this.portWire.has(portKey(port));
+    return this.wireIdAt(port.id, port.slot) < 0;
   }
 
   /** `isFree` without building a PortRef for it. */
   isFreeAt(id: number, slot: PortSlot): boolean {
-    return !this.portWire.has(portKeyAt(id, slot));
+    return this.wireIdAt(id, slot) < 0;
   }
 
   /** `wireAt` without building a PortRef for it. */
   wireAtSlot(id: number, slot: PortSlot): Wire | undefined {
-    const wid = this.portWire.get(portKeyAt(id, slot));
-    if (wid === undefined) return undefined;
+    const wid = this.wireIdAt(id, slot);
+    if (wid < 0) return undefined;
     return this.wires.get(wid);
   }
 
   /** `portsFilled` without allocating the slot list. */
   portsFilledAt(agent: Agent): boolean {
-    if (this.portWire.has(portKeyAt(agent.id, 'p'))) {
-      if (agent.kind === 'era') return true;
-      return (
-        this.portWire.has(portKeyAt(agent.id, 'l')) &&
-        this.portWire.has(portKeyAt(agent.id, 'r'))
-      );
-    }
-    return false;
+    const PW = this.store.portWire;
+    const at = agent.slot * 3;
+    if (PW[at] < 0) return false;
+    if (agent.kind === 'era') return true;
+    return PW[at + 1] >= 0 && PW[at + 2] >= 0;
   }
 
   /** True when `a` and `b` already share a wire. FAR discs skip those pairs. */
@@ -424,8 +475,8 @@ export class Graph {
     const len = Math.max(1, latchLen);
     const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full' };
     this.wires.set(id, wire);
-    this.portWire.set(portKey(a), id);
-    this.portWire.set(portKey(b), id);
+    this.setWireAt(a.id, a.slot, id);
+    this.setWireAt(b.id, b.slot, id);
     this.bump();
     return wire;
   }
@@ -440,17 +491,17 @@ export class Graph {
     if (!w) return false;
     if (a.id === b.id && a.slot === b.slot) return false;
     const held = (p: PortRef) => {
-      const at = this.portWire.get(portKey(p));
-      return at === undefined || at === id;
+      const at = this.wireIdAt(p.id, p.slot);
+      return at < 0 || at === id;
     };
     if (!held(a) || !held(b)) return false;
-    this.portWire.delete(portKey(w.a));
-    this.portWire.delete(portKey(w.b));
+    this.setWireAt(w.a.id, w.a.slot, -1);
+    this.setWireAt(w.b.id, w.b.slot, -1);
     const [na, nb] = orientRebind(w.a, w.b, a, b);
     w.a = na;
     w.b = nb;
-    this.portWire.set(portKey(w.a), id);
-    this.portWire.set(portKey(w.b), id);
+    this.setWireAt(w.a.id, w.a.slot, id);
+    this.setWireAt(w.b.id, w.b.slot, id);
     this.bump();
     return true;
   }
@@ -477,14 +528,14 @@ export class Graph {
       return { wire, end };
     });
     if (occ.every((o) => o === null)) return false;
-    for (const slot of slots) this.portWire.delete(portKeyAt(agentId, slot));
+    for (const slot of slots) this.setWireAt(agentId, slot, -1);
     for (let i = 0; i < n; i++) {
       const o = occ[i];
       if (!o) continue;
       const slot = slots[(i + step) % n];
       if (o.end === 'a') o.wire.a = { id: agentId, slot };
       else o.wire.b = { id: agentId, slot };
-      this.portWire.set(portKeyAt(agentId, slot), o.wire.id);
+      this.setWireAt(agentId, slot, o.wire.id);
     }
     this.bump();
     return true;
@@ -675,8 +726,8 @@ export class Graph {
   detach(id: number): void {
     const w = this.wires.get(id);
     if (!w) return;
-    this.portWire.delete(portKey(w.a));
-    this.portWire.delete(portKey(w.b));
+    this.setWireAt(w.a.id, w.a.slot, -1);
+    this.setWireAt(w.b.id, w.b.slot, -1);
     this.wires.delete(id);
     this.bump();
   }
@@ -723,6 +774,7 @@ export class Graph {
     // Sealing is rare and usually nothing is sealed at all, in which case the
     // second lookup for every port of every body answers no by definition.
     const anySealed = this.sealed.size > 0;
+    const PORTWIRE = this.store.portWire;
     let n = 0;
     for (const agent of agents.values()) {
       const store = agent.store;
@@ -742,11 +794,14 @@ export class Graph {
       const ax = agent.x;
       const ay = agent.y;
       const scale = agent.scale;
+      // The slot is in hand, so occupancy is an array read rather than a hash.
+      // This loop runs for every port of every body: at thirty thousand it was
+      // seventy thousand map lookups a frame, and 3.8 ms of the pass.
+      const pw = s * 3;
       for (let k = 0; k < slots.length; k++) {
         const slot = slots[k];
-        const key = portKeyAt(id, slot);
-        if (this.portWire.has(key)) continue;
-        if (anySealed && this.sealed.has(key)) continue;
+        if (PORTWIRE[pw + k] >= 0) continue;
+        if (anySealed && this.sealed.has(portKeyAt(id, slot))) continue;
         if (n >= this.portX.length) this.growPorts(n * 2 + 64);
         portFrameInto(kind, slot, ax, ay, scale, cos, sin, frame);
         list[n] = agent;
@@ -853,8 +908,9 @@ export class Graph {
       const sla = SLOT_NAME[SLOT[i]];
       const slb = SLOT_NAME[SLOT[j]];
       // A port latched earlier in this pass is no longer free, which is the
-      // whole of what the old `taken` set recorded.
-      if (this.portWire.has(portKeyAt(ia, sla)) || this.portWire.has(portKeyAt(ib, slb))) continue;
+      // whole of what the old `taken` set recorded. Hundreds of candidates a
+      // frame rather than tens of thousands of ports, so the id form is fine.
+      if (this.wireIdAt(ia, sla) >= 0 || this.wireIdAt(ib, slb) >= 0) continue;
       refA.id = ia;
       refA.slot = sla;
       refB.id = ib;
