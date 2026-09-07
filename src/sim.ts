@@ -374,8 +374,20 @@ export class Sim {
   /** Per-agent unmet need this frame, rebuilt by `pulseRequests`. */
   private readonly needOf = new Map<number, number>();
   private readonly wireAdj = new WireAdjacency();
-  /** Connected-component root per agent, refreshed once per frame. */
-  private components = new Map<number, number>();
+  /**
+   * Which connected component each body is in, as a position in
+   * `forceList()`, keyed on the graph and roster versions.
+   *
+   * Union-find over an `Int32Array` rather than the `Map`-of-ids `Graph`
+   * hands out. Every consumer here — the force scratch the wasm passes read,
+   * and the JS declutter fallback — indexes by list position and only ever
+   * compares two roots for equality, so an index is as good a name for a
+   * component as an id and costs a fraction to produce. `Graph.componentIds`
+   * stays for the audio shards, which do want ids.
+   */
+  private componentOf = new Int32Array(0);
+  private compVersion = -1;
+  private compRoster = -1;
   /** Broad-phase results for wire clearance, flattened pairs, rebuilt per frame. */
   private clearBodyPairs: unknown[] = [];
   /** Broad-phase grids and their scratch coordinate arrays. */
@@ -386,7 +398,6 @@ export class Sim {
   private wy: number[] = [];
   private agentList: Agent[] = [];
   private wirePack: Wire[] = [];
-  private packIndex = new Map<number, number>();
   private clearWireList: Wire[] = [];
   private flockAdj: number[][] = [];
   private flockDist = new Int32Array(0);
@@ -808,7 +819,6 @@ export class Sim {
   private beginFrame(dt: number, params: Params): number {
     const t = clamp(dt, 0, 0.05);
     this.time += t;
-    this.components = this.graph.componentIds(this.agents, this.rosterVersion);
     this.trackHome(t);
     /*
      * One centre for the whole world grid, pinned once and never moved.
@@ -912,7 +922,6 @@ export class Sim {
     Sim.phase('harvestSlots');
     this.graph.snap(this.agents, this.w, this.h, params, this.time);
     Sim.phase('snap');
-    this.components = this.graph.componentIds(this.agents, this.rosterVersion);
     Sim.phase('components');
     // `pulseRequests` charges itself in four parts — seeding the need field,
     // relaxing it, moving energy down it, and the state update — because at
@@ -978,7 +987,6 @@ export class Sim {
     for (const id of tickUpkeepFast(this.agents.values(), this.agentStore, t, params.upkeep, this.energy)) {
       this.kill(id);
     }
-    this.components = this.graph.componentIds(this.agents, this.rosterVersion);
     Sim.phase('upkeep');
     /*
      * The GPU owns the field when it is available, and then none of this runs:
@@ -1392,7 +1400,6 @@ export class Sim {
     return list;
   }
   private scratchFresh = false;
-  private readonly scratchIndex = new Map<number, number>();
 
   /**
    * The per-body scratch the force passes read out of wasm memory: which
@@ -1427,6 +1434,44 @@ export class Sim {
    * occupancy depends on — so this is free on the frames when nothing latched,
    * detached or died, which is nearly all of them.
    */
+  private refreshComponents(): Int32Array {
+    if (this.compVersion === this.graph.version && this.compRoster === this.rosterVersion) {
+      return this.componentOf;
+    }
+    const list = this.forceList();
+    const n = list.length;
+    const wires = this.wireListResolved();
+    const ai = this.wireAI;
+    const bi = this.wireBI;
+    if (this.componentOf.length < n) this.componentOf = new Int32Array(Math.max(16, n * 2));
+    const parent = this.componentOf;
+    for (let i = 0; i < n; i++) parent[i] = i;
+    const find = (x: number): number => {
+      let r = x;
+      while (parent[r] !== r) r = parent[r];
+      let cur = x;
+      while (parent[cur] !== r) {
+        const nx = parent[cur];
+        parent[cur] = r;
+        cur = nx;
+      }
+      return r;
+    };
+    for (let k = 0; k < wires.length; k++) {
+      const a = ai[k];
+      const b = bi[k];
+      if (a < 0 || b < 0) continue;
+      const ra = find(a);
+      const rb = find(b);
+      if (ra !== rb) parent[ra] = rb;
+    }
+    // Flattened, so every later read is one array access rather than a walk.
+    for (let i = 0; i < n; i++) parent[i] = find(i);
+    this.compVersion = this.graph.version;
+    this.compRoster = this.rosterVersion;
+    return parent;
+  }
+
   private refreshBound(): void {
     if (this.boundVersion === this.graph.version && this.boundRoster === this.rosterVersion) {
       return;
@@ -1519,10 +1564,8 @@ export class Sim {
     if (!flags || !pwire || !comp || !sat || !free) return;
     if (!nativeSolver.ready || n > nativeSolver.bodyCap) return;
 
-    const idx = this.scratchIndex;
-    idx.clear();
-    for (let i = 0; i < n; i++) idx.set(list[i].id, i);
-
+    const comps = this.refreshComponents();
+    const at = this.slotIndex;
     const g = this.graph;
     for (let i = 0; i < n; i++) {
       const a = list[i];
@@ -1535,11 +1578,12 @@ export class Sim {
       // rather than there so it is walked once per topology instead of once
       // per body per frame.
       free[i] = this.freePortMask(a);
-      comp[i] = this.components.get(a.id) ?? -1 - i;
+      comp[i] = comps[i];
       const pw = g.wireAtSlot(a.id, 'p');
       if (pw) {
         const other = pw.a.id === a.id ? pw.b : pw.a;
-        pwire[i * 2] = idx.get(other.id) ?? -1;
+        const ob = this.agents.get(other.id);
+        pwire[i * 2] = ob ? at[ob.slot] : -1;
         pwire[i * 2 + 1] = this.slotCode(other.slot);
       } else {
         pwire[i * 2] = -1;
@@ -1563,10 +1607,10 @@ export class Sim {
     if (!this.scratchFresh) {
       // Only when the topology cache could not be claimed — a scene too big
       // for the solver, or another Sim holding the arrays.
+      const comps = this.refreshComponents();
       for (let i = 0; i < n; i++) {
-        const a = list[i];
-        sat[i] = this.graph.portsFilledAt(a) ? 1 : 0;
-        comp[i] = this.components.get(a.id) ?? -1 - i;
+        sat[i] = this.graph.portsFilledAt(list[i]) ? 1 : 0;
+        comp[i] = comps[i];
       }
     }
     nativeSolver.declutter(n, reach, atReach, cutoff, Sim.DECLUTTER_FLOOR, dt);
@@ -1877,21 +1921,21 @@ export class Sim {
       return;
     }
 
-    const list = this.forceList();
-    const index = this.packIndex;
-    index.clear();
-    for (let i = 0; i < list.length; i++) index.set(list[i].id, i);
-    const n = list.length;
-    const adj = this.flockAdj;
-    while (adj.length < n) adj.push([]);
-    for (let i = 0; i < n; i++) adj[i].length = 0;
-    for (const w of this.graph.wires.values()) {
-      const ia = index.get(w.a.id);
-      const ib = index.get(w.b.id);
-      if (ia === undefined || ib === undefined || ia === ib) continue;
-      adj[ia].push(ib);
-      adj[ib].push(ia);
-    }
+    /*
+     * The wake graph's CSR rather than an adjacency of its own.
+     *
+     * This used to build an array-of-arrays every frame — a push per wire
+     * end into one of ten thousand arrays — over the same wires, in the same
+     * order, that `refreshWakeGraph` already keeps as a flat CSR keyed on the
+     * graph and the roster. Worse, it built it into `flockAdj`, which
+     * `flock` caches on exactly that key and would happily have gone on
+     * using: the two agreed only because they were building the same thing.
+     */
+    const n = this.refreshWakeGraph();
+    const list = this.wakeList;
+    const at = this.slotIndex;
+    const off = this.wakeOff;
+    const nei = this.wakeNei;
     if (this.flockDist.length < n) {
       const cap = Math.max(n * 2, 16);
       this.flockDist = new Int32Array(cap);
@@ -1902,19 +1946,22 @@ export class Sim {
     hop.fill(-1, 0, n);
     let qt = 0;
     for (const id of seeds) {
-      const i = index.get(id);
-      if (i === undefined || hop[i] >= 0) continue;
+      const a = this.agents.get(id);
+      if (!a) continue;
+      const i = at[a.slot];
+      if (i < 0 || hop[i] >= 0) continue;
       hop[i] = 0;
       q[qt++] = i;
-      this.detailedAgents.add(list[i].id);
+      this.detailedAgents.add(id);
     }
     let qh = 0;
     while (qh < qt) {
       const u = q[qh++];
       const du = hop[u];
       if (du >= Sim.PHYS_HOPS) continue;
-      const nei = adj[u];
-      for (let k = 0; k < nei.length; k++) {
+      const a0 = off[u];
+      const a1 = off[u + 1];
+      for (let k = a0; k < a1; k++) {
         const v = nei[k];
         if (hop[v] >= 0) continue;
         hop[v] = du + 1;
@@ -2121,7 +2168,6 @@ export class Sim {
   dragStep(params: Params, dt: number, view?: PanView | null): void {
     if (!this.grabbed || dt <= 0) return;
     const h = dt / Sim.SUBSTEPS;
-    this.components = this.graph.componentIds(this.agents, this.rosterVersion);
     this.collectRewriteFrozen();
     this.assignPhysicsLod(view);
     this.assignActivityLod(params);
@@ -2202,9 +2248,10 @@ export class Sim {
     const sat = this.satBuf;
     const comp = this.compBuf;
     const slot = this.slotBuf;
+    const comps = this.refreshComponents();
     for (let i = 0; i < n; i++) {
       sat[i] = this.graph.portsFilledAt(list[i]) ? 1 : 0;
-      comp[i] = this.components.get(list[i].id) ?? -1 - i;
+      comp[i] = comps[i];
       slot[i] = list[i].slot;
     }
     const store = this.agentStore;
