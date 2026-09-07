@@ -1180,6 +1180,45 @@ export class WireAdjacency {
    * every neighbour reading as body 0, which is wrong quietly rather than
    * loudly: the field still spreads, just through a graph nobody built.
    */
+  /**
+   * The same, from endpoint indices the caller already has.
+   *
+   * `build` resolves an agent id to a list position through a `Map`, twice
+   * per wire, every time it runs. Its callers in `Sim` now keep that answer
+   * as two arrays parallel to the wire list, cached on the graph and roster
+   * versions — which is exactly what the neighbour lists depend on — so the
+   * lookup is an array read and the counting sort is the whole cost.
+   *
+   * `ai[k]` and `bi[k]` are wire `k`'s two ends, or -1 for an end that is
+   * not in the list. Self-wires and unresolved ends are dropped, matching
+   * `build`; a duplicate wire between the same pair is kept, because two
+   * ports can join the same two bodies and both should conduct.
+   */
+  buildIndexed(n: number, ai: Int32Array, bi: Int32Array, m: number): void {
+    if (this.off.length < n + 1) this.off = new Int32Array(Math.max(16, (n + 1) * 2));
+    if (this.cursor.length < n) this.cursor = new Int32Array(Math.max(16, n * 2));
+    this.off.fill(0, 0, n + 1);
+    let total = 0;
+    for (let k = 0; k < m; k++) {
+      const a = ai[k];
+      const b = bi[k];
+      if (a < 0 || b < 0 || a === b) continue;
+      this.off[a + 1]++;
+      this.off[b + 1]++;
+      total += 2;
+    }
+    for (let i = 0; i < n; i++) this.off[i + 1] += this.off[i];
+    if (this.nei.length < total) this.nei = new Int32Array(Math.max(16, total * 2));
+    for (let i = 0; i < n; i++) this.cursor[i] = this.off[i];
+    for (let k = 0; k < m; k++) {
+      const a = ai[k];
+      const b = bi[k];
+      if (a < 0 || b < 0 || a === b) continue;
+      this.nei[this.cursor[a]++] = b;
+      this.nei[this.cursor[b]++] = a;
+    }
+  }
+
   build(
     n: number,
     index: Map<number, number>,

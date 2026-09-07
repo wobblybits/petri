@@ -137,24 +137,51 @@ and the learned weights move in the direction that made it fall. Trace
 decay. Clamps against a saturating modulator. Persistence across a detach
 and re-latch, which is the property the whole design is for.
 
-**Phase 4. GPU port.** `genome.wgsl` gains the learned block. This needs a
-binding merge first: the pass already uses eight storage buffers against a
-per-stage guarantee of eight, so `hPrev` and `inputs` merge into one
-per-body buffer to make room for one read-write learning buffer. Readback
-is needed only for rewrite parents, and `beginRewrite` gives about forty
-frames of notice, so the pair's rows can ride the next field round trip.
+**Phase 4. GPU port.** *Done.* `genome.wgsl` gained the learned block and
+one read-write storage buffer, the eighth of a guaranteed eight — no merge
+was needed, and the claim that one was came from confusing this pass with
+the field pass next door, which genuinely is at the limit.
+
+The learning row is resident on the device and indexed by slot, like the
+genome. The host writes it in exactly one place, zeroing a slot that has
+been recycled, which is tracked as a dirty range the way the genome table
+already is; a slot handed on with the device copy intact would give a
+newborn the last occupant's experience. The host reads it in exactly one
+place: the two bodies of a rewrite, whose learning `inheritChem` has to
+consolidate into four children's genomes on the CPU. `beginRewrite` marks
+the pair and the rows come back on that frame's round trip, about forty
+frames before commit needs them. A grow copies the old buffer forward, or
+every doubling past a thousand bodies would wipe the pond's memory.
+
+One difference from the CPU pass, deliberate: the shader has no sense gate.
+There the gate saves a bilinear sample into a very large array; here
+`gather` has taken that sample for every body anyway, so it would save
+nothing — and it is settled at birth, which a *learned* sense weight would
+make stale. The two agree wherever the gate is right, because a gate of
+zero means every weight multiplying the reading is zero.
 
 **Phase 5. Instrumentation.** Learned-weight norm and critic error into
-`census()` and the experiment sample, ready for the lab page.
+`census()` and the experiment sample, ready for the lab page. Not started.
+Note that on the GPU path the host's copy of the learning state is only
+fresh for rewrite parents, so anything measuring it either reads it back
+deliberately or accepts that it is sampling those.
 
 ## 6. Consequences to watch
 
 - **`readsField` stops being fixed for life.** A body can learn a non-zero
-  sense column. The flag becomes monotone: set it the moment a learned sense
-  weight becomes non-zero, never clear it. No per-frame rescan.
-- **The state pass roughly doubles when learning is on**: 64 trace updates
-  and 64 weight updates a body against about 60 multiply-adds for `h`.
-  It is off by default and the cost is proportional to what is switched on.
+  sense column. On the CPU the flag becomes monotone: set the moment a
+  learned sense weight goes non-zero, never cleared, so no per-frame rescan.
+  On the GPU the gate is simply gone; see phase 4.
+- **Device loss.** If the adapter goes away mid-session the sim falls back
+  to the CPU pass, whose copy of the learning state is only fresh for
+  bodies that were lately rewrite parents. Everyone else resumes from what
+  the host last had, which is mostly zeros. Survivable and documented
+  rather than solved.
+- **The cost, measured.** On the GPU at 10,228 bodies, back to back on one
+  pond, the genome pass goes 2.29 ms to 2.87 ms a frame with learning on:
+  a quarter more for the pass, and under one per cent of a 60 ms frame.
+  On the CPU it roughly doubles the state pass, which is the reason this
+  belongs on the device and not the reason to leave it off.
 - **`Wh` and `Wn` are the risk.** Online learning inside a recurrence can
   destabilise dynamics that a feedforward path cannot. They get their own
   rate genes seeded at zero, so the pathway exists and evolution opens it

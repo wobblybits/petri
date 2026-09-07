@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import shader from './genome.wgsl?raw';
 import {
   B_STATE, CHEM_LEN, EMIT, E_OUT, F_BASE, F_OUT, HEAD_SCALE, IN_DIMS, L_BASE, L_OUT,
-  P_BASE, P_OUT, SENSE_SCALE, STATE_DIMS, TASTE, T_OUT, W_IN, W_NET, W_SELF,
+  LEARN_CRITIC, LEARN_PREV_V, LEARN_STRIDE, LEARN_TRACE,
+  P_BASE, P_OUT, PLASTIC_LEN, SENSE_SCALE, STATE_DIMS, TASTE, T_OUT, W_IN, W_NET, W_SELF,
 } from '../chem-layout.ts';
 import { refreshReadsField } from '../agents.ts';
 import type { AgentKind } from '../agents.ts';
@@ -43,6 +44,9 @@ describe('the genome shader matches the genome layout', () => {
     const want: Record<string, number> = {
       STATE_DIMS, IN_DIMS, EMIT, TASTE, E_OUT, T_OUT, W_IN, W_SELF, W_NET,
       B_STATE, F_OUT, F_BASE, P_OUT, P_BASE, L_OUT, L_BASE,
+      // The learning row is indexed by the same hand-copied constants and
+      // carries the same hazard.
+      PLASTIC_LEN, LEARN_TRACE, LEARN_CRITIC, LEARN_PREV_V, LEARN_STRIDE,
     };
     for (const [name, value] of Object.entries(want)) {
       expect(shaderConst(name), `genome.wgsl's ${name}`).toBe(value);
@@ -62,9 +66,43 @@ describe('the genome shader matches the genome layout', () => {
     const known = new Set([
       'STATE_DIMS', 'IN_DIMS', 'EMIT', 'TASTE', 'E_OUT', 'T_OUT', 'W_IN', 'W_SELF',
       'W_NET', 'B_STATE', 'F_OUT', 'F_BASE', 'P_OUT', 'P_BASE', 'L_OUT', 'L_BASE',
-      'OUT_STRIDE',
+      'OUT_STRIDE', 'PLASTIC_LEN', 'LEARN_TRACE', 'LEARN_CRITIC', 'LEARN_PREV_V',
+      'LEARN_STRIDE',
     ]);
     expect(declared.filter((d) => !known.has(d)), 'undocumented shader constant').toEqual([]);
+  });
+
+  it('takes its uniform in the order the host writes it', () => {
+    /*
+     * The host hand-packs this struct into an ArrayBuffer by index, so the
+     * field order here is load-bearing in exactly the way the offsets above
+     * are: a field inserted on one side and not the other reads as a
+     * plausible number rather than an error. Every member is a scalar, so
+     * index and slot are the same thing and nothing has to be aligned.
+     */
+    const body = /struct\s+GenomeParams\s*\{([^}]*)\}/.exec(shader);
+    expect(body, 'no GenomeParams in genome.wgsl').not.toBeNull();
+    const fields = [...body![1].matchAll(/^\s*([A-Za-z_]\w*)\s*:/gm)].map((m) => m[1]);
+    expect(fields).toEqual([
+      'n', 'chemLen', 'senseScale', 'groundScale',
+      'sCruise', 'sTurn', 'sAlign', 'sSep', 'sThrust', 'sRecoil', 'energyCh',
+      'learnRate', 'learnCritic', 'learnTrace', 'learnDiscount', 'maxWeight',
+      'pad0', 'pad1', 'pad2', 'pad3',
+    ]);
+    // A uniform buffer's size has to be a whole number of sixteen-byte
+    // blocks, which is what the pads are for.
+    expect((fields.length * 4) % 16).toBe(0);
+  });
+
+  it('binds one buffer per thing it reads, inside the guaranteed eight', () => {
+    /*
+     * WebGPU guarantees only eight storage buffers per compute stage, and an
+     * adapter offering more is the trap: taking it up works on the machine it
+     * was written on and nowhere else. The field pass next door had to merge
+     * two bindings to fit; this one has the learning row and no room left.
+     */
+    const storage = [...shader.matchAll(/@binding\(\d+\)\s*var<storage/g)].length;
+    expect(storage, 'genome.wgsl is over the guaranteed storage-buffer limit').toBeLessThanOrEqual(8);
   });
 
   it('reads inside the genome it is given', () => {
@@ -94,19 +132,26 @@ function mirrorState(a: {
   n: number;
   groundScale: number;
   energyCh: number;
+  /** The device's learning rows, `LEARN_STRIDE` a slot. Absent = nothing learned. */
+  learn?: Float32Array;
 }): Float32Array {
   const S = STATE_DIMS;
   const { chem, hPrev, facts, slots, samples, off, nei, n } = a;
+  const learn = a.learn;
   const out = new Float32Array(n * 18);
   const phi = (v: number): number => v / (1 + Math.abs(v));
   const cl = (v: number, lo: number, hi: number): number => Math.min(Math.max(v, lo), hi);
   for (let i = 0; i < n; i++) {
     const g = slots[i] * CHEM_LEN;
+    const lb = slots[i] * LEARN_STRIDE;
+    /** A state weight as the body has it: gene plus what it learned. */
+    const sw = (k: number): number => chem[g + W_IN + k] + (learn ? learn[lb + k] : 0);
+    // No sense gate, matching the shader: `gather` has taken the sample for
+    // every body either way, so gating it saves nothing there, and the flag
+    // is settled at birth while a learned sense weight is not.
     const s = [0, 0, 0, 0];
-    if (facts[i * 4 + 3] > 0.5) {
-      for (let c = 0; c < 4; c++) s[c] = samples[i * 4 + c] / SENSE_SCALE;
-      s[a.energyCh] = samples[i * 4 + a.energyCh] * a.groundScale;
-    }
+    for (let c = 0; c < 4; c++) s[c] = samples[i * 4 + c] / SENSE_SCALE;
+    s[a.energyCh] = samples[i * 4 + a.energyCh] * a.groundScale;
     const x = [s[0], s[1], s[2], s[3], facts[i * 4], facts[i * 4 + 1], facts[i * 4 + 2]];
     const p = [hPrev[i * S], hPrev[i * S + 1], hPrev[i * S + 2], hPrev[i * S + 3]];
     const m = [0, 0, 0, 0];
@@ -119,13 +164,13 @@ function mirrorState(a: {
     if (deg > 0) for (let k = 0; k < S; k++) m[k] /= deg;
     const h = [0, 0, 0, 0];
     for (let d = 0; d < S; d++) {
-      const wi = g + W_IN + d * IN_DIMS;
-      const ws = g + W_SELF + d * S;
-      const wn = g + W_NET + d * S;
-      let v = chem[g + B_STATE + d];
-      for (let k = 0; k < IN_DIMS; k++) v += chem[wi + k] * x[k];
-      for (let k = 0; k < S; k++) v += chem[ws + k] * p[k];
-      for (let k = 0; k < S; k++) v += chem[wn + k] * m[k];
+      const wi = d * IN_DIMS;
+      const ws = W_SELF - W_IN + d * S;
+      const wn = W_NET - W_IN + d * S;
+      let v = sw(B_STATE - W_IN + d);
+      for (let k = 0; k < IN_DIMS; k++) v += sw(wi + k) * x[k];
+      for (let k = 0; k < S; k++) v += sw(ws + k) * p[k];
+      for (let k = 0; k < S; k++) v += sw(wn + k) * m[k];
       h[d] = phi(v);
     }
     const dot = (base: number, row: number): number => {

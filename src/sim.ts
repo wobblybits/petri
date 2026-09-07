@@ -23,6 +23,9 @@ import {
   P_OUT,
   PLASTIC_LEN,
   CRITIC_LEN,
+  LEARN_CRITIC,
+  LEARN_PREV_V,
+  LEARN_TRACE,
   IN_BOUND,
   IN_DEMAND,
   IN_DIMS,
@@ -386,7 +389,6 @@ export class Sim {
   private packIndex = new Map<number, number>();
   private clearWireList: Wire[] = [];
   private flockAdj: number[][] = [];
-  private flockIndex = new Map<number, number>();
   private flockDist = new Int32Array(0);
   private flockQ = new Int32Array(0);
   private flockSeen: number[] = [];
@@ -461,6 +463,19 @@ export class Sim {
   private genomeCount = 0;
   /** `AgentStore.chemVersion` the GPU's genome table was last synced to. */
   private genomeChemVersion = -1;
+  /** `AgentStore.learnVersion` the device's learning rows were last synced to. */
+  private genomeLearnVersion = -1;
+  /**
+   * Slots whose learning the CPU needs back from the device.
+   *
+   * On the GPU path the device owns what every body has learned, and the CPU
+   * needs it in exactly one place: a rewrite's two parents, whose learning is
+   * consolidated into their children's genome by `inheritChem`. `startRewrites`
+   * marks the pair, and a rewrite takes about forty frames to commit, so the
+   * rows are back long before anything reads them.
+   */
+  private readonly learnWanted: number[] = [];
+  private readonly learnAsked: number[] = [];
   /**
    * Whether the solver steers from readings handed to it — the GPU probe's —
    * rather than sampling a field it holds. Mirrors `nativeSolver.useSamples`
@@ -472,7 +487,6 @@ export class Sim {
    */
   private adjGraphVersion = -1;
   private adjRosterVersion = -1;
-  private readonly adjIndex = new Map<number, number>();
   /** Principal pairs ready to rewrite this frame. See `collectReadyRedexes`. */
   private readonly readyRedexes: Wire[] = [];
   /**
@@ -636,6 +650,9 @@ export class Sim {
     this.genomePending = false;
     this.genomeCount = 0;
     this.genomeChemVersion = -1;
+    this.genomeLearnVersion = -1;
+    this.learnWanted.length = 0;
+    this.learnAsked.length = 0;
     this.steerFromSamples = false;
     this.adjGraphVersion = -1;
     this.adjRosterVersion = -1;
@@ -1058,15 +1075,12 @@ export class Sim {
     const invI = nativeSolver.invInertia;
     const kinds = nativeSolver.kind;
     const sc = nativeSolver.scale;
-    const index = this.packIndex;
     const shared = this.forceBlock;
-    if (!shared) index.clear();
     // Everything but the wires is already there when a block owns the pack;
     // writing it again would discard what the earlier passes accumulated.
     if (!shared) {
       for (let i = 0; i < n; i++) {
         const a = list[i];
-        index.set(a.id, i);
         const o = i * FAR_STRIDE;
         bodies[o + FAR.x] = a.x;
         bodies[o + FAR.y] = a.y;
@@ -1090,11 +1104,14 @@ export class Sim {
      * about the graph moved. The JS-side wire list above does survive.
      */
     const wires = nativeSolver.wiresNear;
+    const ai = this.wireAI;
+    const bi = this.wireBI;
     let k = 0;
-    for (const w of wireList) {
-      const ia = index.get(w.a.id);
-      const ib = index.get(w.b.id);
-      if (ia === undefined || ib === undefined) continue;
+    for (let e = 0; e < wireList.length; e++) {
+      const w = wireList[e];
+      const ia = ai[e];
+      const ib = bi[e];
+      if (ia < 0 || ib < 0) continue;
       const o = k * WIRE_NEAR_STRIDE;
       wires[o + WN.a] = ia;
       wires[o + WN.b] = ib;
@@ -1227,8 +1244,6 @@ export class Sim {
     const sc = nativeSolver.scale;
     if (!bodies || !bm || !invI || !kinds || !sc) return false;
     if (!nativeSolver.canNear(list.length, 0, 0)) return false;
-    const index = this.packIndex;
-    index.clear();
     for (let i = 0; i < list.length; i++) {
       const a = list[i];
       const o = i * FAR_STRIDE;
@@ -1247,7 +1262,6 @@ export class Sim {
       invI[i] = held ? 0 : 1 / Math.max(1e-4, momentOfInertia(a));
       kinds[i] = this.kindCode(a.kind);
       sc[i] = a.scale;
-      index.set(a.id, i);
     }
     return true;
   }
@@ -1285,19 +1299,48 @@ export class Sim {
     if (this.listRoster === this.rosterVersion) return list;
     list.length = 0;
     for (const a of this.agents.values()) list.push(a);
+    const cap = this.agentStore.capacity;
+    if (this.slotIndex.length < cap) this.slotIndex = new Int32Array(cap * 2);
+    const at = this.slotIndex;
+    at.fill(-1);
+    for (let i = 0; i < list.length; i++) at[list[i].slot] = i;
     this.listRoster = this.rosterVersion;
     return list;
   }
 
   private listRoster = -1;
+  /**
+   * Where each store slot sits in `forceList()`, or -1 for a slot nobody
+   * lives in. Rebuilt with the list, on the same key.
+   *
+   * The one index. Six `Map<id, index>` used to answer this question, one
+   * per pass, each rebuilt every frame — a hundred thousand map writes a
+   * frame at fifty thousand bodies to describe an order that only changes
+   * when the roster does. A body's slot is already in hand wherever this is
+   * asked, so the answer is an array read.
+   */
+  private slotIndex = new Int32Array(0);
   /** Scratch owned by `packFar`; see the note there. */
-  private readonly farIndex = new Map<number, number>();
   private readonly farWirePack: Wire[] = [];
+  private farA = new Int32Array(0);
+  private farB = new Int32Array(0);
 
   private wireListVersion = -1;
   private wireListRoster = -1;
   private readonly wireEndA: (Agent | undefined)[] = [];
   private readonly wireEndB: (Agent | undefined)[] = [];
+  /**
+   * The same two endpoints as positions in `forceList()`, or -1.
+   *
+   * Every pass that walks wires wants this and every one of them used to
+   * ask a `Map` for it, twice a wire: the flocking adjacency, the wake
+   * graph, the need field, and all four packs. At thirty thousand wires
+   * that is a few hundred thousand lookups a frame for a table that changes
+   * only when the graph or the roster does, which is the same key this list
+   * is already cached on.
+   */
+  private wireAI = new Int32Array(0);
+  private wireBI = new Int32Array(0);
 
   /**
    * The wires in Map order, with both endpoints already resolved to agents.
@@ -1318,15 +1361,31 @@ export class Sim {
     ) {
       return list;
     }
+    // Before the loop: it is what turns an endpoint into an index, and it
+    // stamps the roster this list is being cut against.
+    const at = (this.forceList(), this.slotIndex);
     list.length = 0;
     const eA = this.wireEndA;
     const eB = this.wireEndB;
     eA.length = 0;
     eB.length = 0;
+    const m = this.graph.wires.size;
+    if (this.wireAI.length < m) {
+      this.wireAI = new Int32Array(m * 2);
+      this.wireBI = new Int32Array(m * 2);
+    }
+    const ai = this.wireAI;
+    const bi = this.wireBI;
+    let k = 0;
     for (const w of this.graph.wires.values()) {
       list.push(w);
-      eA.push(this.agents.get(w.a.id));
-      eB.push(this.agents.get(w.b.id));
+      const A = this.agents.get(w.a.id);
+      const B = this.agents.get(w.b.id);
+      eA.push(A);
+      eB.push(B);
+      ai[k] = A ? at[A.slot] : -1;
+      bi[k] = B ? at[B.slot] : -1;
+      k++;
     }
     this.wireListVersion = this.graph.version;
     this.wireListRoster = this.rosterVersion;
@@ -1409,10 +1468,8 @@ export class Sim {
     if (this.adjGraphVersion === this.graph.version && this.adjRosterVersion === this.rosterVersion) {
       return this.wireAdj;
     }
-    const index = this.adjIndex;
-    index.clear();
-    for (let i = 0; i < list.length; i++) index.set(list[i].id, i);
-    this.wireAdj.build(list.length, index, () => this.graph.wires.values());
+    this.wireListResolved();
+    this.wireAdj.buildIndexed(list.length, this.wireAI, this.wireBI, this.graph.wires.size);
     this.adjGraphVersion = this.graph.version;
     this.adjRosterVersion = this.rosterVersion;
     return this.wireAdj;
@@ -1550,7 +1607,6 @@ export class Sim {
 
   private wakeGraphVersion = -1;
   private wakeGraphRoster = -1;
-  private readonly wakeIndex = new Map<number, number>();
   private readonly wakeList: Agent[] = [];
   private wakeOff = new Int32Array(1);
   private wakeNei = new Int32Array(0);
@@ -1572,13 +1628,11 @@ export class Sim {
     ) {
       return list.length;
     }
-    const index = this.wakeIndex;
-    index.clear();
+    // The shared list, so the wake graph is cut against exactly the order
+    // every other pass indexes by.
+    const src = this.forceList();
     list.length = 0;
-    for (const a of this.agents.values()) {
-      index.set(a.id, list.length);
-      list.push(a);
-    }
+    for (let i = 0; i < src.length; i++) list.push(src[i]);
     const n = list.length;
     if (this.wakeOff.length < n + 2) this.wakeOff = new Int32Array(n * 2 + 4);
     if (this.wakeDist.length < n) {
@@ -1589,15 +1643,15 @@ export class Sim {
     off.fill(0, 0, n + 2);
     // Counting sort into CSR: one pass to count degrees, one to place.
     const wires = this.wireListResolved();
-    const endA = this.wireEndA;
-    const endB = this.wireEndB;
+    const wai = this.wireAI;
+    const wbi = this.wireBI;
     let edges = 0;
     for (let k = 0; k < wires.length; k++) {
-      const A = endA[k];
-      const B = endB[k];
-      if (!A || !B || A === B) continue;
-      off[index.get(A.id)! + 1]++;
-      off[index.get(B.id)! + 1]++;
+      const ia = wai[k];
+      const ib = wbi[k];
+      if (ia < 0 || ib < 0 || ia === ib) continue;
+      off[ia + 1]++;
+      off[ib + 1]++;
       edges += 2;
     }
     for (let i = 0; i < n; i++) off[i + 1] += off[i];
@@ -1606,11 +1660,9 @@ export class Sim {
     const cursor = this.wakeQ;
     for (let i = 0; i < n; i++) cursor[i] = off[i];
     for (let k = 0; k < wires.length; k++) {
-      const A = endA[k];
-      const B = endB[k];
-      if (!A || !B || A === B) continue;
-      const ia = index.get(A.id)!;
-      const ib = index.get(B.id)!;
+      const ia = wai[k];
+      const ib = wbi[k];
+      if (ia < 0 || ib < 0 || ia === ib) continue;
       nei[cursor[ia]++] = ib;
       nei[cursor[ib]++] = ia;
     }
@@ -1639,7 +1691,7 @@ export class Sim {
       this.hitWake.length = 0;
       return;
     }
-    const index = this.wakeIndex;
+    const at = this.slotIndex;
     const list = this.wakeList;
     const hop = this.wakeDist;
     const q = this.wakeQ;
@@ -1659,8 +1711,10 @@ export class Sim {
      * as progress, that pair alone spins the loop forever.
      */
     const seed = (id: number, hold: boolean): boolean => {
-      const i = index.get(id);
-      if (i === undefined) return false;
+      const a = this.agents.get(id);
+      if (!a) return false;
+      const i = at[a.slot];
+      if (i < 0) return false;
       if (hop[i] >= 0) {
         if (hold && !this.holdAwake.has(id)) sticky.push(id);
         return false;
@@ -2537,27 +2591,35 @@ export class Sim {
     const n = list.length;
     if (n === 0) return null;
     /*
-     * Its own scratch, not the shared `packIndex` and `wirePack`.
+     * Its own wire array, not the shared `wirePack`.
      *
      * `wireListResolved` caches `wirePack` and stamps it valid against the
-     * graph and roster versions, with `wireEndA`/`wireEndB` resolved to match
-     * it position by position. This pass builds a *filtered* wire list — only
-     * wires whose endpoints are both in the pack — so borrowing that array
-     * left the cache holding a different list under a stamp that still claimed
-     * to be current, and every later reader paired wire k with the endpoints
-     * of some other wire. Port torques then reel unrelated bodies together and
-     * wires appear to grow without bound.
-     *
-     * It only bites on the GPU path, which is the only caller, and that path
-     * had never run — so the shared arrays looked safe to cache.
+     * graph and roster versions, with `wireEndA`/`wireEndB` and the endpoint
+     * indices resolved to match it position by position. This pass builds a
+     * *filtered* list — self-wires dropped, since a body wired to two of its
+     * own ports has no span to solve — so borrowing that array left the cache
+     * holding a different list under a stamp that still claimed to be
+     * current, and every later reader paired wire k with the endpoints of
+     * some other wire.
      */
-    const index = this.farIndex;
-    index.clear();
-    for (let i = 0; i < n; i++) index.set(list[i].id, i);
+    const all = this.wireListResolved();
+    const ai = this.wireAI;
+    const bi = this.wireBI;
     const wireList = this.farWirePack;
+    if (this.farA.length < all.length) {
+      this.farA = new Int32Array(all.length * 2);
+      this.farB = new Int32Array(all.length * 2);
+    }
     wireList.length = 0;
-    for (const w of this.graph.wires.values()) {
-      if (index.has(w.a.id) && index.has(w.b.id) && w.a.id !== w.b.id) wireList.push(w);
+    let nw = 0;
+    for (let k = 0; k < all.length; k++) {
+      const a = ai[k];
+      const b = bi[k];
+      if (a < 0 || b < 0 || a === b) continue;
+      this.farA[nw] = a;
+      this.farB[nw] = b;
+      wireList.push(all[k]);
+      nw++;
     }
     const { data, wires } = farGpu.packTarget(n, wireList.length);
     for (let i = 0; i < n; i++) {
@@ -2586,8 +2648,8 @@ export class Sim {
       packFarWire(
         wires,
         k,
-        index.get(w.a.id)!,
-        index.get(w.b.id)!,
+        this.farA[k],
+        this.farB[k],
         w.rest,
         oa.x,
         oa.y,
@@ -2630,17 +2692,30 @@ export class Sim {
     const list = this.forceList();
     const n = list.length;
     if (n === 0) return true;
-    const index = this.packIndex;
-    // The force block built this from the same list; no agent has come or
-    // gone since, so rebuilding it is nine thousand Map writes for nothing.
-    if (!this.forceBlock) {
-      index.clear();
-      for (let i = 0; i < n; i++) index.set(list[i].id, i);
+    /*
+     * Its own array, not the cached `wirePack`: this list drops self-wires,
+     * which a body wired to two of its own ports genuinely is, and writing a
+     * filtered list into the shared one leaves it stamped current while
+     * every later reader pairs wire k with the endpoints of another.
+     */
+    const all = this.wireListResolved();
+    const aiAll = this.wireAI;
+    const biAll = this.wireBI;
+    const wireList = this.farWirePack;
+    if (this.farA.length < all.length) {
+      this.farA = new Int32Array(all.length * 2);
+      this.farB = new Int32Array(all.length * 2);
     }
-    const wireList = this.wirePack;
     wireList.length = 0;
-    for (const w of this.graph.wires.values()) {
-      if (index.has(w.a.id) && index.has(w.b.id) && w.a.id !== w.b.id) wireList.push(w);
+    let nw = 0;
+    for (let k = 0; k < all.length; k++) {
+      const a = aiAll[k];
+      const b = biAll[k];
+      if (a < 0 || b < 0 || a === b) continue;
+      this.farA[nw] = a;
+      this.farB[nw] = b;
+      wireList.push(all[k]);
+      nw++;
     }
     if (n > nativeSolver.bodyCap || wireList.length > nativeSolver.wireCap) return false;
 
@@ -2675,8 +2750,8 @@ export class Sim {
       packFarWire(
         wires,
         k,
-        index.get(w.a.id)!,
-        index.get(w.b.id)!,
+        this.farA[k],
+        this.farB[k],
         w.rest,
         this.tmpStemA.x,
         this.tmpStemA.y,
@@ -3081,7 +3156,7 @@ export class Sim {
      * the ordering. Waiting on the field first and dispatching after was two
      * full round trips a frame where one will do.
      */
-    const genomeSubmitted = this.genomeOnGpu && this.submitGenome(list, n);
+    const genomeSubmitted = this.genomeOnGpu && this.submitGenome(list, n, params);
 
     if (!(await fieldGpu.collect())) {
       this.dropFieldGpu();
@@ -3139,6 +3214,7 @@ export class Sim {
 
     if (genomeSubmitted) {
       if (await genomeGpu.collect()) {
+        this.scatterLearn();
         this.genomePending = true;
       } else {
         // Back to the CPU pass for good; nothing is owed, since `updateState`
@@ -3163,6 +3239,8 @@ export class Sim {
     this.fieldOnGpu = false;
     this.genomeOnGpu = false;
     this.steerFromSamples = false;
+    this.learnWanted.length = 0;
+    this.learnAsked.length = 0;
     nativeSolver.useSamples(false);
   }
 
@@ -3182,7 +3260,7 @@ export class Sim {
    *
    * True when the dispatch was queued; `gpuFieldStep` collects it.
    */
-  private submitGenome(list: Agent[], n: number): boolean {
+  private submitGenome(list: Agent[], n: number, params: Params): boolean {
     const samples = fieldGpu.sampleBuffer;
     if (!samples || n === 0) return false;
     const store = this.agentStore;
@@ -3203,7 +3281,8 @@ export class Sim {
      * bodies and would have been 27 MB at fifty; a frame with one birth now
      * pushes one genome. A moved buffer starts over from nothing.
      */
-    const chemMoved = genomeGpu.reserve(n, nNei, chemFloats);
+    const chemMoved = genomeGpu.reserve(n, nNei, chemFloats, maxSlot + 1);
+    this.syncLearn(store, maxSlot + 1);
     if (chemMoved || this.genomeChemVersion !== store.chemVersion) {
       const lo = store.chemDirtyLo * CHEM_LEN;
       const hi = Math.min(store.chemDirtyHi * CHEM_LEN, chemFloats);
@@ -3245,13 +3324,102 @@ export class Sim {
     for (let e = 0; e < nNei; e++) neiData[e] = adj.nei[e];
     Sim.phase('gpu:packGenome');
 
-    if (!genomeGpu.submit(samples, n, nNei, this.groundScale, CH.energy)) {
+    if (
+      !genomeGpu.submit(samples, n, nNei, this.groundScale, CH.energy, {
+        rate: params.learnRate,
+        critic: params.learnCritic,
+        trace: params.learnTrace,
+        discount: params.learnDiscount,
+        maxWeight: CHEM_TASTE_MAX,
+      })
+    ) {
       this.genomeOnGpu = false;
       this.genomePending = false;
       return false;
     }
     this.genomeSlots(list, n);
     return true;
+  }
+
+  /**
+   * Hand the device the learning rows the host has changed, and ask for the
+   * ones the host is about to need.
+   *
+   * The host writes this state in one place only — `AgentStore.clearSlot`,
+   * zeroing a slot that has been recycled — and that write has to land or a
+   * newborn inherits the last occupant's experience through a buffer nobody
+   * cleared. The three CPU arrays are transcoded into the one row the shader
+   * indexes; a frame with one birth moves one row.
+   */
+  private syncLearn(store: AgentStore, learnSlots: number): void {
+    if (this.genomeLearnVersion !== store.learnVersion) {
+      const lo = store.learnDirtyLo;
+      const hi = Math.min(store.learnDirtyHi, learnSlots);
+      if (hi > lo) {
+        const up = genomeGpu.learnUpData;
+        const stride = genomeGpu.learnStride;
+        const P = store.plasticAll;
+        const T = store.traceAll;
+        const C = store.criticAll;
+        const V = store.prevValue;
+        for (let s = lo; s < hi; s++) {
+          const o = (s - lo) * stride;
+          const ps = s * PLASTIC_LEN;
+          for (let k = 0; k < PLASTIC_LEN; k++) {
+            up[o + k] = P[ps + k];
+            up[o + LEARN_TRACE + k] = T[ps + k];
+          }
+          const cs = s * CRITIC_LEN;
+          for (let k = 0; k < CRITIC_LEN; k++) up[o + LEARN_CRITIC + k] = C[cs + k];
+          up[o + LEARN_PREV_V] = V[s];
+        }
+        genomeGpu.pushLearn(lo, hi - lo);
+      }
+      this.genomeLearnVersion = store.learnVersion;
+      store.clearLearnDirty();
+    }
+    const want = this.learnWanted;
+    this.learnAsked.length = 0;
+    if (want.length === 0) return;
+    const took = genomeGpu.readLearn(want, want.length);
+    for (let i = 0; i < took; i++) this.learnAsked.push(want[i]);
+    want.splice(0, took);
+  }
+
+  /**
+   * Put the rows that came back where the CPU keeps them.
+   *
+   * Deliberately does not mark them dirty: this is the device telling the
+   * host what it worked out, and echoing it straight back would push it out
+   * again every frame a rewrite is pending.
+   */
+  private scatterLearn(): void {
+    const rows = genomeGpu.learnCount;
+    if (rows === 0) return;
+    const src = genomeGpu.learnOutData;
+    const stride = genomeGpu.learnStride;
+    const store = this.agentStore;
+    const P = store.plasticAll;
+    const T = store.traceAll;
+    const C = store.criticAll;
+    const V = store.prevValue;
+    for (let i = 0; i < rows && i < this.learnAsked.length; i++) {
+      const s = this.learnAsked[i];
+      const o = i * stride;
+      const ps = s * PLASTIC_LEN;
+      let on = 0;
+      for (let k = 0; k < PLASTIC_LEN; k++) {
+        const w = src[o + k];
+        P[ps + k] = w;
+        T[ps + k] = src[o + LEARN_TRACE + k];
+        if (w !== 0) on = 1;
+      }
+      const cs = s * CRITIC_LEN;
+      for (let k = 0; k < CRITIC_LEN; k++) C[cs + k] = src[o + LEARN_CRITIC + k];
+      V[s] = src[o + LEARN_PREV_V];
+      if (on) store.plasticOn[s] = 1;
+    }
+    this.learnAsked.length = 0;
   }
 
   /**
@@ -3332,27 +3500,29 @@ export class Sim {
     const n = list.length;
     if (n === 0) return true;
 
-    const index = this.packIndex;
-    index.clear();
-    for (let i = 0; i < n; i++) index.set(list[i].id, i);
-
-    const wireList = this.wirePack;
-    wireList.length = 0;
+    /*
+     * The cached list itself, unfiltered: every wire's endpoints are in the
+     * roster, so nothing here can drop one, and the endpoint indices come
+     * with it.
+     */
+    const wireList = this.wireListResolved();
+    const wai = this.wireAI;
+    const wbi = this.wireBI;
     let nNodes = 0;
-    for (const w of this.graph.wires.values()) {
-      if (!index.has(w.a.id) || !index.has(w.b.id)) continue;
-      wireList.push(w);
+    for (let k = 0; k < wireList.length; k++) {
+      const w = wireList[k];
       if (this.wireSimulatesRope(w) && w.nodes.length > 0) nNodes += w.nodes.length;
     }
     const nWires = wireList.length;
     if (!nativeSolver.canNear(n, nWires, nNodes)) return false;
 
-    this.packNearMeta(list, wireList, index, params);
+    this.packNearMeta(list, wireList, wai, wbi, params);
     this.packNearState(list, wireList);
 
     const ropeKeep = Math.exp(-Math.max(0, params.springDamp) * (dt / Sim.SUBSTEPS));
     const heldId = this.grabbed?.id ?? -1;
-    const heldIndex = heldId < 0 ? -1 : (index.get(heldId) ?? -1);
+    const heldBody = heldId < 0 ? undefined : this.agents.get(heldId);
+    const heldIndex = heldBody ? this.slotIndex[heldBody.slot] : -1;
     const gx = this.grabbed?.x ?? 0;
     const gy = this.grabbed?.y ?? 0;
     if (!nativeSolver.stepNear(
@@ -3404,7 +3574,8 @@ export class Sim {
   private packNearMeta(
     list: Agent[],
     wireList: Wire[],
-    index: Map<number, number>,
+    wai: Int32Array,
+    wbi: Int32Array,
     params: Params,
   ): void {
     const bodies = nativeSolver.bodies!;
@@ -3431,8 +3602,8 @@ export class Sim {
     for (let k = 0; k < wireList.length; k++) {
       const w = wireList[k];
       const o = k * WIRE_NEAR_STRIDE;
-      const ai = index.get(w.a.id)!;
-      const bi = index.get(w.b.id)!;
+      const ai = wai[k];
+      const bi = wbi[k];
       const A = list[ai];
       const B = list[bi];
       const frozenEnds = frozen.has(A.id) || frozen.has(B.id);
@@ -4042,11 +4213,7 @@ export class Sim {
         noise[i * 3 + 2] = Math.random();
       }
     } else {
-      const index = this.packIndex;
-      if (!this.forceBlock) {
-        index.clear();
-        for (let i = 0; i < n; i++) index.set(list[i].id, i);
-      }
+      const at = this.slotIndex;
       for (let i = 0; i < n; i++) {
         const a = list[i];
         const pFree = this.graph.isFreeAt(a.id, 'p');
@@ -4066,7 +4233,8 @@ export class Sim {
         let pslot = 0;
         if (pw) {
           const other = pw.a.id === a.id ? pw.b : pw.a;
-          pj = index.get(other.id) ?? -1;
+          const ob = this.agents.get(other.id);
+          pj = ob ? at[ob.slot] : -1;
           pslot = this.slotCode(other.slot);
         }
         pwire[i * 2] = pj;
@@ -4405,16 +4573,15 @@ export class Sim {
       maxHops,
     );
     if (!reuse) {
-      const idx = this.flockIndex;
-      idx.clear();
-      for (let i = 0; i < n; i++) idx.set(list[i].id, i);
-
+      const wires = this.wireListResolved();
+      const ai = this.wireAI;
+      const bi = this.wireBI;
       while (adj.length < n) adj.push([]);
       for (let i = 0; i < n; i++) adj[i].length = 0;
-      for (const wire of this.graph.wires.values()) {
-        const ia = idx.get(wire.a.id);
-        const ib = idx.get(wire.b.id);
-        if (ia === undefined || ib === undefined || ia === ib) continue;
+      for (let k = 0; k < wires.length; k++) {
+        const ia = ai[k];
+        const ib = bi[k];
+        if (ia < 0 || ib < 0 || ia === ib) continue;
         adj[ia].push(ib);
         adj[ib].push(ia);
       }
@@ -5549,6 +5716,15 @@ export class Sim {
         params.rewriteDuration,
         wire.id,
       );
+      /*
+       * With learning on the device, these two bodies' learned weights are
+       * there and not here, and `commitRewrite` is about to consolidate them
+       * into four children's genomes on this side. Asking now gives the round
+       * trip the whole length of the rewrite to complete.
+       */
+      if (this.genomeOnGpu && params.learnRate > 0) {
+        this.learnWanted.push(A.slot, B.slot);
+      }
       this.rewrites.push(rw);
       audio.push(rewriteAudio(rw, 'begin', wire.id, []), this.graph, this.agents);
     }

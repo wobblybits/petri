@@ -186,6 +186,21 @@ export const PLASTIC_LEN = F_OUT - W_IN;
 export const CRITIC_LEN = STATE_DIMS + 1;
 
 /**
+ * One body's learning state, as the GPU holds it: the learned deltas, then
+ * the eligibility traces, then the critic, then last frame's value estimate.
+ *
+ * The CPU keeps these as four separate store arrays, which is the right
+ * shape for a pass that walks one of them at a time. The device wants one
+ * row a body so it is one binding, and a birth or a readback transcodes a
+ * handful of rows between the two. Both sides derive the offsets from here.
+ */
+export const LEARN_PLASTIC = 0;
+export const LEARN_TRACE = PLASTIC_LEN;
+export const LEARN_CRITIC = 2 * PLASTIC_LEN;
+export const LEARN_PREV_V = 2 * PLASTIC_LEN + CRITIC_LEN;
+export const LEARN_STRIDE = LEARN_PREV_V + 1;
+
+/**
  * What one unit of a head's output is worth, per row.
  *
  * The heads exist in the same genome as the emit and taste weights, which live

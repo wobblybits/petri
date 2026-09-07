@@ -1,5 +1,5 @@
 import shader from './genome.wgsl?raw';
-import { CHEM_LEN, HEAD_SCALE, SENSE_SCALE } from '../chem-layout.ts';
+import { CHEM_LEN, HEAD_SCALE, LEARN_STRIDE, SENSE_SCALE } from '../chem-layout.ts';
 
 /**
  * WebGPU host for the genome pass.
@@ -22,8 +22,11 @@ import { CHEM_LEN, HEAD_SCALE, SENSE_SCALE } from '../chem-layout.ts';
 
 /** Floats written per body: h(4), emit(4), taste(4), six heads. */
 const OUT_STRIDE = 18;
-/** 48 bytes: twelve f32/u32, and nothing here is a vec so nothing has to align. */
-const UNIFORM_BYTES = 48;
+/** 80 bytes: twenty f32/u32, and nothing here is a vec so nothing has to align. */
+const UNIFORM_BYTES = 80;
+/** Most learning rows read back in one frame. A frame that begins more
+ *  rewrites than this leaves the rest marked for the next one. */
+const LEARN_READ_CAP = 64;
 
 export class GenomeGpu {
   ready = false;
@@ -39,9 +42,13 @@ export class GenomeGpu {
   private adjNei: GPUBuffer | null = null;
   private out: GPUBuffer | null = null;
   private read: GPUBuffer | null = null;
+  /** Resident learning state, one `LEARN_STRIDE` row a slot. */
+  private learn: GPUBuffer | null = null;
+  private learnRead: GPUBuffer | null = null;
   private bodyCap = 0;
   private neiCap = 0;
   private chemCap = 0;
+  private learnCap = 0;
 
   /** Staging, filled by the caller before `run`. */
   hData = new Float32Array(0);
@@ -49,10 +56,27 @@ export class GenomeGpu {
   offData = new Uint32Array(0);
   neiData = new Uint32Array(0);
   outData = new Float32Array(0);
+  /** Rows to push, filled by the caller before `pushLearn`. */
+  learnUpData = new Float32Array(0);
+  /** Rows that came back, in the order `readLearn` asked for them. */
+  learnOutData = new Float32Array(0);
+  private learnWant = new Int32Array(LEARN_READ_CAP);
+  private learnWantN = 0;
 
   get outStride(): number {
     return OUT_STRIDE;
   }
+
+  get learnStride(): number {
+    return LEARN_STRIDE;
+  }
+
+  /** Rows `collect` brought back, in the order `readLearn` asked for them. */
+  get learnCount(): number {
+    return this.learnGot;
+  }
+
+  private learnGot = 0;
 
   /**
    * Build the pipeline on `device`, rebuilding if it is not the one we hold.
@@ -74,6 +98,9 @@ export class GenomeGpu {
     this.neiCap = 0;
     this.chemCap = 0;
     this.chem = null;
+    this.learn = null;
+    this.learnRead = null;
+    this.learnCap = 0;
     this.hPrev = null;
     this.inputs = null;
     this.adjOff = null;
@@ -94,6 +121,7 @@ export class GenomeGpu {
           { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: readonly },
           { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: readonly },
           { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: storage },
+          { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: storage },
         ],
       });
       this.pipeline = device.createComputePipeline({
@@ -120,10 +148,46 @@ export class GenomeGpu {
    * not change from frame to frame, so the caller uploads it only when it has
    * to. A reallocation is one of those times.
    */
-  reserve(n: number, nei: number, chemFloats: number): boolean {
+  /**
+   * Grow to fit, and report whether the genome table moved.
+   *
+   * `learnSlots` sizes the resident learning state, which is indexed by slot
+   * like the genome. Growing that one loses every body's learning, so it is
+   * grown generously and the caller re-pushes what it has.
+   */
+  reserve(n: number, nei: number, chemFloats: number, learnSlots = 0): boolean {
     const device = this.device;
     if (!device) return false;
     const st = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+    if (learnSlots > this.learnCap || !this.learn) {
+      const oldLearn = this.learn;
+      const oldBytes = this.learnCap * LEARN_STRIDE * 4;
+      this.learnCap = Math.max(1024, learnSlots * 2);
+      this.learnRead?.destroy();
+      this.learn = device.createBuffer({
+        size: this.learnCap * LEARN_STRIDE * 4,
+        usage: st | GPUBufferUsage.COPY_SRC,
+      });
+      /*
+       * Carried over rather than started again. This is the one buffer here
+       * whose contents are not recomputed every frame — it is what every
+       * body has learned — and a pond passes a thousand bodies in seconds,
+       * so a doubling that dropped it would wipe the pond's memory
+       * repeatedly and look like learning that does not stick.
+       */
+      if (oldLearn && oldBytes > 0) {
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(oldLearn, 0, this.learn, 0, oldBytes);
+        device.queue.submit([enc.finish()]);
+        oldLearn.destroy();
+      }
+      this.learnRead = device.createBuffer({
+        size: LEARN_READ_CAP * LEARN_STRIDE * 4,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      this.learnUpData = new Float32Array(this.learnCap * LEARN_STRIDE);
+      this.learnOutData = new Float32Array(LEARN_READ_CAP * LEARN_STRIDE);
+    }
     let chemMoved = false;
     if (chemFloats > this.chemCap) {
       this.chemCap = Math.max(4096, chemFloats * 2);
@@ -163,6 +227,41 @@ export class GenomeGpu {
     return chemMoved;
   }
 
+  /**
+   * Push `count` learning rows starting at slot `lo`, from `learnUpData`.
+   *
+   * The host writes this only to zero a slot that has been recycled, which
+   * matters more than it sounds: a slot handed on with the device copy still
+   * in it would give a newborn the previous occupant's experience.
+   */
+  pushLearn(lo: number, count: number): void {
+    const device = this.device;
+    if (!device || !this.learn || count <= 0) return;
+    device.queue.writeBuffer(
+      this.learn,
+      lo * LEARN_STRIDE * 4,
+      this.learnUpData.buffer,
+      this.learnUpData.byteOffset,
+      count * LEARN_STRIDE * 4,
+    );
+  }
+
+  /**
+   * Ask for these slots' learning rows on the next `collect`.
+   *
+   * Only the two bodies of a rewrite need this, and only so the CPU can
+   * consolidate what they learned into their children's genome, where
+   * inheritance lives. `beginRewrite` gives about forty frames of notice,
+   * which is why a handful of small copies is enough and the whole buffer
+   * never has to come back.
+   */
+  readLearn(slots: ArrayLike<number>, count: number): number {
+    const take = Math.min(count, LEARN_READ_CAP);
+    for (let i = 0; i < take; i++) this.learnWant[i] = slots[i];
+    this.learnWantN = take;
+    return take;
+  }
+
   /** Push the whole genome table. Only when it moved — see `reserve`. */
   uploadChem(chem: Float32Array, floats: number): void {
     this.uploadChemRange(chem, 0, floats);
@@ -181,6 +280,8 @@ export class GenomeGpu {
 
   /** Bytes the last `submit` copied out, for `collect` to map. */
   private pendingBytes = 0;
+  /** Learning rows the last `submit` copied out. */
+  private pendingLearn = 0;
 
   /**
    * One frame of genome. `samples` is the field's probe buffer, borrowed.
@@ -195,8 +296,9 @@ export class GenomeGpu {
     nei: number,
     groundScale: number,
     energyCh: number,
+    learn: { rate: number; critic: number; trace: number; discount: number; maxWeight: number },
   ): Promise<boolean> {
-    if (!this.submit(samples, n, nei, groundScale, energyCh)) return false;
+    if (!this.submit(samples, n, nei, groundScale, energyCh, learn)) return false;
     return this.collect();
   }
 
@@ -207,6 +309,7 @@ export class GenomeGpu {
     nei: number,
     groundScale: number,
     energyCh: number,
+    learn: { rate: number; critic: number; trace: number; discount: number; maxWeight: number },
   ): boolean {
     const device = this.device;
     if (!this.ready || !device || !this.pipeline) return false;
@@ -229,6 +332,11 @@ export class GenomeGpu {
       f32[8] = HEAD_SCALE.thrust;
       f32[9] = HEAD_SCALE.recoil;
       f32[10] = energyCh;
+      f32[11] = learn.rate;
+      f32[12] = learn.critic;
+      f32[13] = learn.trace;
+      f32[14] = learn.discount;
+      f32[15] = learn.maxWeight;
       device.queue.writeBuffer(this.uniform!, 0, u);
       device.queue.writeBuffer(this.hPrev!, 0, this.hData.buffer, this.hData.byteOffset, n * 4 * 4);
       device.queue.writeBuffer(
@@ -271,6 +379,7 @@ export class GenomeGpu {
             { binding: 5, resource: { buffer: this.adjOff! } },
             { binding: 6, resource: { buffer: this.adjNei! } },
             { binding: 7, resource: { buffer: this.out! } },
+            { binding: 8, resource: { buffer: this.learn! } },
           ],
         }),
       );
@@ -278,6 +387,23 @@ export class GenomeGpu {
       pass.end();
       const bytes = n * OUT_STRIDE * 4;
       enc.copyBufferToBuffer(this.out!, 0, this.read!, 0, bytes);
+      /*
+       * And a row apiece for whoever asked. `LEARN_STRIDE` floats is 536
+       * bytes, so every row starts on a four-byte boundary, which is all a
+       * buffer-to-buffer copy asks for.
+       */
+      const rowBytes = LEARN_STRIDE * 4;
+      for (let k = 0; k < this.learnWantN; k++) {
+        enc.copyBufferToBuffer(
+          this.learn!,
+          this.learnWant[k] * rowBytes,
+          this.learnRead!,
+          k * rowBytes,
+          rowBytes,
+        );
+      }
+      this.pendingLearn = this.learnWantN;
+      this.learnWantN = 0;
       device.queue.submit([enc.finish()]);
       this.pendingBytes = bytes;
       return true;
@@ -287,16 +413,32 @@ export class GenomeGpu {
     }
   }
 
-  /** Wait for the last `submit`'s readback and unpack it into `outData`. */
+  /** Wait for the last `submit`'s readbacks and unpack them. */
   async collect(): Promise<boolean> {
     const bytes = this.pendingBytes;
+    const rows = this.pendingLearn;
     this.pendingBytes = 0;
+    this.pendingLearn = 0;
+    this.learnGot = 0;
     if (!this.ready || !this.device) return false;
-    if (bytes === 0) return true;
+    if (bytes === 0 && rows === 0) return true;
     try {
-      await this.read!.mapAsync(GPUMapMode.READ, 0, bytes);
-      this.outData.set(new Float32Array(this.read!.getMappedRange(0, bytes)));
-      this.read!.unmap();
+      // Both maps issued before either is awaited: they ride one submission
+      // and finish together.
+      const waits: Promise<void>[] = [];
+      if (bytes > 0) waits.push(this.read!.mapAsync(GPUMapMode.READ, 0, bytes));
+      const learnBytes = rows * LEARN_STRIDE * 4;
+      if (rows > 0) waits.push(this.learnRead!.mapAsync(GPUMapMode.READ, 0, learnBytes));
+      await Promise.all(waits);
+      if (bytes > 0) {
+        this.outData.set(new Float32Array(this.read!.getMappedRange(0, bytes)));
+        this.read!.unmap();
+      }
+      if (rows > 0) {
+        this.learnOutData.set(new Float32Array(this.learnRead!.getMappedRange(0, learnBytes)));
+        this.learnRead!.unmap();
+        this.learnGot = rows;
+      }
       return true;
     } catch (e) {
       this.lastError = String(e);

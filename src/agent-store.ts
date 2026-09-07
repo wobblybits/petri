@@ -237,6 +237,34 @@ export class AgentStore {
     this.chemDirtyHi = 0;
   }
 
+  /**
+   * The same, for the learning state.
+   *
+   * On the GPU path the device owns this and the host only ever writes it to
+   * zero a slot — but that write matters more than most: a recycled slot
+   * whose learning was left on the device would hand the previous occupant's
+   * experience to whoever moved in.
+   */
+  learnVersion = nextChemVersion++;
+  learnDirtyLo = 0;
+  learnDirtyHi = 0;
+
+  markLearn(slot: number): void {
+    if (this.learnDirtyHi <= this.learnDirtyLo) {
+      this.learnDirtyLo = slot;
+      this.learnDirtyHi = slot + 1;
+    } else {
+      if (slot < this.learnDirtyLo) this.learnDirtyLo = slot;
+      if (slot + 1 > this.learnDirtyHi) this.learnDirtyHi = slot + 1;
+    }
+    this.learnVersion = nextChemVersion++;
+  }
+
+  clearLearnDirty(): void {
+    this.learnDirtyLo = 0;
+    this.learnDirtyHi = 0;
+  }
+
   /** Slots < highWater have been allocated at least once (live or freed). */
   private highWater = 0;
   /** Released slots available for reuse, all < highWater. */
@@ -336,6 +364,7 @@ export class AgentStore {
     this.criticAll.fill(0, slot * CRITIC_LEN, slot * CRITIC_LEN + CRITIC_LEN);
     this.prevValue[slot] = 0;
     this.plasticOn[slot] = 0;
+    this.markLearn(slot);
     this.emitAll.fill(0, slot * 4, slot * 4 + 4);
     this.tasteAll.fill(0, slot * 4, slot * 4 + 4);
   }
