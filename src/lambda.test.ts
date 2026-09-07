@@ -141,6 +141,32 @@ describe('running in the simulation', () => {
     expect(run(0, 2).answer).toBe(2);
   });
 
+  /*
+   * The bug this pins: `injectTerm` let `createAgent` default to a private
+   * one-slot store, so every agent of a term came back in slot 0 of a store
+   * the sim did not own. A slot is how every per-frame pass finds a body's
+   * data, so the term aliased whatever lived in the sim's slot 0 — and
+   * `HarvestPlan` chains bodies by slot, so one slot appearing twice made its
+   * `next` point at itself and the walk spin. Synchronously, inside `step`,
+   * where no test timeout can fire: the default suite hung on it for half an
+   * hour and printed nothing.
+   */
+  it('puts every agent of a term in the simulation own store, one slot each', () => {
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    const sim = new Sim(900, 700);
+    const { ids } = injectTerm(sim, ap(PLUS, church(2), church(3)), 450, 350, params);
+    expect(ids.length).toBeGreaterThan(3);
+    const slots = new Set<number>();
+    for (const id of ids) {
+      const a = sim.agents.get(id)!;
+      expect(a, `agent ${id} is missing`).toBeTruthy();
+      expect(a.store, `agent ${id} is in a foreign store`).toBe(sim.agentStore);
+      expect(slots.has(a.slot), `slot ${a.slot} is claimed twice`).toBe(false);
+      slots.add(a.slot);
+    }
+  });
+
   it('seals the interface so the term cannot latch onto a passer-by', () => {
     const params = defaultParams();
     params.spawnInterval = 0;

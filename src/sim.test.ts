@@ -424,7 +424,7 @@ describe('simulation presets', () => {
     const b = sim.spawn('era', 100, 103, 0, params, true)!;
     a.extra = 1;
     b.extra = 1;
-    sim.graph.snap(sim.agents, sim.w, sim.h, params, sim.time);
+    sim.latchPass(params);
     expect(sim.graph.wires.size).toBe(1);
     expect(sim.graph.isFree({ id: a.id, slot: 'p' })).toBe(false);
     expect(sim.graph.isFree({ id: b.id, slot: 'p' })).toBe(false);

@@ -418,9 +418,20 @@ static int disc_wired(int i, int j) {
   return disc_nei[o] == j || disc_nei[o + 1] == j || disc_nei[o + 2] == j;
 }
 
-static void disc(int n, int n_wires, float h) {
+/*
+ * `rebuild` says whether the topology table has to be laid again.
+ *
+ * `disc_nei` is which bodies a body is wired to, so that a pair the span
+ * constraint owns is not also shoved apart by a contact. It is a function of
+ * the wire list and nothing else, and the host repacks that once a frame —
+ * so inside the substep loop it is constant, and laying it eight times was
+ * laying it seven times for nothing. At fifty thousand bodies that is a
+ * hundred and fifty thousand integer writes and a walk of every wire, eight
+ * times a frame, to reproduce the same table.
+ */
+static void disc(int n, int n_wires, float h, int rebuild) {
   memset(delta, 0, (size_t)n * 2 * sizeof(float));
-  fill_disc_nei(n, n_wires, WIRE_FAR);
+  if (rebuild) fill_disc_nei(n, n_wires, WIRE_FAR);
   float maxr = 0.f;
   for (int i = 0; i < n; i++) {
     float r = bodies[i * STRIDE + FAR_RADIUS];
@@ -2113,9 +2124,11 @@ static int near_contacts(int n, int n_wires, float h, int reset_hits, int rebuil
   if (n > MAX_BODIES) n = MAX_BODIES;
   memset(delta, 0, (size_t)n * 2 * sizeof(float));
   memset(tri_ok, 0, (size_t)n);
-  fill_disc_nei(n, n_wires, WIRE_NEAR);
   int np = g_pairs;
+  // Same argument as `disc`: the wire table is one frame's topology, and
+  // this rebuilds its pair list on exactly the frames it needs the table.
   if (rebuild_pairs || np <= 0) {
+    fill_disc_nei(n, n_wires, WIRE_NEAR);
     float maxr = 0.f;
     for (int i = 0; i < n; i++) {
       float r = bodies[i * STRIDE + FAR_RADIUS];
@@ -2211,7 +2224,7 @@ void solver_step_far(int n, int n_wires, float dt, int substeps) {
   float h = dt / (float)substeps;
   for (int s = 0; s < substeps; s++) {
     integrate(n, h);
-    disc(n, n_wires, h);
+    disc(n, n_wires, h, s == 0);
     apply(n);
     if (n_wires > 0) span(n, n_wires, h);
     finalize(n, h);

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { ERA_SLOTS, NODE_SLOTS, portWorld, portWorldInto, slotsFor } from './agents.ts';
+import {
+  ERA_SLOTS,
+  NODE_SLOTS,
+  portFrameInto,
+  portWorld,
+  portWorldInto,
+  slotsFor,
+} from './agents.ts';
 import type { AgentKind, PortSlot } from './agents.ts';
 import { defaultParams } from './params.ts';
 import { Sim } from './sim.ts';
@@ -78,5 +85,50 @@ describe('portWorldInto', () => {
     expect(() => {
       (NODE_SLOTS as PortSlot[]).push('p');
     }, 'a shared list a caller can mutate is worse than an allocation').toThrow();
+  });
+});
+
+/**
+ * `portFrameInto` against the two functions it replaced.
+ *
+ * The latch pass no longer calls `portWorldInto` per port or the old
+ * `inSnapArcAt` per candidate pair; it turns each body's heading into a sine
+ * and a cosine once and this builds both the port's position and the outward
+ * axis the snap arc is measured from. The axis formula below is the deleted
+ * `inSnapArcAt`'s, kept here so the sign convention has a witness: a flipped
+ * sign would let ports latch to whatever is behind them, which looks like the
+ * pond being unusually social rather than like a bug.
+ */
+describe('portFrameInto', () => {
+  it('agrees with portWorldInto and the arc axis, for every kind, slot and pose', () => {
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    const sim = new Sim(20000, 20000);
+    const kinds: AgentKind[] = ['era', 'dup', 'con'];
+    const into = { x: 0, y: 0 };
+    const frame = { x: 0, y: 0, ax: 0, ay: 0 };
+    for (const kind of kinds) {
+      const a = body(sim, kind, params);
+      for (const heading of [0, 0.3, 1.9, -2.7, Math.PI, 6.1]) {
+        for (const scale of [0.6, 1, 1.7]) {
+          a.heading = heading;
+          a.scale = scale;
+          a.x = 4231.5;
+          a.y = 6104.25;
+          const cos = Math.cos(heading);
+          const sin = Math.sin(heading);
+          for (const slot of slotsFor(kind) as PortSlot[]) {
+            portWorldInto(a, slot, 20000, 20000, into);
+            portFrameInto(kind, slot, a.x, a.y, scale, cos, sin, frame);
+            expect(frame.x, `${kind}.${slot} x`).toBe(into.x);
+            expect(frame.y, `${kind}.${slot} y`).toBe(into.y);
+            // The deleted `inSnapArcAt`'s axis, verbatim.
+            const sign = kind === 'era' || slot === 'p' ? 1 : -1;
+            expect(frame.ax, `${kind}.${slot} ax`).toBe(sign * cos);
+            expect(frame.ay, `${kind}.${slot} ay`).toBe(sign * sin);
+          }
+        }
+      }
+    }
   });
 });

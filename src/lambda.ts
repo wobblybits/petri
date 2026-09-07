@@ -9,6 +9,7 @@ import {
   type PortRef,
   type PortSlot,
 } from './agents.ts';
+import type { AgentStore } from './agent-store.ts';
 import { closestOnSegments, segmentsIntersect } from './geom.ts';
 import type { Graph } from './graph.ts';
 import type { Params } from './params.ts';
@@ -910,6 +911,24 @@ function centerPoses(poses: NetPose[], cx: number, cy: number): void {
 export function injectTerm(
   sim: {
     agents: Map<number, Agent>;
+    /*
+     * The sim's own store, and it has to be the sim's own.
+     *
+     * `createAgent` will make a private one-slot store if you let it, and this
+     * used to let it: every agent of an injected term came back sitting in
+     * slot 0 of a store nothing else could see. A body's slot is how every
+     * per-frame pass finds its data — the packs, the genome, the harvest — so
+     * the whole term aliased slot 0 of the sim's store, which belongs to some
+     * other body entirely.
+     *
+     * It read as a hang rather than as wrong numbers. `HarvestPlan.build`
+     * chains bodies by slot, `next[s] = head[c]; head[c] = s`, so inserting
+     * one slot twice makes `next[s] === s` and the walk that unwinds the chain
+     * never reaches -1. It is a synchronous loop inside `step`, so vitest's
+     * timeout could never fire either: the whole default suite sat on it for
+     * half an hour and reported nothing.
+     */
+    agentStore: AgentStore;
     graph: Graph;
     nextId: number;
     w: number;
@@ -935,6 +954,7 @@ export function injectTerm(
       pose?.y ?? cy,
       pose?.heading ?? 0,
       params,
+      sim.agentStore,
     );
     sim.agents.set(agent.id, agent);
   }

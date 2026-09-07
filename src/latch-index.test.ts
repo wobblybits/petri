@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { Sim } from './sim.ts';
 import { defaultParams, type Params } from './params.ts';
-import type { PortRef } from './agents.ts';
+import type { Agent, PortRef } from './agents.ts';
+import type { Wire } from './graph.ts';
 import { slotsFor } from './agents.ts';
 
 /**
@@ -46,8 +47,28 @@ function freePorts(sim: Sim): PortRef[] {
 
 /** The index is private; a differential test is exactly when reaching in is right. */
 interface Indexable {
-  buildLatchIndex(agents: Sim['agents'], w: number, h: number): void;
+  buildLatchIndex(
+    wires: Wire[],
+    endA: readonly (Agent | undefined)[],
+    endB: readonly (Agent | undefined)[],
+    w: number,
+    h: number,
+  ): void;
   latchIndexed: boolean;
+  latchWires: Wire[];
+}
+
+/**
+ * The resolved wire list `Sim.latchPass` hands the index, reached the same
+ * way. Building the index is the subject here, and it needs what the frame
+ * gives it; going through `latchPass` instead would also latch, which would
+ * move the pond out from under the comparison.
+ */
+interface Resolvable {
+  wireListResolved(): Wire[];
+  wirePack: Wire[];
+  wireEndA: readonly (Agent | undefined)[];
+  wireEndB: readonly (Agent | undefined)[];
 }
 
 describe('latch crossing index', () => {
@@ -71,7 +92,13 @@ describe('latch crossing index', () => {
 
     inner.latchIndexed = false;
     const plain = ask();
-    inner.buildLatchIndex(sim.agents, sim.w, sim.h);
+    const outer = sim as unknown as Resolvable;
+    outer.wireListResolved();
+    inner.buildLatchIndex(outer.wirePack, outer.wireEndA, outer.wireEndB, sim.w, sim.h);
+    // An index that came out empty agrees with nothing and disagrees with
+    // everything, which reads as hundreds of wrong answers rather than as the
+    // one thing that went wrong. Say it plainly instead.
+    expect(inner.latchWires.length, 'the index came out empty').toBe(sim.graph.wires.size);
     const indexed = ask();
     inner.latchIndexed = false;
 

@@ -879,7 +879,32 @@ export class HarvestPlan {
       const j = (c - i) / side;
       const first = this.nEntries;
       let k = first;
-      for (let s = head[c]; s >= 0; s = next[s]) slots[k++] = s;
+      /*
+       * Bounded, because an unbounded walk here cannot be debugged.
+       *
+       * The chain is `next[s] = head[c]; head[c] = s`, so a slot pushed onto
+       * the same cell twice gets `next[s] === s` and this never reaches -1.
+       * That can only happen if two live bodies claim one store slot, which
+       * is a roster bug — and it is one `lambda.ts` actually had: `injectTerm`
+       * let `createAgent` build a private one-slot store, so a whole injected
+       * term aliased slot 0. It presented as the default test suite hanging
+       * for half an hour with no output, because this is a synchronous loop
+       * inside `step` and a test timeout can never fire while it spins.
+       *
+       * `entries` is how many bodies were chained across all cells, so no
+       * single cell's chain can honestly be longer. Failing here says which
+       * invariant broke; spinning says nothing.
+       */
+      const limit = first + entries;
+      for (let s = head[c]; s >= 0; s = next[s]) {
+        if (k > limit) {
+          throw new Error(
+            `HarvestPlan: cell ${c} chains past ${entries} entries — ` +
+              'two bodies share a store slot',
+          );
+        }
+        slots[k++] = s;
+      }
       head[c] = -1;
       // A block clipped away entirely feeds nobody; drop it rather than
       // emitting a zero-sized rect for the shader to skip. Its slots were
@@ -1172,6 +1197,15 @@ export class WireAdjacency {
   }
 
   /**
+   * Builds the CSR from an id-keyed index. **Only the tests call this.**
+   *
+   * The frame does not: `Sim.refreshWakeGraph` lays one CSR from the shared
+   * roster and the wire list's cached endpoint indices, and every pass that
+   * wants neighbours — the two LOD tiers, flocking, and the need field —
+   * reads that same pair of arrays. This stays because the energy tests need
+   * to hand `spreadRequests` a graph they wrote by hand, and an id-keyed
+   * builder is the honest way to write one. It is not a fast path.
+   *
    * `index` maps agent id to its slot in the caller's dense list.
    *
    * `wires` is a factory, not an iterable, because the counting sort walks the
@@ -1180,45 +1214,6 @@ export class WireAdjacency {
    * every neighbour reading as body 0, which is wrong quietly rather than
    * loudly: the field still spreads, just through a graph nobody built.
    */
-  /**
-   * The same, from endpoint indices the caller already has.
-   *
-   * `build` resolves an agent id to a list position through a `Map`, twice
-   * per wire, every time it runs. Its callers in `Sim` now keep that answer
-   * as two arrays parallel to the wire list, cached on the graph and roster
-   * versions — which is exactly what the neighbour lists depend on — so the
-   * lookup is an array read and the counting sort is the whole cost.
-   *
-   * `ai[k]` and `bi[k]` are wire `k`'s two ends, or -1 for an end that is
-   * not in the list. Self-wires and unresolved ends are dropped, matching
-   * `build`; a duplicate wire between the same pair is kept, because two
-   * ports can join the same two bodies and both should conduct.
-   */
-  buildIndexed(n: number, ai: Int32Array, bi: Int32Array, m: number): void {
-    if (this.off.length < n + 1) this.off = new Int32Array(Math.max(16, (n + 1) * 2));
-    if (this.cursor.length < n) this.cursor = new Int32Array(Math.max(16, n * 2));
-    this.off.fill(0, 0, n + 1);
-    let total = 0;
-    for (let k = 0; k < m; k++) {
-      const a = ai[k];
-      const b = bi[k];
-      if (a < 0 || b < 0 || a === b) continue;
-      this.off[a + 1]++;
-      this.off[b + 1]++;
-      total += 2;
-    }
-    for (let i = 0; i < n; i++) this.off[i + 1] += this.off[i];
-    if (this.nei.length < total) this.nei = new Int32Array(Math.max(16, total * 2));
-    for (let i = 0; i < n; i++) this.cursor[i] = this.off[i];
-    for (let k = 0; k < m; k++) {
-      const a = ai[k];
-      const b = bi[k];
-      if (a < 0 || b < 0 || a === b) continue;
-      this.nei[this.cursor[a]++] = b;
-      this.nei[this.cursor[b]++] = a;
-    }
-  }
-
   build(
     n: number,
     index: Map<number, number>,

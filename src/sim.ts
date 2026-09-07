@@ -5,7 +5,9 @@ import {
   ERA_RADIUS,
   inSnapArc,
   momentOfInertia,
+  momentOfInertiaAt,
   poseHeld,
+  poseHeldAt,
   ERA_SLOTS,
   NODE_SLOTS,
   portWorld,
@@ -399,7 +401,6 @@ export class Sim {
   private agentList: Agent[] = [];
   private wirePack: Wire[] = [];
   private clearWireList: Wire[] = [];
-  private flockAdj: number[][] = [];
   private flockDist = new Int32Array(0);
   private flockQ = new Int32Array(0);
   private flockSeen: number[] = [];
@@ -920,9 +921,8 @@ export class Sim {
     if (this.fieldOnGpu) this.creditHarvest();
     else harvestSlotsFast(this.agents.values(), this.agentStore, this.energy, this.harvestPlan);
     Sim.phase('harvestSlots');
-    this.graph.snap(this.agents, this.w, this.h, params, this.time);
+    this.latchPass(params);
     Sim.phase('snap');
-    Sim.phase('components');
     // `pulseRequests` charges itself in four parts — seeding the need field,
     // relaxing it, moving energy down it, and the state update — because at
     // one marker it was the second-largest phase in the frame and there was no
@@ -1252,24 +1252,52 @@ export class Sim {
     const sc = nativeSolver.scale;
     if (!bodies || !bm || !invI || !kinds || !sc) return false;
     if (!nativeSolver.canNear(list.length, 0, 0)) return false;
+    /*
+     * Straight out of the store, not through the flyweight.
+     *
+     * This is the largest JavaScript phase in the frame at fifty thousand
+     * bodies, and it was fourteen accessor calls a body: every one of them
+     * reaches through `store` and `slot` to arrive at exactly these arrays.
+     * The store is the sim's one store, so it is hoisted; the slot is the
+     * only thing that varies. Two property loads a body instead of
+     * twenty-eight, and the values written are the same values.
+     *
+     * `kindCode` in particular was a round trip through a string: the store
+     * holds the kind as the same small integer the solver wants, the
+     * flyweight turned it into `'era'`/`'dup'`/`'con'`, and `this.kindCode`
+     * turned it back.
+     */
+    const st = this.agentStore;
+    const X = st.x;
+    const Y = st.y;
+    const VX = st.vx;
+    const VY = st.vy;
+    const HD = st.heading;
+    const OM = st.omega;
+    const MS = st.mass;
+    const SC = st.scale;
+    const KC = st.kindCode;
     for (let i = 0; i < list.length; i++) {
-      const a = list[i];
+      const sl = list[i].slot;
       const o = i * FAR_STRIDE;
-      bodies[o + FAR.x] = a.x;
-      bodies[o + FAR.y] = a.y;
-      bodies[o + FAR.vx] = a.vx;
-      bodies[o + FAR.vy] = a.vy;
-      bodies[o + FAR.heading] = a.heading;
-      bodies[o + FAR.omega] = a.omega;
-      const held = poseHeld(a);
-      bodies[o + FAR.invMass] = held ? 0 : 1 / Math.max(0.08, a.mass);
+      bodies[o + FAR.x] = X[sl];
+      bodies[o + FAR.y] = Y[sl];
+      bodies[o + FAR.vx] = VX[sl];
+      bodies[o + FAR.vy] = VY[sl];
+      bodies[o + FAR.heading] = HD[sl];
+      bodies[o + FAR.omega] = OM[sl];
+      const mass = MS[sl];
+      const scale = SC[sl];
+      const kc = KC[sl];
+      const held = poseHeldAt(st, sl);
+      bodies[o + FAR.invMass] = held ? 0 : 1 / Math.max(0.08, mass);
       bodies[o + FAR.locked] = held ? 1 : 0;
       // Radius is deliberately absent: no force pass reads it. The broad
       // phases here take their cell size as an argument.
-      bm[i] = a.mass;
-      invI[i] = held ? 0 : 1 / Math.max(1e-4, momentOfInertia(a));
-      kinds[i] = this.kindCode(a.kind);
-      sc[i] = a.scale;
+      bm[i] = mass;
+      invI[i] = held ? 0 : 1 / Math.max(1e-4, momentOfInertiaAt(kc, mass, scale));
+      kinds[i] = kc;
+      sc[i] = scale;
     }
     return true;
   }
@@ -1314,6 +1342,29 @@ export class Sim {
     for (let i = 0; i < list.length; i++) at[list[i].slot] = i;
     this.listRoster = this.rosterVersion;
     return list;
+  }
+
+  /**
+   * The latch pass, handed the resolved wire endpoints it needs.
+   *
+   * It has to know which two bodies each standing wire joins, so it can refuse
+   * a latch whose chord would cross one. `wireListResolved` already answers
+   * that and caches the answer on the graph and roster versions, which are
+   * exactly the two things that can invalidate it. Tests reach for this rather
+   * than `graph.snap` so there is one path, and it is the one the frame runs.
+   */
+  latchPass(params: Params): void {
+    this.wireListResolved();
+    this.graph.snap(
+      this.agents,
+      this.w,
+      this.h,
+      params,
+      this.time,
+      this.wirePack,
+      this.wireEndA,
+      this.wireEndB,
+    );
   }
 
   private listRoster = -1;
@@ -1509,12 +1560,22 @@ export class Sim {
    * they do not, which is most of them, it is free.
    */
   private wireAdjacency(): WireAdjacency {
-    const list = this.forceList();
     if (this.adjGraphVersion === this.graph.version && this.adjRosterVersion === this.rosterVersion) {
       return this.wireAdj;
     }
-    this.wireListResolved();
-    this.wireAdj.buildIndexed(list.length, this.wireAI, this.wireBI, this.graph.wires.size);
+    /*
+     * The wake graph's CSR again, aliased rather than copied.
+     *
+     * Four passes wanted the wire graph as neighbour lists — the two LOD
+     * passes, flocking, and this one for the need field and the genome — and
+     * each built its own from the same wires in the same order on the same
+     * key. `refreshWakeGraph` is the one that builds it; this hands the same
+     * two arrays to the energy passes, which only read them. The queue
+     * scratch stays this object's own, since the relaxation does write that.
+     */
+    this.refreshWakeGraph();
+    this.wireAdj.off = this.wakeOff;
+    this.wireAdj.nei = this.wakeNei;
     this.adjGraphVersion = this.graph.version;
     this.adjRosterVersion = this.rosterVersion;
     return this.wireAdj;
@@ -4051,19 +4112,30 @@ export class Sim {
       this.rosterVersion,
       n,
     );
+    // Out of the store, for the reason `packPose` gives: these accessors all
+    // reach through the same two properties to the same arrays, and the kind
+    // is already the integer the solver wants.
+    const st = this.agentStore;
+    const X = st.x;
+    const Y = st.y;
+    const HD = st.heading;
+    const LK = st.locked;
+    const SC = st.scale;
+    const KC = st.kindCode;
     for (let i = 0; i < n; i++) {
       const a = list[i];
+      const sl = a.slot;
       const o = i * FAR_STRIDE;
-      bodies[o + FAR.x] = a.x;
-      bodies[o + FAR.y] = a.y;
-      bodies[o + FAR.heading] = a.heading;
-      bodies[o + FAR.locked] = a.locked ? 1 : 0;
-      kinds[i] = this.kindCode(a.kind);
-      sc[i] = a.scale;
+      bodies[o + FAR.x] = X[sl];
+      bodies[o + FAR.y] = Y[sl];
+      bodies[o + FAR.heading] = HD[sl];
+      bodies[o + FAR.locked] = LK[sl] !== 0 ? 1 : 0;
+      kinds[i] = KC[sl];
+      sc[i] = SC[sl];
       // Materialised by `updateState`; `CH.energy` is masked here rather than
       // in the vector, because the vector is the budget and the deposit path
       // is the thing that must never see the ground. See `effEmit`.
-      const eo = a.slot * 4;
+      const eo = sl * 4;
       for (let c = 0; c < 4; c++) emit[i * 4 + c] = c === CH.energy ? 0 : EMITS[eo + c];
       if (!freeFresh) free[i] = this.freePortMask(a);
     }
@@ -4504,7 +4576,6 @@ export class Sim {
 
   private flockNative(
     list: Agent[],
-    adj: number[][],
     swim: Uint8Array,
     n: number,
     align: number,
@@ -4527,18 +4598,15 @@ export class Sim {
 
     // On a reuse frame the solver never reads the adjacency — it replays the
     // pair list it already built from it — so neither the fit check nor the
-    // CSR copy has anything to do.
+    // copy has anything to do.
     if (!reuse) {
-      let nAdj = 0;
-      for (let i = 0; i < n; i++) nAdj += adj[i].length;
+      const off = this.wakeOff;
+      const nei = this.wakeNei;
+      const nAdj = off[n];
       if (!nativeSolver.canFlock(n, nAdj)) return false;
-      adjOff[0] = 0;
-      let at = 0;
-      for (let i = 0; i < n; i++) {
-        const nei = adj[i];
-        for (let k = 0; k < nei.length; k++) adjNei[at++] = nei[k];
-        adjOff[i + 1] = at;
-      }
+      // Straight across: both sides are the same CSR, in the same order.
+      adjOff.set(off.subarray(0, n + 1));
+      adjNei.set(nei.subarray(0, nAdj));
     }
 
     const shared = this.forceBlock;
@@ -4611,7 +4679,6 @@ export class Sim {
      * the solver, which is keyed on exactly the same thing. Rebuilding them
      * anyway was most of what this pass cost at scale.
      */
-    const adj = this.flockAdj;
     const reuse = nativeSolver.flockCacheHolds(
       this.simId,
       this.graph.version,
@@ -4619,20 +4686,16 @@ export class Sim {
       n,
       maxHops,
     );
-    if (!reuse) {
-      const wires = this.wireListResolved();
-      const ai = this.wireAI;
-      const bi = this.wireBI;
-      while (adj.length < n) adj.push([]);
-      for (let i = 0; i < n; i++) adj[i].length = 0;
-      for (let k = 0; k < wires.length; k++) {
-        const ia = ai[k];
-        const ib = bi[k];
-        if (ia < 0 || ib < 0 || ia === ib) continue;
-        adj[ia].push(ib);
-        adj[ib].push(ia);
-      }
-    }
+    /*
+     * The wake graph's CSR, which is the same wires in the same order on the
+     * same key. This pass used to build an array-of-arrays and then flatten
+     * it into exactly this shape to hand to wasm — a push per wire end and
+     * then a copy of the lot — for a structure two other passes were already
+     * keeping.
+     */
+    this.refreshWakeGraph();
+    const off = this.wakeOff;
+    const nei = this.wakeNei;
 
     if (this.flockDist.length < n) {
       const cap = Math.max(n * 2, 16);
@@ -4656,9 +4719,7 @@ export class Sim {
 
     const desired = Math.max(18, params.wireMinRest * 0.9);
     const turnRate = params.turnRate;
-    if (
-      this.flockNative(list, adj, swim, n, align, sep, dt, turnRate, desired, maxHops, reuse)
-    ) {
+    if (this.flockNative(list, swim, n, align, sep, dt, turnRate, desired, maxHops, reuse)) {
       return;
     }
 
@@ -4690,8 +4751,9 @@ export class Sim {
         const u = q[qh++];
         const du = dist[u];
         if (du >= maxHops) continue;
-        const nei = adj[u];
-        for (let k = 0; k < nei.length; k++) {
+        const e0 = off[u];
+        const e1 = off[u + 1];
+        for (let k = e0; k < e1; k++) {
           const v = nei[k];
           if (dist[v] >= 0) continue;
           const d = du + 1;

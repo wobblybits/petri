@@ -1,16 +1,16 @@
 import {
   ERA_SLOTS,
-  inSnapArcAt,
   NODE_SLOTS,
   poseHeld,
   portKey,
+  portFrameInto,
   portKeyAt,
-  portWorldInto,
   slotsFor,
   stemWorldInto,
   wireCubic,
   type Agent,
   type AgentKind,
+  type PortFrame,
   type PortRef,
   type PortSlot,
 } from './agents.ts';
@@ -166,6 +166,14 @@ export class Graph {
   private snapSlot = new Uint8Array(0);
   private portX = new Float64Array(0);
   private portY = new Float64Array(0);
+  /*
+   * The outward axis of each port, unit length. Parallel to `portX`/`portY`
+   * and written by the same pass, because both come out of one sine and one
+   * cosine of the body's heading and the arc test would otherwise take that
+   * heading apart again for every candidate pair the port appears in.
+   */
+  private portAX = new Float64Array(0);
+  private portAY = new Float64Array(0);
   /** Candidate pairs, by port-table index, and an index array to sort them. */
   private candA = new Int32Array(0);
   private candB = new Int32Array(0);
@@ -176,7 +184,7 @@ export class Graph {
   /** Scratch refs for `latchCrosses`, which reads them and keeps nothing. */
   private readonly snapRefA: PortRef = { id: 0, slot: 'p' };
   private readonly snapRefB: PortRef = { id: 0, slot: 'p' };
-  private readonly snapTip = { x: 0, y: 0 };
+  private readonly snapFrame: PortFrame = { x: 0, y: 0, ax: 0, ay: 0 };
 
   private growPorts(cap: number): void {
     const id = new Int32Array(cap);
@@ -191,6 +199,12 @@ export class Graph {
     const py = new Float64Array(cap);
     py.set(this.portY);
     this.portY = py;
+    const ax = new Float64Array(cap);
+    ax.set(this.portAX);
+    this.portAX = ax;
+    const ay = new Float64Array(cap);
+    ay.set(this.portAY);
+    this.portAY = ay;
   }
 
   private pushCand(i: number, j: number, dist2: number, rank: number): void {
@@ -250,12 +264,27 @@ export class Graph {
   /**
    * Bin every wire by the box its polyline occupies. Paid once per `snap`,
    * against the `O(candidates x wires)` it replaces -- and it hoists the two
-   * map lookups and two `stemWorldInto` calls per wire out of the candidate
-   * loop as well, which is most of what the scan cost even before the segment
-   * tests.
+   * `stemWorldInto` calls per wire out of the candidate loop as well, which is
+   * most of what the scan cost even before the segment tests.
+   *
+   * `wires` and its two endpoint lists are the caller's, resolved once a frame
+   * and cached on the graph and roster versions. This used to answer
+   * `wire.a.id -> body` itself, with two map lookups per wire: at fifty
+   * thousand bodies, fifty thousand lookups a frame, measured at 3.7 ms of the
+   * latch pass's 11, rebuilding a resolution the caller already kept on
+   * exactly the keys that decide when it goes stale. The roster it is cut
+   * against is `agents.values()`, so the two agree body for body; an endpoint
+   * the caller could not resolve arrives as `undefined`, which is the same
+   * wire this used to skip.
    */
-  private buildLatchIndex(agents: Map<number, Agent>, w: number, h: number): void {
-    const cap = this.wires.size;
+  private buildLatchIndex(
+    wires: Wire[],
+    endA: readonly (Agent | undefined)[],
+    endB: readonly (Agent | undefined)[],
+    w: number,
+    h: number,
+  ): void {
+    const cap = wires.length;
     if (this.latchMinX.length < cap) {
       this.latchMinX = new Float64Array(cap * 2);
       this.latchMinY = new Float64Array(cap * 2);
@@ -264,9 +293,10 @@ export class Graph {
     }
     this.latchWires.length = 0;
     let k = 0;
-    for (const wire of this.wires.values()) {
-      const WA = agents.get(wire.a.id);
-      const WB = agents.get(wire.b.id);
+    for (let wi = 0; wi < cap; wi++) {
+      const wire = wires[wi];
+      const WA = endA[wi];
+      const WB = endB[wi];
       if (!WA || !WB) continue;
       const sa = stemWorldInto(WA, wire.a.slot, w, h, stemScratchA);
       let lox = sa.x;
@@ -671,35 +701,58 @@ export class Graph {
     if (wr) this.detach(wr.id);
   }
 
+  /**
+   * `wires`, `endA` and `endB` are the caller's resolved wire list; see
+   * `buildLatchIndex`. `Sim.latchPass` is the only thing that should call
+   * this, because it is what keeps them.
+   */
   snap(
     agents: Map<number, Agent>,
     w: number,
     h: number,
     params: Params,
     time: number,
+    wires: Wire[],
+    endA: readonly (Agent | undefined)[],
+    endB: readonly (Agent | undefined)[],
   ): void {
     if (params.snapRadius <= 0) return;
     const list = this.snapAgents;
-    const tip = this.snapTip;
+    const frame = this.snapFrame;
+    // Sealing is rare and usually nothing is sealed at all, in which case the
+    // second lookup for every port of every body answers no by definition.
+    const anySealed = this.sealed.size > 0;
     let n = 0;
     for (const agent of agents.values()) {
       const store = agent.store;
       const s = agent.slot;
       if (store.locked[s] || store.stun[s] > 0) continue;
       const id = agent.id;
-      const slots = agent.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
+      const kind = agent.kind;
+      const slots = kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
+      // One turn of the heading for all of this body's ports, and for the arc
+      // test on every pair they later land in.
+      const heading = agent.heading;
+      const cos = Math.cos(heading);
+      const sin = Math.sin(heading);
+      const ax = agent.x;
+      const ay = agent.y;
+      const scale = agent.scale;
       for (let k = 0; k < slots.length; k++) {
         const slot = slots[k];
         const key = portKeyAt(id, slot);
-        if (this.portWire.has(key) || this.sealed.has(key)) continue;
+        if (this.portWire.has(key)) continue;
+        if (anySealed && this.sealed.has(key)) continue;
         if (n >= this.portX.length) this.growPorts(n * 2 + 64);
-        portWorldInto(agent, slot, w, h, tip);
+        portFrameInto(kind, slot, ax, ay, scale, cos, sin, frame);
         list[n] = agent;
         this.portId[n] = id;
         // The slot's index in its list is its code: p, l, r as 0, 1, 2.
         this.snapSlot[n] = k;
-        this.portX[n] = tip.x;
-        this.portY[n] = tip.y;
+        this.portX[n] = frame.x;
+        this.portY[n] = frame.y;
+        this.portAX[n] = frame.ax;
+        this.portAY[n] = frame.ay;
         n++;
       }
     }
@@ -719,6 +772,8 @@ export class Graph {
     const SLOT = this.snapSlot;
     const PX = this.portX;
     const PY = this.portY;
+    const AX = this.portAX;
+    const AY = this.portAY;
     this.portGrid.forEachPair((p, q) => {
       // Keep the original lower-index-first ordering: it decides which end
       // becomes wire.a, and the constraint solve is order-sensitive.
@@ -733,8 +788,23 @@ export class Graph {
       const sa = SLOT[i];
       const sb = SLOT[j];
       if (!touching) {
-        if (!inSnapArcAt(list[i], sa, PX[i], PY[i], PX[j], PY[j], r, arcCos)) return;
-        if (!inSnapArcAt(list[j], sb, PX[j], PY[j], PX[i], PY[i], r, arcCos)) return;
+        /*
+         * The deleted `inSnapArcAt`, inlined for both ends, with the two
+         * things it recomputed lifted out: the separation, which it measured once per end from
+         * coordinates this already has, and each port's outward axis, which
+         * it rebuilt from the body's heading with a sine and a cosine. Thirty
+         * thousand pairs survive the radius at fifty thousand bodies, so that
+         * was sixty thousand hypotenuses and as many sine-cosine pairs.
+         *
+         * Arithmetic is unchanged on purpose — same `Math.hypot`, same
+         * divide, same comparison — so the same pairs latch in the same order
+         * and the determinism hashes hold. The second end's vector is the
+         * first's negated, and IEEE negation is exact.
+         */
+        const dist = Math.hypot(dx, dy);
+        if (dist > r || dist < 1e-6) return;
+        if ((dx * AX[i] + dy * AY[i]) / dist < arcCos) return;
+        if ((-dx * AX[j] - dy * AY[j]) / dist < arcCos) return;
       }
       const pa = sa === 0;
       const pb = sb === 0;
@@ -767,7 +837,7 @@ export class Graph {
     );
     // Index the wires once here rather than rescanning them for every
     // candidate. Only valid while the pass runs: endpoints move next frame.
-    this.buildLatchIndex(agents, w, h);
+    this.buildLatchIndex(wires, endA, endB, w, h);
     const refA = this.snapRefA;
     const refB = this.snapRefB;
     for (let k = 0; k < nc; k++) {

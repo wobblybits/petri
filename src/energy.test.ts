@@ -886,7 +886,7 @@ describe('sim energy', () => {
     const d = sim.spawn('era', 100, 103, 0, params, true)!;
     c.extra = -0.5;
     d.extra = -0.5;
-    sim.graph.snap(sim.agents, sim.w, sim.h, params, sim.time);
+    sim.latchPass(params);
     expect(sim.graph.wires.size).toBe(1);
   });
 });

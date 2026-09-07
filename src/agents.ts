@@ -19,6 +19,7 @@ import { CH } from './fields.ts';
 import type { Params } from './params.ts';
 import { rotate, wrap, wrapAngle, wrapDeltaVec, angleDelta, type Vec2 } from './wrap.ts';
 import { AgentStore, KIND_CODE, CODE_KIND } from './agent-store.ts';
+import { KIND_ERA } from './native/solver.ts';
 
 export type AgentKind = 'era' | 'dup' | 'con';
 export type PortSlot = 'p' | 'l' | 'r';
@@ -551,7 +552,18 @@ export function cloneAgent(a: Agent): Agent {
 
 /** True when physics must not integrate this body (rewrite lock or designer pin). */
 export function poseHeld(a: Agent): boolean {
-  return a.locked || a.pinned;
+  return poseHeldAt(a.store, a.slot);
+}
+
+/**
+ * `poseHeld` from a store and a slot, for packs that walk every body.
+ *
+ * The flyweight's `locked` and `pinned` getters each reach through `store`
+ * and `slot` to arrive at the array this reads directly. One definition, two
+ * ways in: the packs hold the store already, and everything else holds a body.
+ */
+export function poseHeldAt(store: AgentStore, slot: number): boolean {
+  return store.locked[slot] !== 0 || store.pinned[slot] !== 0;
 }
 
 /** Slot as a small integer: principal 0, left 1, right 2. */
@@ -656,12 +668,26 @@ export function discRadius(agent: Agent): number {
 const TRI_VERTEX_R2 = 1.05 * 1.05 + 2 * (0.55 * 0.55 + 0.82 * 0.82);
 
 export function momentOfInertia(agent: Agent): number {
-  const m = Math.max(0.08, agent.mass);
-  if (agent.kind === 'era') {
-    const r = ERA_RADIUS * agent.scale;
+  // Straight out of the store rather than back through the string: the code
+  // is what is stored, and `agent.kind` exists to turn it into a name.
+  return momentOfInertiaAt(agent.store.kindCode[agent.slot], agent.mass, agent.scale);
+}
+
+/**
+ * `momentOfInertia` from a kind code rather than a body.
+ *
+ * The store already holds the kind as the same small integer the solver
+ * wants, so a pack that goes through the flyweight turns it into a string to
+ * compare against `'era'` and then back into an integer to write out. One
+ * definition, and the packs no longer round-trip through the string.
+ */
+export function momentOfInertiaAt(kindCode: number, mass: number, scale: number): number {
+  const m = Math.max(0.08, mass);
+  if (kindCode === KIND_ERA) {
+    const r = ERA_RADIUS * scale;
     return 0.5 * m * r * r;
   }
-  const s = 16 * agent.scale;
+  const s = 16 * scale;
   return (m * TRI_VERTEX_R2 * s * s) / 6;
 }
 
@@ -1268,37 +1294,6 @@ export function inSnapArc(
   return cos >= Math.cos(Math.min(halfArc, Math.PI * 0.49));
 }
 
-/**
- * `inSnapArc` for a caller that already has both tips in hand.
- *
- * `slotCode` is 0 for the principal, 1 and 2 for the aux legs. `arcCos` is
- * `cos(min(halfArc, PI * 0.49))`, hoisted by the caller since it is the same
- * for every pair in a pass. The port axis is the heading for an Era or a
- * principal and its reverse for an aux leg, which is what `portAxis` computes
- * by rotating and normalising an offset — three objects a call, on the hottest
- * pair loop in the latch pass.
- */
-export function inSnapArcAt(
-  agent: Agent,
-  slotCode: number,
-  px: number,
-  py: number,
-  tx: number,
-  ty: number,
-  radius: number,
-  arcCos: number,
-): boolean {
-  const dx = tx - px;
-  const dy = ty - py;
-  const dist = Math.hypot(dx, dy);
-  if (dist > radius || dist < 1e-6) return false;
-  const sign = agent.kind === 'era' || slotCode === 0 ? 1 : -1;
-  const heading = agent.heading;
-  const ax = sign * Math.cos(heading);
-  const ay = sign * Math.sin(heading);
-  return (dx * ax + dy * ay) / dist >= arcCos;
-}
-
 export function portOffset(agent: Agent, slot: PortSlot): Vec2 {
   const loc = portLocal(agent.kind, slot);
   return rotate(loc.x * agent.scale, loc.y * agent.scale, agent.heading);
@@ -1347,6 +1342,53 @@ export function portWorldInto(
   out.x = agent.x + lx * c - ly * sn;
   out.y = agent.y + lx * sn + ly * c;
   return out;
+}
+
+/** A port's world position and the outward axis the snap arc is measured from. */
+export interface PortFrame {
+  x: number;
+  y: number;
+  ax: number;
+  ay: number;
+}
+
+/**
+ * `portWorldInto`'s position and the snap arc's outward axis at once, from a
+ * heading the caller has already turned into a sine and a cosine.
+ *
+ * Both used to take a heading and call `Math.cos`/`Math.sin` on it: the
+ * position once per free port, and the arc test (a deleted `inSnapArcAt`,
+ * now inline in `Graph.snap`) twice per candidate pair, always on a body's
+ * one heading. At fifty thousand bodies that came to about a hundred and
+ * eighty thousand sine-cosine pairs a frame for fifty thousand distinct
+ * angles, plus a flyweight property load each time to fetch the angle again.
+ * The caller now turns each body's heading once and every port of that body
+ * reads it.
+ *
+ * The axis is a unit vector because sine and cosine are, so the arc test
+ * divides by the distance alone.
+ */
+export function portFrameInto(
+  kind: AgentKind,
+  slot: PortSlot,
+  x: number,
+  y: number,
+  scale: number,
+  cos: number,
+  sin: number,
+  out: PortFrame,
+): void {
+  const root = stemRootInto(kind, slot, portWorldScratch);
+  // One condition, used twice: which way the stem points out of the body.
+  const outward = kind === 'era' || slot === 'p';
+  const ex = outward ? PORT_EXTRUDE : -PORT_EXTRUDE;
+  const lx = (root.x + ex) * scale;
+  const ly = root.y * scale;
+  out.x = x + lx * cos - ly * sin;
+  out.y = y + lx * sin + ly * cos;
+  const sign = outward ? 1 : -1;
+  out.ax = sign * cos;
+  out.ay = sign * sin;
 }
 
 export function stemOffset(agent: Agent, slot: PortSlot): Vec2 {
