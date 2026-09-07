@@ -78,7 +78,6 @@ import {
   payToward,
   rescueNeed,
   redexNeed,
-  resetRequestsFast,
   rewriteCost,
   rewriteShareOf,
   rewriteYield,
@@ -374,7 +373,6 @@ export class Sim {
    */
   breed = true;
   /** Per-agent unmet need this frame, rebuilt by `pulseRequests`. */
-  private readonly needOf = new Map<number, number>();
   private readonly wireAdj = new WireAdjacency();
   /**
    * Which connected component each body is in, as a position in
@@ -5169,14 +5167,36 @@ export class Sim {
   }
 
   private pulseRequests(params: Params): void {
-    resetRequestsFast(this.agents.values(), this.agentStore);
-    const need = this.needOf;
-    need.clear();
-
-    for (const a of this.agents.values()) {
-      if (a.locked) continue;
+    /*
+     * Three claims are made on a body here, and the largest wins. That used to
+     * be collected in a `Map` from agent id to the running maximum, cleared
+     * and refilled every frame, and then drained with a roster lookup per
+     * entry — at fifty thousand bodies, some fifty thousand map writes, a map
+     * iteration and fifty thousand `agents.get` a frame.
+     *
+     * None of it was needed. `seedRequest` is itself a maximum into a field
+     * that had just been zeroed, so taking the largest of three claims and
+     * seeding once is the same number as seeding three times in any order. The
+     * map is gone and each claim writes where it is made.
+     *
+     * The zeroing is folded in for the same reason: it was its own walk of
+     * every body to write a zero, and this walks every body immediately after
+     * and knows what the value should be. Locked bodies make no claim, so they
+     * get the zero that walk would have given them.
+     */
+    const list = this.forceList();
+    const REQUEST = this.agentStore.request;
+    const LOCKED = this.agentStore.locked;
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      const slot = a.slot;
+      if (LOCKED[slot]) {
+        REQUEST[slot] = 0;
+        continue;
+      }
+      // Side-effecting: `rescueNeed` is what latches and clears `recovering`.
       const h = rescueNeed(a);
-      if (h > 0) need.set(a.id, h);
+      REQUEST[slot] = h > 0 ? h : 0;
     }
 
     if (params.rewriteDuration > 0) {
@@ -5194,10 +5214,8 @@ export class Sim {
         const paidA = e ? e.paidA : 0;
         const paidB = e ? e.paidB : 0;
         if (stakeMet(A, paidA) && stakeMet(B, paidB)) continue;
-        const rA = redexNeed(A, paidA);
-        if (rA > (need.get(A.id) ?? 0)) need.set(A.id, rA);
-        const rB = redexNeed(B, paidB);
-        if (rB > (need.get(B.id) ?? 0)) need.set(B.id, rB);
+        seedRequest(A, redexNeed(A, paidA));
+        seedRequest(B, redexNeed(B, paidB));
       }
     }
 
@@ -5220,17 +5238,13 @@ export class Sim {
      * leave rather than a reason to be fed.
      */
     if (params.forageAsk > 0) {
-      for (const a of this.agents.values()) {
-        if (a.locked || !this.graph.isFreeAt(a.id, 'p')) continue;
-        const want = params.forageAsk * (a.trail > 0 ? a.trail : 0);
-        if (want > (need.get(a.id) ?? 0)) need.set(a.id, want);
+      for (let i = 0; i < list.length; i++) {
+        const a = list[i];
+        if (LOCKED[a.slot] || !this.graph.isFreeAt(a.id, 'p')) continue;
+        const trail = a.trail;
+        seedRequest(a, params.forageAsk * (trail > 0 ? trail : 0));
       }
     }
-    for (const [id, n] of need) {
-      const a = this.agents.get(id);
-      if (a) seedRequest(a, n);
-    }
-    const list = this.forceList();
     const adj = this.wireAdjacency();
     Sim.phase('pulse:seed');
     spreadRequestsFast(list, this.agentStore, adj);

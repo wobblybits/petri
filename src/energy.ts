@@ -1248,12 +1248,6 @@ export function resetRequests(agents: Iterable<SlotBody>): void {
   for (const a of agents) a.request = 0;
 }
 
-/** Store-based twin of `resetRequests` — see `harvestSlotsFast`'s note. */
-export function resetRequestsFast(agents: Iterable<Agent>, store: AgentStore): void {
-  const REQUEST = store.request;
-  for (const a of agents) REQUEST[a.slot] = 0;
-}
-
 /** Raise a body's own need. The field never lowers what is already there. */
 export function seedRequest(agent: SlotBody, amount: number): void {
   if (amount > agent.request) agent.request = amount;
