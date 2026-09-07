@@ -1344,6 +1344,35 @@ export function portWorldInto(
   return out;
 }
 
+/**
+ * Bring the store's memoised cosine and sine of a body's heading up to date.
+ *
+ * The caller then reads `csCos[slot]` and `csSin[slot]`. Passing the three
+ * arrays rather than a store keeps this off the flyweight, since every caller
+ * is a loop over every body that has already hoisted what it needs.
+ *
+ * `stemOffsetInto` has always kept this memo, through the accessors. The point
+ * of sharing it is that a heading turns into a sine and a cosine once a frame
+ * however many passes want it: the latch pass computes them for every free
+ * port, and the GPU probe pack wants them again a few phases later for the
+ * same bodies at the same headings.
+ *
+ * A body whose heading has moved since the memo was written simply misses and
+ * recomputes, so the answer is never stale — that is what `csHeading` is for.
+ */
+export function syncHeadingCosSin(
+  csHeading: Float64Array,
+  csCos: Float64Array,
+  csSin: Float64Array,
+  slot: number,
+  heading: number,
+): void {
+  if (csHeading[slot] === heading) return;
+  csHeading[slot] = heading;
+  csCos[slot] = Math.cos(heading);
+  csSin[slot] = Math.sin(heading);
+}
+
 /** A port's world position and the outward axis the snap arc is measured from. */
 export interface PortFrame {
   x: number;

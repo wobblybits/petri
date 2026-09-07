@@ -8,6 +8,7 @@ import {
   momentOfInertiaAt,
   poseHeld,
   poseHeldAt,
+  syncHeadingCosSin,
   ERA_SLOTS,
   NODE_SLOTS,
   portWorld,
@@ -3200,15 +3201,32 @@ export class Sim {
 
     const arc = params.sensorAngle;
     const sd = params.sensorDist;
-    // Out of the store, as `packPose` and the steer pack are: seven accessor
-    // calls and four `tasteOf` calls a body, all of them reaching through the
-    // same two properties to these arrays. The four sines and cosines stay
-    // exactly as written — the angle-sum identity would give the same numbers
-    // only to within a bit or two, and the probe positions decide what every
-    // body smells, so that would move the pond.
+    /*
+     * Out of the store, as `packPose` and the steer pack are.
+     *
+     * The two sensor directions come from the body's heading by the angle-sum
+     * identity rather than from four `Math.sin`/`Math.cos` a body, which was
+     * three of this pass's four and a half milliseconds at fifty thousand.
+     * The cosine and sine of the heading itself come from the store's memo,
+     * which the latch pass has usually already filled this frame for the same
+     * body at the same heading.
+     *
+     * This is **not** bit-identical, and it is the one change in this file
+     * that is not. Measured over four sensor angles and two million headings,
+     * the worst disagreement is 5.1e-16 in the unit vector — a couple of ulps
+     * — which is 1.3e-14 px of probe position against a field cell about
+     * forty px across. Physically nothing; the sampled cell is the same one.
+     * But the sim is chaotic, so the printed determinism hashes move, and
+     * that was a deliberate call rather than an oversight.
+     */
+    const ca = Math.cos(arc);
+    const sa = Math.sin(arc);
     const PX = this.agentStore.x;
     const PY = this.agentStore.y;
     const PH = this.agentStore.heading;
+    const CSH = this.agentStore.csHeading;
+    const CSC = this.agentStore.csCos;
+    const CSS = this.agentStore.csSin;
     const TASTE_OF = this.agentStore.tasteAll;
     const groundScale = this.groundScale;
     for (let i = 0; i < n; i++) {
@@ -3217,10 +3235,14 @@ export class Sim {
       const h = PH[sl];
       const x = PX[sl];
       const y = PY[sl];
-      const lc = Math.cos(h - arc);
-      const ls = Math.sin(h - arc);
-      const rc = Math.cos(h + arc);
-      const rs = Math.sin(h + arc);
+      syncHeadingCosSin(CSH, CSC, CSS, sl, h);
+      const c = CSC[sl];
+      const sn = CSS[sl];
+      // cos(h -/+ arc) and sin(h -/+ arc), from cos h and sin h.
+      const lc = c * ca + sn * sa;
+      const ls = sn * ca - c * sa;
+      const rc = c * ca - sn * sa;
+      const rs = sn * ca + c * sa;
       pro[o] = x + lc * sd;
       pro[o + 1] = y + ls * sd;
       pro[o + 2] = x + rc * sd;

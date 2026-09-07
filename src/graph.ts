@@ -7,6 +7,7 @@ import {
   portKeyAt,
   slotsFor,
   stemWorldInto,
+  syncHeadingCosSin,
   wireCubic,
   type Agent,
   type AgentKind,
@@ -731,10 +732,13 @@ export class Graph {
       const kind = agent.kind;
       const slots = kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
       // One turn of the heading for all of this body's ports, and for the arc
-      // test on every pair they later land in.
-      const heading = agent.heading;
-      const cos = Math.cos(heading);
-      const sin = Math.sin(heading);
+      // test on every pair they later land in. Through the store's memo, so
+      // the GPU probe pack a few phases later gets it for nothing — it wants
+      // the same bodies at the same headings.
+      const heading = store.heading[s];
+      syncHeadingCosSin(store.csHeading, store.csCos, store.csSin, s, heading);
+      const cos = store.csCos[s];
+      const sin = store.csSin[s];
       const ax = agent.x;
       const ay = agent.y;
       const scale = agent.scale;
