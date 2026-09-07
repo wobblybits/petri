@@ -88,6 +88,19 @@ export interface Sample {
   /** Principal-to-principal wires, and how many of those are Con-Dup (a commute waiting to happen). */
   ppWires: number;
   conDupWires: number;
+  /**
+   * The commute share of all rewrites so far, and the share proximity alone
+   * would give for the current kind census. `commuteEdge` is the gap.
+   *
+   * This is the one number that says whether latching is being decided by
+   * sensing or by crowding: it goes negative while the dish is too full to
+   * steer in, and positive once the opening cull has made room. See
+   * `Sim.rewriteMix`. Cumulative like the counts above — difference two
+   * samples for a window.
+   */
+  commuteShare: number | null;
+  commuteChance: number;
+  commuteEdge: number | null;
   /** Population mean and spread of the emit bases and taste bases, per channel. */
   emitMean: number[];
   emitSd: number[];
@@ -151,6 +164,7 @@ export function sampleSim(sim: Sim, t: number): Sample {
   const sd = (s: number[], sq: number[]) =>
     s.map((v, k) => (n > 0 ? Math.sqrt(Math.max(0, sq[k] / n - (v / n) * (v / n))) : 0));
   const tally = sim.tally;
+  const mix = sim.rewriteMix();
   return {
     t,
     bodies: n,
@@ -173,6 +187,9 @@ export function sampleSim(sim: Sim, t: number): Sample {
     canPay: n > 0 ? canPay / n : 0,
     ppWires: pp,
     conDupWires: conDup,
+    commuteShare: mix.share,
+    commuteChance: mix.chance,
+    commuteEdge: mix.selectivity,
     emitMean: mean(emitSum),
     emitSd: sd(emitSum, emitSq),
     tasteMean: mean(tasteSum),

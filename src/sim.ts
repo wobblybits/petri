@@ -50,7 +50,7 @@ import {
   type AgentKind,
   type PortSlot,
 } from './agents.ts';
-import { AgentStore } from './agent-store.ts';
+import { AgentStore, CODE_KIND } from './agent-store.ts';
 import { queryHit, queryDiscHit, SLOP, type Hit } from './collide.ts';
 import { closestTOnSegment, segmentsIntersect, WIRE_RADIUS, wireBowBudget, bounceOffDisk } from './geom.ts';
 import { PairGrid } from './grid.ts';
@@ -5234,6 +5234,73 @@ export class Sim {
       trait[k] = { mean, sd: Math.sqrt(varr) };
     }
     return { bodies: n, lines: lines.size, bornMax, bornMean: n > 0 ? bornSum / n : 0, trait };
+  }
+
+  /**
+   * How selective latching currently is, measured against chance.
+   *
+   * The three rewrite rules do very different things to a population: a
+   * commute makes four bodies out of two, an annihilation takes two away, an
+   * erase takes what it meets. So the *mix* of rules is what decides whether a
+   * pond grows or consumes itself, and the mix is decided by which kinds end
+   * up principal-to-principal.
+   *
+   * The number that matters is not the commute share on its own but the share
+   * against what proximity alone would give. If bodies latch with whoever is
+   * adjacent, the mix is the one you would get by drawing two bodies at random
+   * from the current kind census — that is `chance` here, computed by running
+   * `detectRule` over the nine kind pairs weighted by the census and bucketed
+   * exactly as `tally` buckets them. If bodies steer, face and choose before
+   * they latch, the share rises above it.
+   *
+   * Measured at thirty thousand, this traces the pond's opening as a clean U:
+   * 0.224 during the initial latch storm (chance is 0.22 — the dish is so
+   * crowded that latching is pure proximity), down to 0.103 as the net works
+   * through the destructive pairs it made, then back up through the chance
+   * line to 0.251 as the cull opens space and sensing starts to decide who
+   * meets whom. `selectivity` is that distance from chance, and it going
+   * positive is the moment the pond stops being a soup.
+   *
+   * Counts are cumulative since the last `clear`, as the rest of `tally` is;
+   * difference two samples to get a window.
+   */
+  rewriteMix(): {
+    commutes: number;
+    erases: number;
+    annihilations: number;
+    rewrites: number;
+    share: number | null;
+    chance: number;
+    selectivity: number | null;
+  } {
+    const KC = this.agentStore.kindCode;
+    const count = [0, 0, 0];
+    let n = 0;
+    for (const a of this.agents.values()) {
+      count[KC[a.slot]]++;
+      n++;
+    }
+    let chance = 0;
+    if (n > 0) {
+      for (let i = 0; i < 3; i++) {
+        for (let j = 0; j < 3; j++) {
+          if (detectRule(CODE_KIND[i], CODE_KIND[j]) !== 'commute') continue;
+          chance += (count[i] / n) * (count[j] / n);
+        }
+      }
+    }
+    const t = this.tally;
+    const rewrites = t.commutes + t.erases + t.annihilations;
+    const share = rewrites > 0 ? t.commutes / rewrites : null;
+    return {
+      commutes: t.commutes,
+      erases: t.erases,
+      annihilations: t.annihilations,
+      rewrites,
+      share,
+      chance,
+      selectivity: share === null ? null : share - chance,
+    };
   }
 
   private pulseRequests(params: Params): void {
