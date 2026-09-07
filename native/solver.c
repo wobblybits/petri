@@ -418,26 +418,49 @@ static int disc_wired(int i, int j) {
   return disc_nei[o] == j || disc_nei[o + 1] == j || disc_nei[o + 2] == j;
 }
 
+/* Candidate pairs for the far tier, held across one frame's substeps. */
+static int g_far_pairs = 0;
+
 /*
- * `rebuild` says whether the topology table has to be laid again.
+ * `rebuild` says whether this substep has to lay the broad phase again.
+ *
+ * Two things hang off it, and both are one frame's work rather than one
+ * substep's.
  *
  * `disc_nei` is which bodies a body is wired to, so that a pair the span
  * constraint owns is not also shoved apart by a contact. It is a function of
- * the wire list and nothing else, and the host repacks that once a frame —
- * so inside the substep loop it is constant, and laying it eight times was
- * laying it seven times for nothing. At fifty thousand bodies that is a
- * hundred and fifty thousand integer writes and a walk of every wire, eight
- * times a frame, to reproduce the same table.
+ * the wire list and nothing else, and the host repacks that once a frame — so
+ * inside the substep loop it is constant, and laying it eight times was laying
+ * it seven times for nothing.
+ *
+ * The candidate pairs are the larger half. `collect_pairs` walks every body
+ * for a bounding box, counting-sorts them into cells, and then emits every
+ * pair sharing a cell or a neighbouring one — with no distance test, which is
+ * `disc`'s own job below. At fifty thousand bodies in a full dish that is
+ * hundreds of thousands of pairs written out, eight times a frame, from
+ * positions that moved a couple of pixels between one substep and the next.
+ *
+ * `solver_step_near` has always built its list once a frame and reused it for
+ * every substep, on the same cell size and the same `+ 4.f` margin. This is
+ * that, on the tier that had never been given it. The margin is what makes it
+ * sound: the cell is two body radii plus slop plus four, so a pair excluded
+ * here is more than a body apart, and peak speed in a settled pond is about
+ * two pixels a frame. The list is a superset, never a filter — every pair in
+ * it is still distance-tested below, every substep.
  */
 static void disc(int n, int n_wires, float h, int rebuild) {
   memset(delta, 0, (size_t)n * 2 * sizeof(float));
-  if (rebuild) fill_disc_nei(n, n_wires, WIRE_FAR);
-  float maxr = 0.f;
-  for (int i = 0; i < n; i++) {
-    float r = bodies[i * STRIDE + FAR_RADIUS];
-    if (r > maxr) maxr = r;
+  int np = g_far_pairs;
+  if (rebuild || np <= 0) {
+    fill_disc_nei(n, n_wires, WIRE_FAR);
+    float maxr = 0.f;
+    for (int i = 0; i < n; i++) {
+      float r = bodies[i * STRIDE + FAR_RADIUS];
+      if (r > maxr) maxr = r;
+    }
+    np = collect_pairs(n, maxr * 2.f + SLOP + 4.f);
+    g_far_pairs = np;
   }
-  int np = collect_pairs(n, maxr * 2.f + SLOP + 4.f);
   float alpha = CONTACT_COMP / fmaxf(1e-12f, h * h);
   for (int p = 0; p < np; p++) {
     int i = pair_a[p], j = pair_b[p];
@@ -2251,6 +2274,9 @@ void solver_near_wires(int n, int n_wires, float h) {
 
 int solver_near_disc(int n, float h) {
   g_pairs = 0;
+  // Shared buffers: this is about to overwrite `pair_a`/`pair_b`, so the far
+  // tier's count no longer describes what is in them.
+  g_far_pairs = 0;
   if (n <= 0 || h <= 0.f) return 0;
   if (n > MAX_BODIES) n = MAX_BODIES;
   memset(delta, 0, (size_t)n * 2 * sizeof(float));
