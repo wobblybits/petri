@@ -1,4 +1,4 @@
-import { boundRadius, ERA_RADIUS, portLocal, slotsFor, stemRoot, stemWorld, stemWorldInto, triangleLocal, wireCubic, Agent, type AgentKind } from './agents.ts';
+import { boundRadius, ERA_RADIUS, ERA_SLOTS, NODE_SLOTS, portLocal, stemRoot, stemWorld, stemWorldInto, triangleLocal, wireCubic, Agent, type AgentKind } from './agents.ts';
 import { AgentStore } from './agent-store.ts';
 import { EXTRA_CAP, EXTRA_FLOOR, REQUEST_DECAY, REQUEST_FULL } from './energy.ts';
 import { WIRE_STROKE_PX, wiresDrawable } from './audio/lod.ts';
@@ -396,13 +396,21 @@ export function kindChroma(kind: AgentKind, extra: number): number {
 const ghostStore = new AgentStore(1);
 const ghostAgent = new Agent(ghostStore, ghostStore.allocate(-1));
 
-function ghostAsAgent(g: Ghost): Agent {
+/*
+ * Everything about the scratch ghost that does not vary from ghost to ghost,
+ * written once.
+ *
+ * `ghostStore` is private to this module and `ghostAgent` its only occupant,
+ * so nothing between two draws can disturb these — and a rewrite-heavy dish
+ * draws a lot of ghosts. At 1,469 rewrites in flight that loop was running
+ * about 5,900 times a frame, and `chem.fill(0)` alone was zeroing 134 floats
+ * each time, on an array that has been zero since the first call.
+ */
+function initGhostAgent(): void {
   const a = ghostAgent;
-  a.kind = g.kind;
-  a.x = g.x;
-  a.y = g.y;
-  // Cold: a ghost is built fresh each time, so there is nothing to reuse.
-  a.csHeading = NaN;
+  // Never read before being rewritten — `csHeading` is set to NaN per ghost, so
+  // the memo in `stemOffsetInto` always misses and recomputes — but set once so
+  // the scratch starts in exactly the state it used to start every call in.
   a.csCos = 1;
   a.csSin = 0;
   // A ghost is drawn, never simulated, so it neither emits nor smells.
@@ -412,18 +420,12 @@ function ghostAsAgent(g: Ghost): Agent {
   a.flockSep = 0;
   a.vx = 0;
   a.vy = 0;
-  a.heading = g.heading;
   a.omega = 0;
   a.mass = 1;
-  a.alpha = g.alpha;
-  a.scale = g.scale;
   a.locked = true;
   a.stun = 0;
   a.drive = 0;
   a.trail = 0;
-  a.prevX = g.x;
-  a.prevY = g.y;
-  a.prevHeading = g.heading;
   a.extra = 0;
   a.request = 0;
   a.recovering = false;
@@ -434,6 +436,23 @@ function ghostAsAgent(g: Ghost): Agent {
   a.rescueTo = 0.9;
   a.transportThrust = 0;
   a.transportRecoil = 0;
+}
+initGhostAgent();
+
+/** The eight fields that actually differ between one ghost and the next. */
+function ghostAsAgent(g: Ghost): Agent {
+  const a = ghostAgent;
+  a.kind = g.kind;
+  a.x = g.x;
+  a.y = g.y;
+  // Cold: a ghost is built fresh each time, so there is nothing to reuse.
+  a.csHeading = NaN;
+  a.heading = g.heading;
+  a.alpha = g.alpha;
+  a.scale = g.scale;
+  a.prevX = g.x;
+  a.prevY = g.y;
+  a.prevHeading = g.heading;
   return a;
 }
 
@@ -873,8 +892,18 @@ function drawEra(ctx: CanvasRenderingContext2D, fill?: string): void {
   ctx.stroke();
 }
 
+/*
+ * The unit triangle, once.
+ *
+ * `triangleLocal(1)` builds three points a call, and `drawAgent` scales the
+ * context rather than the geometry — so the argument is always 1 and the
+ * answer always the same three points. A rewrite-heavy dish draws thousands
+ * of ghosts a frame through here.
+ */
+const TRIANGLE_UNIT = triangleLocal(1);
+
 function drawTriangle(ctx: CanvasRenderingContext2D, kind: AgentKind, fill?: string): void {
-  const [a, b, c] = triangleLocal(1);
+  const [a, b, c] = TRIANGLE_UNIT;
   ctx.beginPath();
   ctx.moveTo(a.x, a.y);
   ctx.lineTo(b.x, b.y);
@@ -887,6 +916,28 @@ function drawTriangle(ctx: CanvasRenderingContext2D, kind: AgentKind, fill?: str
   ctx.stroke();
 }
 
+/**
+ * Stem inner and outer point per slot, flat: `[ix, iy, ox, oy]` a slot, in
+ * `ERA_SLOTS` / `NODE_SLOTS` order. Pure geometry of the kind, so it is built
+ * once from the same functions that used to be called per port.
+ */
+function stemTable(kind: AgentKind): Float64Array {
+  const slots = kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
+  const out = new Float64Array(slots.length * 4);
+  for (let k = 0; k < slots.length; k++) {
+    const inner = stemRoot(kind, slots[k]);
+    const outer = portLocal(kind, slots[k]);
+    out[k * 4] = inner.x;
+    out[k * 4 + 1] = inner.y;
+    out[k * 4 + 2] = outer.x;
+    out[k * 4 + 3] = outer.y;
+  }
+  return out;
+}
+const ERA_STEMS = stemTable('era');
+const DUP_STEMS = stemTable('dup');
+const CON_STEMS = stemTable('con');
+
 function drawPortStems(
   ctx: CanvasRenderingContext2D,
   agent: Agent,
@@ -895,12 +946,21 @@ function drawPortStems(
 ): void {
   ctx.beginPath();
   let any = false;
-  for (const slot of slotsFor(agent.kind)) {
-    if (graph && !graph.isFreeAt(agent.id, slot)) continue;
-    const inner = stemRoot(agent.kind, slot);
-    const outer = portLocal(agent.kind, slot);
-    ctx.moveTo(inner.x, inner.y);
-    ctx.lineTo(outer.x, outer.y);
+  /*
+   * The stem geometry is a function of kind and slot alone — the body's own
+   * transform is already on the context — so it is a small fixed table rather
+   * than four objects a port. `slotsFor` also built a fresh array a call;
+   * `ERA_SLOTS`/`NODE_SLOTS` are the frozen ones it exists to avoid.
+   */
+  const kind = agent.kind;
+  const slots = kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
+  const stems = kind === 'era' ? ERA_STEMS : kind === 'dup' ? DUP_STEMS : CON_STEMS;
+  const at = agent.slot;
+  for (let k = 0; k < slots.length; k++) {
+    if (graph && !graph.isFreeAtSlot(at, k)) continue;
+    const o = k * 4;
+    ctx.moveTo(stems[o], stems[o + 1]);
+    ctx.lineTo(stems[o + 2], stems[o + 3]);
     any = true;
   }
   if (!any) return;
