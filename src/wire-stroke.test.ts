@@ -137,7 +137,13 @@ describe('wire stroking', () => {
     camera.zoom = 40;
     render(stubCtx(calls), sim, camera, view);
 
-    // Rebuild the expected path from the untouched reference geometry.
+    /*
+     * Rebuild the expected path from the untouched reference geometry — and
+     * the reference deliberately keeps the exhaustive scan over every rewrite
+     * that `drawWires` no longer does. That scan is what the body-indexed
+     * lookup replaced, so this comparison is what says the two agree.
+     */
+    let withHandoff = 0;
     const expected: Call[] = [];
     for (const wire of sim.graph.wires.values()) {
       const A = sim.agents.get(wire.a.id);
@@ -153,6 +159,7 @@ describe('wire stroking', () => {
         if (!handoff) continue;
         stemA = { x: handoff.ax, y: handoff.ay };
         stemB = { x: handoff.bx, y: handoff.by };
+        withHandoff++;
         break;
       }
       const pts = wireStrokePoints(A, B, wire, sim.w, sim.h, stemA, stemB, rope);
@@ -162,6 +169,12 @@ describe('wire stroking', () => {
         expected.push({ op: 'lineTo', x: pts[i].x, y: pts[i].y });
       }
     }
+
+    // Otherwise the handoff half of this is vacuous: no wire would be drawn
+    // from a rewrite's stems and the index would never be consulted.
+    expect(withHandoff, 'no wire is mid-rewrite, so the handoff path is untested')
+      .toBeGreaterThan(0);
+    expect(sim.rewrites.length, 'no rewrites in flight').toBeGreaterThan(1);
 
     const drawn = wirePass(calls);
     expect(drawn.length).toBe(expected.length);

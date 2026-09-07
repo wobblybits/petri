@@ -468,7 +468,24 @@ export function waveDisplace(fwd: number, back: number, env: number, pin: number
  * the population off. Subpaths are what `moveTo` starts, so one path holds
  * them all and the caps and joins come out identical.
  */
-const dyingScratch = new Set<number>();
+/**
+ * Body id -> index of the first rewrite in this frame's list consuming it.
+ *
+ * A set of dying ids was not enough. It skipped the rewrite scan for wires that
+ * touch nothing dying, which is most of them in a young pond — but in a grown
+ * one a lot of wires touch something dying, and each of those still walked the
+ * whole rewrite list. Measured on a pond of 16,765 wires with 1,475 rewrites in
+ * flight: 3,621 wires touching a dying body, 5.3 million `rewriteHandoffStems`
+ * calls a frame, **64.6 ms** — four fifths of the entire wire pass.
+ *
+ * `rewriteHandoffStems` returns null unless the wire has an end on that
+ * rewrite's own two bodies, so only the rewrites indexed here can ever answer
+ * yes: a wire has two ends, so at most two candidates. The index is the
+ * position in `sim.rewrites` so they can still be tried in the order the scan
+ * would have tried them, which is what makes this exactly equivalent rather
+ * than merely close.
+ */
+const dyingScratch = new Map<number, number>();
 
 function drawWires(
   ctx: CanvasRenderingContext2D,
@@ -491,9 +508,10 @@ function drawWires(
   // That inner loop was the whole cross product -- 5,500 wires against 30
   // rewrites is 165,000 calls a frame to answer "no" 164,900 times.
   dyingScratch.clear();
-  for (const rw of rewrites) {
-    dyingScratch.add(rw.a);
-    dyingScratch.add(rw.b);
+  for (let i = 0; i < rewrites.length; i++) {
+    const rw = rewrites[i];
+    if (!dyingScratch.has(rw.a)) dyingScratch.set(rw.a, i);
+    if (!dyingScratch.has(rw.b)) dyingScratch.set(rw.b, i);
   }
   for (const wire of graph.wires.values()) {
     const A = agents.get(wire.a.id);
@@ -501,13 +519,20 @@ function drawWires(
     if (!A || !B) continue;
     let stemA: { x: number; y: number } | undefined;
     let stemB: { x: number; y: number } | undefined;
-    if (dyingScratch.has(wire.a.id) || dyingScratch.has(wire.b.id)) {
-      for (const rw of rewrites) {
-        const handoff = rewriteHandoffStems(rw, wire, agents, w, h);
-        if (!handoff) continue;
+    const ia = dyingScratch.get(wire.a.id);
+    const ib = dyingScratch.get(wire.b.id);
+    if (ia !== undefined || ib !== undefined) {
+      // Whichever of the two candidates the old scan would have reached first,
+      // then the other. Anything else in the list answers null by definition.
+      const lo = ia === undefined ? ib! : ib === undefined ? ia : ia < ib ? ia : ib;
+      const hi = ia === undefined || ib === undefined ? -1 : ia < ib ? ib : ia;
+      let handoff = rewriteHandoffStems(rewrites[lo], wire, agents, w, h);
+      if (!handoff && hi >= 0 && hi !== lo) {
+        handoff = rewriteHandoffStems(rewrites[hi], wire, agents, w, h);
+      }
+      if (handoff) {
         stemA = { x: handoff.ax, y: handoff.ay };
         stemB = { x: handoff.bx, y: handoff.by };
-        break;
       }
     }
     const rec = waves?.index.get(wire.id);
