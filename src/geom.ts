@@ -181,11 +181,12 @@ export function bounceOffDisk(
 export function clampPolylineToChord(
   pts: { x: number; y: number }[],
   maxDev: number,
+  count = pts.length,
 ): void {
-  if (pts.length < 3 || !(maxDev > 0) || !Number.isFinite(maxDev)) return;
+  if (count < 3 || !(maxDev > 0) || !Number.isFinite(maxDev)) return;
   const a = pts[0];
-  const b = pts[pts.length - 1];
-  for (let i = 1; i < pts.length - 1; i++) {
+  const b = pts[count - 1];
+  for (let i = 1; i < count - 1; i++) {
     const q = closestPointOnSegment(pts[i].x, pts[i].y, a.x, a.y, b.x, b.y);
     const dx = pts[i].x - q.x;
     const dy = pts[i].y - q.y;

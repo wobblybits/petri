@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { render, wireStrokePoints, type ViewOpts } from './render.ts';
 import { Camera } from './camera.ts';
+import { stemWorld } from './agents.ts';
 import { rewriteHandoffStems } from './rewrite.ts';
 import { defaultParams } from './params.ts';
 import { Sim } from './sim.ts';
@@ -118,12 +119,22 @@ describe('wire stroking', () => {
     expect(moves).toBe(sim.graph.wires.size);
   });
 
-  it('puts the same points on the canvas as wireStrokePoints', () => {
+  it('puts the same points on the canvas as wireStrokePoints, zoomed in', () => {
     const { sim } = pond();
     const calls: Call[] = [];
     const camera = new Camera();
     camera.setView(400, 300);
     camera.snap(200, 150);
+    /*
+     * Zoomed in, where the chord level of detail asks for every segment.
+     *
+     * `strokeWire` cuts a chord into fewer segments the smaller it is on
+     * screen, and at the camera's default zoom of 0.065 a wire is about a
+     * pixel long and draws as one straight line. This test is about the
+     * geometry agreeing with the reference, so it asks at a zoom where the
+     * detail is not being dropped; the test below covers the dropping.
+     */
+    camera.zoom = 40;
     render(stubCtx(calls), sim, camera, view);
 
     // Rebuild the expected path from the untouched reference geometry.
@@ -159,5 +170,62 @@ describe('wire stroking', () => {
       expect(drawn[i].x, `call ${i} x`).toBeCloseTo(expected[i].x, 9);
       expect(drawn[i].y, `call ${i} y`).toBeCloseTo(expected[i].y, 9);
     }
+  });
+
+  it('cuts a chord into far fewer segments once it is a pixel on screen', () => {
+    const { sim } = pond();
+    const camera = new Camera();
+    camera.setView(400, 300);
+    camera.snap(200, 150);
+
+    const pathAt = (zoom: number): Call[] => {
+      camera.zoom = zoom;
+      const calls: Call[] = [];
+      render(stubCtx(calls), sim, camera, view);
+      return wirePass(calls);
+    };
+
+    // Zoomed in, every chord gets its full sixteen segments.
+    const near = pathAt(40);
+    // The camera's default. A whole dish in view puts a wire at about a pixel.
+    const far = pathAt(0.065);
+
+    const moves = far.filter((c) => c.op === 'moveTo').length;
+    expect(moves, 'nothing was drawn, so this proves nothing').toBeGreaterThan(5);
+    expect(near.filter((c) => c.op === 'moveTo').length, 'same wires either way').toBe(moves);
+    // The point of the whole exercise.
+    expect(far.length * 5, `${near.length} calls zoomed in, ${far.length} out`)
+      .toBeLessThan(near.length);
+    // And most of them are down to a single straight segment.
+    expect(far.length).toBeLessThan(moves * 3);
+
+    /*
+     * A one-segment wire still runs stem to stem: the shortcut drops the curve
+     * between the ends, not the wire's position. Only the single-segment
+     * subpaths are checked, because a wire long enough to keep its segments is
+     * still drawn along the cubic.
+     */
+    const ends = new Set<string>();
+    const key = (x: number, y: number, u: number, v: number): string =>
+      `${x.toFixed(6)},${y.toFixed(6)}|${u.toFixed(6)},${v.toFixed(6)}`;
+    for (const wr of sim.graph.wires.values()) {
+      const A = sim.agents.get(wr.a.id);
+      const B = sim.agents.get(wr.b.id);
+      if (!A || !B) continue;
+      const sa = stemWorld(A, wr.a.slot, sim.w, sim.h);
+      const sb = stemWorld(B, wr.b.slot, sim.w, sim.h);
+      ends.add(key(sa.x, sa.y, sb.x, sb.y));
+    }
+    let singles = 0;
+    for (let i = 0; i < far.length; i++) {
+      if (far[i].op !== 'moveTo') continue;
+      const isSingle = i + 1 < far.length && far[i + 1].op === 'lineTo' &&
+        (i + 2 >= far.length || far[i + 2].op === 'moveTo');
+      if (!isSingle) continue;
+      singles++;
+      const k = key(far[i].x, far[i].y, far[i + 1].x, far[i + 1].y);
+      expect(ends.has(k), `single segment at call ${i} does not run stem to stem`).toBe(true);
+    }
+    expect(singles, 'no wire collapsed to one segment').toBeGreaterThan(5);
   });
 });

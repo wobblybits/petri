@@ -1,4 +1,4 @@
-import { boundRadius, ERA_RADIUS, portLocal, slotsFor, stemRoot, stemWorld, triangleLocal, wireCubic, Agent, type AgentKind } from './agents.ts';
+import { boundRadius, ERA_RADIUS, portLocal, slotsFor, stemRoot, stemWorld, stemWorldInto, triangleLocal, wireCubic, Agent, type AgentKind } from './agents.ts';
 import { AgentStore } from './agent-store.ts';
 import { EXTRA_CAP, EXTRA_FLOOR, REQUEST_DECAY, REQUEST_FULL } from './energy.ts';
 import { WIRE_STROKE_PX, wiresDrawable } from './audio/lod.ts';
@@ -149,7 +149,7 @@ export function render(
   }
 
   if (wiresDrawable(camera.zoom)) {
-    drawWires(ctx, sim, waves);
+    drawWires(ctx, sim, waves, camera.zoom);
     for (const rw of sim.rewrites) {
       drawCommuteGhostWires(ctx, rw, sim.w, sim.h);
     }
@@ -470,7 +470,12 @@ export function waveDisplace(fwd: number, back: number, env: number, pin: number
  */
 const dyingScratch = new Set<number>();
 
-function drawWires(ctx: CanvasRenderingContext2D, sim: Sim, waves: WaveSnapshot | null): void {
+function drawWires(
+  ctx: CanvasRenderingContext2D,
+  sim: Sim,
+  waves: WaveSnapshot | null,
+  zoom: number,
+): void {
   ctx.lineWidth = WIRE_STROKE_PX;
   ctx.strokeStyle = '#ffffff';
   ctx.lineCap = 'round';
@@ -508,7 +513,7 @@ function drawWires(ctx: CanvasRenderingContext2D, sim: Sim, waves: WaveSnapshot 
     const rec = waves?.index.get(wire.id);
     const rope = sim.wireSimulatesRope(wire);
     if (!(rec !== undefined && strokeOffsetWire(ctx, A, B, wire, w, h, waves!.packed, rec, stemA, stemB, rope))) {
-      strokeWire(ctx, A, B, wire, w, h, stemA, stemB, rope);
+      strokeWire(ctx, A, B, wire, w, h, stemA, stemB, rope, zoom);
     }
   }
   ctx.stroke();
@@ -542,8 +547,40 @@ function drawCommuteGhostWires(
   ctx.restore();
 }
 
-/** Samples a chord wire is cut into. Matches `wireControlPoints`. */
+/** Most samples a chord wire is ever cut into. Matches `wireControlPoints`. */
 const CHORD_STEPS = 16;
+
+/**
+ * Screen pixels a chord segment is worth drawing for.
+ *
+ * Sixteen segments is the right count for a wire that fills a good part of the
+ * view and absurd for one that is a pixel long, which is what nearly every
+ * wire is once the camera pulls back far enough to see a whole dish. A 60 s
+ * trace of a grown pond put `drawWires` at 13.3% of all CPU, most of it here.
+ *
+ * The cubic's bow is bounded by its handles, which `wireCubic` caps at a third
+ * of the span, so the sagitta is under about a quarter of the span. At five
+ * screen pixels a segment, the straight-line case is entering at a span whose
+ * whole curve could deviate by roughly one pixel — under the 1.35 px stroke.
+ */
+const CHORD_PX_PER_SEGMENT = 5;
+
+/** Scratch for the one-segment case, which needs the two stems and nothing else. */
+const chordEndA = { x: 0, y: 0 };
+const chordEndB = { x: 0, y: 0 };
+
+/**
+ * How many segments this wire is worth at this zoom, from 1 to `CHORD_STEPS`.
+ *
+ * `lastLen` is the length the step already measured, so this costs a multiply.
+ */
+function chordSteps(wire: Wire, zoom: number): number {
+  const span = wire.lastLen > 0 ? wire.lastLen : wire.rest;
+  if (!(span > 0) || !(zoom > 0)) return CHORD_STEPS;
+  const want = Math.ceil((span * zoom) / CHORD_PX_PER_SEGMENT);
+  if (!(want > 1)) return 1;
+  return want < CHORD_STEPS ? want : CHORD_STEPS;
+}
 
 /**
  * Reused sample buffer for the chord case, which is every wire that is not
@@ -556,23 +593,25 @@ const CHORD_STEPS = 16;
  */
 const chordScratch: { x: number; y: number }[] = [];
 
+/** Writes `steps + 1` points into `chordScratch` and returns that count. */
 function chordPolyline(
   A: Agent,
   B: Agent,
   wire: Wire,
   w: number,
   h: number,
-): { x: number; y: number }[] {
+  steps: number,
+): number {
   while (chordScratch.length <= CHORD_STEPS) chordScratch.push({ x: 0, y: 0 });
   const c = wireCubic(A, wire.a.slot, B, wire.b.slot, w, h, wire.rest);
-  for (let i = 0; i <= CHORD_STEPS; i++) {
-    bezierPointInto(c.p0, c.p1, c.p2, c.p3, i / CHORD_STEPS, chordScratch[i]);
+  for (let i = 0; i <= steps; i++) {
+    bezierPointInto(c.p0, c.p1, c.p2, c.p3, i / steps, chordScratch[i]);
   }
-  const last = chordScratch[CHORD_STEPS];
+  const last = chordScratch[steps];
   const first = chordScratch[0];
   const span = Math.hypot(last.x - first.x, last.y - first.y);
-  clampPolylineToChord(chordScratch, wireBowBudget(span, wire.rest));
-  return chordScratch;
+  clampPolylineToChord(chordScratch, wireBowBudget(span, wire.rest), steps + 1);
+  return steps + 1;
 }
 
 function strokeWire(
@@ -585,13 +624,30 @@ function strokeWire(
   stemA?: { x: number; y: number },
   stemB?: { x: number; y: number },
   rope = true,
+  zoom = 0,
 ): void {
   // The chord case ignores the stems anyway -- `wireControlPoints` reads the
   // ports off the bodies -- so the pooled path is the same geometry.
-  const pts =
-    !rope || wire.nodes.length === 0
-      ? chordPolyline(A, B, wire, w, h)
-      : wireStrokePoints(A, B, wire, w, h, stemA, stemB, rope);
+  if (!rope || wire.nodes.length === 0) {
+    const steps = chordSteps(wire, zoom);
+    if (steps <= 1) {
+      /*
+       * A wire this short on screen is a line. Taking it here skips the whole
+       * cubic — `wireCubic` alone builds about eleven objects a call, and the
+       * sampling built seventeen points for something under five pixels long.
+       */
+      stemWorldInto(A, wire.a.slot, w, h, chordEndA);
+      stemWorldInto(B, wire.b.slot, w, h, chordEndB);
+      ctx.moveTo(chordEndA.x, chordEndA.y);
+      ctx.lineTo(chordEndB.x, chordEndB.y);
+      return;
+    }
+    const n = chordPolyline(A, B, wire, w, h, steps);
+    ctx.moveTo(chordScratch[0].x, chordScratch[0].y);
+    for (let i = 1; i < n; i++) ctx.lineTo(chordScratch[i].x, chordScratch[i].y);
+    return;
+  }
+  const pts = wireStrokePoints(A, B, wire, w, h, stemA, stemB, rope);
   if (pts.length === 0) return;
   ctx.moveTo(pts[0].x, pts[0].y);
   for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
