@@ -28,3 +28,6 @@ dist-ssr
 
 # Experiment sweep output
 experiments/out/
+
+# Chrome performance traces dropped in by hand; large and machine-specific.
+.traces/
