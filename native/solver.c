@@ -337,6 +337,24 @@ static int collect_pairs(int n, float cell_size) {
   for (int c = cells; c > 0; c--) start[c] = start[c - 1];
   start[0] = 0;
 
+  /*
+   * Emitted pairs are filtered to within one cell of each other.
+   *
+   * Without this, a cell's own bucket contributes every pair in it and each of
+   * the four forward neighbours contributes every cross pair, so a pair up to
+   * two cells apart on the diagonal gets written out. The useful reach is two
+   * body radii. Measured at thirty thousand bodies in a settled dish: 144,017
+   * candidate pairs of which 9,770 were actually touching — fifteen to one —
+   * and `disc` walks that list on every one of its eight substeps.
+   *
+   * `cell` is the threshold because it is what the cell size already means:
+   * two radii plus slop plus a four-pixel margin. A pair further apart than
+   * that cannot come into contact before the list is rebuilt next frame, by
+   * the same argument that lets the list be reused across substeps at all.
+   * The list stays a superset of the touching pairs and every pair in it is
+   * still distance-tested by the caller, every substep.
+   */
+  const float reach2 = cell * cell;
   int np = 0;
   const int dxn[4] = {1, -1, 0, 1};
   const int dyn[4] = {0, 1, 1, 1};
@@ -346,9 +364,16 @@ static int collect_pairs(int n, float cell_size) {
       int a0 = start[c], a1 = start[c + 1];
       if (a0 == a1) continue;
       for (int a = a0; a < a1; a++) {
+        int ia = order[a];
+        float ax = bodies[ia * STRIDE + FAR_X];
+        float ay = bodies[ia * STRIDE + FAR_Y];
         for (int b = a + 1; b < a1 && np < MAX_PAIRS; b++) {
-          pair_a[np] = order[a];
-          pair_b[np] = order[b];
+          int ib = order[b];
+          float dx = bodies[ib * STRIDE + FAR_X] - ax;
+          float dy = bodies[ib * STRIDE + FAR_Y] - ay;
+          if (dx * dx + dy * dy > reach2) continue;
+          pair_a[np] = ia;
+          pair_b[np] = ib;
           np++;
         }
       }
@@ -359,9 +384,16 @@ static int collect_pairs(int n, float cell_size) {
         int nb = ny * cols + nx;
         int b0 = start[nb], b1 = start[nb + 1];
         for (int a = a0; a < a1; a++) {
+          int ia = order[a];
+          float ax = bodies[ia * STRIDE + FAR_X];
+          float ay = bodies[ia * STRIDE + FAR_Y];
           for (int b = b0; b < b1 && np < MAX_PAIRS; b++) {
-            pair_a[np] = order[a];
-            pair_b[np] = order[b];
+            int ib = order[b];
+            float dx = bodies[ib * STRIDE + FAR_X] - ax;
+            float dy = bodies[ib * STRIDE + FAR_Y] - ay;
+            if (dx * dx + dy * dy > reach2) continue;
+            pair_a[np] = ia;
+            pair_b[np] = ib;
             np++;
           }
         }
@@ -2220,6 +2252,8 @@ int solver_wire_cap(void) { return MAX_WIRES; }
 int solver_node_cap(void) { return MAX_NODES; }
 int solver_pair_cap(void) { return MAX_PAIRS; }
 int solver_pair_count(void) { return g_pairs; }
+/* Candidate pairs the far tier is holding for this frame. Diagnostic. */
+int solver_far_pair_count(void) { return g_far_pairs; }
 int solver_wire_near_stride(void) { return WIRE_NEAR; }
 int solver_node_stride(void) { return NODE_STRIDE; }
 float *solver_hits(void) { return hits; }
