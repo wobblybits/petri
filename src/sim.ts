@@ -3531,27 +3531,45 @@ export class Sim {
    */
   private syncLearn(store: AgentStore, learnSlots: number): void {
     if (this.genomeLearnVersion !== store.learnVersion) {
-      const lo = store.learnDirtyLo;
-      const hi = Math.min(store.learnDirtyHi, learnSlots);
-      if (hi > lo) {
-        const up = genomeGpu.learnUpData;
-        const stride = genomeGpu.learnStride;
-        const P = store.plasticAll;
-        const T = store.traceAll;
-        const C = store.criticAll;
-        const V = store.prevValue;
-        for (let s = lo; s < hi; s++) {
-          const o = (s - lo) * stride;
-          const ps = s * PLASTIC_LEN;
-          for (let k = 0; k < PLASTIC_LEN; k++) {
-            up[o + k] = P[ps + k];
-            up[o + LEARN_TRACE + k] = T[ps + k];
-          }
-          const cs = s * CRITIC_LEN;
-          for (let k = 0; k < CRITIC_LEN; k++) up[o + LEARN_CRITIC + k] = C[cs + k];
-          up[o + LEARN_PREV_V] = V[s];
+      const up = genomeGpu.learnUpData;
+      const stride = genomeGpu.learnStride;
+      const P = store.plasticAll;
+      const T = store.traceAll;
+      const C = store.criticAll;
+      const V = store.prevValue;
+      /** One slot's row into `learnUpData` at row `row`. */
+      const fill = (slot: number, row: number): void => {
+        const o = row * stride;
+        const ps = slot * PLASTIC_LEN;
+        for (let k = 0; k < PLASTIC_LEN; k++) {
+          up[o + k] = P[ps + k];
+          up[o + LEARN_TRACE + k] = T[ps + k];
         }
-        genomeGpu.pushLearn(lo, hi - lo);
+        const cs = slot * CRITIC_LEN;
+        for (let k = 0; k < CRITIC_LEN; k++) up[o + LEARN_CRITIC + k] = C[cs + k];
+        up[o + LEARN_PREV_V] = V[slot];
+      };
+      if (store.learnDirtyAll) {
+        // The list overran, so all that is left is the span.
+        const lo = store.learnDirtyLo;
+        const hi = Math.min(store.learnDirtyHi, learnSlots);
+        for (let s = lo; s < hi; s++) fill(s, s - lo);
+        if (hi > lo) genomeGpu.pushLearn(lo, hi - lo);
+      } else {
+        /*
+         * A row per dirty slot. The host only writes these to zero a recycled
+         * slot, so they are scattered wherever the free list handed out: on a
+         * grown pond, 62 slots a frame spanning 24,000. Carrying the span cost
+         * 11.9 ms; carrying the slots costs one small write each.
+         */
+        const slots = store.learnDirtySlots;
+        const count = store.learnDirtyCount;
+        for (let i = 0; i < count; i++) {
+          const slot = slots[i];
+          if (slot >= learnSlots) continue;
+          fill(slot, 0);
+          genomeGpu.pushLearn(slot, 1);
+        }
       }
       this.genomeLearnVersion = store.learnVersion;
       store.clearLearnDirty();

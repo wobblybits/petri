@@ -265,6 +265,30 @@ export class AgentStore {
   learnDirtyLo = 0;
   learnDirtyHi = 0;
 
+  /*
+   * Which slots' learning rows the host has written, as a list rather than a
+   * span.
+   *
+   * A span is the wrong shape for this. The host writes a learning row in one
+   * place — zeroing a slot that has just been recycled — so the dirty slots
+   * are wherever the free list happened to hand out, which is everywhere.
+   * Measured on a grown pond: **62 dirty slots a frame, in 62 separate runs,
+   * spanning 24,088 slots.** The span carried three hundred and eighty-nine
+   * times more than it needed to, and interleaving it into the upload buffer
+   * cost 11.9 ms a frame — most of the genome pack.
+   *
+   * The span is kept as the fallback for when the list overruns, which is the
+   * case a list is bad at and a span is fine at.
+   */
+  private static readonly LEARN_DIRTY_CAP = 512;
+  learnDirtySlots = new Int32Array(AgentStore.LEARN_DIRTY_CAP);
+  learnDirtyCount = 0;
+  /** True when the list overran and the span is the only usable record. */
+  learnDirtyAll = false;
+  /** Per-slot stamp, so a slot marked twice in a frame is listed once. */
+  private learnDirtyStamp!: Int32Array;
+  private learnDirtyEpoch = 1;
+
   markLearn(slot: number): void {
     if (this.learnDirtyHi <= this.learnDirtyLo) {
       this.learnDirtyLo = slot;
@@ -273,12 +297,27 @@ export class AgentStore {
       if (slot < this.learnDirtyLo) this.learnDirtyLo = slot;
       if (slot + 1 > this.learnDirtyHi) this.learnDirtyHi = slot + 1;
     }
+    if (!this.learnDirtyAll) {
+      if (this.learnDirtyStamp[slot] !== this.learnDirtyEpoch) {
+        this.learnDirtyStamp[slot] = this.learnDirtyEpoch;
+        if (this.learnDirtyCount < AgentStore.LEARN_DIRTY_CAP) {
+          this.learnDirtySlots[this.learnDirtyCount++] = slot;
+        } else {
+          this.learnDirtyAll = true;
+        }
+      }
+    }
     this.learnVersion = nextChemVersion++;
   }
 
   clearLearnDirty(): void {
     this.learnDirtyLo = 0;
     this.learnDirtyHi = 0;
+    this.learnDirtyCount = 0;
+    this.learnDirtyAll = false;
+    // Bumping the epoch retires every stamp at once, so nothing has to be
+    // cleared and a slot marked last frame is not mistaken for marked now.
+    this.learnDirtyEpoch++;
   }
 
   /** Slots < highWater have been allocated at least once (live or freed). */
@@ -447,6 +486,9 @@ export class AgentStore {
     const newPortWire = new Int32Array(newCapacity * 3).fill(-1);
     if (this.portWire) newPortWire.set(this.portWire.subarray(0, live * 3));
     this.portWire = newPortWire;
+    // Stamps are epoch-compared, so a grown tail of zeros reads as "not marked
+    // this epoch" for any epoch past zero — which `learnDirtyEpoch` starts at.
+    this.learnDirtyStamp = growI32(this.learnDirtyStamp);
     this.csHeading = growF64(this.csHeading);
     this.csCos = growF64(this.csCos);
     this.csSin = growF64(this.csSin);
