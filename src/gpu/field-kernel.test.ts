@@ -685,7 +685,7 @@ describe('field shader arithmetic', () => {
     expect(worst, 'the block was left in a different state').toBeLessThan(1e-7);
   });
 
-  it('takes the uptake dials out of the two slots the uniform used to pad', () => {
+  it('takes the uptake dials out of the slots the uniform used to pad', () => {
     /*
      * The host hand-packs `FieldParams` by index, so a field added on one side
      * and not the other reads as a plausible number rather than an error —
@@ -698,10 +698,13 @@ describe('field shader arithmetic', () => {
     const fields = [...body![1].matchAll(/^\s*([A-Za-z_]\w*)\s*:/gm)].map((m) => m[1]);
     expect(fields).not.toContain('pad3');
     expect(fields).not.toContain('pad4');
-    expect(fields.slice(-2)).toEqual(['uptakeCap', 'uptakeKs']);
+    // `uptakeCap` and `uptakeKs` took the two slots that used to pad; `hillN`
+    // needed a fourth block, which is why there are three pads after it again.
+    expect(fields.slice(-6)).toEqual(['uptakeCap', 'uptakeKs', 'hillN', 'pad5', 'pad6', 'pad7']);
     // Three vec4f (mix, mix2, keep) count as four slots each; everything else
-    // is a scalar, so index and slot are the same thing.
-    expect(fields.length).toBe(40 - 3 * 3);
+    // is a scalar, so index and slot are the same thing. `UNIFORM_BYTES` is
+    // 176, which is eleven sixteen-byte blocks.
+    expect(fields.length).toBe(176 / 4 - 3 * 3);
   });
 
   it('leaves an uneven floor, which is the reason for the ordering', () => {

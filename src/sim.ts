@@ -986,6 +986,7 @@ export class Sim {
         table: params.excreteRate > 0,
         yDirect: params.yDirect,
         yEra: params.yEra,
+        hillN: params.hillN,
       });
     }
     Sim.phase('harvestSlots');
@@ -1037,7 +1038,7 @@ export class Sim {
      * farm itself into debt, which would turn the most useful thing in the
      * economy into a way to die.
      */
-    this.refreshExpression(params);
+    this.refreshExpression(params, t);
     this.runExcretion(params, t);
     Sim.phase('excrete');
     if (params.farmRate > 0) {
@@ -3189,6 +3190,7 @@ export class Sim {
       table: params.excreteRate > 0,
       yDirect: params.yDirect,
       yEra: params.yEra,
+      hillN: params.hillN,
     });
     Sim.phase('gpu:plan');
     // Three ports a body, plus whatever died, farmed, spilled or was refunded
@@ -3397,6 +3399,7 @@ export class Sim {
         entries: plan.nEntries,
         uptakeCap: params.uptakeVmax * dt,
         uptakeKs: params.uptakeKs,
+        hillN: params.hillN,
       },
       seed === null ? null : { ch: CH.energy, value: seed },
     );
@@ -6333,15 +6336,46 @@ export class Sim {
    * shader needs no new output slot and no new binding for any of the reaction
    * table. That pass is already at eight storage buffers of a guaranteed eight.
    */
-  private refreshExpression(params: Params): void {
+  private refreshExpression(params: Params, t: number): void {
     if (!(params.excreteRate > 0) && !(params.uptakeVmax > 0)) return;
     const store = this.agentStore;
     const CHEM = store.chemAll;
     const H = store.hAll;
     const EX = store.expressAll;
+    const perRow = params.rowCost * t;
+    const excrete = params.upkeepExcrete;
     for (const a of this.agents.values()) {
       const s = a.slot;
-      expressVector(CHEM, s * CHEM_LEN, H, s * STATE_DIMS, EX, s * ROW_COUNT);
+      const o = s * ROW_COUNT;
+      expressVector(CHEM, s * CHEM_LEN, H, s * STATE_DIMS, EX, o);
+      if (!(perRow > 0) || a.locked) continue;
+      /*
+       * The fixed cost of running a reaction at all — §3's first way to buy
+       * the superadditivity division of labour needs, and which a linear
+       * budget cannot supply. Running two rows costs `2c` and running one
+       * costs `c`, so a specialist keeps what a generalist spends on breadth.
+       *
+       * Counted on rows that are *expressed*, which relu makes an exact
+       * question: a pre-activation at or below zero is a row switched off, and
+       * driving one there is how a lineage specialises. The all-zero seed
+       * takes `expressVector`'s flat fallback and so pays for all eight — it
+       * is expressing evenly, not expressing nothing, and charging it nothing
+       * would make "say nothing, act as a generalist" free and strictly best
+       * at any cost.
+       *
+       * Excreted on the same terms as upkeep, and for the same reason: what
+       * left a tank has to arrive somewhere or a dial nobody turned on is
+       * quietly destroying matter.
+       */
+      let rows = 0;
+      for (let r = 0; r < ROW_COUNT; r++) if (EX[o + r] > 0) rows++;
+      if (rows === 0) continue;
+      const was = a.extra;
+      a.extra = Math.max(a.debtCap, was - perRow * rows);
+      if (excrete > 0) {
+        const paid = Math.max(0, was) - Math.max(0, a.extra);
+        if (paid > 0) this.energy.addAt(a.x, a.y, paid * excrete);
+      }
     }
   }
 

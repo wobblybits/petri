@@ -25,7 +25,7 @@ import { CHANNELS, type Fields } from '../fields.ts';
  * written at the wrong offset reads as a plausible number rather than an
  * error, which is the whole hazard of hand-packing a uniform.
  */
-const UNIFORM_BYTES = 160;
+const UNIFORM_BYTES = 176;
 /** Floats per Deposit and per Probe in the shader's layout. */
 const DEPOSIT_FLOATS = 8;
 const PROBE_FLOATS = 12;
@@ -355,7 +355,7 @@ export class FieldGpu {
     decayRate: number,
     grow: { ch: number; r: number; cap: number; catCh: number; gamma: number },
     react: { u: number; v: number; feed: number; kill: number; dt: number },
-    harvest: { ch: number; blocks: number; entries: number; uptakeCap: number; uptakeKs: number },
+    harvest: { ch: number; blocks: number; entries: number; uptakeCap: number; uptakeKs: number; hillN: number },
     fill: { ch: number; value: number } | null,
   ): Promise<boolean> {
     if (!this.submit(fields, nDeposit, nProbe, mix, mix2, decayRate, grow, react, harvest, fill)) {
@@ -374,7 +374,7 @@ export class FieldGpu {
     decayRate: number,
     grow: { ch: number; r: number; cap: number; catCh: number; gamma: number },
     react: { u: number; v: number; feed: number; kill: number; dt: number },
-    harvest: { ch: number; blocks: number; entries: number; uptakeCap: number; uptakeKs: number },
+    harvest: { ch: number; blocks: number; entries: number; uptakeCap: number; uptakeKs: number; hillN: number },
     fill: { ch: number; value: number } | null,
   ): boolean {
     const device = this.device;
@@ -429,6 +429,7 @@ export class FieldGpu {
       // The two slots the struct used to pad with. See `harvest` in field.wgsl.
       f32[38] = harvest.uptakeCap;
       f32[39] = harvest.uptakeKs;
+      f32[40] = harvest.hillN;
       device.queue.writeBuffer(this.uniform!, 0, u);
       if (nDeposit > 0) {
         device.queue.writeBuffer(

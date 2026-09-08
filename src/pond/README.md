@@ -308,7 +308,7 @@ sweep, not a default.
 | `upkeepExcrete` | 0 | rent returns to the ground rather than vanishing |
 | `bodyValue` | `EXTRA_CAP` | at `REWRITE_SHARE` a commute stops minting |
 | `eraCapRatio`, `eraUpkeepRatio` | 2, −0.2 | at 1, 1 the two rules keyed on an Era's glyph are gone |
-| `rowCost`, `hillN` | 0, 1 | the two superadditivity dials §3 argues division of labour needs. **Declared, not yet read** |
+| `rowCost`, `hillN` | 0, 1 | the two superadditivity dials §3 argues division of labour needs: a fixed cost per expressed row, and a Hill exponent on uptake |
 
 **`senseScale` has to move with `excreteRate`.** Measured as the p90 signal
 reading at a body's own position over soups of 60, 400 and 2000 — the same

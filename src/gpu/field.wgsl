@@ -49,6 +49,11 @@ struct FieldParams {
   // path this shader has always run. See `energy.ts:uptakeRate`.
   uptakeCap: f32,
   uptakeKs: f32,
+  // Hill coefficient on uptake; 1 is plain Monod. See `UptakeKinetics.hillN`.
+  hillN: f32,
+  pad5: f32,
+  pad6: f32,
+  pad7: f32,
 }
 
 // A world position and what to add there, per channel.
@@ -543,7 +548,15 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
       // `vmax` off the table, so this is also what keeps uptake on the ground
       // alone until `excreteRate` stops the minting — see `UptakeKinetics`.
       if (left > FLOW_EPS && vmax[c] > 0.0 && density[c] > 0.0) {
-        let rate = vmax[c] * density[c] / (ks[c] + density[c]);
+        // Hill at `n`; 1 is plain Monod and does not pay for the two `pow`
+        // calls. Kept in step with `runHarvestPlan` by hand.
+        var sN = density[c];
+        var kN = ks[c];
+        if (P.hillN != 1.0) {
+          sN = pow(density[c], P.hillN);
+          kN = pow(ks[c], P.hillN);
+        }
+        let rate = vmax[c] * sN / (kN + sN);
         var want = rate;
         if (left < want) { want = left; }
         if (want > FLOW_EPS) {

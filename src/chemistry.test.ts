@@ -386,3 +386,106 @@ describe('trophic yield', () => {
     expect(era.extra).toBeGreaterThan(con.extra * 2);
   });
 });
+
+describe('superadditivity', () => {
+  /*
+   * §3's condition, stated precisely: division of labour needs a trade-off,
+   * and a linear budget is not one. With a linear constraint and concave
+   * payoffs — Monod at `n = 1` is concave — the optimum is interior and
+   * everyone becomes a generalist, because specialising beats splitting only
+   * when `f(1) > 2 f(1/2)`, which concavity forbids. These are the two dials
+   * that break the concavity, and both ship at the neutral value.
+   */
+
+  it('charges a generalist for every row it runs', () => {
+    const p = chemistryParams();
+    p.ambientEnergy = 0;
+    p.uptakeVmax = 1.5;
+    p.rowCost = 0.02;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    const a = [...sim.agents.values()][0];
+    a.extra = 1;
+    // Flat expression is all eight rows, so a seeded body pays for all eight.
+    // Charging it nothing would make "say nothing, act as a generalist" free
+    // and strictly best at any cost, which is the opposite of the pressure.
+    sim.step(1 / 60, p);
+    expect(a.extra).toBeCloseTo(1 - 0.02 * (1 / 60) * ROW_COUNT, 6);
+  });
+
+  it('lets a specialist keep what breadth costs', () => {
+    const p = chemistryParams();
+    p.ambientEnergy = 0;
+    p.uptakeVmax = 1.5;
+    p.rowCost = 0.02;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    const bodies = [...sim.agents.values()];
+    const generalist = bodies[0];
+    const specialist = bodies[1];
+    generalist.extra = 1;
+    specialist.extra = 1;
+    // Relu makes "switched off" an exact question, and driving a row's
+    // pre-activation below zero is how a lineage specialises.
+    for (let r = 1; r < ROW_COUNT; r++) specialist.chem[X_BASE + r] = -1;
+    specialist.chem[X_BASE] = 1;
+    sim.step(1 / 60, p);
+    expect(specialist.extra).toBeGreaterThan(generalist.extra);
+    expect(1 - specialist.extra).toBeCloseTo((1 - generalist.extra) / ROW_COUNT, 6);
+  });
+
+  it('is off at zero, and does not destroy what it charges', () => {
+    /*
+     * With `excreteRate` on, because conservation is only a question once the
+     * minting has stopped. Left minting, the field fills with scent nobody
+     * paid for and the total climbs past twenty-eight thousand from a hundred
+     * and twenty — which is today's pond working as designed, and nothing to
+     * do with the row cost.
+     */
+    const p = chemistryParams();
+    p.ambientEnergy = 0;
+    p.uptakeVmax = 1.5;
+    p.excreteRate = 0.5;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    for (const a of sim.agents.values()) a.extra = 1;
+    const before = matter(sim, p.bodyValue);
+    for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
+    // Five places, not six: `Fields.data` is Float32 and `matter` sums a
+    // million cells of it, so the rounding floor is around a part in ten
+    // million of the total and not something the reactions can do better than.
+    expect(matter(sim, p.bodyValue)).toBeCloseTo(before, 5);
+
+    /*
+     * And with the cost on, what leaves a tank arrives on the ground.
+     *
+     * Gentle enough that nobody reaches debt, and the test checks that they
+     * did not. A body billed past empty runs a debt rather than moving matter
+     * — correctly, since it has none to move — so a pond that starved would
+     * show a shortfall here that is an artifact of the question rather than a
+     * leak. `energy.test.ts` documents the same hole from the other side.
+     */
+    const q = { ...p, rowCost: 0.01, excreteRate: 0.1, upkeepExcrete: 1 };
+    const sim2 = new Sim(1600, 1200, 128);
+    loadPreset(sim2, 'soup', q);
+    for (const a of sim2.agents.values()) a.extra = 1;
+    const before2 = matter(sim2, q.bodyValue);
+    for (let i = 0; i < 60; i++) sim2.step(1 / 60, q);
+    const poorest = Math.min(...[...sim2.agents.values()].map((a) => a.extra));
+    expect(poorest, 'somebody ran a debt; the total below is not the test').toBeGreaterThan(0);
+    expect(sim2.totalFree()).toBeLessThan(60);
+    expect(matter(sim2, q.bodyValue)).toBeCloseTo(before2, 5);
+  });
+
+  it('makes uptake convex at low density above n = 1', () => {
+    // The other dial. At n = 1 Monod is concave everywhere; above it the
+    // response is convex at low density, which is what makes committing pay.
+    const monod = (s: number, n: number) => (1.5 * s ** n) / (0.5 ** n + s ** n);
+    const half = monod(0.1, 1);
+    const full = monod(0.2, 1);
+    expect(full).toBeLessThan(2 * half);
+    const halfH = monod(0.1, 3);
+    const fullH = monod(0.2, 3);
+    expect(fullH).toBeGreaterThan(2 * halfH);
+  });
+});

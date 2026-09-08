@@ -1203,6 +1203,18 @@ export interface UptakeKinetics {
    */
   yDirect: number;
   yEra: number;
+  /**
+   * Hill coefficient on uptake: `v = vmax * S^n / (ks^n + S^n)`.
+   *
+   * One of §3's two ways to buy superadditivity, which division of labour
+   * needs and a linear budget cannot supply. With a linear constraint and
+   * *concave* payoffs — and Monod at `n = 1` is concave — the optimum is
+   * interior and everyone becomes a generalist; specialising beats splitting
+   * only when `f(1) > 2 f(1/2)`, which concavity forbids. Above 1 the response
+   * is convex at low density, which is the shape that makes committing to one
+   * species pay. At 1, plain Monod.
+   */
+  hillN: number;
 }
 
 /**
@@ -1250,6 +1262,7 @@ export function runHarvestPlan(
   const CAP = store.energyCap;
   const B = plan.blocks;
   const metered = uptake !== undefined && uptake.cap > 0;
+  const hill = uptake !== undefined && uptake.hillN > 0 ? uptake.hillN : 1;
   const R = plan.rooms;
   for (let b = 0; b < plan.nBlocks; b++) {
     const first = B[b * 6 + 4];
@@ -1307,7 +1320,12 @@ export function runHarvestPlan(
         const vmax = R[ro + HARVEST_VMAX + c];
         const density = SPECIES_DENSITY[c];
         if (!(vmax > 0) || !(density > 0)) continue;
-        const rate = (vmax * density) / (R[ro + HARVEST_KS + c] + density);
+        // Hill at `n`, which is plain Monod at 1 and does not pay for the two
+        // `pow` calls there. See `UptakeKinetics.hillN`.
+        const ks = R[ro + HARVEST_KS + c];
+        const sN = hill === 1 ? density : Math.pow(density, hill);
+        const kN = hill === 1 ? ks : Math.pow(ks, hill);
+        const rate = (vmax * sN) / (kN + sN);
         if (!(rate > 0)) continue;
         const want = rate < left ? rate : left;
         const got = grid.takeFrom(key, c, want);
