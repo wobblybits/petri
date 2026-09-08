@@ -5,6 +5,7 @@ import { fieldGpu } from '../gpu/field-gpu.ts';
 import { nativeSolver } from '../native/solver.ts';
 import { PondDb, type NetRow } from './db.ts';
 import { NET_FORMAT, layoutComplaint, readHeader } from './net-blob.ts';
+import { parseGround } from './ground.ts';
 import { paramsWith, runPond, type SeedNet } from './run.ts';
 import { effectTable, effects, pointTable, sweepTrials } from './analyze.ts';
 import { gridPoints, runSweep } from './sweep.ts';
@@ -46,6 +47,8 @@ run options
   --min-bodies <n>     smallest component worth storing  (default 2)
   --limit <n>          store only the n largest components per harvest
   --gpu auto|on|off    field and genome on the GPU, via Dawn  (default auto)
+  --ground <spec>      uniform | none | patches[:n]   (default uniform)
+                       the same total mass, arranged differently
   --set <key>=<value>  override one Params field; repeatable
   --note <text>        free text on the run row
 
@@ -264,6 +267,7 @@ async function cmdRun(args: Args): Promise<void> {
       minBodies: num(flags, 'min-bodies', 2),
       limit: flags.has('limit') ? num(flags, 'limit', 0) : null,
       gpu,
+      ground: parseGround(flags.get('ground') ?? 'uniform'),
     };
 
     const runId = db.startRun({
@@ -516,6 +520,7 @@ async function cmdSweep(args: Args): Promise<void> {
     world: { w: ww, h: wh },
     sampleEvery: num(flags, 'sample-every', 10),
     gpu: gpuFlag as 'auto' | 'on' | 'off',
+    ground: parseGround(flags.get('ground') ?? 'uniform'),
     keepNets: flags.has('keep-nets'),
     note: flags.get('note') ?? null,
   };

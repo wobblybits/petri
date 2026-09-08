@@ -7,6 +7,7 @@ import { fieldGpu } from '../gpu/field-gpu.ts';
 import { genomeGpu } from '../gpu/genome-gpu.ts';
 import { nativeSolver } from '../native/solver.ts';
 import { captureNets, plantNet, type CapturedNet } from './capture.ts';
+import { layGround, type GroundSpec } from './ground.ts';
 import { measureDiversity, type Diversity } from './measure.ts';
 import { openWebGpu } from './webgpu-node.ts';
 import { encodeNet } from './net-blob.ts';
@@ -62,6 +63,15 @@ export interface PondRunSpec {
   minBodies: number;
   /** Store only the largest this-many components per harvest. */
   limit: number | null;
+  /**
+   * How the ground is arranged at the start, at the same total mass.
+   *
+   * See `ground.ts`: the uniform dish every preset lays down is what §0 of the
+   * chemistry plan calls a puddle, and comparing it against a patchy one at
+   * *equal mass* is the only way to ask about structure rather than about how
+   * much food there is.
+   */
+  ground: GroundSpec;
   /**
    * Whether to put the field and genome on the GPU.
    *
@@ -149,6 +159,13 @@ export async function runPond(
         throw new Error(`pond: --gpu on, but no device: ${open.error ?? fieldGpu.lastError}`);
       }
     }
+    /*
+     * After the device is open, not before. A non-uniform ground crosses as
+     * deferred conserved adds, and `deferAdds` is switched on by
+     * `openFieldGpu` — laid down earlier it would land in the host's mirror,
+     * which the shader does not read, and the GPU pond would start barren.
+     */
+    layGround(sim, spec.ground);
 
     if (spec.seeds.length > 0) {
       const cx = sim.w * 0.5;

@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import type { Params } from '../params.ts';
 import { PondDb } from './db.ts';
+import type { GroundSpec } from './ground.ts';
 import { paramsWith, runPond, type PondRunSpec } from './run.ts';
 
 /*
@@ -36,6 +37,8 @@ export interface SweepSpec {
   world: { w: number; h: number };
   sampleEvery: number;
   gpu: 'auto' | 'on' | 'off';
+  /** How the ground is arranged; see `ground.ts`. */
+  ground: GroundSpec;
   /**
    * Store nets from each trial, or only the timeline.
    *
@@ -108,6 +111,7 @@ export async function runSweep(
         // the timeline is the deliverable and the genomes are a by-product.
         limit: spec.keepNets ? 8 : 0,
         gpu: spec.gpu,
+        ground: spec.ground,
       };
       const runId = db.startRun({
         seed,
