@@ -702,32 +702,61 @@ describe('heritable traits', () => {
   });
 
   it('blends a Dup child too, once the lineage has drifted all the way down', () => {
-    // The other end, and the one the old rule could not express at all: a
-    // lineage for which even duplication combines rather than copies.
-    const { sim, params } = oscillatorPair();
-    const dup = [...sim.agents.values()].find((a) => a.kind === 'dup')!;
-    const con = [...sim.agents.values()].find((a) => a.kind === 'con')!;
-    dup.requestDecay = 0.55;
-    con.requestDecay = 0.95;
-    dup.assort = 0;
-    con.assort = 0;
+    /*
+     * The other end, and the one the old rule could not express at all: a
+     * lineage for which duplication can combine rather than only copy.
+     *
+     * Stated as a comparison between the two ends, and measured over many
+     * rewrites, because neither is true of a single child. `assortChance`
+     * offsets the parents' mean by the child's kind — `mean + 0.5` for a Dup —
+     * so parents at 0 give a Dup child a chance of **0.5**, not 0: about half
+     * its genes are still copied whole. Asserting off one rewrite that both
+     * children blended was therefore a coin flip landing right, and it duly
+     * came up tails the first time `CHEM_LEN` grew and `inheritChem` started
+     * drawing more numbers per child.
+     *
+     * What is actually true, and is what the rule is for: at the top of the
+     * range a Dup child never blends, and at the bottom it often does.
+     */
+    const m = TRAIT_RANGE.requestDecay.mutate;
+    const blendedShare = (assort: number): number => {
+      let children = 0;
+      let blended = 0;
+      for (let trial = 0; trial < 30; trial++) {
+        const { sim, params } = oscillatorPair();
+        const dup = [...sim.agents.values()].find((a) => a.kind === 'dup')!;
+        const con = [...sim.agents.values()].find((a) => a.kind === 'con')!;
+        dup.requestDecay = 0.55;
+        con.requestDecay = 0.95;
+        dup.assort = assort;
+        con.assort = assort;
 
-    const before = new Set(sim.agents.keys());
-    const rw = beginRewrite(dup, con, sim.graph, sim.agents, sim.w, sim.h, 1);
-    sim.nextId = commitRewrite(rw, sim.agents, sim.graph, params, sim.nextId, sim.time, sim.w, sim.h, sim.agentStore);
-    const children = [...sim.agents.values()].filter((a) => !before.has(a.id));
-    const dups = children.filter((a) => a.kind === 'dup');
-    expect(dups).toHaveLength(2);
-    // At 0 both kinds blend, so a Dup child is no longer pinned near either
-    // parent's exact value — it lands somewhere across the widened span.
-    const pinned = dups.every((c) => {
-      const m = TRAIT_RANGE.requestDecay.mutate;
-      return (
-        Math.abs(c.requestDecay - dup.requestDecay) <= m + 1e-9 ||
-        Math.abs(c.requestDecay - con.requestDecay) <= m + 1e-9
-      );
-    });
-    expect(pinned, 'both Dup children still copied a parent whole').toBe(false);
+        const before = new Set(sim.agents.keys());
+        const rw = beginRewrite(dup, con, sim.graph, sim.agents, sim.w, sim.h, 1);
+        sim.nextId = commitRewrite(rw, sim.agents, sim.graph, params, sim.nextId, sim.time, sim.w, sim.h, sim.agentStore);
+        const dups = [...sim.agents.values()]
+          .filter((a) => !before.has(a.id))
+          .filter((a) => a.kind === 'dup');
+        expect(dups).toHaveLength(2);
+        for (const c of dups) {
+          children++;
+          const pinned =
+            Math.abs(c.requestDecay - 0.55) <= m + 1e-9 || Math.abs(c.requestDecay - 0.95) <= m + 1e-9;
+          if (!pinned) blended++;
+        }
+      }
+      return blended / children;
+    };
+
+    const atTop = blendedShare(1);
+    const atBottom = blendedShare(0);
+    // Copied whole, every gene, every child: the mutation nudge is the only
+    // thing that moves a Dup child at all up here.
+    expect(atTop, `assort 1 blended ${atTop}`).toBeLessThan(0.05);
+    // And down here it is a real fraction. Half the genes are still assorted
+    // and a blend can land near a parent or on the range's clamp, so this is
+    // nothing like 1 — the claim is that it is not nothing.
+    expect(atBottom, `assort 0 blended ${atBottom}`).toBeGreaterThan(0.2);
   });
 
   it('clones an Era through erase, with a mutation nudge', () => {

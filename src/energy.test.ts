@@ -13,6 +13,7 @@ import {
   extraCapFor,
   flowCharges,
   harvestSlots,
+  uptakeRate,
   hungerNeed,
   redexNeed,
   rewriteShareOf,
@@ -34,7 +35,17 @@ import {
   WireAdjacency,
 } from './energy.ts';
 import { Sim } from './sim.ts';
-import { defaultParams } from './params.ts';
+import { defaultParams, type Params } from './params.ts';
+import { loadPreset } from './presets.ts';
+import { CH, CHANNELS } from './fields.ts';
+
+/** Sum of one channel over the whole field — the harness's own helper. */
+function channelTotal(sim: Sim, ch: number): number {
+  const d = sim.fields.data;
+  let s = 0;
+  for (let k = ch; k < d.length; k += CHANNELS) s += d[k];
+  return s;
+}
 
 /** Defaults to `con`: Era has its own upkeep rate, so kind matters here. */
 function body(
@@ -218,6 +229,74 @@ describe('harvest slots', () => {
     expect(a.extra).toBeCloseTo(1);
     expect(b.extra).toBe(0);
     expect(grid.getAt(2, 2)).toBe(0);
+  });
+
+  /*
+   * Monod uptake. `docs/energy-chemistry-plan.md` §4.
+   *
+   * Two claims worth a test each: at `cap` 0 nothing whatsoever changes, and
+   * above it the id-order artifact — older bodies systematically eating first
+   * in a contested cell, a fitness gradient on age nobody chose — stops being
+   * a thing.
+   */
+  it('is Monod above zero and unmetered at zero', () => {
+    expect(uptakeRate(1, 0, 0.25)).toBe(Infinity);
+    expect(uptakeRate(0, 2, 0.25)).toBe(0);
+    // Half-saturation is exactly that: at S = Ks the rate is vmax/2.
+    expect(uptakeRate(0.25, 2, 0.25)).toBeCloseTo(1, 12);
+    // Saturating, and monotone in S but never past vmax.
+    expect(uptakeRate(1000, 2, 0.25)).toBeGreaterThan(1.99);
+    expect(uptakeRate(1000, 2, 0.25)).toBeLessThan(2);
+    expect(uptakeRate(0.5, 2, 0.25)).toBeGreaterThan(uptakeRate(0.25, 2, 0.25));
+  });
+
+  it('takes what fits, exactly as before, at uptakeVmax zero', () => {
+    // Bit-identical, not close: the whole discipline of the plan is that a
+    // dial at its neutral value leaves the pond it was added to alone.
+    const plain = new EnergyGrid(10, 1);
+    const a1 = body(1, 2, 2);
+    harvestSlots([a1], plain);
+
+    const metered = new EnergyGrid(10, 1);
+    const a2 = body(1, 2, 2);
+    harvestSlots([a2], metered, { cap: 0, ks: 0.25 });
+
+    expect(a2.extra).toBe(a1.extra);
+    expect(metered.getAt(2, 2)).toBe(plain.getAt(2, 2));
+  });
+
+  it('shares a contested cell instead of handing it to the lowest id', () => {
+    // The sibling test above — 'gives a shared cell of 1 to the lower id
+    // only' — is the artifact this removes. Same cell, same two bodies.
+    const grid = new EnergyGrid(10, 1);
+    const a = body(1, 2, 2);
+    const b = body(2, 3, 2);
+    // A rate well under the cell's stock, so neither can drain it in a frame.
+    harvestSlots([a, b], grid, { cap: 0.2, ks: 0.25 });
+    expect(a.extra).toBeGreaterThan(0);
+    expect(b.extra).toBeGreaterThan(0);
+    // Drawn concurrently, so they get the same rate; order stops mattering
+    // except at exhaustion.
+    expect(b.extra).toBeCloseTo(a.extra, 9);
+    expect(a.extra + b.extra).toBeLessThanOrEqual(1 + 1e-9);
+  });
+
+  it('caps a rich cell at the rate and a poor one below it', () => {
+    const rich = new EnergyGrid(10, 4);
+    const r = body(1, 2, 2);
+    harvestSlots([r], rich, { cap: 0.2, ks: 0.25 });
+    // Saturated: near vmax*dt, and nowhere near the tank's room.
+    expect(r.extra).toBeGreaterThan(0.18);
+    expect(r.extra).toBeLessThanOrEqual(0.2 + 1e-9);
+
+    const poor = new EnergyGrid(10, 0.05);
+    const p = body(1, 2, 2);
+    harvestSlots([p], poor, { cap: 0.2, ks: 0.25 });
+    // Below half-saturation, so the rate is well under vmax — and this is the
+    // half of Monod that makes a low-Ks scavenger a viable different strategy
+    // rather than a strictly worse grazer.
+    expect(p.extra).toBeLessThan(r.extra);
+    expect(p.extra).toBeCloseTo(uptakeRate(0.05, 0.2, 0.25), 9);
   });
 
   it('does not fill a slot that is already at the cap', () => {
@@ -901,5 +980,138 @@ describe('EnergyGrid.forEachStored', () => {
     expect(seen).toHaveLength(2);
     expect(seen).toContain('0,0:1.1');
     expect(seen).toContain('-3,4:0');
+  });
+});
+
+describe('conservation', () => {
+  /*
+   * `docs/energy-chemistry-plan.md` §5, as one assertion:
+   *
+   *   > The dish is driven — feed in, kill out, patterned.
+   *   > The bodies are conservative — no reaction a body runs creates or
+   *   > destroys matter.
+   *
+   * The second is the invariant that makes selection honest, and it is only
+   * reachable with the three phase-2 dials at their conservative settings.
+   * Every one of them ships at the value that reproduces today's pond, so
+   * this is a test of what the dials *can* do, not of what the pond does.
+   */
+  function conservativeParams(): Params {
+    const p = defaultParams();
+    p.soupCount = 120;
+    // The drive, off. `grow` is a source and `decay` a sink; both are the
+    // dish, and the dish is allowed to be driven. This test is about bodies.
+    p.energyRegrow = 0;
+    p.decay = 0;
+    // Immigrants are matter created out of nothing, which is deliberate — it
+    // is what stops a pond going permanently extinct — and it is not a body
+    // reaction.
+    p.spawnInterval = 0;
+    // The three dials.
+    p.upkeepExcrete = 1;
+    p.bodyValue = REWRITE_SHARE;
+    p.eraUpkeepRatio = 1;
+    return p;
+  }
+
+  /**
+   * Everything the pond is made of, counting a body's debt against it.
+   *
+   * `totalFree` deliberately floors at zero — it answers "how much can be
+   * spent" — and that is the wrong question here. A body one unit into debt
+   * holds `bodyValue - 1` of real matter, and `deathYield` releases exactly
+   * that when it dies. Counting its stock as zero instead would make every
+   * starvation look like matter vanishing, when what vanished was a debt.
+   */
+  const pondTotal = (sim: Sim, bodyValue: number): number => {
+    let inBodies = 0;
+    for (const a of sim.agents.values()) inBodies += bodyValue + a.extra;
+    /*
+     * Plus what is in flight. A rewrite charges its pair `rewriteCost` when it
+     * *begins* and pays the pool out when it *commits*, and in between the
+     * shares are held by the `Rewrite` itself — not by a body, not by the
+     * escrow map, and so not by any of the three totals above. Two seconds of
+     * rewrite duration at two shares apiece is a swing of a few units that
+     * closes itself every time.
+     */
+    let inFlight = 0;
+    // Per rule: only a commute costs shares up front. An erase or an
+    // annihilation is free to start and pays out on commit.
+    for (const rw of sim.rewrites) inFlight += rewriteCost(rw.rule);
+    return inBodies + inFlight + sim.escrowTotal() + sim.energy.storedTotal();
+  };
+
+  it('diffusion moves the substance without destroying it', () => {
+    /*
+     * The dish wall absorbs a signal and reflects the substance.
+     *
+     * It used to absorb both, which cost the ground 10.6% over 900 frames at
+     * 128 cells a side with nothing else running — a sink nobody asked for, on
+     * the one channel `decayRate` is zeroed for so that nothing could destroy
+     * it. It hid in the production dish because the loss goes as perimeter
+     * over area.
+     */
+    const p = defaultParams();
+    p.soupCount = 0;
+    p.spawnInterval = 0;
+    p.energyRegrow = 0;
+    p.decay = 0;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    const before = sim.energy.storedTotal();
+    expect(before, 'the dish should start with ground in it').toBeGreaterThan(0);
+    for (let i = 0; i < 600; i++) sim.step(1 / 60, p);
+    expect(sim.energy.storedTotal()).toBeCloseTo(before, 6);
+  });
+
+  it('a signal still leaks into the rim, which is what a rim is for', () => {
+    // The other half of the same rule. Without it the dish would fill with
+    // everything anything had ever said.
+    const sim = new Sim(1600, 1200, 128);
+    const p = defaultParams();
+    p.soupCount = 0;
+    p.spawnInterval = 0;
+    p.energyRegrow = 0;
+    p.decay = 0;
+    loadPreset(sim, 'soup', p);
+    sim.fields.fillDisk(CH.conP, 1);
+    const before = channelTotal(sim, CH.conP);
+    expect(before).toBeGreaterThan(0);
+    for (let i = 0; i < 600; i++) sim.step(1 / 60, p);
+    expect(channelTotal(sim, CH.conP)).toBeLessThan(before * 0.99);
+  });
+
+  it('bodies neither create nor destroy, across a pond that rewrites', () => {
+    const p = conservativeParams();
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    const before = pondTotal(sim, p.bodyValue);
+    let worst = 0;
+    for (let i = 0; i < 900; i++) {
+      sim.step(1 / 60, p);
+      worst = Math.max(worst, Math.abs(pondTotal(sim, p.bodyValue) - before));
+    }
+    // Something has to have happened, or this asserts about a still pond.
+    expect(sim.tally.annihilations + sim.tally.commutes, 'no rewrites ran').toBeGreaterThan(4);
+    /*
+     * Not exact: a pair that annihilates while in debt releases less than it
+     * holds, and that debt dies with it rather than being minted away — see
+     * `tickRewrites`, where the pool is clamped at zero. Everything else
+     * balances to a part in a hundred thousand, over nine hundred frames of a
+     * pond that latched, commuted, erased and annihilated throughout.
+     */
+    expect(worst / before, `drifted ${worst} of ${before}`).toBeLessThan(1e-4);
+  });
+
+  it('destroys the rent when upkeepExcrete is off, which is today', () => {
+    // The dial's other end, so the test above cannot pass by the invariant
+    // being vacuous. Rent vanishing is what the pond does now.
+    const p = conservativeParams();
+    p.upkeepExcrete = 0;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    const before = pondTotal(sim, p.bodyValue);
+    for (let i = 0; i < 900; i++) sim.step(1 / 60, p);
+    expect(pondTotal(sim, p.bodyValue)).toBeLessThan(before * 0.999);
   });
 });

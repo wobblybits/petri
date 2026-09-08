@@ -59,8 +59,8 @@ export const ERA_CAP_RATIO = 2;
  * than reset to this — so this is only the seed `createAgent` gives a body
  * born outside a rewrite.
  */
-export function extraCapFor(kind: AgentKind): number {
-  return kind === 'era' ? EXTRA_CAP * ERA_CAP_RATIO : EXTRA_CAP;
+export function extraCapFor(kind: AgentKind, eraRatio = ERA_CAP_RATIO): number {
+  return kind === 'era' ? EXTRA_CAP * eraRatio : EXTRA_CAP;
 }
 /**
  * Default death floor: a whole unit of debt. A body's own `debtCap` takes
@@ -84,9 +84,15 @@ const EXTRA_FULL_EPS = 1e-6;
  */
 export const BODY_VALUE = EXTRA_CAP;
 
-/** Energy released by one death: the body's own worth plus what it held. */
-export function deathYield(a: { extra: number }): number {
-  return Math.max(0, BODY_VALUE + a.extra);
+/**
+ * Energy released by one death: the body's own worth plus what it held.
+ *
+ * `value` is `params.bodyValue`, which ships at `BODY_VALUE` and reduces to
+ * what this always did. At `REWRITE_SHARE` the pond is strictly conserved
+ * across the commute-then-annihilate cycle — see the note on `BODY_VALUE`.
+ */
+export function deathYield(a: { extra: number }, value = BODY_VALUE): number {
+  return Math.max(0, value + a.extra);
 }
 
 /** Energy locked up in one body's existence. Every kind costs the same. */
@@ -155,9 +161,16 @@ export const REQUEST_FULL = 1;
  */
 export const ERA_UPKEEP_RATIO = -0.2;
 
-/** Upkeep per second for one body, given the global rate. */
-export function upkeepRateFor(kind: AgentKind, rate: number): number {
-  return kind === 'era' ? rate * ERA_UPKEEP_RATIO : rate;
+/**
+ * Upkeep per second for one body, given the global rate.
+ *
+ * `eraRatio` is `params.eraUpkeepRatio`, shipping at `ERA_UPKEEP_RATIO` and so
+ * reducing to what this always did. At 1 an Era pays rent like everything
+ * else, which is what §5 of the chemistry plan wants once an Era's income
+ * comes from a high uptake yield instead of from a mint keyed on its glyph.
+ */
+export function upkeepRateFor(kind: AgentKind, rate: number, eraRatio = ERA_UPKEEP_RATIO): number {
+  return kind === 'era' ? rate * eraRatio : rate;
 }
 
 export function agentValue(kind: AgentKind): number {
@@ -251,9 +264,9 @@ export function rewriteCost(rule: Rule): number {
 }
 
 /** Existence released when the rewrite commits, before the dying bodies' own stock. */
-export function rewriteYield(rule: Rule): number {
+export function rewriteYield(rule: Rule, value = BODY_VALUE): number {
   const d = bodyDelta(rule);
-  return d > 0 ? d * BODY_VALUE : 0;
+  return d > 0 ? d * value : 0;
 }
 
 /*
@@ -584,6 +597,44 @@ export class EnergyGrid {
     return this.getCell(i, j);
   }
 
+  /**
+   * Mean standing stock per cell across a key's block — the `S` a Monod rate
+   * reads. See `uptakeRate`.
+   *
+   * The *mean*, not the total, because a rate constant has to mean the same
+   * thing whatever the block's size, and because the shader's twin divides by
+   * the same cell count. Walks the same rect `take` walks, so the two cannot
+   * disagree about which cells a body is standing over.
+   *
+   * The map-backed grid has no block: one key is one cell, so its own stock is
+   * the density. An inexhaustible grid reads as `ambient` everywhere, which is
+   * what it means.
+   */
+  density(key: number): number {
+    if (this.inexhaustible) return this.ambient;
+    const f = this.fields;
+    if (f) {
+      const i = Math.floor(key / CELL_KEY_WIDTH) - CELL_KEY_OFFSET;
+      const j = key - (i + CELL_KEY_OFFSET) * CELL_KEY_WIDTH - CELL_KEY_OFFSET;
+      const b = this.rectScratch;
+      if (!this.blockRectAt(i, j, b)) return 0;
+      const fi = b[0];
+      const fj = b[1];
+      const wi = b[2];
+      const wj = b[3];
+      const cells = wi * wj;
+      if (cells <= 0) return 0;
+      const d = f.data;
+      let sum = 0;
+      for (let y = 0; y < wj; y++) {
+        let k = ((fj + y) * f.cols + fi) * CHANNELS + CH.energy;
+        for (let x = 0; x < wi; x++, k += CHANNELS) sum += d[k];
+      }
+      return sum / cells;
+    }
+    return this.cells.has(key) ? (this.cells.get(key) ?? 0) : this.ambient;
+  }
+
   /** Take up to `n` from a cell and return how much was taken. */
   take(key: number, n: number): number {
     let want = Math.max(0, n);
@@ -723,8 +774,17 @@ export type SlotBody = Pick<
 /**
  * Unlocked agents below cap take from their cell, in id order, up to what
  * they still have room for. Ambient 0.1 therefore takes ten cells to fill.
+ *
+ * `uptake` rate-limits the draw against the cell's own density, as
+ * `runHarvestPlan` does and for the same reasons; omitted, or at `cap` 0, this
+ * is the unmetered path it has always been. Kept in step with the plan runner
+ * by hand, which is what the twin comment on `harvestSlotsFast` is about.
  */
-export function harvestSlots(agents: Iterable<SlotBody>, grid: EnergyGrid): void {
+export function harvestSlots(
+  agents: Iterable<SlotBody>,
+  grid: EnergyGrid,
+  uptake?: UptakeKinetics,
+): void {
   const hungry = new Map<number, SlotBody[]>();
   for (const a of agents) {
     if (a.locked || atCap(a)) continue;
@@ -738,13 +798,18 @@ export function harvestSlots(agents: Iterable<SlotBody>, grid: EnergyGrid): void
     }
     list.push(a);
   }
+  const metered = uptake !== undefined && uptake.cap > 0;
   for (const [key, list] of hungry) {
     list.sort((a, b) => a.id - b.id);
+    // One rate for the cell, read before anybody eats — so the order they are
+    // visited in cannot decide what any of them is allowed to draw.
+    const rate = metered ? uptakeRate(grid.density(key), uptake.cap, uptake.ks) : Infinity;
     for (const a of list) {
       const cap = a.energyCap;
       const room = cap - a.extra;
       if (room <= EXTRA_FULL_EPS) continue;
-      const got = grid.take(key, room);
+      const want = rate < room ? rate : room;
+      const got = grid.take(key, want);
       if (got <= 0) break;
       a.extra = Math.min(cap, a.extra + got);
     }
@@ -948,25 +1013,79 @@ export class HarvestPlan {
 }
 
 /**
+ * How fast a body may draw from a cell, given what is standing in it.
+ *
+ * Monod: `v = vmax * S / (Ks + S)`. See `docs/energy-chemistry-plan.md` §4.
+ * `cap` is `params.uptakeVmax * dt` — the most a body could take this frame on
+ * saturating ground — and **zero means the old path**, which is not the same
+ * as no uptake: at zero a body takes whatever fits in its tank, instantly, as
+ * it always has. `Infinity` is what says "unlimited", and `Math.min` against
+ * it returns the room unchanged down to the bit, which is what keeps the
+ * default bit-identical.
+ *
+ * The point of the `Ks` half is that `(vmax, Ks)` do not dominate each other:
+ * high/high is a fast grazer that needs rich ground, low/low a scavenger that
+ * lives on scraps, and neither wins everywhere. That is the precondition for
+ * coexistence rather than takeover.
+ *
+ * A separate exported function because `field.wgsl` computes the same number
+ * on the device and `field-kernel.test.ts` mirrors it — two implementations of
+ * one formula is exactly the arrangement this file's harvest already lives
+ * under.
+ */
+export function uptakeRate(density: number, cap: number, ks: number): number {
+  if (!(cap > 0)) return Infinity;
+  if (density <= 0) return 0;
+  return (cap * density) / (ks + density);
+}
+
+/** `uptakeVmax * dt` and `uptakeKs`, as the harvest wants them. */
+export interface UptakeKinetics {
+  cap: number;
+  ks: number;
+}
+
+/**
  * Run a plan against the CPU field, crediting as it goes.
  *
  * The shader's `harvest` is a line-for-line port of this loop; keep them in
  * step. `field-kernel.test.ts` holds the mirror that checks they are.
+ *
+ * `uptake` rate-limits every body in a block by the block's own mean density,
+ * which is what makes uptake a phenotype rather than a race. Omitted, or at
+ * `cap` 0, the loop is what it was.
  */
-export function runHarvestPlan(plan: HarvestPlan, store: AgentStore, grid: EnergyGrid): void {
+export function runHarvestPlan(
+  plan: HarvestPlan,
+  store: AgentStore,
+  grid: EnergyGrid,
+  uptake?: UptakeKinetics,
+): void {
   const EXTRA = store.extra;
   const CAP = store.energyCap;
   const B = plan.blocks;
+  const metered = uptake !== undefined && uptake.cap > 0;
   for (let b = 0; b < plan.nBlocks; b++) {
     const first = B[b * 6 + 4];
     const count = B[b * 6 + 5];
     const key = plan.keys[b];
+    /*
+     * One rate for the block, read before anybody eats.
+     *
+     * Before, so that the order bodies are visited in cannot change what any
+     * of them is allowed to draw — which is half of what §4 is fixing. The
+     * other half is that the draw is now bounded by a rate, so a block that
+     * cannot satisfy everyone shares out by exhaustion rather than by who was
+     * born first.
+     */
+    const rate = metered ? uptakeRate(grid.density(key), uptake.cap, uptake.ks) : Infinity;
     for (let e = 0; e < count; e++) {
       const s = plan.slots[first + e];
       const cap = CAP[s];
       const room = cap - EXTRA[s];
       if (room <= EXTRA_FULL_EPS) continue;
-      const got = grid.take(key, room);
+      const want = rate < room ? rate : room;
+      const got = grid.take(key, want);
       if (got <= 0) break;
       EXTRA[s] = Math.min(cap, EXTRA[s] + got);
     }
@@ -990,9 +1109,10 @@ export function harvestSlotsFast(
   store: AgentStore,
   grid: EnergyGrid,
   plan: HarvestPlan = new HarvestPlan(),
+  uptake?: UptakeKinetics,
 ): void {
   plan.build(agents, store, grid);
-  runHarvestPlan(plan, store, grid);
+  runHarvestPlan(plan, store, grid, uptake);
 }
 
 /**
@@ -1004,17 +1124,37 @@ export function harvestSlotsFast(
  * other source. Returns the ids that reached their own `debtCap` — death
  * rather than a detachment.
  */
+export interface UpkeepOptions {
+  /**
+   * Fraction of ordinary upkeep excreted onto the ground rather than
+   * destroyed, `params.upkeepExcrete`.
+   *
+   * 0 is what upkeep has always done: rent vanishes. 1 makes a body
+   * conservative — nothing it runs creates or destroys matter — which is the
+   * invariant that makes selection honest. See
+   * `docs/energy-chemistry-plan.md` §5, and note the grid is already to hand
+   * here for the overfill spill, which is why this is the one line the plan
+   * says it is.
+   */
+  excrete?: number;
+  /** `params.eraUpkeepRatio`; see `upkeepRateFor`. */
+  eraRatio?: number;
+}
+
 export function tickUpkeep(
   agents: Iterable<SlotBody>,
   dt: number,
   rate: number,
   grid?: EnergyGrid,
+  opts: UpkeepOptions = {},
 ): number[] {
   if (!(dt > 0)) return [];
+  const excrete = opts.excrete ?? 0;
+  const eraRatio = opts.eraRatio ?? ERA_UPKEEP_RATIO;
   const dead: number[] = [];
   for (const a of agents) {
     if (a.locked) continue;
-    const r = upkeepRateFor(a.kind, rate);
+    const r = upkeepRateFor(a.kind, rate, eraRatio);
     if (r === 0) continue;
     const was = a.extra;
     const next = a.extra - r * dt;
@@ -1038,6 +1178,22 @@ export function tickUpkeep(
     } else {
       a.extra = Math.max(a.debtCap, next);
     }
+    /*
+     * Excrete what actually left the tank, which is not the same as what was
+     * billed.
+     *
+     * A body billed past empty runs a *debt*: the balance falls but no matter
+     * moves, because it had none to move. Excreting the billed amount would
+     * mint whatever the pond's starving bodies owed, which is the opposite of
+     * the invariant this exists to establish. So the ground gets the change in
+     * the body's non-negative stock — nothing while it is in debt, and nothing
+     * for the last partial step down through zero beyond the part it could pay.
+     * The `debtCap` clamp above is included for free, for the same reason.
+     */
+    if (grid && excrete > 0) {
+      const paid = Math.max(0, was) - Math.max(0, a.extra);
+      if (paid > 0) grid.addAt(a.x, a.y, paid * excrete);
+    }
     if (was > a.debtCap && a.extra <= a.debtCap) dead.push(a.id);
   }
   return dead;
@@ -1050,8 +1206,11 @@ export function tickUpkeepFast(
   dt: number,
   rate: number,
   grid?: EnergyGrid,
+  opts: UpkeepOptions = {},
 ): number[] {
   if (!(dt > 0)) return [];
+  const excrete = opts.excrete ?? 0;
+  const eraRatio = opts.eraRatio ?? ERA_UPKEEP_RATIO;
   const LOCKED = store.locked;
   const KIND_CODE = store.kindCode;
   const EXTRA = store.extra;
@@ -1064,7 +1223,7 @@ export function tickUpkeepFast(
   for (const a of agents) {
     const s = a.slot;
     if (LOCKED[s]) continue;
-    const r = KIND_CODE[s] === KIND_ERA ? rate * ERA_UPKEEP_RATIO : rate;
+    const r = KIND_CODE[s] === KIND_ERA ? rate * eraRatio : rate;
     if (r === 0) continue;
     const was = EXTRA[s];
     const next = was - r * dt;
@@ -1077,6 +1236,12 @@ export function tickUpkeepFast(
       EXTRA[s] = cap;
     } else {
       EXTRA[s] = Math.max(floor, next);
+    }
+    // See `tickUpkeep`: the ground gets what left the tank, not what was
+    // billed — a body in debt is not excreting anything.
+    if (grid && excrete > 0) {
+      const paid = Math.max(0, was) - Math.max(0, EXTRA[s]);
+      if (paid > 0) grid.addAt(X[s], Y[s], paid * excrete);
     }
     if (was > floor && EXTRA[s] <= floor) dead.push(ID[s]);
   }

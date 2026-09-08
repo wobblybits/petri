@@ -71,6 +71,7 @@ import {
 } from './rewrite.ts';
 import {
   agentValue,
+  BODY_VALUE,
   deathYield,
   EnergyGrid,
   flowChargesFast,
@@ -318,6 +319,12 @@ export class Sim {
    * touching a single wire.
    */
   rosterVersion = 0;
+  /**
+   * What a body is worth dead, latched from `params.bodyValue` each frame.
+   *
+   * `kill` has no `Params` to read — see the note where this is set.
+   */
+  bodyValue = BODY_VALUE;
 
   /**
    * Register a roster change made without going through `spawn` or `kill`.
@@ -751,7 +758,7 @@ export class Sim {
   kill(id: number): void {
     const agent = this.agents.get(id);
     if (!agent) return;
-    this.energy.addAt(agent.x, agent.y, deathYield(agent));
+    this.energy.addAt(agent.x, agent.y, deathYield(agent, this.bodyValue));
     this.graph.detachAgent(id);
     this.agents.delete(id);
     this.agentStore.release(id);
@@ -883,6 +890,15 @@ export class Sim {
      */
     this.energyCell = params.energyCell;
     this.energyAmbient = params.ambientEnergy;
+    /*
+     * Latched here for the same reason the two above it are: `kill` is public
+     * and takes no `Params` — the designer and the pond library both call it —
+     * so what a body is worth dead has to be a fact about the Sim by the time
+     * anything can die. Read out of `params` at the death site instead and a
+     * pond killed from outside a frame would price its corpses from the
+     * defaults. See `params.bodyValue`.
+     */
+    this.bodyValue = params.bodyValue;
     const h = this.home;
     if (h && !this.worldPinned) this.pinWorld(h.x, h.y, params);
     this.contactAudioNow.clear();
@@ -952,7 +968,17 @@ export class Sim {
      * been served.
      */
     if (this.fieldOnGpu) this.creditHarvest();
-    else harvestSlotsFast(this.agents.values(), this.agentStore, this.energy, this.harvestPlan);
+    else {
+      // `uptakeVmax` at zero is the take-what-fits path this has always run;
+      // above it, uptake is a rate against the block's own density. The GPU
+      // twin applies the same limit inside the shader — see `field.wgsl`'s
+      // `harvest` and `energy.ts:uptakeRate`.
+      harvestSlotsFast(this.agents.values(), this.agentStore, this.energy, this.harvestPlan, {
+        // `t` is the frame's clamped dt — see `beginFrame`.
+        cap: params.uptakeVmax * t,
+        ks: params.uptakeKs,
+      });
+    }
     Sim.phase('harvestSlots');
     this.latchPass(params);
     Sim.phase('snap');
@@ -1017,7 +1043,10 @@ export class Sim {
       }
     }
     for (const id of this.contactDamage(params, t)) this.kill(id);
-    for (const id of tickUpkeepFast(this.agents.values(), this.agentStore, t, params.upkeep, this.energy)) {
+    for (const id of tickUpkeepFast(this.agents.values(), this.agentStore, t, params.upkeep, this.energy, {
+      excrete: params.upkeepExcrete,
+      eraRatio: params.eraUpkeepRatio,
+    })) {
       this.kill(id);
     }
     Sim.phase('upkeep');
@@ -3317,7 +3346,13 @@ export class Sim {
         kill: params.reactKill,
         dt,
       },
-      { ch: CH.energy, blocks: plan.nBlocks, entries: plan.nEntries },
+      {
+        ch: CH.energy,
+        blocks: plan.nBlocks,
+        entries: plan.nEntries,
+        uptakeCap: params.uptakeVmax * dt,
+        uptakeKs: params.uptakeKs,
+      },
       seed === null ? null : { ch: CH.energy, value: seed },
     );
     if (!submitted) {
@@ -5231,6 +5266,32 @@ export class Sim {
     lines: number;
     bornMax: number;
     bornMean: number;
+    /**
+     * Commutes per latch, cumulative — the tripwire on whether polluting the
+     * two principal channels is cheap.
+     *
+     * `docs/energy-chemistry-plan.md` §8. Latching is proximity plus an arc
+     * test and scent never gates it, and net reduction is confluent, so a net
+     * is a fixed budget of evolutionary events spent down: scent cannot touch
+     * that budget, only how nets acquire new structure. Well above 1 means
+     * nets are doing real internal computation and chemistry on species 0 and
+     * 1 costs little. At or below 1 every commute is roughly paid for by a
+     * fresh latch and encounter rate is load-bearing after all.
+     *
+     * **Cumulative, and therefore unreadable on its own.** `tally` counts from
+     * the last `clear`, and a soup's opening is a latch storm — measured over
+     * an 18-trial sweep, 6,775 latches against 1,095 commutes in the first
+     * thirty seconds. That start drags the cumulative ratio below 1 for
+     * minutes whatever the pond then does. Difference two samples: over the
+     * same sweep the windowed ratio ran 0.16, 0.52, 1.02, 1.43, 1.67, 2.06
+     * across six thirty-second windows and was still climbing. Same shape, and
+     * the same trap, as `rewriteMix`'s U — see its note, which says so at
+     * length about the number next door.
+     *
+     * Null before anything has latched, because a ratio over nothing is not
+     * zero — it is undecided, and reporting zero would read as the bad case.
+     */
+    commutesPerLatch: number | null;
     trait: Record<string, { mean: number; sd: number }>;
   } {
     const lines = new Set<number>();
@@ -5261,7 +5322,14 @@ export class Sim {
       const varr = n > 0 ? Math.max(0, sqs[k] / n - mean * mean) : 0;
       trait[k] = { mean, sd: Math.sqrt(varr) };
     }
-    return { bodies: n, lines: lines.size, bornMax, bornMean: n > 0 ? bornSum / n : 0, trait };
+    return {
+      bodies: n,
+      lines: lines.size,
+      bornMax,
+      bornMean: n > 0 ? bornSum / n : 0,
+      commutesPerLatch: this.tally.latches > 0 ? this.tally.commutes / this.tally.latches : null,
+      trait,
+    };
   }
 
   /**
@@ -6177,7 +6245,7 @@ export class Sim {
       // Signed: a pair that annihilates while in debt releases less than a
       // well-fed one, and their debt dies with them rather than being minted
       // away. `rewriteYield` has already counted the bodies themselves.
-      let pool = rewriteYield(rw.rule);
+      let pool = rewriteYield(rw.rule, this.bodyValue);
       if (dyingA) pool += dyingA.extra;
       if (dyingB) pool += dyingB.extra;
       pool = Math.max(0, pool);

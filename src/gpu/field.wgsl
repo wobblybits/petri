@@ -44,8 +44,11 @@ struct FieldParams {
   harvestCh: f32,
   fillCh: f32,
   fillValue: f32,
-  pad3: f32,
-  pad4: f32,
+  // Monod uptake, in the two slots that used to be padding. `uptakeCap` is
+  // `params.uptakeVmax * dt` and zero means unmetered — the take-what-fits
+  // path this shader has always run. See `energy.ts:uptakeRate`.
+  uptakeCap: f32,
+  uptakeKs: f32,
 }
 
 // A world position and what to add there, per channel.
@@ -238,10 +241,22 @@ fn diffuseAt(idx: u32, m: vec4f) {
   var c = here;
   var e = here;
   if (dirichlet) {
-    a = vec4f(0.0);
-    b = vec4f(0.0);
-    c = vec4f(0.0);
-    e = vec4f(0.0);
+    /*
+     * A missing neighbour reads as zero on the three signal channels — an
+     * absorbing rim, which is what stops the dish filling with everybody's
+     * shouting — and as this cell's own value on `CH.energy`, which reflects.
+     *
+     * A wall that eats the substance is a sink nobody asked for: `decayRate`
+     * is zero on that channel precisely so nothing can destroy it. Measured
+     * on the CPU twin with no bodies and decay off, the absorbing wall cost
+     * the ground 10.6% over 900 frames at 128 cells a side. Kept in step with
+     * `Fields.diffuse` by hand and by `field-kernel.test.ts`.
+     */
+    let miss = vec4f(0.0, 0.0, here.z, 0.0);
+    a = miss;
+    b = miss;
+    c = miss;
+    e = miss;
     if (i > 0 && !cellOut(i - 1, j)) { a = src[idx - 1u]; }
     if (i + 1 < i32(P.cols) && !cellOut(i + 1, j)) { b = src[idx + 1u]; }
     if (j > 0 && !cellOut(i, j - 1)) { c = src[idx - P.cols]; }
@@ -417,8 +432,34 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
   if (b >= P.nBlocks) { return; }
   let blk = hBlocks[b];
   let ch = u32(P.harvestCh);
+  /*
+   * Monod, read off the block before anybody eats.
+   *
+   * Before, so the order bodies are visited in cannot decide what any of them
+   * is allowed to draw — which is half of what the plan's §4 is fixing; the
+   * other half is that a block which cannot satisfy everyone now shares out by
+   * exhaustion rather than by who was born first. `energy.ts:runHarvestPlan`
+   * computes the identical number from `EnergyGrid.density`.
+   *
+   * The large finite stand-in for "unmetered" is deliberate: `min` against it
+   * returns the room unchanged, so `uptakeCap` at zero leaves this kernel
+   * bit-identical to what it was.
+   */
+  var rate = 1e30;
+  if (P.uptakeCap > 0.0) {
+    var sum = 0.0;
+    for (var y = 0u; y < blk.wj; y++) {
+      for (var x = 0u; x < blk.wi; x++) {
+        sum += src[(blk.fj + y) * P.cols + (blk.fi + x)][ch];
+      }
+    }
+    let cells = f32(blk.wi * blk.wj);
+    var s = 0.0;
+    if (cells > 0.0) { s = sum / cells; }
+    if (s <= 0.0) { rate = 0.0; } else { rate = P.uptakeCap * s / (P.uptakeKs + s); }
+  }
   for (var e = 0u; e < blk.count; e++) {
-    var want = hFlow[blk.first + e];
+    var want = min(hFlow[blk.first + e], rate);
     if (want <= FLOW_EPS) {
       hFlow[blk.first + e] = 0.0;
       continue;

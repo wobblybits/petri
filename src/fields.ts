@@ -652,8 +652,34 @@ export class Fields {
     if (this.loJ > 0) this.loJ--;
     if (this.hiI < this.cols - 1) this.hiI++;
     if (this.hiJ < this.rows - 1) this.hiJ++;
-    // No bound: -1 reflects off the square edge (neither absorbs nor invents).
-    // Bound set: a neighbour outside the disk is 0, so scent leaks into the rim.
+    /*
+     * No bound: -1 reflects off the square edge (neither absorbs nor invents).
+     * Bound set: a neighbour outside the disk is 0, so scent leaks into the rim.
+     *
+     * **Except `CH.energy`, which always reflects.** A rim that absorbs is
+     * right for a signal — it is what stops the dish filling with everybody's
+     * shouting — and wrong for the substance, which nothing is supposed to be
+     * able to destroy. `decayRate[CH.energy]` is zero for exactly that reason,
+     * and `maxSignal` excludes the channel because it is "the stuff itself";
+     * the wall was quietly undoing both.
+     *
+     * Measured with no bodies in the dish and decay off, over 900 frames —
+     * 10.587% of the ground at 128 cells a side, 2.658% at 512, **1.330% at
+     * the production 1024**. All of it into the rim: the interior is uniform
+     * so diffusion moves nothing there, and the rim kept draining and being
+     * refilled from inside. It goes as perimeter over area, which is why a
+     * bigger dish leaks proportionally less.
+     *
+     * What hid it is `grow`. Regrowth kept topping the dish up, so the ground
+     * sat at an equilibrium between regrowth and a wall nobody knew was there
+     * rather than at `cellCap` — visible only as a standing crop that never
+     * quite reached the capacity it was told to hold.
+     *
+     * The channel is hard-coded rather than a `Params` flag on both sides
+     * because it is a fact about what the model *is*: a substance is
+     * conserved and a signal is not. `field-kernel.test.ts` pins the two
+     * implementations together.
+     */
     const dirichlet = this.boundR > 0;
     const { lo: sLo, hi: sHi } = this.spans();
     for (let j = this.loJ; j <= this.hiJ; j++) {
@@ -748,10 +774,10 @@ export class Fields {
         dst[base + 2] =
           k2 * s2 +
           m2 *
-            ((l ? src[left + 2] : dirichlet ? 0 : s2) +
-              (r ? src[right + 2] : dirichlet ? 0 : s2) +
-              (u ? src[up + 2] : dirichlet ? 0 : s2) +
-              (w ? src[down + 2] : dirichlet ? 0 : s2)) *
+            ((l ? src[left + 2] : s2) +
+              (r ? src[right + 2] : s2) +
+              (u ? src[up + 2] : s2) +
+              (w ? src[down + 2] : s2)) *
             0.25;
         dst[base + 3] =
           k3 * s3 +
@@ -819,10 +845,10 @@ export class Fields {
         dst[base + 2] =
           k2 * s2 +
           m2 *
-            ((l ? src[left + 2] : dirichlet ? 0 : s2) +
-              (r ? src[right + 2] : dirichlet ? 0 : s2) +
-              (u ? src[up + 2] : dirichlet ? 0 : s2) +
-              (w ? src[down + 2] : dirichlet ? 0 : s2)) *
+            ((l ? src[left + 2] : s2) +
+              (r ? src[right + 2] : s2) +
+              (u ? src[up + 2] : s2) +
+              (w ? src[down + 2] : s2)) *
             0.25;
         dst[base + 3] =
           k3 * s3 +

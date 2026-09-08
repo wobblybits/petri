@@ -3,7 +3,7 @@ import shader from './genome.wgsl?raw';
 import {
   B_STATE, CHEM_LEN, EMIT, E_OUT, F_BASE, F_OUT, HEAD_SCALE, IN_DIMS, L_BASE, L_OUT,
   LEARN_CRITIC, LEARN_PREV_V, LEARN_STRIDE, LEARN_TRACE,
-  P_BASE, P_OUT, PLASTIC_LEN, SENSE_SCALE, STATE_DIMS, TASTE, T_OUT, W_IN, W_NET, W_SELF,
+  P_BASE, P_OUT, PLASTIC_LEN, X_OUT, SENSE_SCALE, STATE_DIMS, TASTE, T_OUT, W_IN, W_NET, W_SELF,
 } from '../chem-layout.ts';
 import { refreshReadsField } from '../agents.ts';
 import type { AgentKind } from '../agents.ts';
@@ -106,11 +106,21 @@ describe('the genome shader matches the genome layout', () => {
   });
 
   it('reads inside the genome it is given', () => {
-    // The furthest the shader can reach is the last head weight. If the layout
-    // ever grows a field after `L_BASE` without the shader knowing, this stays
-    // true and the test above catches it; if the shader ever reaches past the
-    // genome, this is what fails.
-    expect(L_BASE + 2).toBe(CHEM_LEN);
+    /*
+     * The furthest the shader can reach is the last locomotion weight, at
+     * `L_BASE + 2`. It must stay inside the genome; if it ever reaches past
+     * it, this is what fails.
+     *
+     * This used to assert equality, on the grounds that a field added after
+     * `L_BASE` should be noticed. `X`, the expression head, is that field —
+     * added by `docs/energy-chemistry-plan.md` phase 0 and read by nothing on
+     * either side until phase 3. So the invariant is stated as what it always
+     * meant: the shader stops at `X_OUT`, and everything from there to
+     * `CHEM_LEN` is the part it does not know about yet. Phase 3 moves this
+     * line, deliberately and with the shader.
+     */
+    expect(L_BASE + 2).toBe(X_OUT);
+    expect(X_OUT).toBeLessThanOrEqual(CHEM_LEN);
   });
 });
 

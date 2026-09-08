@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import shader from './field.wgsl?raw';
 import { CH, CHANNELS, Fields } from '../fields.ts';
-import { EnergyGrid } from '../energy.ts';
+import { EnergyGrid, uptakeRate } from '../energy.ts';
 import { defaultParams } from '../params.ts';
 
 /**
@@ -218,11 +219,27 @@ function mirrorHarvest(
   ch: number,
   blk: { fi: number; fj: number; wi: number; wj: number },
   rooms: number[],
+  uptake: { cap: number; ks: number } = { cap: 0, ks: 0 },
 ): number[] {
   const FLOW_EPS = 1e-9;
   const got: number[] = [];
+  // The shader's Monod pre-pass: the block's mean density, read before anybody
+  // eats, decides the rate everybody in it draws at. `1e30` is the shader's
+  // stand-in for unmetered; `min` against it returns the room unchanged.
+  let rate = 1e30;
+  if (uptake.cap > 0) {
+    let sum = 0;
+    for (let y = 0; y < blk.wj; y++) {
+      for (let x = 0; x < blk.wi; x++) {
+        sum += field[((blk.fj + y) * cols + (blk.fi + x)) * CHANNELS + ch];
+      }
+    }
+    const cells = blk.wi * blk.wj;
+    const density = cells > 0 ? sum / cells : 0;
+    rate = density <= 0 ? 0 : (uptake.cap * density) / (uptake.ks + density);
+  }
   for (let e = 0; e < rooms.length; e++) {
-    let want = rooms[e];
+    let want = Math.min(rooms[e], rate);
     if (want <= FLOW_EPS) {
       got.push(0);
       continue;
@@ -615,6 +632,76 @@ describe('field shader arithmetic', () => {
       }
     }
     expect(worst, 'the block was left in a different state').toBeLessThan(1e-7);
+  });
+
+  it('meters a block the way runHarvestPlan does, at the same rate', () => {
+    /*
+     * The Monod half of `harvest`, on both sides. `energy.ts` reads the
+     * density off `EnergyGrid.density` and the shader sums the block itself;
+     * this is what says the two produce the same rate, and therefore the same
+     * draw, for the same block.
+     *
+     * Also the guard on the ordering claim: metered, everyone in the block
+     * gets the *same* rate, so a body's share stops depending on its id — which
+     * is the artifact `docs/energy-chemistry-plan.md` §4 exists to remove.
+     */
+    const params = defaultParams();
+    params.ambientEnergy = 1;
+    const ref = new Fields();
+    const mine = new Fields();
+    const grid = new EnergyGrid(params.energyCell, params.ambientEnergy);
+    grid.bind(ref);
+    grid.configure(params.energyCell, params.ambientEnergy);
+    const { i, j, key } = grid.index(ref.originX + ref.worldW * 0.5, ref.originY + ref.worldW * 0.5);
+    grid.setCell(i, j, 1);
+    mine.data.set(ref.data);
+    const rect = grid.blockRect(i, j)!;
+
+    const uptake = { cap: 0.05, ks: 0.25 };
+    const density = grid.density(key);
+    expect(density, 'the block should have a standing stock').toBeGreaterThan(0);
+    const rate = uptakeRate(density, uptake.cap, uptake.ks);
+    expect(rate).toBeLessThan(uptake.cap);
+
+    const rooms = [4, 4, 4];
+    const got = mirrorHarvest(mine.data, mine.cols, CH.energy, rect, rooms, uptake);
+    // The CPU side, through the grid, at the rate read before anybody ate.
+    const want = rooms.map((r) => grid.take(key, Math.min(r, rate)));
+
+    for (let e = 0; e < rooms.length; e++) {
+      expect(got[e], `body ${e} took a different amount`).toBeCloseTo(want[e], 6);
+      // Three bodies, one rate, identical appetites: identical draws. Without
+      // metering the first would have taken the block and left the other two
+      // nothing at all.
+      expect(got[e]).toBeCloseTo(rate, 6);
+    }
+    let worst = 0;
+    for (let y = 0; y < rect.wj; y++) {
+      for (let x = 0; x < rect.wi; x++) {
+        const k = ((rect.fj + y) * ref.cols + (rect.fi + x)) * CHANNELS + CH.energy;
+        worst = Math.max(worst, Math.abs(ref.data[k] - mine.data[k]));
+      }
+    }
+    expect(worst, 'the block was left in a different state').toBeLessThan(1e-7);
+  });
+
+  it('takes the uptake dials out of the two slots the uniform used to pad', () => {
+    /*
+     * The host hand-packs `FieldParams` by index, so a field added on one side
+     * and not the other reads as a plausible number rather than an error —
+     * the same hazard `genome-kernel.test.ts` pins for its own uniform. These
+     * two went into `pad3` and `pad4`, and the struct's size must not have
+     * moved: a uniform buffer is a whole number of sixteen-byte blocks.
+     */
+    const body = /struct\s+FieldParams\s*\{([\s\S]*?)\n\}/.exec(shader);
+    expect(body, 'no FieldParams in field.wgsl').not.toBeNull();
+    const fields = [...body![1].matchAll(/^\s*([A-Za-z_]\w*)\s*:/gm)].map((m) => m[1]);
+    expect(fields).not.toContain('pad3');
+    expect(fields).not.toContain('pad4');
+    expect(fields.slice(-2)).toEqual(['uptakeCap', 'uptakeKs']);
+    // Three vec4f (mix, mix2, keep) count as four slots each; everything else
+    // is a scalar, so index and slot are the same thing.
+    expect(fields.length).toBe(40 - 3 * 3);
   });
 
   it('leaves an uneven floor, which is the reason for the ordering', () => {

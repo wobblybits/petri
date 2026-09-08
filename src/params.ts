@@ -1,4 +1,8 @@
 import { FIELD_CELL } from './fields.ts';
+// Derived, not copied. These three are the values the pond has always run at,
+// and they live where the economy that uses them lives; writing the numbers
+// again here is exactly the duplication `chem-layout.ts` exists to warn about.
+import { BODY_VALUE, ERA_CAP_RATIO, ERA_UPKEEP_RATIO } from './energy.ts';
 
 export interface Params {
   deposit: number;
@@ -494,6 +498,114 @@ export interface Params {
    * much of their parents' arrived already written into the genome.
    */
   inheritLearned: number;
+
+  /*
+   * Chemistry. See `docs/energy-chemistry-plan.md`; every one of these ships
+   * at the value that reduces to the behaviour before it existed, which is
+   * the same discipline `farmRate`, `fertilise` and `reactFeed` follow.
+   */
+
+  /**
+   * Maximum uptake rate, energy per second, at saturating ground.
+   *
+   * **Zero is the old path**, and that is not the same as "no uptake": at
+   * zero, `runHarvestPlan` takes what fits in the tank instantaneously, as it
+   * always has. Anything above zero makes uptake a *rate*, which is what
+   * gives it a phenotype for selection to grip and what dissolves the
+   * id-order artifact — older bodies systematically eating first in a
+   * contested cell, a fitness gradient on age that nobody chose.
+   */
+  uptakeVmax: number;
+  /**
+   * Half-saturation constant: the ground density at which uptake runs at half
+   * `uptakeVmax`.
+   *
+   * With `uptakeVmax` this is the non-dominating trade-off the plan is after.
+   * High/high is a fast grazer that needs rich ground; low/low is a scavenger
+   * living on scraps; neither wins everywhere, which is the precondition for
+   * coexistence rather than takeover.
+   */
+  uptakeKs: number;
+  /**
+   * Fixed cost, per second, of expressing a reaction row at all.
+   *
+   * One of the two dials that decide whether nets differentiate. A linear
+   * budget with concave payoffs — and Monod saturation is concave — puts the
+   * optimum in the interior and makes everyone a generalist; specialisation
+   * needs `f(1) > 2 f(1/2)`, which concavity forbids. A fixed cost per row
+   * supplies the superadditivity: two rows cost `2c`, one costs `c`.
+   */
+  rowCost: number;
+  /**
+   * Hill coefficient on uptake. The other superadditivity dial.
+   *
+   * At 1 this is plain Monod. Above 1 the response is convex at low
+   * expression, which is the other way to make specialising beat splitting.
+   */
+  hillN: number;
+  /**
+   * Yield on energy a body takes up directly from the ground, 0 to 1.
+   *
+   * 1 is today. Moving it toward 0 makes bodies obligately dependent on what
+   * a net's Eras bring in — but check the larval window first: a fresh spawn
+   * has about `EXTRA_CAP / upkeep` seconds of tank, and if mean
+   * time-to-encounter with a net is not well under that, obligate dependency
+   * kills the soup rather than structuring it.
+   */
+  yDirect: number;
+  /**
+   * Yield on energy an Era takes up, 0 to 1 and normally above `yDirect`.
+   *
+   * An Era is exactly a terminated port, so the count of them is a net's
+   * boundary size while upkeep is charged per body: income scales with the
+   * boundary and cost with the volume. Surface-to-volume becomes a real
+   * constraint on net size and the only way to get bigger is to get
+   * branchier — a morphological pressure the simulation has no other source
+   * of. 1 is today, where an Era is no better a grazer than anything else.
+   */
+  yEra: number;
+  /**
+   * How much of ordinary upkeep is excreted onto the ground rather than
+   * destroyed, 0 to 1.
+   *
+   * 0 is today: rent vanishes. 1 makes bodies conservative — no reaction a
+   * body runs creates or destroys matter — which is the invariant that makes
+   * selection honest. It is a dial rather than a constant because turning it
+   * on changes the pond's standing stock, and the plan's discipline is that
+   * nothing changes behaviour until somebody has looked.
+   */
+  upkeepExcrete: number;
+  /**
+   * What a body's existence is worth when it dies, `EXTRA_CAP` today.
+   *
+   * At `REWRITE_SHARE` (1) the commute-then-annihilate cycle stops minting:
+   * today it makes `2 * (EXTRA_CAP - REWRITE_SHARE)` = 0.5 out of nothing,
+   * which the comment on `BODY_VALUE` has always described as the metabolism
+   * rather than a slip. With uptake rate-limited, a net's income no longer
+   * has to be proportional to its rewrite rate, which is the argument for
+   * taking it — but taking it moves the pond, so it is a dial and not an edit.
+   */
+  bodyValue: number;
+  /**
+   * How much more an Era holds than a Con or a Dup. 2 today; 1 drops the rule.
+   *
+   * `energyCap` is already heritable and recombined across a commute's
+   * children, so storage is an evolvable axis available to every kind. The
+   * kind rule duplicates it with a wall instead of a gradient — and while it
+   * is in place nobody can learn whether big tanks actually belong on the
+   * boundary.
+   */
+  eraCapRatio: number;
+  /**
+   * An Era's upkeep as a multiple of everyone else's. Negative today, which
+   * means an Era *produces*: a mint keyed on a glyph, conditional on nothing.
+   *
+   * At 1 an Era pays rent like anything else, and its income has to come from
+   * the ground under it — which is what makes `#Eras` a net's boundary size
+   * against an upkeep charged per body, and surface-to-volume a real
+   * constraint on how big a net can get.
+   */
+  eraUpkeepRatio: number;
 }
 
 export function defaultParams(): Params {
@@ -564,6 +676,16 @@ export function defaultParams(): Params {
     learnTrace: 0.95,
     learnDiscount: 0.95,
     inheritLearned: 1,
+    uptakeVmax: 0,
+    uptakeKs: 0.25,
+    rowCost: 0,
+    hillN: 1,
+    yDirect: 1,
+    yEra: 1,
+    upkeepExcrete: 0,
+    bodyValue: BODY_VALUE,
+    eraCapRatio: ERA_CAP_RATIO,
+    eraUpkeepRatio: ERA_UPKEEP_RATIO,
   };
 }
 
@@ -641,4 +763,14 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'learnTrace', label: 'Learn trace decay', min: 0.5, max: 0.995, step: 0.005 },
   { key: 'learnDiscount', label: 'Learn discount', min: 0.5, max: 0.995, step: 0.005 },
   { key: 'inheritLearned', label: 'Inherit learned', min: 0, max: 1, step: 0.05 },
+  { key: 'uptakeVmax', label: 'Uptake rate', min: 0, max: 4, step: 0.05 },
+  { key: 'uptakeKs', label: 'Uptake half-sat', min: 0.01, max: 2, step: 0.01 },
+  { key: 'rowCost', label: 'Expression row cost', min: 0, max: 0.02, step: 0.0005 },
+  { key: 'hillN', label: 'Hill coefficient', min: 1, max: 4, step: 0.1 },
+  { key: 'yDirect', label: 'Direct uptake yield', min: 0, max: 1, step: 0.05 },
+  { key: 'yEra', label: 'Era uptake yield', min: 0, max: 4, step: 0.05 },
+  { key: 'upkeepExcrete', label: 'Upkeep excretes', min: 0, max: 1, step: 0.05 },
+  { key: 'bodyValue', label: 'Body value', min: 0.5, max: 2, step: 0.05 },
+  { key: 'eraCapRatio', label: 'Era tank ratio', min: 1, max: 4, step: 0.1 },
+  { key: 'eraUpkeepRatio', label: 'Era upkeep ratio', min: -1, max: 2, step: 0.05 },
 ];

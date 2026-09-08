@@ -158,7 +158,44 @@ export const P_BASE = P_OUT + 2 * STATE_DIMS;
  */
 export const L_OUT = P_BASE + 2;
 export const L_BASE = L_OUT + 2 * STATE_DIMS;
-export const CHEM_LEN = L_BASE + 2;
+
+/**
+ * The body reaction table's rows: `excrete_c` and `uptake_c` for each of the
+ * four species. See `docs/energy-chemistry-plan.md` §3.
+ *
+ * Eight, not four. The plan's own arithmetic says "4 + 4 * STATE_DIMS = 20
+ * floats" while its table lists eight rows and its prose says the simplex is
+ * "normalised across all eight rows"; the table and the prose agree with each
+ * other and the sizing does not, so the sizing is the slip. Derived here from
+ * the species count rather than written down, which is the point of this
+ * module.
+ */
+export const CHEM_SPECIES = 4;
+export const ROW_EXCRETE = 0;
+export const ROW_UPTAKE = CHEM_SPECIES;
+export const ROW_COUNT = 2 * CHEM_SPECIES;
+
+/**
+ * `X`, state -> expression: one rate multiplier per reaction row.
+ *
+ * The head a body's chemistry is a phenotype through. An enzyme, in the sense
+ * the plan commits to, is a reaction whose rate constant comes from here —
+ * nothing more. Row-major by row: `X_OUT + row * STATE_DIMS + d`.
+ *
+ * Seeded to zero along with its base, so a body expresses nothing and every
+ * reaction runs at whatever constant it ran at before this existed. The rows
+ * are read through a unit simplex like `emitVector`'s, so this is a budget
+ * rather than eight independent dials: a body cannot both shout and eat
+ * without giving something up, which is the trade-off division of labour
+ * needs and the reason the head is one head and not eight.
+ *
+ * Outside `[PLASTIC_BASE, PLASTIC_BASE + PLASTIC_LEN)` on purpose — see the
+ * plan's §8. Expression is inherited and mutated, not learned, though it
+ * still varies within a life because it reads `h`.
+ */
+export const X_OUT = L_BASE + 2;
+export const X_BASE = X_OUT + ROW_COUNT * STATE_DIMS;
+export const CHEM_LEN = X_BASE + ROW_COUNT;
 
 /**
  * The span of `chem` a body can change while it is alive: `Wx`, `Wh`, `Wn`

@@ -1164,7 +1164,7 @@ export function createAgent(
   store.turn[slot] = params.turnRate;
   agent.recovering = false;
   agent.requestDecay = params.requestDecay;
-  agent.energyCap = extraCapFor(kind);
+  agent.energyCap = extraCapFor(kind, params.eraCapRatio);
   agent.debtCap = params.debtCap;
   agent.rescueTo = params.rescueTo;
   agent.assort = params.assortBias;
