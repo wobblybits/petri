@@ -345,6 +345,63 @@ a stiffness. And once that exists the obvious bending actuator is to drive the
 actually is, a thing that changes a rest length, and would make the whole
 `PUSH`-as-muscle route a jet rather than a muscle after all.
 
+## Where bending stiffness can come from: topology, up to a hard limit
+
+A ladder instead of a new primitive — two rails cross-linked rung by rung. The
+port budget works out exactly, which is the first sign it is the right shape: a
+Con has three ports, a rail uses `p` forward and `l` backward, and that leaves
+`r`, one per body, exactly one rung's worth.
+
+Cantilever test in `beam.exp.ts` — pin the rear, settle, push the free end
+sideways with a fixed total force, read how far it goes:
+
+| shape | deflect @25 | @100 | @400 | recovered |
+|---|---:|---:|---:|---:|
+| chain | 51.2 | 184.5 | 448.9 | negative |
+| chain + Era fins | — | — | 365.0 | negative |
+| ladder, gap 48 | — | — | 291.7 | negative |
+| ladder, gap 96 | — | — | 262.9 | negative |
+| ladder, gap 144 | 14.2 | **74.9** | 218.8 | negative |
+| 3 rails, gap 48 | — | — | 225.6 | negative |
+
+**The ladder is about two and a half times stiffer than the chain** at a load
+where both are still roughly linear (184.5 against 74.9, tight over three
+seeds), and stiffness rises monotonically with rail separation — 291.7, 262.9,
+218.8 as the gap goes 48, 96, 144. Topology pays for stiffness, no new force
+required.
+
+### But it is resistance, not elasticity, and that is a theorem
+
+`recovered` is negative for every shape at every load: released, the structure
+keeps drifting rather than springing back. It resists while loaded and then
+stays where it was put.
+
+The reason is that a wire between two ports is a *distance* constraint, so as a
+pin-jointed structure a ladder cell is a quadrilateral with four pin joints —
+a mechanism with one degree of freedom, which shears for free. It bends without
+stretching anything, so nothing stores strain energy and nothing pushes back.
+
+Bracing cannot fix it, and this is the part worth writing down. Generic
+rigidity in the plane needs `|E| >= 2|V| - 3` (Laman). A Con or Dup has three
+ports and an Era one, so a net has maximum degree three and therefore at most
+`3|V|/2` wires. Those meet only when `3|V|/2 >= 2|V| - 3`, i.e. **`|V| <= 6`**.
+Past six bodies, *no* net of interaction combinators can be a rigid
+pin-jointed truss. The alphabet forbids it. Eras make it strictly worse, not
+better: each adds one node and one wire, and the deficit grows by one — which
+is why the Era fins bought 449 to 365 while the ladder bought 449 to 219. The
+fins are mass and drag surface at a lever arm, which is a paddle and a useful
+thing, but they are not stiffness.
+
+So the ladder's advantage is not truss action. It is that `portTorques` — the
+angular servo that is the only *angular* constraint in the system — gets a
+longer moment arm to work against. Wider rails, more leverage, which is exactly
+the monotone trend measured.
+
+**Which settles the earlier question.** The restoring force has to be angular,
+because the angular side is the only side that can supply it. A joint with a
+rest angle is not one option among several; given a three-port alphabet in two
+dimensions it is the only one. That is worth knowing before building it.
+
 ### One caveat on the numbers above
 
 `lag` reads 0.00 throughout this section and means nothing there: it is

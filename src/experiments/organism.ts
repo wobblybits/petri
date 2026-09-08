@@ -1,6 +1,6 @@
 import { Sim } from '../sim.ts';
 import { defaultParams, type Params } from '../params.ts';
-import { refreshReadsField, type Agent, type AgentKind, type PortSlot } from '../agents.ts';
+import { refreshReadsField, stemRoot, type Agent, type AgentKind, type PortSlot } from '../agents.ts';
 import {
   CHEM_LEN,
   EMIT,
@@ -21,6 +21,7 @@ import {
   X_BASE,
 } from '../chem-layout.ts';
 import { CH } from '../fields.ts';
+import { rotate } from '../wrap.ts';
 import { seededRandom } from './harness.ts';
 
 /*
@@ -129,6 +130,122 @@ export function buildWorm(sim: Sim, params: Params, spec: WormSpec): number[] {
     sim.wire(ids[i]!, 'p', ids[i + 1]!, slot, params);
   }
   return ids;
+}
+
+export interface LadderSpec extends WormSpec {
+  /**
+   * Rails side by side, cross-linked rung by rung.
+   *
+   * The port budget works out exactly, which is the first sign this is the
+   * right shape: a Con has three ports, a rail uses `p` forward and `l`
+   * backward, and that leaves `r` — one per body, exactly one rung's worth.
+   * Nothing is left over and nothing is short.
+   *
+   * The point is bending stiffness, and it comes from geometry rather than
+   * from any new force. Bending a ladder means lengthening one rail and
+   * shortening the other, and rail length is held by the span constraint,
+   * which at `COMPLIANCE.span` 3e-6 is the stiffest thing in the solver bar
+   * the rope links. A single chain has nothing playing that role: its only
+   * resistance to hinging is `portTorques`, an aiming servo with no preferred
+   * relative angle. So a chain is a string and a ladder is a beam, and the
+   * beam's stiffness scales with the square of the rail separation — which is
+   * a number the body plan sets, and therefore something a net could evolve.
+   */
+  rails?: number;
+  /** Centre-to-centre spacing between rails. */
+  railGap?: number;
+}
+
+/**
+ * A ladder: `rails` parallel chains, rung-linked through the spare aux port.
+ *
+ * Returns every id, rail-major and rear-first within each rail, so index
+ * `rail * segments + i` is one body and the first rail's ordering matches
+ * `buildWorm`'s.
+ */
+export function buildLadder(sim: Sim, params: Params, spec: LadderSpec): number[] {
+  const rails = spec.rails ?? 2;
+  const n = spec.segments;
+  const gap = spec.spacing ?? params.wireMinRest;
+  const railGap = spec.railGap ?? params.wireMinRest;
+  const heading = spec.heading ?? 0;
+  const cx = spec.x ?? sim.w * 0.5;
+  const cy = spec.y ?? sim.h * 0.5;
+  const ux = Math.cos(heading);
+  const uy = Math.sin(heading);
+  // Across the body, so a rail offset is a sideways displacement.
+  const vx = -uy;
+  const vy = ux;
+  const back = ((n - 1) * gap) / 2;
+  const side = ((rails - 1) * railGap) / 2;
+  const ids: number[] = [];
+  for (let r = 0; r < rails; r++) {
+    const off = r * railGap - side;
+    for (let i = 0; i < n; i++) {
+      const d = i * gap - back;
+      const wobble = spec.jitter ? (Math.random() * 2 - 1) * spec.jitter : 0;
+      const a = sim.spawn(
+        kindAt(spec, i),
+        cx + ux * d + vx * off,
+        cy + uy * d + vy * off,
+        heading + wobble,
+        params,
+        true,
+      );
+      if (!a) throw new Error(`buildLadder: spawn failed at rail ${r} segment ${i}`);
+      a.extra = a.energyCap;
+      ids.push(a.id);
+    }
+  }
+  const at = (r: number, i: number): number => ids[r * n + i]!;
+  for (let r = 0; r < rails; r++) {
+    for (let i = 0; i + 1 < n; i++) sim.wire(at(r, i), 'p', at(r, i + 1), 'l', params);
+  }
+  // Rungs on the one port a rail leaves free. Between neighbouring rails only,
+  // so three rails are a strip and not a triangle.
+  for (let r = 0; r + 1 < rails; r++) {
+    for (let i = 0; i < n; i++) sim.wire(at(r, i), 'r', at(r + 1, i), 'r', params);
+  }
+  return ids;
+}
+
+/**
+ * Cap every free aux port with an Era.
+ *
+ * Three things at once, which is why it is worth having as its own move. An
+ * Era has one port and no aux, so it can only ever be a terminus — in
+ * interaction-combinator terms it is precisely a terminated port, and a net's
+ * Era count is its boundary size. It occupies the port, so nothing else can
+ * latch there and a worm cannot bend round and eat itself without
+ * `snapRadius` being switched off. And it hangs mass and drag surface off the
+ * body at a lever arm, which under anisotropic drag is what a paddle is.
+ *
+ * Returns the ids of the Eras added.
+ */
+export function capWithEras(sim: Sim, params: Params, ids: number[], slot: PortSlot = 'r'): number[] {
+  const added: number[] = [];
+  const reach = params.wireMinRest * 0.5;
+  for (const id of ids) {
+    const host = sim.agents.get(id);
+    if (!host || host.kind === 'era') continue;
+    if (!sim.graph.isFreeAt(id, slot)) continue;
+    const root = stemRoot(host.kind, slot);
+    const out = rotate(root.x * host.scale, root.y * host.scale, host.heading);
+    const len = Math.hypot(out.x, out.y) || 1;
+    const era = sim.spawn(
+      'era',
+      host.x + (out.x / len) * reach,
+      host.y + (out.y / len) * reach,
+      host.heading + Math.PI,
+      params,
+      true,
+    );
+    if (!era) break;
+    era.extra = era.energyCap;
+    sim.wire(id, slot, era.id, 'p', params);
+    added.push(era.id);
+  }
+  return added;
 }
 
 // ----------------------------------------------------------------- genomes
