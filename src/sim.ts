@@ -3618,6 +3618,58 @@ export class Sim {
   }
 
   /**
+   * Bring every body's learning back from the device.
+   *
+   * On the GPU path the learning row is device-resident and the host's copy
+   * is fresh only for rewrite parents — `syncLearn` reads back a handful a
+   * frame because a handful a frame is all the simulation needs. Anything
+   * that *measures* what the pond has learned has to ask for the rest, and
+   * `docs/plasticity-plan.md` phase 5 says so in as many words.
+   *
+   * This is that ask. The headless harvest calls it before storing a net,
+   * because `plasticAll` and `criticAll` are two of the things a stored net
+   * is for, and writing the zeros the host happened to be holding would make
+   * the database quietly wrong rather than loudly empty.
+   *
+   * A no-op returning true off the GPU path, where the host's copy is the
+   * only copy. Deliberately does not mark the rows dirty: this is the device
+   * telling the host what it worked out, and echoing it back would push it
+   * out again next frame.
+   */
+  async syncLearningToHost(): Promise<boolean> {
+    if (!this.genomeOnGpu) return true;
+    const store = this.agentStore;
+    let maxSlot = -1;
+    for (const a of this.agents.values()) if (a.slot > maxSlot) maxSlot = a.slot;
+    if (maxSlot < 0) return true;
+    const rows = await genomeGpu.drainLearn(maxSlot + 1);
+    if (!rows) return false;
+    const stride = genomeGpu.learnStride;
+    const P = store.plasticAll;
+    const T = store.traceAll;
+    const C = store.criticAll;
+    const V = store.prevValue;
+    for (const a of this.agents.values()) {
+      const s = a.slot;
+      const o = s * stride;
+      if (o + stride > rows.length) continue;
+      const ps = s * PLASTIC_LEN;
+      let on = 0;
+      for (let k = 0; k < PLASTIC_LEN; k++) {
+        const w = rows[o + k];
+        P[ps + k] = w;
+        T[ps + k] = rows[o + LEARN_TRACE + k];
+        if (w !== 0) on = 1;
+      }
+      const cs = s * CRITIC_LEN;
+      for (let k = 0; k < CRITIC_LEN; k++) C[cs + k] = rows[o + LEARN_CRITIC + k];
+      V[s] = rows[o + LEARN_PREV_V];
+      if (on) store.plasticOn[s] = 1;
+    }
+    return true;
+  }
+
+  /**
    * Put the rows that came back where the CPU keeps them.
    *
    * Deliberately does not mark them dirty: this is the device telling the
@@ -5527,9 +5579,11 @@ export class Sim {
     const n = list.length;
     if (n === 0) return;
     if (this.genomeOnGpu) {
-      // Learning does not happen on this path yet: the shader computes `h`
-      // and this only unpacks it. See `docs/plasticity-plan.md` phase 4 —
-      // it wants a binding merge before the learned block will fit.
+      // The shader does all of this, learning included — `genome.wgsl` carries
+      // the learned block against its own resident row, and this only unpacks
+      // what came back. The learning row stays there: `syncLearn` fetches the
+      // handful of parents a rewrite needs, and `syncLearningToHost` fetches
+      // the rest when something means to measure it.
       this.unpackGenome();
       return;
     }

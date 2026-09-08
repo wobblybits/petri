@@ -24,7 +24,20 @@ swallows the table.
   count is a meeting problem.
 - `matrixDrift` is how far the unseeded part of the genome has moved. It
   rises under drift and under selection alike; it only says the genome is
-  being touched at all.
+  being touched at all. If you want to know whether the pond is *diverging*
+  rather than merely moving, that is `netFst` — see `src/pond/README.md`.
+
+  **Not comparable across `CHEM_LEN`.** It is a mean over the span past the
+  taste bases, so adding a head widens the denominator: the expression head
+  `X` took `CHEM_LEN` from 134 to 174 and nothing reads it yet, which scales
+  every `matrixDrift` by about 0.75 against runs from before. Within a sweep
+  the factor cancels; across commits it does not. The `run` row in a pond
+  library records `chem_len` for exactly this reason.
+
+- The sweeps here write one JSON file per invocation and relate to nothing.
+  `npm run pond -- sweep` writes the same trials into the pond library
+  instead, where they accumulate and can be queried across sessions and
+  commits. Prefer it for anything you want to still know next week.
 - `canPay` is the fraction of bodies that could fund a rewrite this frame.
 
 ## Adding one

@@ -15,12 +15,16 @@
     "test": "vitest run --project suite",
     "test:soak": "vitest run --project soak",
     "bench": "vitest run --project bench",
-    "experiment": "vitest run --project experiments --disableConsoleIntercept"
+    "experiment": "vitest run --project experiments --disableConsoleIntercept",
+    "pond": "node --experimental-strip-types --disable-warning=ExperimentalWarning --import ./tools/node-hooks.mjs src/pond/cli.ts"
   },
   "devDependencies": {
     "@types/node": "^26.4.1",
     "typescript": "~6.0.2",
     "vite": "^8.2.2",
     "vitest": "^4.1.11"
+  },
+  "optionalDependencies": {
+    "webgpu": "^0.6.0"
   }
 }

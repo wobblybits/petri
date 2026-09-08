@@ -414,6 +414,52 @@ export class GenomeGpu {
   }
 
   /** Wait for the last `submit`'s readbacks and unpack them. */
+  /**
+   * Copy every resident learning row back to the host, in one go.
+   *
+   * The per-frame path (`readLearn`) is a trickle by design: only a rewrite's
+   * two parents need their learning on the CPU, `beginRewrite` gives forty
+   * frames of notice, and `LEARN_READ_CAP` is sized for that. Which means the
+   * host's copy of everybody else's learning is whatever it was when the pond
+   * moved to the device — usually zero.
+   *
+   * That is fine for the simulation and wrong for anything that *measures*
+   * it. `docs/plasticity-plan.md` phase 5 says as much: an instrument either
+   * reads this back deliberately or is quietly sampling rewrite parents. This
+   * is the deliberate read — the headless harvest uses it before storing a
+   * net, since a stored genome without what its bodies learned is a record of
+   * half the animal.
+   *
+   * One staging buffer per call, destroyed on the way out: this runs at a
+   * harvest and not in a frame, so a resident buffer the size of the whole
+   * learning table would be megabytes held for something that happens once a
+   * minute.
+   */
+  async drainLearn(slots: number): Promise<Float32Array | null> {
+    const device = this.device;
+    if (!this.ready || !device || !this.learn || slots <= 0) return null;
+    const rows = Math.min(slots, this.learnCap);
+    const bytes = rows * LEARN_STRIDE * 4;
+    const staging = device.createBuffer({
+      size: bytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(this.learn, 0, staging, 0, bytes);
+      device.queue.submit([enc.finish()]);
+      await staging.mapAsync(GPUMapMode.READ, 0, bytes);
+      const out = new Float32Array(new Float32Array(staging.getMappedRange(0, bytes)));
+      staging.unmap();
+      return out;
+    } catch (e) {
+      this.lastError = String(e);
+      return null;
+    } finally {
+      staging.destroy();
+    }
+  }
+
   async collect(): Promise<boolean> {
     const bytes = this.pendingBytes;
     const rows = this.pendingLearn;

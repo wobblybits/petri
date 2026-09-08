@@ -31,3 +31,6 @@ experiments/out/
 
 # Chrome performance traces dropped in by hand; large and machine-specific.
 .traces/
+
+# Pond databases: evolved genomes, big and machine-local.
+ponds/
