@@ -319,8 +319,37 @@ with `excreteRate` on has sense genes reading three orders below anything
 
 ```bash
 npm run pond -- run --seconds 600 \
-  --set excreteRate=0.5 --set uptakeVmax=1.5 --set senseScale=0.002
+  --set excreteRate=0.015 --set uptakeVmax=6 --set senseScale=0.002
 ```
+
+### Why those numbers
+
+Measured over four sweeps, 600 simulated seconds from a 500-body soup, five
+seeds a point, against a control with the chemistry off (lineage depth 68.7).
+
+`excreteRate` is the dial that matters — it explained 68–93% of the variance
+in reproduction, energy and effective lines, while `uptakeVmax` explained
+2–8% and was unresolved. At 0.5 the pond is **sterile**: excretion is mass
+action on the tank, so bodies shed faster than they can refill and never hold
+the share a commute costs (depth 1.09, free 0.11 a body against a share of 1).
+Lowering it recovers reproduction, and then **stops helping** — 0.015 and
+0.005 are indistinguishable at depth ~13, while 0.005 throws away two-thirds
+of the standing signal for nothing. 0.015 is where the curve turns over.
+
+The remaining cost turned out not to be excretion at all. Phase 1's metered
+uptake was on in every chemistry run and off in the control, and it was most
+of the gap: at `excreteRate` 0.015, depth runs 13.2 metered at 1.5, 25.3 at 6,
+and 39.0 unmetered. Unmetered is the cheapest by reproduction and the most
+differentiated pond measured (`netFst` 0.418) — but it takes the
+single-species harvest path, so bodies would excrete four species and eat one,
+which is the loop phase 3c exists to close. 6 keeps the table whole at 2.7x
+the control's depth, and it was the top of the range with the trend still
+rising, so there is probably more there.
+
+**Read these as a regime, not a tuning.** The seed spread is wide — depth
+25.3 ± 13.8 at the recommended point — so the large steps are real and the
+fine ranking is not. "0.015, where the curve turns over" is a claim the data
+supports; "0.015 rather than 0.01" is not.
 
 Two couplings the code enforces rather than trusting you to remember. Uptake
 covers all four species only when `excreteRate` is on — metered uptake with
