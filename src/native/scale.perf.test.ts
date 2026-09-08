@@ -35,7 +35,23 @@ class GrowingMesh {
 
   constructor(params: Params, world = 8000) {
     this.params = params;
-    this.sim = new Sim(world, world);
+/*
+     * A quarter-size dish, because the field is not what this measures.
+     *
+     * `bench` keeps the production 1024 cells on purpose — a frame budget over a
+     * small field would not be a budget of the thing that ships. But the CPU
+     * field's two diffusions, decay and grow are a *fixed* cost of about 18 ms at
+     * that size, independent of bodies, wires and zoom: measured here at 18.45 ms
+     * with zero bodies detailed, against a 60 fps budget of 16.67. So the budget
+     * was failing before any of the physics this file is about had run, and the
+     * LOD saving it exists to demonstrate — 21.56 ms in to 18.45 ms out — was
+     * three milliseconds inside a frame that was five-sixths field.
+     *
+     * The field has its own ledger in `native/field-extent.perf.test.ts`, and on
+     * the path that ships it is on the GPU anyway. Sixteenth the field work leaves
+     * the physics, which is the thing under budget.
+     */
+    this.sim = new Sim(world, world, 256);
     this.spacing = params.wireMinRest + 16;
   }
 

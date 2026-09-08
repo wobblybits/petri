@@ -103,10 +103,13 @@ export interface Diversity {
 /** Grouped variance decomposition over a set of loci. Returns F_ST, or null. */
 function fst(
   chem: Float32Array,
-  slots: number[],
-  groupOf: number[],
+  slotsAll: number[],
+  groupOfAll: number[],
   loci: number[],
+  keep?: (i: number) => boolean,
 ): number | null {
+  const slots = keep ? slotsAll.filter((_, i) => keep(i)) : slotsAll;
+  const groupOf = keep ? groupOfAll.filter((_, i) => keep(i)) : groupOfAll;
   const n = slots.length;
   if (n < 2) return null;
   const groups = new Map<number, number[]>();
@@ -116,6 +119,25 @@ function fst(
     else groups.set(groupOf[i], [i]);
   }
   if (groups.size < 2) return null;
+  /*
+   * At least one group has to have two members in it.
+   *
+   * With every group a singleton the within-group variance is identically
+   * zero, so `1 - vW/vT` is **1** by construction — and that is a fact about
+   * the grouping, not about the data. A fresh soup is exactly that case: every
+   * body is its own component and its own founder line, and the first sample
+   * of every run was reporting perfect differentiation for a pond with no
+   * structure in it at all. Maximally misleading, because 1 is the reading
+   * that would mean the thing we are watching for.
+   */
+  let estimable = false;
+  for (const members of groups.values()) {
+    if (members.length >= 2) {
+      estimable = true;
+      break;
+    }
+  }
+  if (!estimable) return null;
 
   let totalVar = 0;
   let withinVar = 0;
@@ -219,7 +241,10 @@ export function measureDiversity(sim: Sim): Diversity {
     kindsEffective: kindStats.effective,
     varianceDrifted: variance(drifted),
     varianceSeeded: variance(seeded),
-    netFst: fst(chem, slots, compOf, drifted),
+    // Nets, not components: a lone unattached body is not a net, and grouping
+    // by it would let the soup's singletons decide a statistic about nets.
+    // Same definition `nets` above uses.
+    netFst: fst(chem, slots, compOf, drifted, (i) => (compCount.get(compOf[i]) ?? 0) >= 2),
     lineFst: fst(chem, slots, lineOf, drifted),
     commutesPerLatch: sim.census().commutesPerLatch,
   };

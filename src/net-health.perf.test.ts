@@ -9,7 +9,16 @@ import { Sim } from './sim.ts';
  * The minute-of-soup soak tests from net-health.test.ts. Split out because
  * they run 3600 frames across 3 seeds each — correctness checks, not frame
  * budgets, but too slow to share the parallel `suite` project with everything
- * else. See vite.config.ts for why `bench` runs its files serially.
+ * else.
+ *
+ * In the `soak` project, not `bench`, despite the file name. `bench` keeps the
+ * full 1024-cell dish on purpose, because a frame budget measured over a small
+ * field would not be a budget of the thing that ships — and this file budgets
+ * nothing, so it was paying sixteen times the field arithmetic for assertions
+ * that only look at wire geometry and rewrite counts. About three minutes a
+ * test, five tests, which is most of why `npm run bench` looked like it hung.
+ * `soak`'s setup gives it the small dish and the numbers below are unchanged
+ * by it, being counts and angles rather than times.
  */
 
 const realRandom = Math.random;

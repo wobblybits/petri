@@ -150,6 +150,17 @@ const isDemo = process.env.VITE_APP === 'demo';
 /** Test files that simulate minutes of pond. Their own project; see below. */
 const SOAK = [
   'src/net-health.test.ts',
+  /*
+   * A minute of soup times three seeds times five tests, and its own header
+   * says what it is: "correctness checks, not frame budgets". It sat in
+   * `bench` for scheduling — serial, away from the parallel suite — and paid
+   * for that with the full 1024-cell dish, which `bench` keeps deliberately
+   * because a frame *budget* over a small field would not be a budget of the
+   * thing that ships. This file budgets nothing. It was spending about three
+   * minutes a test on field arithmetic none of its assertions look at, which
+   * is most of why `npm run bench` looked like it hung.
+   */
+  'src/net-health.perf.test.ts',
   'src/determinism.test.ts',
   'src/connected.test.ts',
   'src/oscillator-zoom.test.ts',
@@ -246,6 +257,7 @@ export default defineConfig({
         test: {
           name: 'bench',
           include: ['src/**/*.perf.test.ts'],
+          exclude: ['**/node_modules/**', '**/dist/**', ...SOAK],
           fileParallelism: false,
           testTimeout: 300_000,
         },

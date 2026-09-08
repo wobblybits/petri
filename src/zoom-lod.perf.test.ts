@@ -18,7 +18,23 @@ describe('physics LOD across zoom', () => {
     const side = 16;
     const rows: { zoom: number; p50: number; detailed: number }[] = [];
     for (const zoom of [1, 0.6, 0.5, 0.42, 0.3, 0.2, 0.1, 0.05]) {
-      const sim = new Sim(2000, 2000);
+/*
+       * A quarter-size dish, because the field is not what this measures.
+       *
+       * `bench` keeps the production 1024 cells on purpose — a frame budget over a
+       * small field would not be a budget of the thing that ships. But the CPU
+       * field's two diffusions, decay and grow are a *fixed* cost of about 18 ms at
+       * that size, independent of bodies, wires and zoom: measured here at 18.45 ms
+       * with zero bodies detailed, against a 60 fps budget of 16.67. So the budget
+       * was failing before any of the physics this file is about had run, and the
+       * LOD saving it exists to demonstrate — 21.56 ms in to 18.45 ms out — was
+       * three milliseconds inside a frame that was five-sixths field.
+       *
+       * The field has its own ledger in `native/field-extent.perf.test.ts`, and on
+       * the path that ships it is on the GPU anyway. Sixteenth the field work leaves
+       * the physics, which is the thing under budget.
+       */
+      const sim = new Sim(2000, 2000, 256);
       const params = defaultParams();
       params.spawnInterval = 0;
       params.upkeep = 0;

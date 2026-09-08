@@ -76,8 +76,40 @@ describe('field extent', () => {
         `  nonzero scent   ${nonzero} / ${f.data.length} slots\n`,
     );
     expect(n).toBeGreaterThan(0);
-    // Not a target, a tripwire: if the window ever stops dwarfing the pond, or
-    // cells stop being many agents wide, the tradeoffs above have changed.
-    expect(inside, 'bodies fell outside the scent window').toBe(n);
+    /*
+     * Not a target, a tripwire — but on the invariant that is actually load
+     * bearing now, which is not the one this used to assert.
+     *
+     * It asserted that every body sits inside the scent window, which was true
+     * while the field followed the world. The field is world-*fixed* now: one
+     * dish of `FIELD_CELLS * FIELD_CELL` units, pinned once at the first
+     * centre of mass and never moved, with `worldR` the bound that collects
+     * bodies into it. So "the window dwarfs the pond" has become "the window
+     * covers the dish", and that is what is checked below.
+     *
+     * This test seeds eight blocks across sixty thousand units — three times
+     * the dish — and steps twenty frames, which is nowhere near long enough
+     * for the bound to gather them. Measured: 24 bodies outside the window, 45
+     * outside the bound, and **every one of the 24 is among the 45**. They are
+     * not bodies the field failed to cover; they are bodies still on their way
+     * in. Failing on them was the test reporting its own setup back to itself.
+     */
+    expect(f.worldW, 'the scent window no longer covers the dish').toBeGreaterThanOrEqual(
+      2 * sim.worldR,
+    );
+    // The other half of the original tripwire, unchanged: a cell has to stay
+    // many agents wide or the tradeoffs in the header have moved.
+    expect(cellW, `cell ${cellW.toFixed(1)} units against a ~21-unit body`).toBeGreaterThan(21 * 0.4);
+    // And nothing outside the window may be inside the bound: that would be
+    // the dish genuinely outgrowing its field, which is the failure the
+    // original assertion was reaching for.
+    let strandedInside = 0;
+    for (const a of sim.agents.values()) {
+      const gx = ((a.x - f.originX) / f.worldW) * f.cols;
+      const gy = ((a.y - f.originY) / f.worldH) * f.rows;
+      if (gx >= 0 && gx < f.cols && gy >= 0 && gy < f.rows) continue;
+      if (Math.hypot(a.x - sim.worldX, a.y - sim.worldY) <= sim.worldR) strandedInside++;
+    }
+    expect(strandedInside, 'a body inside the dish had no scent window over it').toBe(0);
   }, 900_000);
 });

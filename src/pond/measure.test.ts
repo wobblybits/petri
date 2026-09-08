@@ -63,6 +63,13 @@ describe('diversity', () => {
     const sim = pond(60, 0);
     const d = measureDiversity(sim);
     expect(d.bodies).toBe(60);
+    /*
+     * Null, not 1. Every body is its own component and its own founder line,
+     * so within-group variance is identically zero and `1 - vW/vT` is 1 by
+     * construction — a fact about the grouping and not about the data. It read
+     * 1 for the first sample of every run, which is the value that would mean
+     * the thing this measure exists to watch for.
+     */
     expect(d.netFst).toBeNull();
     expect(d.lineFst).toBeNull();
     expect(d.varianceDrifted).toBe(0);
@@ -71,6 +78,24 @@ describe('diversity', () => {
     expect(d.linesEffective).toBeCloseTo(60, 6);
     expect(d.nets).toBe(0);
     expect(d.commutesPerLatch).toBeNull();
+  });
+
+  it('reports nothing to compare when every group is a singleton', () => {
+    // The degenerate case on its own, because it is the one that produced a
+    // confident wrong answer rather than an obviously broken one.
+    const sim = pond(40, 0);
+    const store = sim.agentStore;
+    // Give the genomes real variance, so the only thing making F_ST
+    // undefined is that no group has two members to vary within.
+    let k = 0;
+    for (const a of sim.agents.values()) {
+      store.chemAll[a.slot * CHEM_LEN + TASTE + 4] = k++ * 0.1;
+    }
+    const d = measureDiversity(sim);
+    expect(d.varianceDrifted).toBeGreaterThan(0);
+    expect(d.nets).toBe(0);
+    expect(d.netFst).toBeNull();
+    expect(d.lineFst).toBeNull();
   });
 
   it('separates richness from evenness', () => {
