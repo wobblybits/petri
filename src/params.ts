@@ -305,11 +305,11 @@ export interface Params {
    *
    * With a price on it the wire network becomes a fuel line. A sub-net that
    * swims runs itself down and asks; `spreadRequests` carries the ask inward
-   * and `flowCharges` sends stock back out; `applyTransportRecoil` already
-   * kicks the pair as it goes. Which bodies a net chooses to feed is which
-   * way it goes — and because `transportThrust`, `transportRecoil` and
-   * `requestDecay` are all heritable, what a lineage does with that is
-   * something it can evolve rather than something set here.
+   * and `flowCharges` sends stock back out. Transport itself is mechanically
+   * inert — moving matter between two bodies of one net cannot move their
+   * centre of mass, and pretending otherwise was a momentum pump — so what a
+   * net does with the energy is up to `ANGLE`, and `requestDecay` and
+   * `conductSpeed` decide where the energy gets to in the first place.
    *
    * Off by default. Turning it on is a real change to the economy: at a
    * cruise of 38 and an upkeep of 0.015, a cost of 0.0004 roughly doubles
@@ -418,45 +418,6 @@ export interface Params {
    * population starts and what a mutation is centred near.
    */
   requestDecay: number;
-  /**
-   * Momentum a body recoils with per unit of energy it pumps to a neighbour.
-   * 0 = off.
-   *
-   * Stable well past the slider's range — a seeded soup is still calm at 800
-   * and only comes apart near 3000. The ceiling is low because the visible
-   * events are one-off transfers of most of a unit, and 20 makes one of those
-   * a ~56 px/s nudge on an Era against settled speeds around 50.
-   *
-   * Heritable, like `requestDecay` above: a pump's actual kick is its own
-   * `transportRecoil`, seeded from this slider and free to drift by breeding.
-   */
-  transportRecoil: number;
-  /**
-   * How much of the receiver's kick is withheld, 0–1, and therefore how much
-   * of a pump's recoil survives as motion of the pair.
-   *
-   * At 0 the pump is equal and opposite and a net can never shift itself by
-   * moving energy around inside itself. At 1 only the sender is kicked, so the
-   * pair — and any net holding a standing gradient — drifts back along the
-   * wire, against the direction the energy is flowing. That is the swimming
-   * stroke: pushing charge toward the hungry end pushes the body the other way.
-   *
-   * Drag bounds it, so this is a cruising speed rather than an acceleration.
-   * One whole unit pumped between an Era and a Con at the default recoil
-   * leaves the pair drifting `20 * thrust / (0.45 + 1)` px/s — ~7 at the
-   * default, ~14 at 1 — against settled speeds around 40. In a live soup that
-   * is invisible for the same reason the recoil gain is: mean speed over a
-   * seeded 30 s soup at 0 / 0.25 / 0.5 / 1 is 40 / 60 / 34 / 47 px/s, which is
-   * seed noise. It reads on the events, and on a net actually holding a
-   * gradient — drive one end full and the other hungry and the chain visibly
-   * runs away from its own supply.
-   *
-   * Heritable, like the two above. A transfer reads the *sender's* own
-   * `transportRecoil` and the *receiver's* own `transportThrust`, so breeding
-   * a strong low-thrust pump against a high-thrust receiver can drift a
-   * net's stroke somewhere neither parent line swims alone.
-   */
-  transportThrust: number;
   /**
    * How fast a body's state matrices change while it is alive. 0 = off, and
    * off is exactly the simulation as it was.
@@ -627,6 +588,58 @@ export interface Params {
    */
   excreteRate: number;
   /**
+   * Angular stiffness of a joint, holding the two ports across a wire at their
+   * rest angle. 0 = off, and off is every net this simulation has ever run.
+   *
+   * The only restoring force a net can have, and that is a counting result
+   * rather than a preference. A wire is a distance constraint, so a net is a
+   * pin-jointed structure; generic planar rigidity needs `|E| >= 2|V| - 3`
+   * against the `3|V|/2` wires a three-port alphabet can supply, and those meet
+   * only at `|V| <= 6`. Past six bodies no net of interaction combinators can
+   * be a rigid truss, so nothing on the distance side can make one spring back.
+   *
+   * `portTorques` is not this. It aims each port at its partner's stem
+   * *position*, and a smooth arc satisfies that for free — every port in a
+   * curved chain still points at the next body — so it constrains orientation
+   * against neighbours' positions and cannot see curvature at all. This
+   * constrains the angle between the two port *axes*, which an arc does not
+   * satisfy. Measured, a cantilevered chain deflects 51.2 where a ladder
+   * deflects 14.2, and neither springs back; this is what makes them spring
+   * back.
+   *
+   * Applied as a couple — equal and opposite torques on the two bodies — so it
+   * is internal and conserves the pair's angular momentum. An internal
+   * actuator can change a shape and must not change a momentum.
+   */
+  jointStiff: number;
+  /**
+   * Normal drag over tangential drag. **1 is isotropic**, which is what this
+   * sim has always been, and 2 is roughly what resistive-force theory gives a
+   * slender body in a viscous medium. `drag` stays the tangential coefficient,
+   * so the neutral value is the old behaviour exactly.
+   *
+   * This is what turns a shape change into travel, and so what makes `ANGLE` a
+   * gait rather than a wiggle. With isotropic drag a body's displacement
+   * depends on how hard it was pushed and in which direction and not at all on
+   * *when*, so a wave of pose time-averages to nothing. Anisotropy is the
+   * medium noticing: a segment lying across its own travel is held back harder
+   * than one lying along it, so the same internal work buys different distance
+   * depending on the pose it is done in.
+   */
+  dragAniso: number;
+  /**
+   * Energy per radian per second of commanded bend, charged to the body doing
+   * the commanding. 0 = bending is free.
+   *
+   * Charged on the *commanded* angle rather than on the torque, so a straight
+   * joint costs nothing and a body holding itself bent pays continuously, the
+   * way an isometric muscle does. Without it the actuator is another free gain:
+   * `transportRecoil` was one, and selection scored on distance would have
+   * pinned it at its clamp and bred a thrasher. A muscle that costs nothing is
+   * not a muscle, it is a wish.
+   */
+  bendCost: number;
+  /**
    * How fast unmet need travels along a wire, in hops per second. **0 is the
    * old path**, and the old path is instantaneous.
    *
@@ -657,77 +670,6 @@ export interface Params {
    * natural ceiling. Slower is a body that conducts poorly.
    */
   transportSpeed: number;
-  /**
-   * Fraction of a body's spare energy it may push out of a wire per second,
-   * because it decided to rather than because the far end is hungrier.
-   * 0 = off, and off is where every transfer is a rescue.
-   *
-   * `flowCharges` answers "who near me is worst off", which is the right
-   * question for keeping a net alive and the wrong one for timing a stroke:
-   * direction of travel is set by where the shortage is, so a net can only ever
-   * pump toward its own poverty. This is the other operator — a body moves
-   * matter out of a chosen port at a rate its own state sets, into a neighbour
-   * that may be perfectly comfortable.
-   *
-   * That is what makes locomotion a phenotype. The recoil is the same one
-   * `flowCharges` gets, so pushing out of a port shoves the body the other way
-   * along it, and which port a body pushes from is decided by the `PUSH` head
-   * against a fixed anatomy — a principal points along the heading and an aux
-   * against it. So a body can pump forwards or backwards, and a chain of them
-   * with a phase offset is a stroke.
-   *
-   * Bounded by what the donor can spare and what the receiver can hold, so it
-   * is conserved and cannot force-feed a full body.
-   */
-  pushRate: number;
-  /**
-   * Normal drag over tangential drag. **1 is isotropic**, which is what this
-   * sim has always been, and 2 is roughly what resistive-force theory gives a
-   * slender body in a viscous medium.
-   *
-   * `drag` stays the tangential coefficient, so this is a pure ratio and the
-   * old behaviour is the neutral value. The decomposition is against each
-   * body's own heading: motion along the way it points is damped at `drag`,
-   * motion across it at `drag * dragAniso`.
-   *
-   * This is the ingredient a *gait* needs, and its absence is why every phase
-   * sweep on the worm bench has come back flat. With isotropic drag a body's
-   * contribution to displacement depends on how hard it was pushed and in what
-   * direction and not at all on *when*, so a row of co-directed thrusters sums
-   * to the same displacement however their firing is staggered — timing
-   * time-averages away. Anisotropy is what makes the medium notice: a segment
-   * that is pointing across its own travel is held back harder than one
-   * pointing along it, so the same impulse buys different distance depending on
-   * the pose the body is in when it lands, and a wave of pose is worth
-   * something.
-   *
-   * Above 1 is a slender swimmer. Below 1 is a body that slides sideways more
-   * easily than it advances, which is strange but not meaningless — a skate.
-   */
-  dragAniso: number;
-  /**
-   * How much of a transport recoil is applied at the port rather than at the
-   * body's centre. 0 is the old behaviour; 1 is the full lever arm.
-   *
-   * Every other impulse in the simulation lands at the point it acts through —
-   * `chain.ts`'s `applyImpulse` takes an attachment and adds the angular term,
-   * which is what makes a rope hanging off an off-centre port torque its body
-   * instead of only dragging it. Transport recoil did not, so pumping matter
-   * out of a port shoved the body and never turned it, whatever the port's
-   * offset. An aux stem sits about nine units off the centreline; a principal
-   * sits on it. So with this at 1, pushing out of an aux both thrusts *and*
-   * bends, and pushing out of the principal only thrusts.
-   *
-   * That is the difference between a jet and a muscle. A bend is the only
-   * actuator a chain has for changing its own pose, and a pose wave is the only
-   * thing `dragAniso` can convert into thrust.
-   *
-   * Applied only to pushes, because they are the transfers that name a port.
-   * `flowCharges` works over the wire adjacency, which does not carry which
-   * ports a wire joined, so a rescue has no port to act at and keeps the
-   * central impulse it always had.
-   */
-  recoilLever: number;
   /**
    * What one unit of a signal reading is worth on the way into `x`.
    *
@@ -816,8 +758,6 @@ export function defaultParams(): Params {
     assortBias: 0.5,
     debtCap: -1,
     requestDecay: 0.95,
-    transportRecoil: 100,
-    transportThrust: 1.0,
     learnRate: 0,
     learnCritic: 0.02,
     learnTrace: 0.95,
@@ -835,9 +775,9 @@ export function defaultParams(): Params {
     eraUpkeepRatio: ERA_UPKEEP_RATIO,
     excreteRate: 0,
     transportSpeed: 0,
-    pushRate: 0,
     dragAniso: 1,
-    recoilLever: 0,
+    jointStiff: 0,
+    bendCost: 0,
     senseScale: SENSE_SCALE,
   };
 }
@@ -909,8 +849,6 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'assortBias', label: 'Assortment (seed)', min: 0, max: 1, step: 0.05 },
   { key: 'debtCap', label: 'Debt cap', min: -2.5, max: -0.05, step: 0.05 },
   { key: 'requestDecay', label: 'Demand decay', min: 0.5, max: 0.98, step: 0.01 },
-  { key: 'transportRecoil', label: 'Pump recoil (seed)', min: 0, max: 200, step: 5 },
-  { key: 'transportThrust', label: 'Pump thrust (seed)', min: 0, max: 1, step: 0.05 },
   { key: 'learnRate', label: 'Learn rate', min: 0, max: 0.02, step: 0.0005 },
   { key: 'learnCritic', label: 'Learn critic', min: 0, max: 0.2, step: 0.005 },
   { key: 'learnTrace', label: 'Learn trace decay', min: 0.5, max: 0.995, step: 0.005 },
@@ -928,8 +866,8 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'eraUpkeepRatio', label: 'Era upkeep ratio', min: -1, max: 2, step: 0.05 },
   { key: 'excreteRate', label: 'Excrete rate', min: 0, max: 2, step: 0.02 },
   { key: 'transportSpeed', label: 'Conduction speed', min: 0, max: 60, step: 0.5 },
-  { key: 'pushRate', label: 'Push rate', min: 0, max: 4, step: 0.05 },
   { key: 'dragAniso', label: 'Drag anisotropy', min: 0.25, max: 4, step: 0.05 },
-  { key: 'recoilLever', label: 'Recoil lever', min: 0, max: 1, step: 0.05 },
+  { key: 'jointStiff', label: 'Joint stiffness', min: 0, max: 400, step: 5 },
+  { key: 'bendCost', label: 'Bend cost', min: 0, max: 0.4, step: 0.005 },
   { key: 'senseScale', label: 'Sense scale', min: 0.001, max: 8, step: 0.001 },
 ];

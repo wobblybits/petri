@@ -25,11 +25,9 @@ import {
   HEAD_SCALE,
   L_BASE,
   L_OUT,
-  P_BASE,
-  P_OUT,
-  PUSH_BASE,
-  PUSH_OUT,
-  PUSH_SLOTS,
+  ANGLE_BASE,
+  ANGLE_OUT,
+  ANGLE_SLOTS,
   PLASTIC_LEN,
   CRITIC_LEN,
   LEARN_CRITIC,
@@ -60,7 +58,7 @@ import { AgentStore, CODE_KIND } from './agent-store.ts';
 import { queryHit, queryDiscHit, SLOP, type Hit } from './collide.ts';
 import { closestTOnSegment, segmentsIntersect, WIRE_RADIUS, wireBowBudget, bounceOffDisk } from './geom.ts';
 import { PairGrid } from './grid.ts';
-import { attachOffset, CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
+import { CHAIN_MASS, contactMechanics, portAxisWorld, portExitAngle, solveContact } from './chain.ts';
 import { CH, CHANNELS, FERTILISE_CH, FIELD_CELL, FIELD_CELLS, Fields, worldBoundRadius } from './fields.ts';
 import { Graph, ropeIsLive, wrapPos, type Wire } from './graph.ts';
 import type { Params } from './params.ts';
@@ -565,22 +563,17 @@ export class Sim {
     latches: 0,
     snaps: 0,
     /**
-     * Transport, counted the same way every other event here is.
+     * Transport, counted the same way every other event here is: energy that
+     * crossed a wire, and the number of crossings.
      *
-     * `moved` is energy that crossed a wire, `hops` the number of crossings,
-     * and `pumpImpulse` the momentum those crossings put into the pond —
-     * `sum(gain * amount)` over the senders, which is exactly what
-     * `applyTransportRecoil` hands out.
-     *
-     * The three are here because a net's stroke cannot be read off any of the
-     * others. Energy that travels five wires from a full head to an empty tail
-     * kicks five times, so `moved` alone understates the thrust by the path
-     * length, and neither says anything about a net that is pumping hard in
-     * two directions at once and going nowhere. Cumulative since `clear`.
+     * Both, because neither alone says what a net is doing. Energy that travels
+     * five wires from a full head to an empty tail counts five times in
+     * `moved`, so it is unit-*hops* rather than consumption, and a big total
+     * over few crossings is a different economy from a small one over many.
+     * Cumulative since `clear`.
      */
     moved: 0,
     hops: 0,
-    pumpImpulse: 0,
   };
   /**
    * Physics detail. When a view is passed, FAR agents keep disc contacts and a
@@ -946,6 +939,8 @@ export class Sim {
     Sim.phase('steer');
     this.portTorques(params, t);
     Sim.phase('portTorques');
+    this.jointAngles(params, t);
+    Sim.phase('jointAngles');
     this.declutter(params, t);
     Sim.phase('declutter');
     this.uncrossPrincipals(params, t);
@@ -1270,6 +1265,91 @@ export class Sim {
   }
 
   /**
+   * Joints: hold the two ports across a wire at their rest angle.
+   *
+   * The only restoring force a net can have, and that is arithmetic rather
+   * than taste. A wire is a distance constraint, so a net is a pin-jointed
+   * structure; planar rigidity wants `|E| >= 2|V| - 3` and a three-port
+   * alphabet supplies at most `3|V|/2`, and those meet only at `|V| <= 6`.
+   * Past six bodies nothing on the distance side can make a net spring back,
+   * so it has to come from here.
+   *
+   * `portTorques` is emphatically not this, and the difference is the whole
+   * reason the pass exists. That one aims each port at its partner's stem
+   * *position*, and a smooth arc satisfies it for free — every port in a
+   * curved chain still points at the next body — so it constrains a body
+   * against its neighbours' positions and curvature is invisible to it. This
+   * constrains the angle between the two port *axes*, a function of the two
+   * headings and of nothing else, which an arc does not satisfy.
+   *
+   * Straight is the two axes anti-parallel, so `rel` is measured against pi
+   * and zero means straight. Each end contributes its own rest angle from the
+   * `ANGLE` head, and they add: a joint is bent by agreement between the two
+   * bodies holding it, and either can bend it alone.
+   *
+   * Applied as a **couple** — equal and opposite torques, from one potential —
+   * so the pair's angular momentum is untouched. That is the invariant that
+   * makes this an internal actuator rather than the momentum pump the
+   * transport recoil turned out to be: an internal actuator may change a
+   * shape and may not change a momentum. Everything the net then does with
+   * that shape it does through drag, which is where `dragAniso` comes in.
+   *
+   * Public for the same reason `latchPass` is: the couple is exact in this
+   * pass and only approximately visible through a whole step, because the
+   * constraint solve re-derives `omega` from the poses it lands on. A test
+   * that wants to check conservation has to call the pass.
+   */
+  jointAngles(params: Params, dt: number): void {
+    const k = params.jointStiff;
+    if (!(k > 0) || dt <= 0) return;
+    const store = this.agentStore;
+    const ANGLE = store.angleAll;
+    const cost = params.bendCost * dt;
+    for (const wire of this.graph.wires.values()) {
+      const A = this.agents.get(wire.a.id);
+      const B = this.agents.get(wire.b.id);
+      if (!A || !B || A === B) continue;
+      const heldA = poseHeld(A);
+      const heldB = poseHeld(B);
+      const invIA = heldA ? 0 : 1 / Math.max(1e-4, momentOfInertia(A));
+      const invIB = heldB ? 0 : 1 / Math.max(1e-4, momentOfInertia(B));
+      const denom = invIA + invIB;
+      if (denom < 1e-12) continue;
+      const ua = portAxisWorld(A, wire.a.slot);
+      const ub = portAxisWorld(B, wire.b.slot);
+      const restA = ANGLE[A.slot * ANGLE_SLOTS + this.slotCode(wire.a.slot)];
+      const restB = ANGLE[B.slot * ANGLE_SLOTS + this.slotCode(wire.b.slot)];
+      const rel = wrapAngle(Math.atan2(ub.y, ub.x) - Math.atan2(ua.y, ua.x) - Math.PI);
+      const err = wrapAngle(rel - (restA + restB));
+      // Critically damped against the *relative* spin, which is the velocity
+      // of the coordinate being constrained. Damping the two absolute spins
+      // instead would fight a rigid rotation of the pair, which is free.
+      const damp = 2 * Math.sqrt(k / denom);
+      const gen = (k * err + damp * (B.omega - A.omega)) * dt;
+      if (!Number.isFinite(gen)) continue;
+      // Not wrapped: `omega` is an angular velocity, and a body may legitimately
+      // spin faster than a turn a second. `portTorques` does not wrap it either.
+      if (!heldA) A.omega += gen * invIA;
+      if (!heldB) B.omega -= gen * invIB;
+      /*
+       * And the bill, on the commanded angle rather than on the torque.
+       *
+       * A joint at rest costs nothing and a body holding itself bent pays
+       * continuously, which is how an isometric muscle behaves and, more to
+       * the point, is what stops this being another free gain. The last one —
+       * `transportRecoil`, which bought impulse without consuming anything —
+       * made cost of transport improve monotonically with a gene that cost
+       * nothing, and selection scored on distance would have pinned it at the
+       * clamp.
+       */
+      if (cost > 0) {
+        if (restA !== 0) A.extra -= cost * Math.abs(restA);
+        if (restB !== 0) B.extra -= cost * Math.abs(restB);
+      }
+    }
+  }
+
+  /**
    * True while the packed bodies, not the Agent objects, are the live copy.
    * Each native pass then reads and writes them in place and skips its own
    * copy in and out.
@@ -1279,15 +1359,23 @@ export class Sim {
   /**
    * Open a shared copy for the run of WASM force passes.
    *
-   * Only when every pass in that run is native: `uncrossPrincipals` is still
-   * JS, so a scene that uses it would have that pass read stale velocities and
-   * then have its own writes overwritten on unpack. It is off by default, and
-   * when it is on each pass falls back to copying for itself.
+   * Only when every pass in that run is native: `uncrossPrincipals` and
+   * `jointAngles` are still JS, so a scene that uses either would have that
+   * pass read stale velocities and then have its own writes overwritten on
+   * unpack. Both are off by default, and when one is on each pass falls back
+   * to copying for itself.
    */
   private openForceBlock(params: Params): boolean {
     this.forceBlock = false;
     if (!Sim.nativeForces || !nativeSolver.ready) return false;
     if (params.uncross > 0) return false;
+    // Same reason as `uncross`, and the same failure it would otherwise cause:
+    // `jointAngles` is still JS, so with the block open it would write `omega`
+    // into a store that `syncForces` is about to overwrite from the pack. The
+    // symptom is silent and total — the joint appears to run, every number it
+    // produces is plausible, and the simulation is bit-identical to one with
+    // the actuator switched off.
+    if (params.jointStiff > 0) return false;
     const list = this.forceList();
     if (list.length === 0) return false;
     if (!this.packPose(list)) return false;
@@ -5658,10 +5746,9 @@ export class Sim {
     if (params.transportSpeed > 0) spreadRequestsWave(list, this.agentStore, adj, dt);
     else spreadRequestsFast(list, this.agentStore, adj);
     Sim.phase('pulse:spread');
-    this.tally.moved += flowChargesFast(list, this.agentStore, adj, (from, to, amount) =>
-      this.recoil(from, to, amount),
-    );
-    this.pushCharges(params, dt);
+    this.tally.moved += flowChargesFast(list, this.agentStore, adj, () => {
+      this.tally.hops++;
+    });
     Sim.phase('pulse:flow');
     this.updateState(list, adj, params);
     Sim.phase('state');
@@ -5759,9 +5846,7 @@ export class Sim {
     const TURN = store.turn;
     const FA = store.flockAlign;
     const FS = store.flockSep;
-    const TT = store.transportThrust;
-    const TR = store.transportRecoil;
-    const PUSH = store.pushAll;
+    const ANGLE = store.angleAll;
     const PLASTIC = store.plasticAll;
     const TRACE = store.traceAll;
     const CRITIC = store.criticAll;
@@ -5991,16 +6076,16 @@ export class Sim {
       TURN[slot] = clamp(headAt(CHEM, g, L_OUT, L_BASE, 1, H, ho, S) * HEAD_SCALE.turn, 0, 8);
       FA[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 0, H, ho, S) * HEAD_SCALE.align, -8, 16);
       FS[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 1, H, ho, S) * HEAD_SCALE.sep, -60, 120);
-      TT[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 0, H, ho, S) * HEAD_SCALE.thrust, 0, 1);
-      TR[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 1, H, ho, S) * HEAD_SCALE.recoil, 0, 200);
-      // One row a port, in `p`, `l`, `r` order. Clamped at zero because a
-      // negative push is a pull, and a pull is the neighbour's push seen from
-      // the other end — modelling it twice would let two bodies disagree about
-      // which way matter went.
-      const pusho = slot * PUSH_SLOTS;
-      for (let k = 0; k < PUSH_SLOTS; k++) {
-        PUSH[pusho + k] = clamp(
-          headAt(CHEM, g, PUSH_OUT, PUSH_BASE, k, H, ho, S) * HEAD_SCALE.push, 0, 1,
+      // One row a port, in `p`, `l`, `r` order, and signed: both directions a
+      // joint can bend are meaningful, unlike a push where a negative would be
+      // the neighbour's push seen from the other end. Clamped at a quarter
+      // turn, which is already a fold rather than a bend.
+      const ango = slot * ANGLE_SLOTS;
+      for (let k = 0; k < ANGLE_SLOTS; k++) {
+        ANGLE[ango + k] = clamp(
+          headAt(CHEM, g, ANGLE_OUT, ANGLE_BASE, k, H, ho, S) * HEAD_SCALE.angle,
+          -Math.PI / 2,
+          Math.PI / 2,
         );
       }
 
@@ -6203,33 +6288,6 @@ export class Sim {
       store.turn[slot] = out[o + 13];
       store.flockAlign[slot] = out[o + 14];
       store.flockSep[slot] = out[o + 15];
-      store.transportThrust[slot] = out[o + 16];
-      store.transportRecoil[slot] = out[o + 17];
-    }
-  }
-
-  /**
-   * The sender's own `transportRecoil` is the kick's size — it is the one
-   * doing the pumping — and the receiver's own `transportThrust` decides how
-   * much of that kick it keeps versus hands back down the wire. Both are
-   * heritable, so a lineage of strong, low-thrust pumps feeding a lineage of
-   * high-thrust receivers drifts a net's swimming stroke somewhere neither
-   * parent species swims alone.
-   */
-  private recoil(
-    from: { id: number },
-    to: { id: number },
-    amount: number,
-    lever?: RecoilLever,
-  ): void {
-    const A = this.agents.get(from.id);
-    const B = this.agents.get(to.id);
-    if (A && B && A.transportRecoil > 0) {
-      applyTransportRecoil(
-        A, B, amount, A.transportRecoil, this.w, this.h, B.transportThrust, lever,
-      );
-      this.tally.hops++;
-      this.tally.pumpImpulse += A.transportRecoil * amount;
     }
   }
 
@@ -6558,62 +6616,6 @@ export class Sim {
    * neighbour achieves nothing, which is the coupling that makes a pump need
    * somewhere to pump *to* — a muscle only works against a load.
    */
-  /** Reused by `pushCharges`; one push a port a body a frame, so this must not allocate. */
-  private readonly pushLever: RecoilLever = {
-    ax: 0, ay: 0, bx: 0, by: 0, invIA: 0, invIB: 0, amount: 0,
-  };
-
-  private pushCharges(params: Params, dt: number): void {
-    const rate = params.pushRate;
-    if (!(rate > 0) || dt <= 0) return;
-    const store = this.agentStore;
-    const PUSH = store.pushAll;
-    const LOCKED = store.locked;
-    const list = this.forceList();
-    const arm = Math.max(0, params.recoilLever);
-    const lever = this.pushLever;
-    lever.amount = arm;
-    for (let i = 0; i < list.length; i++) {
-      const a = list[i];
-      const s = a.slot;
-      if (LOCKED[s]) continue;
-      const po = s * PUSH_SLOTS;
-      const slots = a.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
-      for (let k = 0; k < slots.length; k++) {
-        const drive = PUSH[po + k];
-        if (!(drive > 0)) continue;
-        const wire = this.graph.wireAtSlot(a.id, slots[k]);
-        if (!wire) continue;
-        const peerRef = wire.a.id === a.id && wire.a.slot === slots[k] ? wire.b : wire.a;
-        const peer = this.agents.get(peerRef.id);
-        if (!peer || peer === a || LOCKED[peer.slot]) continue;
-        const spare = a.extra > 0 ? a.extra : 0;
-        const room = peer.energyCap - peer.extra;
-        if (!(spare > 0) || !(room > 0)) continue;
-        let give = rate * dt * drive * spare;
-        if (give > spare) give = spare;
-        if (give > room) give = room;
-        if (!(give > 1e-9)) continue;
-        a.extra -= give;
-        peer.extra += give;
-        this.tally.moved += give;
-        if (arm > 0) {
-          const rA = attachOffset(a, slots[k]);
-          const rB = attachOffset(peer, peerRef.slot);
-          lever.ax = rA.x;
-          lever.ay = rA.y;
-          lever.bx = rB.x;
-          lever.by = rB.y;
-          lever.invIA = 1 / Math.max(1e-4, momentOfInertia(a));
-          lever.invIB = 1 / Math.max(1e-4, momentOfInertia(peer));
-          this.recoil(a, peer, give, lever);
-        } else {
-          this.recoil(a, peer, give);
-        }
-      }
-    }
-  }
-
   /**
    * Whether the scent path still mints.
    *
@@ -6697,95 +6699,6 @@ export class Sim {
       settlePool(pool, recipients, this.energy, rw.midX, rw.midY);
     }
     if (done.length) this.rewrites = this.rewrites.filter((rw) => !done.includes(rw));
-  }
-}
-
-/**
- * Pumping energy along a wire shoves the two bodies apart along it.
- *
- * A body that ejects energy east recoils west, and the body that absorbs it is
- * pushed east, as an impulse, so a light Era twitches where a Con barely stirs.
- *
- * `thrust` is how much of the receiver's kick is withheld. At 0 the pair is
- * equal and opposite and the flock's centre of mass never moves. Above 0 the
- * pair keeps a net impulse of `thrust * gain * amount` pointing back down the
- * wire, *against* the direction the energy travelled — so a net with a standing
- * gradient, surplus at one end and shortage at the other, swims away from its
- * own supply. That is a momentum pump on purpose: it is the one force in here
- * that a net can only generate by moving energy through itself, which makes
- * transport something a body does rather than something that happens to it.
- * Nothing runs away, because fluid drag turns a sustained pump into a terminal
- * drift rather than an acceleration.
- *
- * What it buys, at the default gain, is a twitch on the *events*: a fresh
- * latch beside a charged body, a rescue, a pair refilling after a commute —
- * transfers of most of a unit, which nudge an Era about 56 px/s against
- * settled speeds around 50. It does not show up in steady state, and the
- * reason is the economy rather than the constant: with everyone nearly topped
- * up, a frame's transfer is about 4e-4, three orders of magnitude below a
- * one-off. Measured over a seeded 30 s soup, net openness at gains 0 / 6 / 12 /
- * 25 is 80 / 86 / 79 / 89 px, which is seed noise. Moving more energy per
- * frame is what would make the tissue breathe; raising this alone will not.
- * The same arithmetic bounds the swimming: a steady-state transfer of ~4e-4 a
- * frame at gain 20 and full thrust is under 1 px/s of drift, so the stroke
- * shows up on the events — a rescue, a refill after a commute — and on a net
- * held under a real gradient, not on a soup that is already topped up.
- */
-export interface RecoilLever {
-  /** Attachment of the impulse on each body, relative to its centre, already rotated. */
-  ax: number;
-  ay: number;
-  bx: number;
-  by: number;
-  invIA: number;
-  invIB: number;
-  /** 0 applies the impulse at the centre as it always was; 1 uses the full arm. */
-  amount: number;
-}
-
-export function applyTransportRecoil(
-  A: { x: number; y: number; vx: number; vy: number; omega?: number; mass: number; locked: boolean },
-  B: { x: number; y: number; vx: number; vy: number; omega?: number; mass: number; locked: boolean },
-  amount: number,
-  gain: number,
-  w: number,
-  h: number,
-  thrust = 0,
-  lever?: RecoilLever,
-): void {
-  if (A.locked || B.locked || !(amount > 0) || !(gain > 0)) return;
-  const d = wrapDeltaVec(A.x, A.y, B.x, B.y, w, h);
-  const dist = Math.hypot(d.x, d.y);
-  if (!(dist > 1e-6)) return;
-  const p = gain * amount;
-  // The sender's recoil is the whole impulse and never scales — thrust only
-  // decides how much of it the receiver cancels, so dialling thrust up changes
-  // where the pair ends up without changing how hard the pump kicks.
-  const catches = 1 - Math.min(1, Math.max(0, thrust));
-  const nx = d.x / dist;
-  const ny = d.y / dist;
-  const wA = 1 / Math.max(0.08, A.mass);
-  const wB = 1 / Math.max(0.08, B.mass);
-  A.vx -= nx * p * wA;
-  A.vy -= ny * p * wA;
-  B.vx += nx * p * catches * wB;
-  B.vy += ny * p * catches * wB;
-  /*
-   * And the angular half, when the caller knows which port the matter left by.
-   *
-   * `r x F` about each body's own centre, exactly as `chain.ts`'s
-   * `applyImpulse` does it for a rope. Without this a pump is a thruster
-   * bolted to the centre of mass however far off-axis its nozzle is, and a
-   * chain has no way to change its own pose at all — which is what a stroke
-   * is. An aux stem sits about nine units off the centreline and a principal
-   * sits on it, so this is what makes pushing out of `l` and out of `r`
-   * opposite bends and pushing out of `p` a pure shove.
-   */
-  if (!lever || !(lever.amount > 0)) return;
-  const k = Math.min(1, lever.amount) * p;
-  if (A.omega !== undefined) A.omega -= (lever.ax * ny - lever.ay * nx) * k * lever.invIA;
-  if (B.omega !== undefined) {
-    B.omega += (lever.bx * ny - lever.by * nx) * k * catches * lever.invIB;
   }
 }
 

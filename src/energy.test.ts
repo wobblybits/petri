@@ -719,7 +719,7 @@ describe('sim energy', () => {
     params.upkeep = 0;
     params.rewriteDuration = 0;
     params.snapRadius = 0;
-    params.transportRecoil = 0;
+    params.transportSpeed = 0;
     sim.energy.configure(params.energyCell, 0);
     const n = 12;
     const ids: number[] = [];

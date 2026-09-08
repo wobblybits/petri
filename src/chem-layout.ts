@@ -152,9 +152,6 @@ export const B_STATE = W_NET + STATE_DIMS * STATE_DIMS;
  */
 export const F_OUT = B_STATE + STATE_DIMS;
 export const F_BASE = F_OUT + 2 * STATE_DIMS;
-/** `P`, state -> transport. Two rows: thrust, then recoil. */
-export const P_OUT = F_BASE + 2;
-export const P_BASE = P_OUT + 2 * STATE_DIMS;
 /**
  * `L`, state -> locomotion. Two rows: cruise, then turn.
  *
@@ -164,7 +161,7 @@ export const P_BASE = P_OUT + 2 * STATE_DIMS;
  * relocating it. A body could not previously swim differently because it was
  * hungry, however far its lineage had drifted.
  */
-export const L_OUT = P_BASE + 2;
+export const L_OUT = F_BASE + 2;
 export const L_BASE = L_OUT + 2 * STATE_DIMS;
 
 /**
@@ -227,37 +224,46 @@ export const X_BASE = X_OUT + ROW_COUNT * STATE_DIMS;
 export const KS_BASE = X_BASE + ROW_COUNT;
 
 /**
- * `PUSH`, state -> directed transfer: how hard this body pumps matter out of
- * each of its three ports, one row per slot in `p`, `l`, `r` order.
+ * `ANGLE`, state -> joint rest angle: the relative angle this body's port would
+ * like to hold across each of its wires, one row per slot in `p`, `l`, `r`
+ * order.
  *
- * The head that makes locomotion a decision rather than a consequence. Every
- * other transfer in the sim is a rescue — `flowCharges` sends energy to
- * whichever neighbour is worst off — so a net can only pump toward its own
- * poverty, and the direction it swims is set by where its shortage happens to
- * be. That is why a phase-locked chain of clocked segments showed no phase in
- * its transport at all: the wave had nowhere to live.
+ * The one actuator. It replaces three half-actuators — a transport recoil, a
+ * momentum-splitting coefficient and a directed push — which were between them
+ * trying to change a net's *shape* by moving matter about and letting lever
+ * arms do the bending. This does it directly, and it is the only one of the
+ * four that can supply a restoring force.
  *
- * Per *port* rather than per neighbour, and that is the whole trick. A body
- * has no way to name the neighbour it wants, and should not — but it does have
- * a fixed anatomy, because a principal's axis points along the heading and an
- * aux's points against it. So "push out of `p`" and "push out of `l`" are
- * opposite directions in the body's own frame whatever it is wired to, and the
- * recoil (which is the same one `flowCharges` earns) turns that into thrust one
- * way or the other. Direction becomes anatomy times phenotype.
+ * The distinction that makes it necessary was measured rather than argued.
+ * `Sim.portTorques` aims each port's axis at its partner's stem *position*, and
+ * a smooth arc satisfies that for free: in a curved chain every port still
+ * points at the next body. So aiming constrains a body against its neighbours'
+ * positions, and curvature is exactly the deformation it cannot see. A rest
+ * angle constrains the angle between the two port *axes*, which is a function
+ * of the two bodies' orientations and of nothing else, and an arc does not
+ * satisfy it. That is the whole of the difference, and it is why a cantilevered
+ * chain deflected 51.2 where a ladder deflected 14.2 in `beam.exp.ts` — the
+ * ladder cannot curve without its two rails needing different arc lengths.
  *
- * Row-major by slot: `PUSH_OUT + slot * STATE_DIMS + d`, with its base at
- * `PUSH_BASE + slot`. Seeded to zero, so nothing pushes until a genome moves,
- * and gated behind `params.pushRate` besides.
+ * Angular, and it has to be. A wire is a distance constraint, so a net is a
+ * pin-jointed structure, and generic planar rigidity needs `|E| >= 2|V| - 3`
+ * against the `3|V|/2` wires a three-port alphabet can supply. Those meet only
+ * at `|V| <= 6`, so past six bodies no net of interaction combinators can be a
+ * rigid truss at all and a restoring force cannot come from the distance side.
+ * The angular side is the only side left.
  *
- * Not a simplex, unlike `X`. Expression divides one unit of chemical effort
- * between things a body must choose between; pushing out of two ports at once
- * is not a contradiction, it is a body squeezing itself from both ends. The
- * budget that bounds it is the tank.
+ * Zero is straight and zero is the seed, so a fresh net is a passive elastic
+ * backbone and nothing more. Driven off `h` it is a muscle in the literal
+ * sense: a thing that sets a rest angle.
+ *
+ * Past `X_OUT`, so the genome shader does not know about it — the arrangement
+ * `X` and `ks` already live under, and for the same reason: it is consumed on
+ * the host by a force pass rather than through a packed buffer.
  */
-export const PUSH_SLOTS = 3;
-export const PUSH_OUT = KS_BASE + CHEM_SPECIES;
-export const PUSH_BASE = PUSH_OUT + PUSH_SLOTS * STATE_DIMS;
-export const CHEM_LEN = PUSH_BASE + PUSH_SLOTS;
+export const ANGLE_SLOTS = 3;
+export const ANGLE_OUT = KS_BASE + CHEM_SPECIES;
+export const ANGLE_BASE = ANGLE_OUT + ANGLE_SLOTS * STATE_DIMS;
+export const CHEM_LEN = ANGLE_BASE + ANGLE_SLOTS;
 
 /**
  * The span of `chem` a body can change while it is alive: `Wx`, `Wh`, `Wn`
@@ -316,11 +322,14 @@ export const LEARN_STRIDE = LEARN_PREV_V + 1;
 export const HEAD_SCALE = {
   align: 8,
   sep: 60,
-  thrust: 1,
-  recoil: 100,
   cruise: 40,
   turn: 2,
-  push: 1,
+  /**
+   * Radians per gene unit. One, so a gene of 1 commands a radian of bend —
+   * already more than a joint should usually want, and the head is clamped
+   * well inside it.
+   */
+  angle: 1,
 } as const;
 
 /**

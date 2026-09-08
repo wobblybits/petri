@@ -1,5 +1,5 @@
 import { KIND_CON, KIND_DUP, KIND_ERA } from './native/solver.ts';
-import { CHEM_LEN, CHEM_SPECIES, CRITIC_LEN, PLASTIC_LEN, PUSH_SLOTS, ROW_COUNT, STATE_DIMS as STATE_W } from './chem-layout.ts';
+import { ANGLE_SLOTS, CHEM_LEN, CHEM_SPECIES, CRITIC_LEN, PLASTIC_LEN, ROW_COUNT, STATE_DIMS as STATE_W } from './chem-layout.ts';
 import type { AgentKind } from './agents.ts';
 
 /*
@@ -87,8 +87,6 @@ export class AgentStore {
   rescueTo!: Float64Array;
   /** How particulate this lineage's inheritance is. See `assortChance`. */
   assort!: Float64Array;
-  transportThrust!: Float64Array;
-  transportRecoil!: Float64Array;
   /**
    * Which wire holds each of this body's three ports, or -1 for a free one.
    * Three entries a body: `slot * 3 + 0/1/2` for principal, left, right.
@@ -190,8 +188,8 @@ export class AgentStore {
    * rounding error beside the passes that already run here.
    */
   expressAll!: Float64Array;
-  /** This frame's `PUSH` head, `PUSH_SLOTS` a body in `p`, `l`, `r` order. */
-  pushAll!: Float64Array;
+  /** This frame's `ANGLE` head, `ANGLE_SLOTS` a body in `p`, `l`, `r` order. */
+  angleAll!: Float64Array;
   /**
    * Last frame's need field, so the lagged relay reads one generation of its
    * neighbours rather than a mixture. The same discipline `hPrev` follows in
@@ -439,8 +437,6 @@ export class AgentStore {
     this.debtCap[slot] = 0;
     this.rescueTo[slot] = 0;
     this.assort[slot] = 0;
-    this.transportThrust[slot] = 0;
-    this.transportRecoil[slot] = 0;
     this.csHeading[slot] = 0;
     this.csCos[slot] = 0;
     this.csSin[slot] = 0;
@@ -462,7 +458,7 @@ export class AgentStore {
     this.emitAll.fill(0, slot * 4, slot * 4 + 4);
     this.tasteAll.fill(0, slot * 4, slot * 4 + 4);
     this.expressAll.fill(0, slot * ROW_COUNT, slot * ROW_COUNT + ROW_COUNT);
-    this.pushAll.fill(0, slot * PUSH_SLOTS, slot * PUSH_SLOTS + PUSH_SLOTS);
+    this.angleAll.fill(0, slot * ANGLE_SLOTS, slot * ANGLE_SLOTS + ANGLE_SLOTS);
     this.excreteAll.fill(0, slot * CHEM_SPECIES, slot * CHEM_SPECIES + CHEM_SPECIES);
   }
 
@@ -520,8 +516,6 @@ export class AgentStore {
     this.debtCap = growF64(this.debtCap);
     this.rescueTo = growF64(this.rescueTo);
     this.assort = growF64(this.assort);
-    this.transportThrust = growF64(this.transportThrust);
-    this.transportRecoil = growF64(this.transportRecoil);
     // Three a body, and -1 rather than 0 is the free marker, so a fresh tail
     // cannot read as "port held by wire 0".
     const newPortWire = new Int32Array(newCapacity * 3).fill(-1);
@@ -568,9 +562,9 @@ export class AgentStore {
     const newExpress = new Float64Array(newCapacity * ROW_COUNT);
     if (this.expressAll) newExpress.set(this.expressAll.subarray(0, live * ROW_COUNT));
     this.expressAll = newExpress;
-    const newPush = new Float64Array(newCapacity * PUSH_SLOTS);
-    if (this.pushAll) newPush.set(this.pushAll.subarray(0, live * PUSH_SLOTS));
-    this.pushAll = newPush;
+    const newAngle = new Float64Array(newCapacity * ANGLE_SLOTS);
+    if (this.angleAll) newAngle.set(this.angleAll.subarray(0, live * ANGLE_SLOTS));
+    this.angleAll = newAngle;
     const newExcrete = new Float64Array(newCapacity * CHEM_SPECIES);
     if (this.excreteAll) newExcrete.set(this.excreteAll.subarray(0, live * CHEM_SPECIES));
     this.excreteAll = newExcrete;

@@ -4,7 +4,7 @@
 //     h <- phi( Wx.x + Wh.h + Wn.mean(h of wired neighbours) + b )  in R^4
 //     emit  = normalise(relu( E.h + e0 ))                          in R^4
 //     taste = T.h + t0                                             in R^4
-//     [cruise,turn] = L.h + l0, and the same shape for F and P
+//     [cruise,turn] = L.h + l0, and the same shape for F
 //
 // A line-for-line port of `Sim.updateState`, and it has to stay one: the CPU
 // version is the reference, `genome-kernel.test.ts` mirrors this against it,
@@ -29,10 +29,8 @@ const W_NET: u32 = 84u;
 const B_STATE: u32 = 100u;
 const F_OUT: u32 = 104u;
 const F_BASE: u32 = 112u;
-const P_OUT: u32 = 114u;
-const P_BASE: u32 = 122u;
-const L_OUT: u32 = 124u;
-const L_BASE: u32 = 132u;
+const L_OUT: u32 = 114u;
+const L_BASE: u32 = 122u;
 
 // The learning row, from `chem-layout.ts`: learned deltas on the state
 // matrices, then their eligibility traces, then the critic, then last
@@ -44,8 +42,8 @@ const LEARN_CRITIC: u32 = 128u;
 const LEARN_PREV_V: u32 = 133u;
 const LEARN_STRIDE: u32 = 134u;
 
-// Floats written per body: h(4), emit(4), taste(4), then the six heads.
-const OUT_STRIDE: u32 = 18u;
+// Floats written per body: h(4), emit(4), taste(4), then the four heads.
+const OUT_STRIDE: u32 = 16u;
 
 struct GenomeParams {
   n: u32,
@@ -57,8 +55,6 @@ struct GenomeParams {
   sTurn: f32,
   sAlign: f32,
   sSep: f32,
-  sThrust: f32,
-  sRecoil: f32,
   energyCh: f32,
   // Learning. `learnRate` at zero is the whole thing switched off, and the
   // block at the end of `state` is then never entered.
@@ -71,6 +67,11 @@ struct GenomeParams {
   pad1: f32,
   pad2: f32,
   pad3: f32,
+  // Two more where `sThrust` and `sRecoil` were. The uniform stays 80 bytes so
+  // `UNIFORM_BYTES` and the buffer allocation do not move for a change that is
+  // about which heads exist.
+  pad4: f32,
+  pad5: f32,
 }
 
 @group(0) @binding(0) var<uniform> G: GenomeParams;
@@ -268,8 +269,6 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
   outv[o + 13u] = clampf(headAt(g, L_OUT, L_BASE, 1u, h) * G.sTurn, 0.0, 8.0);
   outv[o + 14u] = clampf(headAt(g, F_OUT, F_BASE, 0u, h) * G.sAlign, -8.0, 16.0);
   outv[o + 15u] = clampf(headAt(g, F_OUT, F_BASE, 1u, h) * G.sSep, -60.0, 120.0);
-  outv[o + 16u] = clampf(headAt(g, P_OUT, P_BASE, 0u, h) * G.sThrust, 0.0, 1.0);
-  outv[o + 17u] = clampf(headAt(g, P_OUT, P_BASE, 1u, h) * G.sRecoil, 0.0, 200.0);
 
   /*
    * What this body learns from the frame it has just had. A line-for-line

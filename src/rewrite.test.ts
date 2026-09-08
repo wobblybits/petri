@@ -558,8 +558,8 @@ describe('heritable traits', () => {
     const con = [...sim.agents.values()].find((a) => a.kind === 'con')!;
     dup.requestDecay = 0.55;
     con.requestDecay = 0.95;
-    dup.transportRecoil = 5;
-    con.transportRecoil = 180;
+    dup.conductSpeed = 5;
+    con.conductSpeed = 55;
 
     const before = new Set(sim.agents.keys());
     const rw = beginRewrite(dup, con, sim.graph, sim.agents, sim.w, sim.h, 1);
@@ -580,8 +580,8 @@ describe('heritable traits', () => {
     for (const c of children) {
       expect(c.requestDecay).toBeGreaterThanOrEqual(0.5);
       expect(c.requestDecay).toBeLessThanOrEqual(0.98);
-      expect(c.transportRecoil).toBeGreaterThanOrEqual(0);
-      expect(c.transportRecoil).toBeLessThanOrEqual(200);
+      expect(c.conductSpeed).toBeGreaterThanOrEqual(0);
+      expect(c.conductSpeed).toBeLessThanOrEqual(200);
     }
     // Neither parent's exact value survives untouched, and the four siblings
     // do not all land on the same blend of the same two numbers.
@@ -603,10 +603,10 @@ describe('heritable traits', () => {
     con.requestDecay = 0.95;
     dup.energyCap = EXTRA_CAP * 0.6;
     con.energyCap = EXTRA_CAP * 1.8;
-    dup.transportThrust = 0.05;
-    con.transportThrust = 0.95;
-    dup.transportRecoil = 10;
-    con.transportRecoil = 190;
+    dup.rescueTo = 0.05;
+    con.rescueTo = 0.95;
+    dup.conductSpeed = 10;
+    con.conductSpeed = 190;
 
     const before = new Set(sim.agents.keys());
     const rw = beginRewrite(dup, con, sim.graph, sim.agents, sim.w, sim.h, 1);

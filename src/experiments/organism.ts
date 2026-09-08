@@ -8,10 +8,9 @@ import {
   HEAD_SCALE,
   KS_BASE,
   L_BASE,
-  P_BASE,
-  PUSH_BASE,
-  PUSH_OUT,
-  PUSH_SLOTS,
+  ANGLE_BASE,
+  ANGLE_OUT,
+  ANGLE_SLOTS,
   ROW_EXCRETE,
   ROW_UPTAKE,
   STATE_DIMS,
@@ -266,9 +265,7 @@ export interface Dress {
   /** Emit bases per channel, in `CH` order. Normalised at read, so these are shares. */
   emit?: Partial<Record<keyof typeof CH, number>>;
   taste?: Partial<Record<keyof typeof CH, number>>;
-  /** Transport: how much of the sender's kick the receiver cancels, and the kick itself. */
-  thrust?: number;
-  recoil?: number;
+
   cruise?: number;
   turn?: number;
   align?: number;
@@ -301,15 +298,13 @@ export interface Dress {
   uptakeGain?: Partial<Record<keyof typeof CH, number[]>>;
   excreteGain?: Partial<Record<keyof typeof CH, number[]>>;
   /**
-   * The `PUSH` head: how hard this body pumps matter out of each port, as
-   * `[p, l, r]` bases and an optional matrix row per port off the state.
-   *
-   * A port is a direction in the body's own frame — the principal along the
-   * heading, an aux against it — so this is the gene that decides which way a
-   * segment thrusts, and driving it off `h` is what puts that on a clock.
+   * The `ANGLE` head: the rest angle this body wants to hold across each of
+   * its ports, as `[p, l, r]` bases and an optional matrix row per port off the
+   * state. Zero is straight. Driving it off `h` is what makes it a muscle
+   * rather than a shape.
    */
-  push?: number[];
-  pushGain?: number[][];
+  angle?: number[];
+  angleGain?: number[][];
   /** Per-body conduction speed, in hops a second. The need field's time constant. */
   conductSpeed?: number;
   /** `Wh`, row-major `[d][e]`: how much of last frame's `h_e` enters `v_d`. */
@@ -358,14 +353,14 @@ export function dress(a: Agent, d: Dress): void {
       for (let k = 0; k < STATE_DIMS; k++) c[X_OUT + r * STATE_DIMS + k] = row![k] ?? 0;
     }
   }
-  if (d.push) {
-    for (let k = 0; k < PUSH_SLOTS; k++) c[PUSH_BASE + k] = (d.push[k] ?? 0) / HEAD_SCALE.push;
+  if (d.angle) {
+    for (let k = 0; k < ANGLE_SLOTS; k++) c[ANGLE_BASE + k] = (d.angle[k] ?? 0) / HEAD_SCALE.angle;
   }
-  if (d.pushGain) {
-    for (let k = 0; k < PUSH_SLOTS; k++) {
-      const row = d.pushGain[k];
+  if (d.angleGain) {
+    for (let k = 0; k < ANGLE_SLOTS; k++) {
+      const row = d.angleGain[k];
       for (let j = 0; j < STATE_DIMS; j++) {
-        c[PUSH_OUT + k * STATE_DIMS + j] = (row?.[j] ?? 0) / HEAD_SCALE.push;
+        c[ANGLE_OUT + k * STATE_DIMS + j] = (row?.[j] ?? 0) / HEAD_SCALE.angle;
       }
     }
   }
@@ -379,8 +374,6 @@ export function dress(a: Agent, d: Dress): void {
     const h = a.h;
     for (let k = 0; k < STATE_DIMS; k++) h[k] = d.h[k] ?? 0;
   }
-  if (d.thrust !== undefined) c[P_BASE] = d.thrust / HEAD_SCALE.thrust;
-  if (d.recoil !== undefined) c[P_BASE + 1] = d.recoil / HEAD_SCALE.recoil;
   if (d.cruise !== undefined) c[L_BASE] = d.cruise / HEAD_SCALE.cruise;
   if (d.turn !== undefined) c[L_BASE + 1] = d.turn / HEAD_SCALE.turn;
   if (d.align !== undefined) c[F_BASE] = d.align / HEAD_SCALE.align;
@@ -506,7 +499,6 @@ export interface OrganismSample {
   /** Cumulative, from `Sim.tally`. */
   moved: number;
   hops: number;
-  pumpImpulse: number;
   segments: SegmentSample[];
 }
 
@@ -606,7 +598,6 @@ function sampleOrganism(
     wires,
     moved: sim.tally.moved,
     hops: sim.tally.hops,
-    pumpImpulse: sim.tally.pumpImpulse,
     segments,
   };
 }
@@ -716,17 +707,14 @@ export interface Gait {
   speed: number;
   /** |net displacement| / path length. 1 is a straight line, 0 is a stroke going nowhere. */
   straightness: number;
-  /** Energy that crossed a wire, transfers, and the momentum those transfers injected. */
+  /** Energy that crossed a wire, and the number of crossings. */
   moved: number;
   hops: number;
-  pumpImpulse: number;
   /**
    * Energy moved per unit distance travelled: this motor's cost of transport,
    * in the only currency the pond has. The number to compare gaits on.
    */
   costOfTransport: number;
-  /** Impulse that ended up as displacement rather than cancelling. */
-  pumpEfficiency: number;
   /** Path-weighted mean cosine between travel and the body's own forward. See `OrganismTrial`. */
   headward: number;
   /**
@@ -888,9 +876,7 @@ export function gaitOf(trial: OrganismTrial): Gait {
     straightness: trial.pathLen > 1e-9 ? dist / trial.pathLen : 0,
     moved,
     hops: last.hops - first.hops,
-    pumpImpulse: last.pumpImpulse - first.pumpImpulse,
     costOfTransport: dist > 1e-6 ? moved / dist : Infinity,
-    pumpEfficiency: last.pumpImpulse > 1e-9 ? dist / last.pumpImpulse : 0,
     headward: trial.headward,
     demandTilt: tiltCount > 0 ? tiltSum / tiltCount : 0,
     tankSwing: tankCount > 0 ? tankSwing / tankCount : 0,
@@ -914,7 +900,6 @@ export function gaitTable(rows: { label: string; gait: Gait }[]): string {
     ['lag', (g) => g.waveLag.toFixed(2)],
     ['moved', (g) => g.moved.toFixed(2)],
     ['hops', (g) => String(g.hops)],
-    ['impulse', (g) => g.pumpImpulse.toFixed(1)],
     ['cot', (g) => (Number.isFinite(g.costOfTransport) ? g.costOfTransport.toFixed(4) : '-')],
     ['bend', (g) => g.bendSwing.toFixed(2)],
     ['gap', (g) => g.gapSwing.toFixed(1)],

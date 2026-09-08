@@ -20,8 +20,8 @@ import { CHEM_LEN, HEAD_SCALE, LEARN_STRIDE } from '../chem-layout.ts';
  * has to know what a slot is except to index the genome.
  */
 
-/** Floats written per body: h(4), emit(4), taste(4), six heads. */
-const OUT_STRIDE = 18;
+/** Floats written per body: h(4), emit(4), taste(4), four heads. */
+const OUT_STRIDE = 16;
 /** 80 bytes: twenty f32/u32, and nothing here is a vec so nothing has to align. */
 const UNIFORM_BYTES = 80;
 /** Most learning rows read back in one frame. A frame that begins more
@@ -331,14 +331,12 @@ export class GenomeGpu {
       f32[5] = HEAD_SCALE.turn;
       f32[6] = HEAD_SCALE.align;
       f32[7] = HEAD_SCALE.sep;
-      f32[8] = HEAD_SCALE.thrust;
-      f32[9] = HEAD_SCALE.recoil;
-      f32[10] = energyCh;
-      f32[11] = learn.rate;
-      f32[12] = learn.critic;
-      f32[13] = learn.trace;
-      f32[14] = learn.discount;
-      f32[15] = learn.maxWeight;
+      f32[8] = energyCh;
+      f32[9] = learn.rate;
+      f32[10] = learn.critic;
+      f32[11] = learn.trace;
+      f32[12] = learn.discount;
+      f32[13] = learn.maxWeight;
       device.queue.writeBuffer(this.uniform!, 0, u);
       device.queue.writeBuffer(this.hPrev!, 0, this.hData.buffer, this.hData.byteOffset, n * 4 * 4);
       device.queue.writeBuffer(

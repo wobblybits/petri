@@ -434,8 +434,6 @@ function initGhostAgent(): void {
   a.energyCap = EXTRA_CAP;
   a.debtCap = EXTRA_FLOOR;
   a.rescueTo = 0.9;
-  a.transportThrust = 0;
-  a.transportRecoil = 0;
 }
 initGhostAgent();
 

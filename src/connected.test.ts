@@ -29,7 +29,7 @@ function frozenPassive(): Params {
   params.sense = 0;
   // The transport pump is a motor too: a pair pumping energy recoils along
   // the wire, which is the swimming stroke. A passive net has it off.
-  params.transportRecoil = 0;
+  params.transportSpeed = 0;
   return params;
 }
 

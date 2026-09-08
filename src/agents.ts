@@ -11,7 +11,6 @@ import {
   IN_DEMAND,
   IN_DIMS,
   IN_SENSE,
-  P_BASE,
   ROW_COUNT,
   STATE_DIMS,
   TASTE,
@@ -451,22 +450,6 @@ export class Agent {
     this.store.assort[this.slot] = v;
   }
 
-  /** How much of a kick this body's own pumps hand off instead of keeping. */
-  get transportThrust(): number {
-    return this.store.transportThrust[this.slot];
-  }
-  set transportThrust(v: number) {
-    this.store.transportThrust[this.slot] = v;
-  }
-
-  /** How hard this body recoils, per unit of energy it pumps to a neighbour. */
-  get transportRecoil(): number {
-    return this.store.transportRecoil[this.slot];
-  }
-  set transportRecoil(v: number) {
-    this.store.transportRecoil[this.slot] = v;
-  }
-
   /**
    * Memoized cosine and sine of `heading`, with the heading they were taken
    * at. Every port position in the sim goes through `stemOffsetInto`, which
@@ -554,8 +537,6 @@ export function cloneAgent(a: Agent): Agent {
   clone.debtCap = a.debtCap;
   clone.rescueTo = a.rescueTo;
   clone.assort = a.assort;
-  clone.transportThrust = a.transportThrust;
-  clone.transportRecoil = a.transportRecoil;
   clone.csHeading = a.csHeading;
   clone.csCos = a.csCos;
   clone.csSin = a.csSin;
@@ -763,11 +744,9 @@ export {
   LEARN_TRACE,
   PLASTIC_BASE,
   PLASTIC_LEN,
-  P_BASE,
-  P_OUT,
-  PUSH_BASE,
-  PUSH_OUT,
-  PUSH_SLOTS,
+  ANGLE_BASE,
+  ANGLE_OUT,
+  ANGLE_SLOTS,
   KS_BASE,
   ROW_COUNT,
   ROW_EXCRETE,
@@ -1075,8 +1054,6 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
   // pumping are exactly the constants they used to be.
   c[F_BASE] = params.flockAlign / HEAD_SCALE.align;
   c[F_BASE + 1] = params.flockSep / HEAD_SCALE.sep;
-  c[P_BASE] = params.transportThrust / HEAD_SCALE.thrust;
-  c[P_BASE + 1] = params.transportRecoil / HEAD_SCALE.recoil;
   c[L_BASE] = params.stepSpeed / HEAD_SCALE.cruise;
   c[L_BASE + 1] = params.turnRate / HEAD_SCALE.turn;
   if (kind === 'con') {
@@ -1261,8 +1238,6 @@ export function createAgent(
   agent.debtCap = params.debtCap;
   agent.rescueTo = params.rescueTo;
   agent.assort = params.assortBias;
-  agent.transportThrust = params.transportThrust;
-  agent.transportRecoil = params.transportRecoil;
   return agent;
 }
 
