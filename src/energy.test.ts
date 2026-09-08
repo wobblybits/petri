@@ -259,7 +259,7 @@ describe('harvest slots', () => {
 
     const metered = new EnergyGrid(10, 1);
     const a2 = body(1, 2, 2);
-    harvestSlots([a2], metered, { cap: 0, ks: 0.25 });
+    harvestSlots([a2], metered, { cap: 0, ks: 0.25, table: false });
 
     expect(a2.extra).toBe(a1.extra);
     expect(metered.getAt(2, 2)).toBe(plain.getAt(2, 2));
@@ -272,7 +272,7 @@ describe('harvest slots', () => {
     const a = body(1, 2, 2);
     const b = body(2, 3, 2);
     // A rate well under the cell's stock, so neither can drain it in a frame.
-    harvestSlots([a, b], grid, { cap: 0.2, ks: 0.25 });
+    harvestSlots([a, b], grid, { cap: 0.2, ks: 0.25, table: false });
     expect(a.extra).toBeGreaterThan(0);
     expect(b.extra).toBeGreaterThan(0);
     // Drawn concurrently, so they get the same rate; order stops mattering
@@ -284,14 +284,14 @@ describe('harvest slots', () => {
   it('caps a rich cell at the rate and a poor one below it', () => {
     const rich = new EnergyGrid(10, 4);
     const r = body(1, 2, 2);
-    harvestSlots([r], rich, { cap: 0.2, ks: 0.25 });
+    harvestSlots([r], rich, { cap: 0.2, ks: 0.25, table: false });
     // Saturated: near vmax*dt, and nowhere near the tank's room.
     expect(r.extra).toBeGreaterThan(0.18);
     expect(r.extra).toBeLessThanOrEqual(0.2 + 1e-9);
 
     const poor = new EnergyGrid(10, 0.05);
     const p = body(1, 2, 2);
-    harvestSlots([p], poor, { cap: 0.2, ks: 0.25 });
+    harvestSlots([p], poor, { cap: 0.2, ks: 0.25, table: false });
     // Below half-saturation, so the rate is well under vmax — and this is the
     // half of Monod that makes a low-Ks scavenger a viable different strategy
     // rather than a strictly worse grazer.

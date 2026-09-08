@@ -59,7 +59,7 @@ import { queryHit, queryDiscHit, SLOP, type Hit } from './collide.ts';
 import { closestTOnSegment, segmentsIntersect, WIRE_RADIUS, wireBowBudget, bounceOffDisk } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
-import { CH, FERTILISE_CH, FIELD_CELL, FIELD_CELLS, Fields, worldBoundRadius } from './fields.ts';
+import { CH, CHANNELS, FERTILISE_CH, FIELD_CELL, FIELD_CELLS, Fields, worldBoundRadius } from './fields.ts';
 import { Graph, ropeIsLive, wrapPos, type Wire } from './graph.ts';
 import type { Params } from './params.ts';
 import {
@@ -87,6 +87,8 @@ import {
   rewriteCost,
   rewriteShareOf,
   PENDING_STRIDE,
+  HARVEST_GOT,
+  HARVEST_STRIDE,
   rewriteYield,
   seedRequest,
   settlePool,
@@ -982,6 +984,7 @@ export class Sim {
         // `t` is the frame's clamped dt — see `beginFrame`.
         cap: params.uptakeVmax * t,
         ks: params.uptakeKs,
+        table: params.excreteRate > 0,
       });
     }
     Sim.phase('harvestSlots');
@@ -1033,6 +1036,7 @@ export class Sim {
      * farm itself into debt, which would turn the most useful thing in the
      * economy into a way to die.
      */
+    this.refreshExpression(params);
     this.runExcretion(params, t);
     Sim.phase('excrete');
     if (params.farmRate > 0) {
@@ -3178,7 +3182,11 @@ export class Sim {
      * CPU work whichever side the field lives on; what crosses is the answer.
      */
     const plan = this.harvestPlan;
-    plan.build(this.agents.values(), this.agentStore, this.energy);
+    plan.build(this.agents.values(), this.agentStore, this.energy, {
+      cap: params.uptakeVmax * dt,
+      ks: params.uptakeKs,
+      table: params.excreteRate > 0,
+    });
     Sim.phase('gpu:plan');
     // Three ports a body, plus whatever died, farmed, spilled or was refunded
     // this frame and had nowhere to put it.
@@ -3343,8 +3351,11 @@ export class Sim {
         blk[bo + 4] = src[so + 4];
         blk[bo + 5] = src[so + 5];
       }
+      // `HARVEST_STRIDE` floats an entry now, not one: the reaction table's
+      // rates and affinities are per body and cannot be uniforms.
       const rooms = fieldGpu.roomData;
-      for (let e = 0; e < plan.nEntries; e++) rooms[e] = plan.rooms[e];
+      const span = plan.nEntries * HARVEST_STRIDE;
+      for (let e = 0; e < span; e++) rooms[e] = plan.rooms[e];
       this.harvestPending = true;
     }
 
@@ -5279,10 +5290,14 @@ export class Sim {
     const CAP = store.energyCap;
     const IDS = store.id;
     for (let e = 0; e < plan.nEntries; e++) {
-      const g = got[e];
-      if (!(g > 0)) continue;
       const slot = plan.slots[e];
       if (IDS[slot] !== plan.ids[e]) continue;
+      // One row per entry, one `got` per species: unmetered, only the ground's
+      // is ever non-zero, and the sum is what it always was.
+      const ro = e * HARVEST_STRIDE + HARVEST_GOT;
+      let g = 0;
+      for (let c = 0; c < CHANNELS; c++) g += got[ro + c];
+      if (!(g > 0)) continue;
       const cap = CAP[slot];
       const next = EXTRA[slot] + g;
       EXTRA[slot] = next > cap ? cap : next;
@@ -6301,6 +6316,33 @@ export class Sim {
   private readonly excreteScratch = new Float64Array(CHEM_SPECIES);
 
   /**
+   * Materialise every body's expression vector for the frame.
+   *
+   * Its own pass because two things read it — excretion here, and the uptake
+   * rates the harvest plan packs — and they are gated on different dials. It
+   * was computed inside `runExcretion` at first, which meant a pond with
+   * metered uptake and no excretion read an all-zero expression and took
+   * nothing: the harvest's per-species `vmax` is the expression scaled, so
+   * zero expression is a body that cannot eat.
+   *
+   * Computed on the host on both field paths — it is a pure function of `chem`
+   * and `h`, and `unpackGenome` brings `h` back every frame, so the genome
+   * shader needs no new output slot and no new binding for any of the reaction
+   * table. That pass is already at eight storage buffers of a guaranteed eight.
+   */
+  private refreshExpression(params: Params): void {
+    if (!(params.excreteRate > 0) && !(params.uptakeVmax > 0)) return;
+    const store = this.agentStore;
+    const CHEM = store.chemAll;
+    const H = store.hAll;
+    const EX = store.expressAll;
+    for (const a of this.agents.values()) {
+      const s = a.slot;
+      expressVector(CHEM, s * CHEM_LEN, H, s * STATE_DIMS, EX, s * ROW_COUNT);
+    }
+  }
+
+  /**
    * The reaction table's excretion rows: tank -> field, conserved.
    *
    * Mass action on the tank, which is where "absolute honesty" comes from.
@@ -6323,22 +6365,12 @@ export class Sim {
   private runExcretion(params: Params, t: number): void {
     if (!(params.excreteRate > 0)) return;
     const store = this.agentStore;
-    const CHEM = store.chemAll;
-    const H = store.hAll;
     const EX = store.expressAll;
     const OUT = store.excreteAll;
     const w = this.excreteScratch;
     const rate = params.excreteRate * t * ROW_COUNT;
     for (const a of this.agents.values()) {
       const s = a.slot;
-      /*
-       * Expression is computed here on both field paths. It is a pure function
-       * of `chem` and `h`, and `unpackGenome` brings `h` back to the host
-       * every frame, so the genome shader needs no new output slot and no new
-       * binding for any of this — which is what keeps the reaction table off a
-       * pass that is already at eight storage buffers.
-       */
-      expressVector(CHEM, s * CHEM_LEN, H, s * STATE_DIMS, EX, s * ROW_COUNT);
       const eo = s * ROW_COUNT + ROW_EXCRETE;
       const oo = s * CHEM_SPECIES;
       const have = a.extra > 0 ? a.extra : 0;

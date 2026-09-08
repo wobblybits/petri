@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { bareBody, expressVector, seedChem, uptakeKsOf } from './agents.ts';
-import { CHEM_LEN, CHEM_SPECIES, ROW_COUNT, ROW_EXCRETE, ROW_UPTAKE, STATE_DIMS, X_BASE, X_OUT } from './chem-layout.ts';
+import { CHEM_LEN, CHEM_SPECIES, KS_BASE, ROW_COUNT, ROW_EXCRETE, ROW_UPTAKE, STATE_DIMS, X_BASE, X_OUT } from './chem-layout.ts';
+import { REWRITE_SHARE, rewriteCost } from './energy.ts';
 import { CH, CHANNELS } from './fields.ts';
 import { defaultParams, type Params } from './params.ts';
 import { loadPreset } from './presets.ts';
@@ -34,17 +35,32 @@ function chemistryParams(): Params {
   p.decay = 0;
   p.diffuse = 0;
   p.upkeep = 0;
+  // Bodies conservative, so a commute is a transfer and not a mint. See
+  // `matter` and `energy.test.ts`'s conservation suite.
+  p.bodyValue = REWRITE_SHARE;
   return p;
 }
 
-/** Everything in the pond: bodies' stock, and every species in the field. */
-function matter(sim: Sim): number {
+/**
+ * Everything in the pond: what bodies are made of and hold, what is in
+ * escrow or in flight, and every species in the field.
+ *
+ * A body's *existence* has to be in here, not just its stock. Deaths and
+ * rewrites move `bodyValue` between the two, and a total that counted only
+ * `extra` would read every commute as matter appearing — which is exactly what
+ * it read, at four per cent over three simulated seconds, before this counted
+ * bodies. Pair it with `bodyValue = REWRITE_SHARE`, which is what makes those
+ * transfers conservative in the first place.
+ */
+function matter(sim: Sim, bodyValue: number): number {
   let held = 0;
-  for (const a of sim.agents.values()) held += a.extra;
+  for (const a of sim.agents.values()) held += bodyValue + a.extra;
+  let inFlight = 0;
+  for (const rw of sim.rewrites) inFlight += rewriteCost(rw.rule);
   let field = 0;
   const d = sim.fields.data;
   for (let k = 0; k < d.length; k++) field += d[k];
-  return held + field;
+  return held + inFlight + sim.escrowTotal() + field;
 }
 
 describe('expression', () => {
@@ -134,11 +150,11 @@ describe('excretion', () => {
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', p);
     for (const a of sim.agents.values()) a.extra = 1;
-    const before = matter(sim);
+    const before = matter(sim, p.bodyValue);
     for (let i = 0; i < 120; i++) sim.step(1 / 60, p);
     // The scent path multiplies by `params.deposit`, which is five, and takes
     // nothing out of any tank. Matter grows, and that is today's pond.
-    expect(matter(sim)).toBeGreaterThan(before);
+    expect(matter(sim, p.bodyValue)).toBeGreaterThan(before);
   });
 
   it('conserves what it moves, and stops the mint', () => {
@@ -148,9 +164,9 @@ describe('excretion', () => {
     loadPreset(sim, 'soup', p);
     // Bodies need something to excrete, and a barren pond gives them none.
     for (const a of sim.agents.values()) a.extra = 1;
-    const before = matter(sim);
+    const before = matter(sim, p.bodyValue);
     for (let i = 0; i < 120; i++) sim.step(1 / 60, p);
-    const after = matter(sim);
+    const after = matter(sim, p.bodyValue);
     // Exactly, not nearly: with the dish off there is nothing but the bodies'
     // own reactions moving anything, and they are conservative by construction.
     expect(after / before, `matter went ${before} -> ${after}`).toBeCloseTo(1, 6);
@@ -204,5 +220,112 @@ describe('excretion', () => {
     expect(out(poor)).toBe(0);
     // And never into debt: what it spent is what it had, at most.
     expect(rich.extra).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('uptake', () => {
+  /** Standing stock of one species across the whole field. */
+  const total = (sim: Sim, ch: number): number => {
+    const d = sim.fields.data;
+    let s = 0;
+    for (let k = ch; k < d.length; k += CHANNELS) s += d[k];
+    return s;
+  };
+
+  it('eats only the ground until excretion stops the minting', () => {
+    /*
+     * The coupling that matters, and the reason `UptakeKinetics.table` is not
+     * simply `uptakeVmax > 0`.
+     *
+     * Metering uptake on all four species while the scent path still mints is
+     * a fountain: `params.deposit` puts five times a body's voice into three
+     * channels out of nothing, and metered uptake then lets it eat that back.
+     * Measured before this was coupled, it ran the pond at twice the rate cap
+     * and filled every tank.
+     */
+    const p = chemistryParams();
+    p.ambientEnergy = 0;
+    p.uptakeVmax = 0.6;
+    p.diffuse = 0.6;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    for (const a of sim.agents.values()) a.extra = 0;
+    for (let i = 0; i < 120; i++) sim.step(1 / 60, p);
+    // Scent was minted, so there is plenty to eat if anything is allowed to.
+    expect(total(sim, CH.conP)).toBeGreaterThan(0);
+    // And nothing did: with no ground in the dish, nobody ate at all.
+    expect(sim.totalFree()).toBeCloseTo(0, 6);
+  });
+
+  it('closes the loop once the table is on', () => {
+    // One body's excretion is another's food, which is the whole point of four
+    // species rather than one substance and three decorations.
+    const p = chemistryParams();
+    p.excreteRate = 0.5;
+    p.uptakeVmax = 1.5;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    for (const a of sim.agents.values()) a.extra = 1;
+    for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
+    // Something was excreted onto a signal species and something took it back.
+    expect(total(sim, CH.conP)).toBeGreaterThan(0);
+    const store = sim.agentStore;
+    let excreted = 0;
+    for (const a of sim.agents.values()) {
+      for (let c = 0; c < CHEM_SPECIES; c++) excreted += store.excreteAll[a.slot * CHEM_SPECIES + c];
+    }
+    expect(excreted).toBeGreaterThan(0);
+    // Held stock is not simply draining away: what left tanks is coming back.
+    const held = [...sim.agents.values()].reduce((n, a) => n + a.extra, 0);
+    expect(held).toBeGreaterThan(0);
+  });
+
+  it('conserves with the whole table running', () => {
+    const p = chemistryParams();
+    p.excreteRate = 0.5;
+    p.uptakeVmax = 1.5;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    for (const a of sim.agents.values()) a.extra = 1;
+    const before = matter(sim, p.bodyValue);
+    for (let i = 0; i < 180; i++) sim.step(1 / 60, p);
+    const after = matter(sim, p.bodyValue);
+    expect(after / before, `matter went ${before} -> ${after}`).toBeCloseTo(1, 6);
+  });
+
+  it('gives a fast grazer and a scavenger different answers', () => {
+    /*
+     * The non-dominating pair, which is what §4 says the diversity comes from.
+     * Same expression, same ground, different affinity: on rich ground the
+     * high-affinity gene barely helps, and on poor ground it is most of the
+     * difference. Neither body wins everywhere, which is the property.
+     */
+    const p = chemistryParams();
+    p.excreteRate = 0;
+    p.uptakeVmax = 1.5;
+    p.uptakeKs = 0.5;
+
+    const run = (ambient: number, ksGene: number): number => {
+      const sim = new Sim(1600, 1200, 128);
+      const q = { ...p, ambientEnergy: ambient };
+      loadPreset(sim, 'soup', q);
+      const a = [...sim.agents.values()][0];
+      a.extra = 0;
+      // `KS_BASE + CH.energy`, not `+ 0`: off the reaction table only the
+      // ground's row is metered, so the affinity that matters is the ground's.
+      a.chem[KS_BASE + CH.energy] = ksGene;
+      for (let i = 0; i < 30; i++) sim.step(1 / 60, q);
+      return a.extra;
+    };
+
+    const richGeneralist = run(2, 1);
+    const richSpecialist = run(2, 0.05);
+    const poorGeneralist = run(0.02, 1);
+    const poorSpecialist = run(0.02, 0.05);
+    // A better transporter is worth little where there is plenty...
+    const richEdge = richSpecialist / Math.max(richGeneralist, 1e-9);
+    // ...and a great deal where there is not.
+    const poorEdge = poorSpecialist / Math.max(poorGeneralist, 1e-9);
+    expect(poorEdge).toBeGreaterThan(richEdge * 1.5);
   });
 });

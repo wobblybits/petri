@@ -1,5 +1,6 @@
 import type { Agent, AgentKind } from './agents.ts';
 import { CH, CHANNELS, FIELD_CELL, type Fields } from './fields.ts';
+import { CHEM_LEN, ROW_COUNT, ROW_UPTAKE, uptakeKsOf } from './chem-layout.ts';
 import type { AgentStore } from './agent-store.ts';
 import { KIND_ERA } from './native/solver.ts';
 import type { Rule } from './rewrite.ts';
@@ -626,7 +627,12 @@ export class EnergyGrid {
    * what it means.
    */
   density(key: number): number {
-    if (this.inexhaustible) return this.ambient;
+    return this.densityOf(key, CH.energy);
+  }
+
+  /** The same for any species. See `density`. */
+  densityOf(key: number, ch: number): number {
+    if (this.inexhaustible) return ch === CH.energy ? this.ambient : 0;
     const f = this.fields;
     if (f) {
       const i = Math.floor(key / CELL_KEY_WIDTH) - CELL_KEY_OFFSET;
@@ -642,16 +648,29 @@ export class EnergyGrid {
       const d = f.data;
       let sum = 0;
       for (let y = 0; y < wj; y++) {
-        let k = ((fj + y) * f.cols + fi) * CHANNELS + CH.energy;
+        let k = ((fj + y) * f.cols + fi) * CHANNELS + ch;
         for (let x = 0; x < wi; x++, k += CHANNELS) sum += d[k];
       }
       return sum / cells;
     }
-    return this.cells.has(key) ? (this.cells.get(key) ?? 0) : this.ambient;
+    return ch === CH.energy && this.cells.has(key)
+      ? (this.cells.get(key) ?? 0)
+      : ch === CH.energy
+        ? this.ambient
+        : 0;
   }
 
-  /** Take up to `n` from a cell and return how much was taken. */
+  /** Take up to `n` of the ground from a cell, and return how much was taken. */
   take(key: number, n: number): number {
+    return this.takeFrom(key, CH.energy, n);
+  }
+
+  /**
+   * The same for any species: the reaction table lets a body eat what another
+   * excreted, which is what makes four species a network rather than a
+   * substance and three decorations.
+   */
+  takeFrom(key: number, ch: number, n: number): number {
     let want = Math.max(0, n);
     if (this.inexhaustible) return Math.min(this.ambient, want);
     const f = this.fields;
@@ -674,7 +693,7 @@ export class EnergyGrid {
       const d = f.data;
       let got = 0;
       for (let y = 0; y < wj && want > FLOW_EPS; y++) {
-        let k = ((fj + y) * f.cols + fi) * CHANNELS + CH.energy;
+        let k = ((fj + y) * f.cols + fi) * CHANNELS + ch;
         for (let x = 0; x < wi && want > FLOW_EPS; x++, k += CHANNELS) {
           const have = d[k];
           if (have <= 0) continue;
@@ -686,6 +705,8 @@ export class EnergyGrid {
       }
       return got;
     }
+    // The map-backed grid models only the ground.
+    if (ch !== CH.energy) return 0;
     const have = this.cells.has(key) ? (this.cells.get(key) ?? 0) : this.ambient;
     const got = Math.min(have, want);
     this.cells.set(key, have - got);
@@ -918,7 +939,10 @@ export class HarvestPlan {
    * energy paid into whichever body inherited the slot.
    */
   ids = new Int32Array(0);
-  /** Room in that body's tank when the frame's grazing began. */
+  /**
+   * `HARVEST_STRIDE` floats an entry: the room in that body's tank, then its
+   * per-species uptake rate and affinity. See the constants above.
+   */
   rooms = new Float64Array(0);
   /** The energy-cell key per block, which the CPU runner needs and the GPU does not. */
   keys = new Float64Array(0);
@@ -947,8 +971,15 @@ export class HarvestPlan {
   private touched = new Int32Array(0);
   private readonly rect = new Int32Array(4);
 
-  build(agents: Iterable<Agent>, store: AgentStore, grid: EnergyGrid): void {
+  /**
+   * `kinetics` present means the reaction table's uptake rows are live and
+   * every entry carries its own rates; absent means the single-species
+   * take-what-fits path, which is what the pond runs by default.
+   */
+  build(agents: Iterable<Agent>, store: AgentStore, grid: EnergyGrid, kinetics?: UptakeKinetics): void {
     const LOCKED = store.locked;
+    const EXPRESS = store.expressAll;
+    const CHEM = store.chemAll;
     const EXTRA = store.extra;
     const CAP = store.energyCap;
     const X = store.x;
@@ -991,7 +1022,7 @@ export class HarvestPlan {
     if (this.slots.length < entries) {
       this.slots = new Int32Array(entries * 2);
       this.ids = new Int32Array(entries * 2);
-      this.rooms = new Float64Array(entries * 2);
+      this.rooms = new Float64Array(entries * 2 * HARVEST_STRIDE);
     }
     const B = this.blocks;
     const slots = this.slots;
@@ -1065,7 +1096,24 @@ export class HarvestPlan {
       for (let e = first; e < k; e++) {
         const sl = slots[e];
         ids[e] = ID[sl];
-        rooms[e] = CAP[sl] - EXTRA[sl];
+        const ro = e * HARVEST_STRIDE;
+        rooms[ro + HARVEST_ROOM] = CAP[sl] - EXTRA[sl];
+        if (kinetics) {
+          /*
+           * Per body, not per pond. `vmax` is `uptakeVmax` scaled by what the
+           * body is expressing on that species' uptake row — `ROW_COUNT` in
+           * the factor so even expression, which is what a seeded genome has,
+           * runs at exactly the global. `ks` is the body's own affinity gene.
+           */
+          const xo = sl * ROW_COUNT + ROW_UPTAKE;
+          const g = sl * CHEM_LEN;
+          for (let c = 0; c < CHANNELS; c++) {
+            // Off the table, only the ground has a rate; see `UptakeKinetics`.
+            const on = kinetics.table || c === CH.energy;
+            rooms[ro + HARVEST_VMAX + c] = on ? kinetics.cap * ROW_COUNT * EXPRESS[xo + c] : 0;
+            rooms[ro + HARVEST_KS + c] = uptakeKsOf(CHEM, g, c, kinetics.ks);
+          }
+        }
       }
       this.nEntries = k;
     }
@@ -1103,7 +1151,47 @@ export function uptakeRate(density: number, cap: number, ks: number): number {
 export interface UptakeKinetics {
   cap: number;
   ks: number;
+  /**
+   * Whether the whole reaction table is live, or only the ground's row.
+   *
+   * These two are coupled and must not be set independently. Metered uptake of
+   * all four species while the scent path still *mints* is a matter fountain:
+   * a body deposits five times its voice into three channels out of nothing —
+   * that is what `params.deposit` is — and then eats it back. Measured, that
+   * ran the pond at twice the rate cap and filled every tank.
+   *
+   * So the species rows follow `excreteRate`, which is the dial that stops the
+   * minting, and not `uptakeVmax`, which only says uptake is a rate. Below
+   * that, uptake is metered on the ground alone, which is exactly what phase 1
+   * shipped.
+   */
+  table: boolean;
 }
+
+/**
+ * One entry's row in the harvest's flow buffer.
+ *
+ * The buffer used to be one float an entry — the room in that body's tank —
+ * because uptake was one species taken to saturation. The reaction table makes
+ * it four species at four rates against four affinities, and those are
+ * per-body: `vmax` comes off the expression head and `ks` off a gene, so they
+ * cannot be uniforms the way phase 1's globals were.
+ *
+ * Widened rather than given a buffer of its own, because `field.wgsl` binds
+ * eight storage buffers of a guaranteed eight and has none to spare. A wider
+ * stride costs memory and no bindings, which is the trade this file has to
+ * keep making.
+ *
+ * `got` overwrites `vmax` on the way back out: the rate is consumed before
+ * anything is written, the two are the same shape, and a separate output span
+ * would double the buffer to carry four floats that are only read once.
+ * Derived on both sides from here; `field-kernel.test.ts` pins them together.
+ */
+export const HARVEST_ROOM = 0;
+export const HARVEST_VMAX = 1;
+export const HARVEST_GOT = HARVEST_VMAX;
+export const HARVEST_KS = HARVEST_VMAX + CHANNELS;
+export const HARVEST_STRIDE = HARVEST_KS + CHANNELS;
 
 /**
  * Run a plan against the CPU field, crediting as it goes.
@@ -1125,32 +1213,77 @@ export function runHarvestPlan(
   const CAP = store.energyCap;
   const B = plan.blocks;
   const metered = uptake !== undefined && uptake.cap > 0;
+  const R = plan.rooms;
   for (let b = 0; b < plan.nBlocks; b++) {
     const first = B[b * 6 + 4];
     const count = B[b * 6 + 5];
     const key = plan.keys[b];
+    if (!metered) {
+      /*
+       * The single-species path: take what fits, from the ground, to
+       * saturation. What the pond runs by default, and bit for bit what it ran
+       * before any of the reaction table existed.
+       */
+      for (let e = 0; e < count; e++) {
+        const s = plan.slots[first + e];
+        const cap = CAP[s];
+        const room = cap - EXTRA[s];
+        if (room <= EXTRA_FULL_EPS) continue;
+        const got = grid.take(key, room);
+        if (got <= 0) break;
+        EXTRA[s] = Math.min(cap, EXTRA[s] + got);
+      }
+      continue;
+    }
     /*
-     * One rate for the block, read before anybody eats.
+     * The reaction table's four uptake rows.
      *
-     * Before, so that the order bodies are visited in cannot change what any
-     * of them is allowed to draw — which is half of what §4 is fixing. The
-     * other half is that the draw is now bounded by a rate, so a block that
-     * cannot satisfy everyone shares out by exhaustion rather than by who was
-     * born first.
+     * Densities are read once for the block, before anybody eats, so the order
+     * bodies are visited in cannot change what any of them is allowed to draw
+     * — which is half of what the plan's §4 is fixing. The other half is that
+     * every draw is bounded by a rate, so a block that cannot satisfy everyone
+     * shares out by exhaustion rather than by who was born first.
+     *
+     * One tank, four species competing for it: `left` is the room remaining
+     * after the species already taken, so a body that fills on the first thing
+     * it finds does not also take the rest. Species are visited in index
+     * order, which is arbitrary and has to be identical here and in the
+     * shader.
      */
-    const rate = metered ? uptakeRate(grid.density(key), uptake.cap, uptake.ks) : Infinity;
+    const lo = uptake.table ? 0 : CH.energy;
+    const hi = uptake.table ? CHANNELS : CH.energy + 1;
+    for (let c = lo; c < hi; c++) SPECIES_DENSITY[c] = grid.densityOf(key, c);
     for (let e = 0; e < count; e++) {
       const s = plan.slots[first + e];
       const cap = CAP[s];
-      const room = cap - EXTRA[s];
-      if (room <= EXTRA_FULL_EPS) continue;
-      const want = rate < room ? rate : room;
-      const got = grid.take(key, want);
-      if (got <= 0) break;
-      EXTRA[s] = Math.min(cap, EXTRA[s] + got);
+      let left = cap - EXTRA[s];
+      if (left <= EXTRA_FULL_EPS) continue;
+      const ro = (first + e) * HARVEST_STRIDE;
+      for (let c = lo; c < hi && left > EXTRA_FULL_EPS; c++) {
+        /*
+         * Monod inline rather than through `uptakeRate`, because the two mean
+         * opposite things by a rate of zero. There, `cap <= 0` is the sentinel
+         * for *unmetered* — take what fits — which is what the whole
+         * single-species path above rests on. Here a `vmax` of zero is a body
+         * expressing nothing on that row, and it must take nothing.
+         */
+        const vmax = R[ro + HARVEST_VMAX + c];
+        const density = SPECIES_DENSITY[c];
+        if (!(vmax > 0) || !(density > 0)) continue;
+        const rate = (vmax * density) / (R[ro + HARVEST_KS + c] + density);
+        if (!(rate > 0)) continue;
+        const want = rate < left ? rate : left;
+        const got = grid.takeFrom(key, c, want);
+        if (got <= 0) continue;
+        EXTRA[s] = Math.min(cap, EXTRA[s] + got);
+        left -= got;
+      }
     }
   }
 }
+
+/** Block densities, one per species, reused across blocks. */
+const SPECIES_DENSITY = new Float64Array(CHANNELS);
 
 /**
  * Store-based twin of `harvestSlots`, for sim.ts's per-frame hot path.
@@ -1171,7 +1304,7 @@ export function harvestSlotsFast(
   plan: HarvestPlan = new HarvestPlan(),
   uptake?: UptakeKinetics,
 ): void {
-  plan.build(agents, store, grid);
+  plan.build(agents, store, grid, uptake);
   runHarvestPlan(plan, store, grid, uptake);
 }
 

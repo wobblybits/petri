@@ -281,3 +281,20 @@ export const HEAD_SCALE = {
   cruise: 40,
   turn: 2,
 } as const;
+
+/**
+ * This body's half-saturation for species `c`, in the field's own units.
+ *
+ * Here rather than in `agents.ts` for the reason this module exists at all:
+ * `energy.ts` reads it inside the harvest, and `agents.ts` imports `energy.ts`
+ * for `extraCapFor`, so the other direction would be a runtime cycle. Reading
+ * a gene is layout knowledge, which is what lives here.
+ */
+export function uptakeKsOf(chem: Float32Array, g: number, c: number, globalKs: number): number {
+  const gene = chem[g + KS_BASE + c];
+  const ks = globalKs * (gene > 0 ? gene : 0);
+  // Zero affinity is division by zero downstream, and a gene mutated to or
+  // past zero is a body with an infinitely good transporter, which is not a
+  // thing. Floored at a thousandth of the global, which is a very good one.
+  return ks > globalKs * 1e-3 ? ks : globalKs * 1e-3;
+}

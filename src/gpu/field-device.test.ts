@@ -164,6 +164,70 @@ describe('field.wgsl on a device', () => {
     expect(gpu.energy.storedTotal()).toBeCloseTo(cpu.energy.storedTotal(), 0);
   });
 
+  it('runs the whole reaction table the way the host does', async ({ skip }) => {
+    if (!device) skip();
+    /*
+     * Four species out and four back in, on the device. `harvest` gained a
+     * per-species drain and a per-entry row of rates and affinities to do it,
+     * and the row is the widest thing in this pass — the field shader binds
+     * eight storage buffers of a guaranteed eight, so it had to grow a stride
+     * rather than a buffer. Nothing but a device says the two agree.
+     */
+    const params = pondParams();
+    params.energyRegrow = 0;
+    params.ambientEnergy = 0.4;
+    params.decay = 0;
+    params.upkeep = 0;
+    params.excreteRate = 0.5;
+    params.uptakeVmax = 1.5;
+
+    const build = (): Sim => {
+      const sim = new Sim(1600, 1200, 128);
+      loadPreset(sim, 'soup', params);
+      const cx = sim.w * 0.5;
+      const cy = sim.h * 0.5;
+      for (let i = 0; i < 12; i++) {
+        const a = sim.spawn('con', cx + (i % 4) * 12 - 24, cy + Math.floor(i / 4) * 12 - 12, 0, params, true)!;
+        a.pinned = true;
+        a.extra = 1;
+      }
+      return sim;
+    };
+
+    const cpu = build();
+    const gpu = build();
+    expect(await gpu.openFieldGpu(), fieldGpu.lastError).toBe(true);
+    gpu.wantFieldReadback = true;
+
+    for (let i = 0; i < 90; i++) {
+      cpu.step(1 / 60, params);
+      await gpu.stepAsync(1 / 60, params);
+    }
+
+    const held = (s: Sim) => [...s.agents.values()].reduce((n, a) => n + a.extra, 0);
+    // Something moved in both directions, or this asserts about a still pond.
+    expect(totalOf(cpu.fields, CH.conP), 'nothing excreted').toBeGreaterThan(0);
+    expect(held(cpu)).toBeGreaterThan(0);
+    // The tanks agree, which is uptake and excretion netting out the same way
+    // on both sides. The harvest's one-frame lag is why this is not exact.
+    expect(held(gpu)).toBeCloseTo(held(cpu), 1);
+    /*
+     * Relative, not absolute, and for a stated reason: with the table running,
+     * every species is grazed, and the GPU harvest is credited a frame late by
+     * design. What stands in the field at any instant is the difference
+     * between what has been excreted and what has been eaten back, so the two
+     * paths are one frame's uptake apart — about 0.02 on a standing 2.7 here.
+     * A tolerance tighter than that is asserting they agree about *when*,
+     * which they deliberately do not; one looser would wave through a real
+     * divergence.
+     */
+    for (const ch of [CH.conP, CH.dupP, CH.aux]) {
+      const c = totalOf(cpu.fields, ch);
+      expect(c, `nothing on channel ${ch}`).toBeGreaterThan(0);
+      expect(Math.abs(totalOf(gpu.fields, ch) - c) / c, `channel ${ch} differs`).toBeLessThan(0.02);
+    }
+  });
+
   it('excretes every species onto the device the way the host does', async ({ skip }) => {
     if (!device) skip();
     /*

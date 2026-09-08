@@ -1,4 +1,5 @@
 import shader from './field.wgsl?raw';
+import { HARVEST_STRIDE } from '../energy.ts';
 import { CHANNELS, type Fields } from '../fields.ts';
 
 /**
@@ -296,16 +297,20 @@ export class FieldGpu {
       this.entryCap = Math.max(1024, nEntries * 2);
       this.hFlow?.destroy();
       this.hRead?.destroy();
+      // `HARVEST_STRIDE` floats an entry: room, then a rate and an affinity
+      // per species. Wider rather than a second buffer, because this pass
+      // binds eight storage buffers of a guaranteed eight. See `energy.ts`.
+      const floats = this.entryCap * HARVEST_STRIDE;
       this.hFlow = device.createBuffer({
-        size: this.entryCap * 4,
+        size: floats * 4,
         usage: st | GPUBufferUsage.COPY_SRC,
       });
       this.hRead = device.createBuffer({
-        size: this.entryCap * 4,
+        size: floats * 4,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
       });
-      this.roomData = new Float32Array(this.entryCap);
-      this.gotData = new Float32Array(this.entryCap);
+      this.roomData = new Float32Array(floats);
+      this.gotData = new Float32Array(floats);
     }
   }
 
@@ -456,7 +461,7 @@ export class FieldGpu {
           0,
           this.roomData.buffer,
           this.roomData.byteOffset,
-          harvest.entries * 4,
+          harvest.entries * HARVEST_STRIDE * 4,
         );
       }
 
@@ -524,7 +529,7 @@ export class FieldGpu {
         enc.copyBufferToBuffer(this.samples!, 0, this.readback!, 0, nProbe * SAMPLE_FLOATS * 4);
       }
       if (harvest.entries > 0) {
-        enc.copyBufferToBuffer(this.hFlow!, 0, this.hRead!, 0, harvest.entries * 4);
+        enc.copyBufferToBuffer(this.hFlow!, 0, this.hRead!, 0, harvest.entries * HARVEST_STRIDE * 4);
       }
       device.queue.submit([enc.finish()]);
       this.pendingProbe = nProbe;
@@ -549,7 +554,7 @@ export class FieldGpu {
     if (!this.ready || !this.device) return false;
     try {
       const sampleBytes = nProbe * SAMPLE_FLOATS * 4;
-      const gotBytes = entries * 4;
+      const gotBytes = entries * HARVEST_STRIDE * 4;
       const waits: Promise<void>[] = [];
       if (nProbe > 0) waits.push(this.readback!.mapAsync(GPUMapMode.READ, 0, sampleBytes));
       if (entries > 0) waits.push(this.hRead!.mapAsync(GPUMapMode.READ, 0, gotBytes));

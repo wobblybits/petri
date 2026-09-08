@@ -122,6 +122,16 @@ struct HarvestBlock {
  */
 @group(0) @binding(8) var<storage, read_write> hFlow: array<f32>;
 
+// One entry's row in `hFlow`, from `energy.ts`: the room in that body's tank,
+// then a rate and an affinity per species. `got` overwrites the rates on the
+// way back out, which is safe because they are read before anything is
+// written and a separate output span would double the buffer.
+const HARVEST_ROOM: u32 = 0u;
+const HARVEST_VMAX: u32 = 1u;
+const HARVEST_GOT: u32 = 1u;
+const HARVEST_KS: u32 = 5u;
+const HARVEST_STRIDE: u32 = 9u;
+
 // Matches `FLOW_EPS` in energy.ts: below this a take is not worth a cell walk.
 const FLOW_EPS: f32 = 1e-9;
 
@@ -426,68 +436,126 @@ fn gather(@builtin(global_invocation_id) gid: vec3u) {
  * still queued gets nothing. Their entries are zeroed rather than left, since
  * the buffer outlives a frame.
  */
+/*
+ * Drain up to `want` of one species from a block, cell by cell in raster
+ * order, and return what was taken.
+ *
+ * Cell by cell rather than proportionally, and the order is the whole point:
+ * grazing has to leave an uneven floor, because an uneven floor is what
+ * diffusion then has a gradient to work against. `EnergyGrid.takeFrom` is the
+ * same loop, and `field-kernel.test.ts` holds the mirror that says so.
+ */
+fn drain(blk: HarvestBlock, ch: u32, want0: f32) -> f32 {
+  var want = want0;
+  var got = 0.0;
+  for (var y = 0u; y < blk.wj; y++) {
+    if (want <= FLOW_EPS) { break; }
+    for (var x = 0u; x < blk.wi; x++) {
+      if (want <= FLOW_EPS) { break; }
+      let idx = (blk.fj + y) * P.cols + (blk.fi + x);
+      var v = src[idx];
+      let have = v[ch];
+      if (have <= 0.0) { continue; }
+      var g = want;
+      if (have < want) { g = have; }
+      v[ch] = have - g;
+      src[idx] = v;
+      got += g;
+      want -= g;
+    }
+  }
+  return got;
+}
+
 @compute @workgroup_size(64)
 fn harvest(@builtin(global_invocation_id) gid: vec3u) {
   let b = gid.x;
   if (b >= P.nBlocks) { return; }
   let blk = hBlocks[b];
-  let ch = u32(P.harvestCh);
-  /*
-   * Monod, read off the block before anybody eats.
-   *
-   * Before, so the order bodies are visited in cannot decide what any of them
-   * is allowed to draw — which is half of what the plan's §4 is fixing; the
-   * other half is that a block which cannot satisfy everyone now shares out by
-   * exhaustion rather than by who was born first. `energy.ts:runHarvestPlan`
-   * computes the identical number from `EnergyGrid.density`.
-   *
-   * The large finite stand-in for "unmetered" is deliberate: `min` against it
-   * returns the room unchanged, so `uptakeCap` at zero leaves this kernel
-   * bit-identical to what it was.
-   */
-  var rate = 1e30;
-  if (P.uptakeCap > 0.0) {
-    var sum = 0.0;
-    for (var y = 0u; y < blk.wj; y++) {
-      for (var x = 0u; x < blk.wi; x++) {
-        sum += src[(blk.fj + y) * P.cols + (blk.fi + x)][ch];
+  if (P.uptakeCap <= 0.0) {
+    // The single-species path: take what fits, from the ground, to saturation.
+    // What the pond runs by default, and what this kernel has always been.
+    let ch = u32(P.harvestCh);
+    for (var e = 0u; e < blk.count; e++) {
+      let ro = (blk.first + e) * HARVEST_STRIDE;
+      var want = hFlow[ro + HARVEST_ROOM];
+      hFlow[ro + HARVEST_GOT] = 0.0;
+      hFlow[ro + HARVEST_GOT + 1u] = 0.0;
+      hFlow[ro + HARVEST_GOT + 2u] = 0.0;
+      hFlow[ro + HARVEST_GOT + 3u] = 0.0;
+      if (want <= FLOW_EPS) { continue; }
+      let got = drain(blk, ch, want);
+      hFlow[ro + HARVEST_GOT + ch] = got;
+      if (got <= 0.0) {
+        for (var r = e + 1u; r < blk.count; r++) {
+          let z = (blk.first + r) * HARVEST_STRIDE;
+          hFlow[z + HARVEST_GOT] = 0.0;
+          hFlow[z + HARVEST_GOT + 1u] = 0.0;
+          hFlow[z + HARVEST_GOT + 2u] = 0.0;
+          hFlow[z + HARVEST_GOT + 3u] = 0.0;
+        }
+        break;
       }
     }
-    let cells = f32(blk.wi * blk.wj);
-    var s = 0.0;
-    if (cells > 0.0) { s = sum / cells; }
-    if (s <= 0.0) { rate = 0.0; } else { rate = P.uptakeCap * s / (P.uptakeKs + s); }
+    return;
+  }
+
+  /*
+   * The reaction table's four uptake rows.
+   *
+   * Densities are read once for the block, before anybody eats, so the order
+   * bodies are visited in cannot decide what any of them may draw. One tank,
+   * four species competing for it: `left` is the room after the species
+   * already taken, so a body that fills on the first thing it finds does not
+   * also take the rest. Species in index order, which is arbitrary and has to
+   * match `runHarvestPlan` exactly.
+   */
+  var density = vec4f(0.0);
+  let cells = f32(blk.wi * blk.wj);
+  if (cells > 0.0) {
+    var sum = vec4f(0.0);
+    for (var y = 0u; y < blk.wj; y++) {
+      for (var x = 0u; x < blk.wi; x++) {
+        sum += src[(blk.fj + y) * P.cols + (blk.fi + x)];
+      }
+    }
+    density = sum / cells;
   }
   for (var e = 0u; e < blk.count; e++) {
-    var want = min(hFlow[blk.first + e], rate);
-    if (want <= FLOW_EPS) {
-      hFlow[blk.first + e] = 0.0;
-      continue;
-    }
-    var got = 0.0;
-    for (var y = 0u; y < blk.wj; y++) {
-      if (want <= FLOW_EPS) { break; }
-      for (var x = 0u; x < blk.wi; x++) {
-        if (want <= FLOW_EPS) { break; }
-        let idx = (blk.fj + y) * P.cols + (blk.fi + x);
-        var v = src[idx];
-        let have = v[ch];
-        if (have <= 0.0) { continue; }
-        var g = want;
-        if (have < want) { g = have; }
-        v[ch] = have - g;
-        src[idx] = v;
-        got += g;
-        want -= g;
+    let ro = (blk.first + e) * HARVEST_STRIDE;
+    var left = hFlow[ro + HARVEST_ROOM];
+    // Read before the writeback overwrites them: `got` shares the rates' slots.
+    let vmax = vec4f(
+      hFlow[ro + HARVEST_VMAX],
+      hFlow[ro + HARVEST_VMAX + 1u],
+      hFlow[ro + HARVEST_VMAX + 2u],
+      hFlow[ro + HARVEST_VMAX + 3u],
+    );
+    let ks = vec4f(
+      hFlow[ro + HARVEST_KS],
+      hFlow[ro + HARVEST_KS + 1u],
+      hFlow[ro + HARVEST_KS + 2u],
+      hFlow[ro + HARVEST_KS + 3u],
+    );
+    for (var c = 0u; c < 4u; c++) {
+      var got = 0.0;
+      // A species the body has no rate for takes nothing. The host zeroes
+      // `vmax` off the table, so this is also what keeps uptake on the ground
+      // alone until `excreteRate` stops the minting — see `UptakeKinetics`.
+      if (left > FLOW_EPS && vmax[c] > 0.0 && density[c] > 0.0) {
+        let rate = vmax[c] * density[c] / (ks[c] + density[c]);
+        var want = rate;
+        if (left < want) { want = left; }
+        if (want > FLOW_EPS) {
+          got = drain(blk, c, want);
+          left -= got;
+        }
       }
-    }
-    hFlow[blk.first + e] = got;
-    if (got <= 0.0) {
-      for (var r = e + 1u; r < blk.count; r++) { hFlow[blk.first + r] = 0.0; }
-      break;
+      hFlow[ro + HARVEST_GOT + c] = got;
     }
   }
 }
+
 
 /*
  * Lay one channel down across the disk, which is how a world starts with

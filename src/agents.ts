@@ -762,6 +762,7 @@ export {
   ROW_COUNT,
   ROW_EXCRETE,
   ROW_UPTAKE,
+  uptakeKsOf,
   X_BASE,
   X_OUT,
   SENSE_SCALE,
@@ -1182,15 +1183,7 @@ export function expressVector(
   }
 }
 
-/** This body's half-saturation for species `c`, in the field's own units. */
-export function uptakeKsOf(chem: Float32Array, g: number, c: number, globalKs: number): number {
-  const gene = chem[g + KS_BASE + c];
-  const ks = globalKs * (gene > 0 ? gene : 0);
-  // Zero affinity is division by zero downstream, and a gene mutated to or
-  // past zero is a body with an infinitely good transporter, which is not a
-  // thing. Floored at a thousandth of the global, which is a very good one.
-  return ks > globalKs * 1e-3 ? ks : globalKs * 1e-3;
-}
+
 
 /**
  * `store` defaults to a fresh, private, single-agent `AgentStore` when
