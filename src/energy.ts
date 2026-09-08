@@ -1215,6 +1215,13 @@ export interface UptakeKinetics {
    * species pay. At 1, plain Monod.
    */
   hillN: number;
+  /**
+   * `params.catCoSubstrate`: how much the non-ground species need `CH.energy`
+   * present to be metabolised. See §6b of the chemistry plan and the note on
+   * the parameter itself. 0 leaves the rows eating their species raw, which is
+   * what phase 3 shipped.
+   */
+  coSubstrate: number;
 }
 
 /**
@@ -1263,6 +1270,7 @@ export function runHarvestPlan(
   const B = plan.blocks;
   const metered = uptake !== undefined && uptake.cap > 0;
   const hill = uptake !== undefined && uptake.hillN > 0 ? uptake.hillN : 1;
+  const co = uptake !== undefined ? uptake.coSubstrate : 0;
   const R = plan.rooms;
   for (let b = 0; b < plan.nBlocks; b++) {
     const first = B[b * 6 + 4];
@@ -1303,6 +1311,9 @@ export function runHarvestPlan(
     const lo = uptake.table ? 0 : CH.energy;
     const hi = uptake.table ? CHANNELS : CH.energy + 1;
     for (let c = lo; c < hi; c++) SPECIES_DENSITY[c] = grid.densityOf(key, c);
+    // Always, because the ground gates the other three whether or not it is
+    // itself being taken this frame.
+    if (lo > CH.energy || hi <= CH.energy) SPECIES_DENSITY[CH.energy] = grid.densityOf(key, CH.energy);
     for (let e = 0; e < count; e++) {
       const s = plan.slots[first + e];
       const cap = CAP[s];
@@ -1320,12 +1331,28 @@ export function runHarvestPlan(
         const vmax = R[ro + HARVEST_VMAX + c];
         const density = SPECIES_DENSITY[c];
         if (!(vmax > 0) || !(density > 0)) continue;
+        /*
+         * Catabolism: the ground is the co-substrate the other three are
+         * converted *with*. Blended rather than required, because a hard
+         * requirement makes the machinery worthless until it is complete and
+         * leaves selection no slope to climb — at any `coSubstrate` above zero
+         * a body with a little capability still does a little better than one
+         * with none. The ground's own row is never gated: it is the thing
+         * everyone can already use raw, which is what makes it the ground.
+         */
+        let gate = 1;
+        if (co > 0 && c !== CH.energy) {
+          const e = SPECIES_DENSITY[CH.energy];
+          const avail = e > 0 ? e / (R[ro + HARVEST_KS + CH.energy] + e) : 0;
+          gate = 1 - co + co * avail;
+          if (!(gate > 0)) continue;
+        }
         // Hill at `n`, which is plain Monod at 1 and does not pay for the two
         // `pow` calls there. See `UptakeKinetics.hillN`.
         const ks = R[ro + HARVEST_KS + c];
         const sN = hill === 1 ? density : Math.pow(density, hill);
         const kN = hill === 1 ? ks : Math.pow(ks, hill);
-        const rate = (vmax * sN) / (kN + sN);
+        const rate = (gate * vmax * sN) / (kN + sN);
         if (!(rate > 0)) continue;
         const want = rate < left ? rate : left;
         const got = grid.takeFrom(key, c, want);

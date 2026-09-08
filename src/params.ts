@@ -651,6 +651,28 @@ export interface Params {
    * genes are reading a signal three orders below the range `phi` can resolve.
    */
   senseScale: number;
+  /**
+   * How much the three signalling species need `CH.energy` present to be
+   * metabolised at all, 0 to 1. See `docs/energy-chemistry-plan.md` §6b.
+   *
+   * 0 is what phase 3 shipped: an uptake row eats its species raw, which is
+   * "eating scent" and is the thing §6b calls wrong. At 1 a body can only
+   * convert species 0, 1 and 3 into energy where there is ground to convert
+   * them *with* — energy is the co-substrate everyone can already use, and the
+   * others are mass nobody can touch without it.
+   *
+   * A dial rather than a switch, and continuous, because that is what keeps
+   * the gradient: at any value above zero a body with a little capability for
+   * a species does a little better than one with none, so selection has a
+   * slope to climb. Forcing a hard requirement is what makes machinery
+   * worthless until complete, which is the trap §6b is written around.
+   *
+   * It buys access, never amplification — conservation still holds, a unit
+   * consumed is a unit banked. What a catabolist gains is a pool its
+   * competitors cannot reach, and the pool is largest exactly where other
+   * bodies are dense and the ground is grazed out.
+   */
+  catCoSubstrate: number;
 }
 
 export function defaultParams(): Params {
@@ -733,6 +755,7 @@ export function defaultParams(): Params {
     eraUpkeepRatio: ERA_UPKEEP_RATIO,
     excreteRate: 0,
     senseScale: SENSE_SCALE,
+    catCoSubstrate: 0,
   };
 }
 
@@ -822,4 +845,5 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'eraUpkeepRatio', label: 'Era upkeep ratio', min: -1, max: 2, step: 0.05 },
   { key: 'excreteRate', label: 'Excrete rate', min: 0, max: 2, step: 0.02 },
   { key: 'senseScale', label: 'Sense scale', min: 0.001, max: 8, step: 0.001 },
+  { key: 'catCoSubstrate', label: 'Catabolism needs ground', min: 0, max: 1, step: 0.05 },
 ];

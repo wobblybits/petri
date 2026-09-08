@@ -541,7 +541,42 @@ The rest of phase 5 is ready: `Fields.react` exists and ships at zero, and
 `npm run pond -- sweep --axis reactFeed=... --axis reactKill=...` already
 parses — the `F, k` grid can be queued the moment the complement is chosen.
 
-**Phase 7. Catabolism.** *Not started; §6b is the argument.* `a_ij` stops
+**Phase 7a. The co-substrate.** *Done, 2026-09-08.* `catCoSubstrate`, at 0.
+
+The fork above turned out to dissolve rather than need deciding. If the
+"recipe" is the expression vector across the uptake rows — already a simplex,
+already heritable, already state-dependent — then one-species and multi-species
+capability are both expressible and *selection* picks, which is a measurement
+rather than a design commitment. Forcing two is what reintroduces the cliff;
+not forcing it costs nothing. And §0's "machinery no single body embodies" is
+already met by the **excretor-catabolist pair**: a body that lives on species 0
+depends on whoever excretes it. The within-body recipe was an elaboration on
+top of a bar that was already cleared.
+
+So what was actually missing was smaller than a recipe gene. The three
+non-ground rows were *ungated*, which is what "eating raw scent" means.
+`catCoSubstrate` blends in a Monod factor on `CH.energy` for those three rows
+and leaves the ground's own row alone, on both paths. Blended and not required,
+because a hard requirement is the cliff; at any value above zero a body with a
+little capability does a little better than one with none.
+
+Conservation is untouched, so it buys access and not amplification.
+
+**Phase 7b. Whether it pays.** *Not started, and it is the real question.*
+
+Gating makes catabolism *harder*, so on its own it cannot explain why the
+sweeps preferred the four-species table switched off. Under strict
+conservation, eating a signalling species can never beat eating the ground
+unless that species is locally more available — which happens exactly where
+bodies are dense and the ground is grazed out.
+
+**None of the sweeps so far created that condition.** They ran with
+`ambientEnergy` and `energyRegrow` refilling the dish, so the ground was never
+scarce and there was never anything to be gained by reaching past it. The
+measurement that matters is a pond where the ground is genuinely contested, and
+that is a change to the *conditions*, not to the mechanism.
+
+**Phase 7c. Catabolism.** *Not started; §6b is the argument.* `a_ij` stops
 being diagonal: an uptake row consumes a *recipe* over the species rather than
 one of them, gated on `CH.energy` as the co-substrate so the gradient runs from
 zero. Conservative by construction — it buys access, not amplification.

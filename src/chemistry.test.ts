@@ -489,3 +489,111 @@ describe('superadditivity', () => {
     expect(fullH).toBeGreaterThan(2 * halfH);
   });
 });
+
+describe('catabolism', () => {
+  /*
+   * §6b. Eating a signalling species raw is what phase 3 shipped and what the
+   * sweeps liked least; `catCoSubstrate` makes the ground the co-substrate the
+   * others are converted *with*. It buys access, never amplification —
+   * conservation is unchanged — and the gradient runs continuously from zero
+   * so that a body with a little capability is a little better off than one
+   * with none.
+   */
+  const seeded = (tweak: (p: Params) => void) => {
+    const p = chemistryParams();
+    p.excreteRate = 0.015;
+    p.uptakeVmax = 6;
+    p.ambientEnergy = 0;
+    tweak(p);
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    const cx = sim.w * 0.5;
+    const cy = sim.h * 0.5;
+    // One body, standing on a patch of one signalling species and nothing
+    // else, with a tank to start from.
+    const a = sim.spawn('con', cx, cy, 0, p, true)!;
+    a.pinned = true;
+    a.extra = 0.2;
+    sim.fields.fillDisk(CH.conP, 4);
+    return { sim, p, a };
+  };
+
+  it('lets a body eat a signalling species raw when the gate is off', () => {
+    const { sim, p, a } = seeded(() => {});
+    const before = a.extra;
+    for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
+    /*
+     * Phase 3's behaviour, kept reachable: it fed, on a dish seeded with no
+     * ground at all. Not asserted as "the ground stays empty" — excretion is
+     * on, and a body excretes onto `CH.energy` along with the rest, so it lays
+     * down a little ground of its own as it goes. What matters is that it came
+     * out ahead while standing on a species it should not be able to eat raw.
+     */
+    expect(a.extra).toBeGreaterThan(before);
+  });
+
+  it('cannot live on scent alone once the ground is the co-substrate', () => {
+    const { sim, p, a } = seeded((q) => {
+      q.catCoSubstrate = 1;
+    });
+    const before = a.extra;
+    for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
+    // Plenty of species 0 under it and no ground to convert it with.
+    expect(a.extra).toBeLessThan(before);
+  });
+
+  it('converts it where there is ground to convert it with', () => {
+    const { sim, p } = seeded((q) => {
+      q.catCoSubstrate = 1;
+      q.ambientEnergy = 0.3;
+    });
+    const beforeScent = (() => {
+      const d = sim.fields.data;
+      let s = 0;
+      for (let k = CH.conP; k < d.length; k += CHANNELS) s += d[k];
+      return s;
+    })();
+    for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
+    const afterScent = (() => {
+      const d = sim.fields.data;
+      let s = 0;
+      for (let k = CH.conP; k < d.length; k += CHANNELS) s += d[k];
+      return s;
+    })();
+    // The species was consumed, which it could not be without the ground.
+    expect(afterScent).toBeLessThan(beforeScent);
+  });
+
+  it('leaves a slope to climb rather than a cliff', () => {
+    /*
+     * The property the whole design turns on. A hard requirement would make
+     * machinery worthless until complete and leave selection nothing to
+     * ascend; blending means every increment of ground availability is worth
+     * something, monotonically.
+     */
+    const fed = (co: number, ambient: number): number => {
+      const { sim, p, a } = seeded((q) => {
+        q.catCoSubstrate = co;
+        q.ambientEnergy = ambient;
+      });
+      const before = a.extra;
+      for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
+      return a.extra - before;
+    };
+    const none = fed(1, 0);
+    const some = fed(1, 0.05);
+    const plenty = fed(1, 0.4);
+    expect(some).toBeGreaterThan(none);
+    expect(plenty).toBeGreaterThan(some);
+  });
+
+  it('still conserves', () => {
+    const { sim, p } = seeded((q) => {
+      q.catCoSubstrate = 1;
+      q.ambientEnergy = 0.3;
+    });
+    const before = matter(sim, p.bodyValue);
+    for (let i = 0; i < 120; i++) sim.step(1 / 60, p);
+    expect(matter(sim, p.bodyValue)).toBeCloseTo(before, 5);
+  });
+});

@@ -987,6 +987,7 @@ export class Sim {
         yDirect: params.yDirect,
         yEra: params.yEra,
         hillN: params.hillN,
+        coSubstrate: params.catCoSubstrate,
       });
     }
     Sim.phase('harvestSlots');
@@ -3191,6 +3192,7 @@ export class Sim {
       yDirect: params.yDirect,
       yEra: params.yEra,
       hillN: params.hillN,
+      coSubstrate: params.catCoSubstrate,
     });
     Sim.phase('gpu:plan');
     // Three ports a body, plus whatever died, farmed, spilled or was refunded
@@ -3400,6 +3402,7 @@ export class Sim {
         uptakeCap: params.uptakeVmax * dt,
         uptakeKs: params.uptakeKs,
         hillN: params.hillN,
+        coSubstrate: params.catCoSubstrate,
       },
       seed === null ? null : { ch: CH.energy, value: seed },
     );

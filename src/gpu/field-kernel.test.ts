@@ -700,7 +700,7 @@ describe('field shader arithmetic', () => {
     expect(fields).not.toContain('pad4');
     // `uptakeCap` and `uptakeKs` took the two slots that used to pad; `hillN`
     // needed a fourth block, which is why there are three pads after it again.
-    expect(fields.slice(-6)).toEqual(['uptakeCap', 'uptakeKs', 'hillN', 'pad5', 'pad6', 'pad7']);
+    expect(fields.slice(-6)).toEqual(['uptakeCap', 'uptakeKs', 'hillN', 'coSubstrate', 'pad6', 'pad7']);
     // Three vec4f (mix, mix2, keep) count as four slots each; everything else
     // is a scalar, so index and slot are the same thing. `UNIFORM_BYTES` is
     // 176, which is eleven sixteen-byte blocks.

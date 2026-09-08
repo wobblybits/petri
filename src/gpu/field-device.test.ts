@@ -164,6 +164,72 @@ describe('field.wgsl on a device', () => {
     expect(gpu.energy.storedTotal()).toBeCloseTo(cpu.energy.storedTotal(), 0);
   });
 
+  it('gates catabolism on the ground the way the host does', async ({ skip }) => {
+    if (!device) skip();
+    // §6b's co-substrate rule, which is one blended factor on the rate and so
+    // exactly the kind of thing that reads as plausible on both sides while
+    // being multiplied in the wrong place on one of them.
+    const params = pondParams();
+    params.energyRegrow = 0;
+    params.ambientEnergy = 0.3;
+    params.decay = 0;
+    params.upkeep = 0;
+    params.excreteRate = 0.015;
+    params.uptakeVmax = 6;
+    params.catCoSubstrate = 1;
+
+    const build = (): Sim => {
+      const sim = new Sim(1600, 1200, 128);
+      loadPreset(sim, 'soup', params);
+      const cx = sim.w * 0.5;
+      const cy = sim.h * 0.5;
+      for (let i = 0; i < 8; i++) {
+        const a = sim.spawn('con', cx + i * 12 - 48, cy, 0, params, true)!;
+        a.pinned = true;
+        a.extra = 0.5;
+      }
+      /*
+       * No artificial substrate: the bodies excrete `CH.conP` themselves, and
+       * that is the only seeding both paths can be given identically.
+       *
+       * `fillDisk` writes the host's mirror, which the shader does not read —
+       * `openFieldGpu` clears the device and reseeds only `CH.energy`. And a
+       * conserved add placed before that call is not deferred, so it lands in
+       * the mirror too. There is exactly one crossing for a non-ground
+       * species, the deferred adds, and it only exists once the device is
+       * open. Letting excretion make the substrate sidesteps the whole
+       * question and is what a real pond does anyway.
+       */
+      return sim;
+    };
+
+    const cpu = build();
+    const gpu = build();
+    expect(await gpu.openFieldGpu(), fieldGpu.lastError).toBe(true);
+    gpu.wantFieldReadback = true;
+    for (let i = 0; i < 90; i++) {
+      cpu.step(1 / 60, params);
+      await gpu.stepAsync(1 / 60, params);
+    }
+    /*
+     * The tanks are the tight assertion, and they are what the gate decides:
+     * if the shader multiplied the co-substrate factor in the wrong place, or
+     * applied it to the ground's own row, these would part company.
+     */
+    const held = (s: Sim) => [...s.agents.values()].reduce((n, a) => n + a.extra, 0);
+    expect(held(cpu)).toBeGreaterThan(0);
+    expect(held(gpu)).toBeCloseTo(held(cpu), 1);
+    /*
+     * The standing `conP` loosely, because here it is the small difference
+     * between what eight bodies excreted and what they ate back again — so one
+     * frame of the GPU harvest's designed lag is a large share of it. The
+     * quantity is a residue, not a stock.
+     */
+    const c = totalOf(cpu.fields, CH.conP);
+    expect(c, 'nothing was excreted').toBeGreaterThan(0);
+    expect(Math.abs(totalOf(gpu.fields, CH.conP) - c) / c).toBeLessThan(0.06);
+  });
+
   it('runs the whole reaction table the way the host does', async ({ skip }) => {
     if (!device) skip();
     /*

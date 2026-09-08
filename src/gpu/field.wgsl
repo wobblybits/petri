@@ -51,7 +51,9 @@ struct FieldParams {
   uptakeKs: f32,
   // Hill coefficient on uptake; 1 is plain Monod. See `UptakeKinetics.hillN`.
   hillN: f32,
-  pad5: f32,
+  // How much the non-ground species need `CH.energy` present to be
+  // metabolised. See `UptakeKinetics.coSubstrate` and §6b of the plan.
+  coSubstrate: f32,
   pad6: f32,
   pad7: f32,
 }
@@ -544,10 +546,25 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
     );
     for (var c = 0u; c < 4u; c++) {
       var got = 0.0;
+      /*
+       * Catabolism: the ground is the co-substrate the other three are
+       * converted *with*. Blended rather than required, so a body with a
+       * little capability still does a little better than one with none —
+       * a hard requirement leaves selection no slope to climb. The ground's
+       * own row is never gated, being the thing everyone can use raw. Kept in
+       * step with `runHarvestPlan` by hand.
+       */
+      var gate = 1.0;
+      if (P.coSubstrate > 0.0 && c != u32(P.harvestCh)) {
+        let e = density[u32(P.harvestCh)];
+        var avail = 0.0;
+        if (e > 0.0) { avail = e / (ks[u32(P.harvestCh)] + e); }
+        gate = 1.0 - P.coSubstrate + P.coSubstrate * avail;
+      }
       // A species the body has no rate for takes nothing. The host zeroes
       // `vmax` off the table, so this is also what keeps uptake on the ground
       // alone until `excreteRate` stops the minting — see `UptakeKinetics`.
-      if (left > FLOW_EPS && vmax[c] > 0.0 && density[c] > 0.0) {
+      if (left > FLOW_EPS && vmax[c] > 0.0 && density[c] > 0.0 && gate > 0.0) {
         // Hill at `n`; 1 is plain Monod and does not pay for the two `pow`
         // calls. Kept in step with `runHarvestPlan` by hand.
         var sN = density[c];
@@ -556,7 +573,7 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
           sN = pow(density[c], P.hillN);
           kN = pow(ks[c], P.hillN);
         }
-        let rate = vmax[c] * sN / (kN + sN);
+        let rate = gate * vmax[c] * sN / (kN + sN);
         var want = rate;
         if (left < want) { want = left; }
         if (want > FLOW_EPS) {
