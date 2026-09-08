@@ -34,6 +34,7 @@ export const METRICS: Record<string, string> = {
   line_dominance: 'lineDom',
   nets: 'nets',
   nets_effective: 'netsEff',
+  net_dominance: 'netDom',
   net_fst: 'netFst',
   line_fst: 'lineFst',
   var_drifted: 'varDrift',
