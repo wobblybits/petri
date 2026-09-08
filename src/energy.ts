@@ -977,6 +977,20 @@ export class HarvestPlan {
    * take-what-fits path, which is what the pond runs by default.
    */
   build(agents: Iterable<Agent>, store: AgentStore, grid: EnergyGrid, kinetics?: UptakeKinetics): void {
+    /*
+     * Whether uptake is *metered*, not whether a kinetics object was handed
+     * over. `sim.ts` passes one every frame with `cap` set from `uptakeVmax`,
+     * which ships at zero — so guarding on the object's existence ran the
+     * per-species fill for every body every frame to write eight zeros and
+     * call `uptakeKsOf` four times for nothing. Measured at ten thousand
+     * bodies on the GPU path, that was 0.82 ms a frame, and it was the whole
+     * of the 2% the reaction table appeared to cost a pond not using it.
+     *
+     * The same condition `runHarvestPlan` uses, and it has to stay the same
+     * one: the fill and the drain have to agree about whether the rates in
+     * this buffer mean anything.
+     */
+    const meter = kinetics !== undefined && kinetics.cap > 0;
     const LOCKED = store.locked;
     const EXPRESS = store.expressAll;
     const CHEM = store.chemAll;
@@ -1099,7 +1113,7 @@ export class HarvestPlan {
         ids[e] = ID[sl];
         const ro = e * HARVEST_STRIDE;
         rooms[ro + HARVEST_ROOM] = CAP[sl] - EXTRA[sl];
-        if (kinetics) {
+        if (meter) {
           /*
            * Per body, not per pond. `vmax` is `uptakeVmax` scaled by what the
            * body is expressing on that species' uptake row — `ROW_COUNT` in
