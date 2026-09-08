@@ -64,7 +64,7 @@ export interface WormSpec {
    * rather than avoiding — it is the obvious way to build a spring — but it is
    * not a worm.)
    */
-  spine?: 'l' | 'r';
+  spine?: 'l' | 'r' | 'alternate';
   x?: number;
   y?: number;
   /** Facing of every segment at build, and the axis displacement is measured along. */
@@ -122,10 +122,11 @@ export function buildWorm(sim: Sim, params: Params, spec: WormSpec): number[] {
     a.extra = a.energyCap;
     ids.push(a.id);
   }
-  const spine: PortSlot = spec.spine ?? 'l';
+  const spine = spec.spine ?? 'l';
   for (let i = 0; i + 1 < n; i++) {
     if (kindAt(spec, i + 1) === 'era') throw new Error('buildWorm: an Era has no aux port to receive a spine');
-    sim.wire(ids[i]!, 'p', ids[i + 1]!, spine, params);
+    const slot: PortSlot = spine === 'alternate' ? (i % 2 === 0 ? 'l' : 'r') : spine;
+    sim.wire(ids[i]!, 'p', ids[i + 1]!, slot, params);
   }
   return ids;
 }

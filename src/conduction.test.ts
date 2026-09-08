@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { defaultParams } from './params.ts';
 import { Sim } from './sim.ts';
 import { CHEM_LEN, PUSH_BASE, HEAD_SCALE } from './chem-layout.ts';
+import { applyTransportRecoil } from './sim.ts';
 
 /*
  * The two operators that make transport directional.
@@ -175,5 +176,114 @@ describe('the genome still has room for it', () => {
     const params = quiet();
     const { sim, ids } = chain(params, 1);
     expect(sim.agents.get(ids[0])!.chem.length).toBe(CHEM_LEN);
+  });
+});
+
+describe('anisotropic drag', () => {
+  it('is isotropic by default', () => {
+    expect(defaultParams().dragAniso).toBe(1);
+  });
+
+  it('holds back sideways motion harder than motion along the heading', () => {
+    const params = quiet();
+    params.drag = 1;
+    params.dragAniso = 3;
+    const sim = new Sim(4000, 4000, 128);
+    sim.pinWorld(2000, 2000, params);
+    // Same speed, same heading, one moving along it and one across it.
+    const along = sim.spawn('con', 1900, 2000, 0, params, true)!;
+    const across = sim.spawn('con', 2100, 2000, 0, params, true)!;
+    along.vx = 100;
+    across.vy = 100;
+    for (let f = 0; f < 30; f++) sim.step(1 / 60, params);
+    expect(Math.hypot(across.vx, across.vy)).toBeLessThan(Math.hypot(along.vx, along.vy));
+  });
+
+  it('reduces to the old loop at a ratio of one', () => {
+    const run = (aniso: number): number => {
+      const params = quiet();
+      params.drag = 1;
+      params.dragAniso = aniso;
+      const sim = new Sim(4000, 4000, 128);
+      sim.pinWorld(2000, 2000, params);
+      const a = sim.spawn('con', 2000, 2000, 0.7, params, true)!;
+      a.vx = 60;
+      a.vy = -40;
+      for (let f = 0; f < 30; f++) sim.step(1 / 60, params);
+      return Math.hypot(a.vx, a.vy);
+    };
+    expect(run(1)).toBeCloseTo(run(1), 12);
+    // A heading of 0.7 rad against a velocity that is neither along nor across
+    // it: the two paths must still agree exactly at the neutral ratio.
+    expect(run(1.0000001)).toBeCloseTo(run(1), 4);
+  });
+});
+
+describe('recoil lever', () => {
+  /*
+   * Unit tests on `applyTransportRecoil` itself rather than on a stepped sim.
+   * A body's `omega` after a frame carries the port torques and the constraint
+   * solve as well as the recoil, and those dominate — the first version of
+   * these read 1.33 rad/s on a body the push had not turned at all.
+   */
+  const body = (x: number, y: number) => ({
+    x, y, vx: 0, vy: 0, omega: 0, mass: 1, locked: false,
+  });
+  /** An aux stem's offset at heading 0: back along the body, off to one side. */
+  const AUX_BACK = -8.8;
+  const AUX_SIDE = 9.184;
+  const lever = (ay: number, amount: number) => ({
+    ax: AUX_BACK, ay, bx: 0, by: 0, invIA: 1, invIB: 0, amount,
+  });
+
+  it('leaves a body unturned when the lever is off', () => {
+    const a = body(0, 0);
+    const b = body(48, 0);
+    applyTransportRecoil(a, b, 1, 10, 4000, 4000, 1, lever(-AUX_SIDE, 0));
+    expect(a.vx, 'it should still have been shoved').toBeLessThan(0);
+    expect(a.omega).toBe(0);
+  });
+
+  it('turns a body when the port it pumped from is off the centreline', () => {
+    const a = body(0, 0);
+    const b = body(48, 0);
+    applyTransportRecoil(a, b, 1, 10, 4000, 4000, 1, lever(-AUX_SIDE, 1));
+    expect(Math.abs(a.omega)).toBeGreaterThan(1e-6);
+  });
+
+  it('bends opposite ways out of the two aux ports', () => {
+    // The whole point of an alternating spine: one push gene is opposite bends
+    // depending on which side of the centreline the joint sits.
+    const left = body(0, 0);
+    const right = body(0, 0);
+    const ahead = body(48, 0);
+    applyTransportRecoil(left, ahead, 1, 10, 4000, 4000, 1, lever(-AUX_SIDE, 1));
+    applyTransportRecoil(right, body(48, 0), 1, 10, 4000, 4000, 1, lever(AUX_SIDE, 1));
+    expect(Math.sign(left.omega)).toBe(-Math.sign(right.omega));
+    expect(Math.abs(left.omega)).toBeCloseTo(Math.abs(right.omega), 12);
+  });
+
+  it('does not turn a body pumping out of its principal, which is on the axis', () => {
+    const a = body(0, 0);
+    const b = body(48, 0);
+    // A principal stem sits at (16.8, 0): forward, and exactly on the centreline.
+    applyTransportRecoil(a, b, 1, 10, 4000, 4000, 1, { ...lever(0, 1), ax: 16.8 });
+    expect(a.omega).toBeCloseTo(0, 12);
+    expect(a.vx, 'but it is still a shove').toBeLessThan(0);
+  });
+
+  it('reaches the sim through pushCharges', () => {
+    const params = quiet();
+    params.pushRate = 1;
+    params.angDrag = 0;
+    params.recoilLever = 1;
+    params.portStiff = 0;
+    params.springK = 0;
+    const { sim, ids } = chain(params, 2);
+    sim.agents.get(ids[1])!.extra = 0.2;
+    sim.agents.get(ids[1])!.chem[PUSH_BASE + 1] = 1 / HEAD_SCALE.push;
+    const before = sim.agents.get(ids[1])!.omega;
+    sim.step(1 / 60, params);
+    expect(sim.agents.get(ids[1])!.omega).not.toBe(before);
   });
 });

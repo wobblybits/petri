@@ -681,6 +681,54 @@ export interface Params {
    */
   pushRate: number;
   /**
+   * Normal drag over tangential drag. **1 is isotropic**, which is what this
+   * sim has always been, and 2 is roughly what resistive-force theory gives a
+   * slender body in a viscous medium.
+   *
+   * `drag` stays the tangential coefficient, so this is a pure ratio and the
+   * old behaviour is the neutral value. The decomposition is against each
+   * body's own heading: motion along the way it points is damped at `drag`,
+   * motion across it at `drag * dragAniso`.
+   *
+   * This is the ingredient a *gait* needs, and its absence is why every phase
+   * sweep on the worm bench has come back flat. With isotropic drag a body's
+   * contribution to displacement depends on how hard it was pushed and in what
+   * direction and not at all on *when*, so a row of co-directed thrusters sums
+   * to the same displacement however their firing is staggered — timing
+   * time-averages away. Anisotropy is what makes the medium notice: a segment
+   * that is pointing across its own travel is held back harder than one
+   * pointing along it, so the same impulse buys different distance depending on
+   * the pose the body is in when it lands, and a wave of pose is worth
+   * something.
+   *
+   * Above 1 is a slender swimmer. Below 1 is a body that slides sideways more
+   * easily than it advances, which is strange but not meaningless — a skate.
+   */
+  dragAniso: number;
+  /**
+   * How much of a transport recoil is applied at the port rather than at the
+   * body's centre. 0 is the old behaviour; 1 is the full lever arm.
+   *
+   * Every other impulse in the simulation lands at the point it acts through —
+   * `chain.ts`'s `applyImpulse` takes an attachment and adds the angular term,
+   * which is what makes a rope hanging off an off-centre port torque its body
+   * instead of only dragging it. Transport recoil did not, so pumping matter
+   * out of a port shoved the body and never turned it, whatever the port's
+   * offset. An aux stem sits about nine units off the centreline; a principal
+   * sits on it. So with this at 1, pushing out of an aux both thrusts *and*
+   * bends, and pushing out of the principal only thrusts.
+   *
+   * That is the difference between a jet and a muscle. A bend is the only
+   * actuator a chain has for changing its own pose, and a pose wave is the only
+   * thing `dragAniso` can convert into thrust.
+   *
+   * Applied only to pushes, because they are the transfers that name a port.
+   * `flowCharges` works over the wire adjacency, which does not carry which
+   * ports a wire joined, so a rescue has no port to act at and keeps the
+   * central impulse it always had.
+   */
+  recoilLever: number;
+  /**
    * What one unit of a signal reading is worth on the way into `x`.
    *
    * A `Params` field rather than the `SENSE_SCALE` constant it defaults to,
@@ -788,6 +836,8 @@ export function defaultParams(): Params {
     excreteRate: 0,
     transportSpeed: 0,
     pushRate: 0,
+    dragAniso: 1,
+    recoilLever: 0,
     senseScale: SENSE_SCALE,
   };
 }
@@ -879,5 +929,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'excreteRate', label: 'Excrete rate', min: 0, max: 2, step: 0.02 },
   { key: 'transportSpeed', label: 'Conduction speed', min: 0, max: 60, step: 0.5 },
   { key: 'pushRate', label: 'Push rate', min: 0, max: 4, step: 0.05 },
+  { key: 'dragAniso', label: 'Drag anisotropy', min: 0.25, max: 4, step: 0.05 },
+  { key: 'recoilLever', label: 'Recoil lever', min: 0, max: 1, step: 0.05 },
   { key: 'senseScale', label: 'Sense scale', min: 0.001, max: 8, step: 0.001 },
 ];

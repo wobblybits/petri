@@ -276,6 +276,82 @@ That makes anisotropic drag the single remaining ingredient for gait, and it is
 a few lines in `dampVelocities` and its wasm twin — project the velocity onto
 the heading and damp the two components differently.
 
+## Anisotropic drag, a recoil that turns the body, and still no gait
+
+Three more things, all shipping neutral, all tested.
+
+**`dragAniso`** is normal drag over tangential, 1 being the isotropic medium
+this sim has always had. `drag` stays the tangential coefficient, so the
+neutral value is the old behaviour exactly; the isotropic path is kept as its
+own loop rather than folded in at a ratio of one.
+
+**`recoilLever`** fixes something that was simply wrong. Every other impulse in
+the sim lands where it acts — `chain.ts`'s `applyImpulse` takes an attachment
+and adds the angular term, which is what makes a rope on an off-centre port
+torque its body rather than only drag it. Transport recoil did not, so pumping
+matter out of a port shoved the body and never turned it, whatever the port's
+offset. An aux stem sits about nine units off the centreline and a principal
+sits on it, so at lever 1 pushing out of an aux thrusts *and* bends, and
+pushing out of the principal only thrusts. Applied to pushes only: they are the
+transfers that name a port, while `flowCharges` works over an adjacency that
+does not carry which ports a wire joined.
+
+**An alternating spine.** `p(i) -> l(i+1)` on even segments and `-> r(i+1)` on
+odd, so consecutive backward joints sit on opposite sides of the body. One push
+gene is then two opposite bends — a muscle running down alternate sides, and
+the only body plan here on which a travelling phase could become a travelling
+bend.
+
+With all three, and a stiffness sweep on the backbone besides, **phase still
+does nothing**:
+
+| portStiff | phase 0 | +pi/2 | -pi/2 | straight | bend |
+|---|---:|---:|---:|---:|---:|
+| 2 | 7.00 | 4.64 | 5.34 | 0.26-0.36 | 6.2 |
+| 0.25 | 6.52 | 6.85 | 9.54 | 0.38-0.52 | 6.2 |
+| 0.05 | 8.64 | 5.54 | 6.88 | 0.37-0.51 | 6.0 |
+
+The ordering is different at every stiffness, which is what noise looks like.
+And at the gentler drive that keeps the worm straight (`pushRate` 1.5, recoil
+25) the bend swing is 2.3 to 2.9 rad, straightness 0.98, and the phase rows are
+within 4% of each other — with the lever off giving 3.74 px/s against 3.73 with
+it on, so the bend actuator was not reaching the body at all.
+
+### The diagnosis: the chain has no bending stiffness
+
+There is no drive at which a controlled curvature wave exists. Gentle, and the
+body stays straight and the actuator is swallowed. Hard, and it coils — bend
+swing 6.2 rad is gross reconfiguration, not a stroke. Nothing in between.
+
+The reason is that **a joint between two bodies has no rest angle and no
+bending stiffness**. What holds the chain's shape is `portTorques`, a
+critically-damped servo at `portStiff * 320` aiming each port at its
+neighbour's stem. That is an aiming controller, not a beam: it has no preferred
+*relative* angle between two bodies and nothing that resists a joint hinging,
+only something that rotates each body to face the other. `COMPLIANCE.bend`
+exists but it is on the rope's own nodes — the shape of the wire between two
+bodies — not on the pair.
+
+So the servo is either stiff enough to reject the actuator or soft enough that
+the chain has no shape, and there is no compliance regime between the two. A
+real undulatory swimmer has a passive elastic backbone with a straight rest
+configuration and a defined bending stiffness, which is exactly what turns a
+periodic actuator into bounded curvature.
+
+**The next ingredient is a joint with a rest angle**, not more actuator: an
+angular spring between consecutive bodies preferring some relative angle, with
+a stiffness. And once that exists the obvious bending actuator is to drive the
+*rest angle* off `h` rather than to push energy around — which is what a muscle
+actually is, a thing that changes a rest length, and would make the whole
+`PUSH`-as-muscle route a jet rather than a muscle after all.
+
+### One caveat on the numbers above
+
+`lag` reads 0.00 throughout this section and means nothing there: it is
+measured off the tank traces, and the `feedAll` conditions pin every tank each
+frame so there is no trace to correlate. It is live in the metabolic
+conditions, where it was noise for the separate reason recorded above.
+
 ## What this does not yet show
 
 - **A steerable worm.** `headward` is high because the body only ever goes

@@ -129,6 +129,11 @@ interface Condition {
   pushRate?: number;
   pushSlot?: number;
   transportSpeed?: number;
+  /** Normal-over-tangential drag. 1 is the isotropic medium this sim has always had. */
+  dragAniso?: number;
+  /** How much of a push's recoil acts at the port rather than the centre. */
+  recoilLever?: number;
+  spine?: 'l' | 'r' | 'alternate';
   thrust?: number;
   recoil?: number;
   segments?: number;
@@ -151,6 +156,19 @@ interface Condition {
   feedAll?: boolean;
 }
 
+/**
+ * Which port index carries the joint to the segment behind `i`.
+ *
+ * `buildWorm` wires `p(i) -> l(i+1)` on a plain spine and alternates `l`/`r`
+ * on an alternating one, so segment `i`'s backward joint is whichever slot
+ * `buildWorm` gave it. 0 is the principal, 1 is `l`, 2 is `r`.
+ */
+function jointSlot(c: Condition, i: number): number {
+  if (c.pushSlot !== undefined) return c.pushSlot;
+  if (c.spine !== 'alternate') return 1;
+  return (i - 1) % 2 === 0 ? 1 : 2;
+}
+
 function run(c: Condition, seed: number): Gait {
   const segments = c.segments ?? SEGMENTS;
   const thrust = c.thrust ?? 1;
@@ -161,7 +179,7 @@ function run(c: Condition, seed: number): Gait {
     seconds: SECONDS,
     seed,
     sampleEvery: c.cpg ? 0.1 : 2,
-    worm: { segments, kinds: 'con', heading: 0, jitter: 0.08 },
+    worm: { segments, kinds: 'con', heading: 0, jitter: 0.08, spine: c.spine },
     params: {
       ...bench(),
       portStiff: c.portStiff ?? 2,
@@ -171,6 +189,8 @@ function run(c: Condition, seed: number): Gait {
       ...(c.excreteRate !== undefined ? { excreteRate: c.excreteRate } : {}),
       ...(c.pushRate !== undefined ? { pushRate: c.pushRate } : {}),
       ...(c.transportSpeed !== undefined ? { transportSpeed: c.transportSpeed } : {}),
+      ...(c.dragAniso !== undefined ? { dragAniso: c.dragAniso } : {}),
+      ...(c.recoilLever !== undefined ? { recoilLever: c.recoilLever } : {}),
       ...(c.params ?? {}),
     },
     dressWorm: (sim: Sim, ids: number[]) => {
@@ -250,9 +270,15 @@ function run(c: Condition, seed: number): Gait {
                         // point in its cycle and not at all at the other. The
                         // phase offset between segments is then a phase offset
                         // between strokes.
-                        push: [0, 0, 0].map((_, k) => (k === (c.pushSlot ?? 1) ? 0.5 : 0)),
+                        /*
+                         * On an alternating spine the backward joint is `l` on
+                         * even segments and `r` on odd, so "push out of the
+                         * joint behind me" is one gene and two opposite bends.
+                         * That is the muscle running down alternate sides.
+                         */
+                        push: [0, 1, 2].map((k) => (k === jointSlot(c, i) ? 0.5 : 0)),
                         pushGain: [0, 1, 2].map((k) =>
-                          k === (c.pushSlot ?? 1) ? [0, 0, 1.5, 0] : [0, 0, 0, 0],
+                          k === jointSlot(c, i) ? [0, 0, 1.5, 0] : [0, 0, 0, 0],
                         ),
                       }
                     : {}),
@@ -460,6 +486,39 @@ describe('experiment: a muscle the net drives itself', () => {
       feedAll: true,
       params: { upkeep: 0, ambientEnergy: 0 },
     };
+    const G = {
+      recoil: 25,
+      pushRate: 1.5,
+      feedAll: true,
+      recoilLever: 1,
+      spine: 'alternate' as const,
+      params: { upkeep: 0, ambientEnergy: 0 },
+    };
+    /*
+     * The bend actuator against the servo that holds the chain straight.
+     *
+     * `portTorques` runs at `portStiff * 320`, so the shipped 2 is a gain of
+     * 640 aiming every port at its neighbour, critically damped. A push torque
+     * is `r x F` with `r` about nine units and `F` a fraction of a unit — three
+     * orders of magnitude under it. If the backbone is what is swallowing the
+     * stroke, softening it is what shows the stroke.
+     */
+    for (const stiff of [2, 0.25, 0.05]) {
+      report(`bend against the backbone, portStiff ${stiff}`, [
+        { label: '+pi/2', ...G, portStiff: stiff, pushRate: 4, recoil: 100, dragAniso: 3, cpg: { ...CPG, phase: Math.PI / 2 } },
+        { label: '-pi/2', ...G, portStiff: stiff, pushRate: 4, recoil: 100, dragAniso: 3, cpg: { ...CPG, phase: -Math.PI / 2 } },
+        { label: 'phase 0', ...G, portStiff: stiff, pushRate: 4, recoil: 100, dragAniso: 3, cpg: { ...CPG, phase: 0 } },
+      ]);
+    }
+    report('gait: alternating spine, recoil at the port', [
+      { label: 'iso, phase 0', ...G, dragAniso: 1, cpg: { ...CPG, phase: 0 } },
+      { label: 'iso, +pi/2', ...G, dragAniso: 1, cpg: { ...CPG, phase: Math.PI / 2 } },
+      { label: 'iso, -pi/2', ...G, dragAniso: 1, cpg: { ...CPG, phase: -Math.PI / 2 } },
+      { label: 'aniso 3, phase 0', ...G, dragAniso: 3, cpg: { ...CPG, phase: 0 } },
+      { label: 'aniso 3, +pi/2', ...G, dragAniso: 3, cpg: { ...CPG, phase: Math.PI / 2 } },
+      { label: 'aniso 3, -pi/2', ...G, dragAniso: 3, cpg: { ...CPG, phase: -Math.PI / 2 } },
+      { label: 'aniso 3, no lever', ...G, recoilLever: 0, dragAniso: 3, cpg: { ...CPG, phase: Math.PI / 2 } },
+    ]);
     report('the actuator alone: every tank held full, so every transfer is a push', [
       { label: 'aux, phase 0', ...A, pushSlot: 1, cpg: { ...CPG, phase: 0 } },
       { label: 'aux, +pi/2', ...A, pushSlot: 1, cpg: { ...CPG, phase: Math.PI / 2 } },

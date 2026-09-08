@@ -60,7 +60,7 @@ import { AgentStore, CODE_KIND } from './agent-store.ts';
 import { queryHit, queryDiscHit, SLOP, type Hit } from './collide.ts';
 import { closestTOnSegment, segmentsIntersect, WIRE_RADIUS, wireBowBudget, bounceOffDisk } from './geom.ts';
 import { PairGrid } from './grid.ts';
-import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
+import { attachOffset, CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
 import { CH, CHANNELS, FERTILISE_CH, FIELD_CELL, FIELD_CELLS, Fields, worldBoundRadius } from './fields.ts';
 import { Graph, ropeIsLive, wrapPos, type Wire } from './graph.ts';
 import type { Params } from './params.ts';
@@ -4212,11 +4212,39 @@ export class Sim {
     const VX = store.vx;
     const VY = store.vy;
     const OMEGA = store.omega;
+    const aniso = Math.max(0, params.dragAniso);
+    if (aniso === 1) {
+      for (const agent of this.agents.values()) {
+        const s = agent.slot;
+        if (LOCKED[s] || PINNED[s]) continue;
+        VX[s] *= linKeep;
+        VY[s] *= linKeep;
+        OMEGA[s] *= angKeep;
+      }
+      return;
+    }
+    /*
+     * Anisotropic: resolve each body's velocity against its own heading and
+     * damp the two components differently. See `params.dragAniso` for why this
+     * is the ingredient a gait needs.
+     *
+     * The isotropic case above is kept as its own loop rather than folded in at
+     * a ratio of one, because it is the shipped path and it costs a sine, a
+     * cosine and eight multiplies a body to pretend otherwise.
+     */
+    const normKeep = Math.exp(-Math.max(0, params.drag) * aniso * dt);
+    const HEADING = store.heading;
     for (const agent of this.agents.values()) {
       const s = agent.slot;
       if (LOCKED[s] || PINNED[s]) continue;
-      VX[s] *= linKeep;
-      VY[s] *= linKeep;
+      const hx = Math.cos(HEADING[s]);
+      const hy = Math.sin(HEADING[s]);
+      const vT = VX[s] * hx + VY[s] * hy;
+      const vN = -VX[s] * hy + VY[s] * hx;
+      const kT = vT * linKeep;
+      const kN = vN * normKeep;
+      VX[s] = kT * hx - kN * hy;
+      VY[s] = kT * hy + kN * hx;
       OMEGA[s] *= angKeep;
     }
   }
@@ -6166,11 +6194,18 @@ export class Sim {
    * high-thrust receivers drifts a net's swimming stroke somewhere neither
    * parent species swims alone.
    */
-  private recoil(from: { id: number }, to: { id: number }, amount: number): void {
+  private recoil(
+    from: { id: number },
+    to: { id: number },
+    amount: number,
+    lever?: RecoilLever,
+  ): void {
     const A = this.agents.get(from.id);
     const B = this.agents.get(to.id);
     if (A && B && A.transportRecoil > 0) {
-      applyTransportRecoil(A, B, amount, A.transportRecoil, this.w, this.h, B.transportThrust);
+      applyTransportRecoil(
+        A, B, amount, A.transportRecoil, this.w, this.h, B.transportThrust, lever,
+      );
       this.tally.hops++;
       this.tally.pumpImpulse += A.transportRecoil * amount;
     }
@@ -6501,6 +6536,11 @@ export class Sim {
    * neighbour achieves nothing, which is the coupling that makes a pump need
    * somewhere to pump *to* — a muscle only works against a load.
    */
+  /** Reused by `pushCharges`; one push a port a body a frame, so this must not allocate. */
+  private readonly pushLever: RecoilLever = {
+    ax: 0, ay: 0, bx: 0, by: 0, invIA: 0, invIB: 0, amount: 0,
+  };
+
   private pushCharges(params: Params, dt: number): void {
     const rate = params.pushRate;
     if (!(rate > 0) || dt <= 0) return;
@@ -6508,6 +6548,9 @@ export class Sim {
     const PUSH = store.pushAll;
     const LOCKED = store.locked;
     const list = this.forceList();
+    const arm = Math.max(0, params.recoilLever);
+    const lever = this.pushLever;
+    lever.amount = arm;
     for (let i = 0; i < list.length; i++) {
       const a = list[i];
       const s = a.slot;
@@ -6532,7 +6575,19 @@ export class Sim {
         a.extra -= give;
         peer.extra += give;
         this.tally.moved += give;
-        this.recoil(a, peer, give);
+        if (arm > 0) {
+          const rA = attachOffset(a, slots[k]);
+          const rB = attachOffset(peer, peerRef.slot);
+          lever.ax = rA.x;
+          lever.ay = rA.y;
+          lever.bx = rB.x;
+          lever.by = rB.y;
+          lever.invIA = 1 / Math.max(1e-4, momentOfInertia(a));
+          lever.invIB = 1 / Math.max(1e-4, momentOfInertia(peer));
+          this.recoil(a, peer, give, lever);
+        } else {
+          this.recoil(a, peer, give);
+        }
       }
     }
   }
@@ -6654,14 +6709,27 @@ export class Sim {
  * shows up on the events — a rescue, a refill after a commute — and on a net
  * held under a real gradient, not on a soup that is already topped up.
  */
+export interface RecoilLever {
+  /** Attachment of the impulse on each body, relative to its centre, already rotated. */
+  ax: number;
+  ay: number;
+  bx: number;
+  by: number;
+  invIA: number;
+  invIB: number;
+  /** 0 applies the impulse at the centre as it always was; 1 uses the full arm. */
+  amount: number;
+}
+
 export function applyTransportRecoil(
-  A: { x: number; y: number; vx: number; vy: number; mass: number; locked: boolean },
-  B: { x: number; y: number; vx: number; vy: number; mass: number; locked: boolean },
+  A: { x: number; y: number; vx: number; vy: number; omega?: number; mass: number; locked: boolean },
+  B: { x: number; y: number; vx: number; vy: number; omega?: number; mass: number; locked: boolean },
   amount: number,
   gain: number,
   w: number,
   h: number,
   thrust = 0,
+  lever?: RecoilLever,
 ): void {
   if (A.locked || B.locked || !(amount > 0) || !(gain > 0)) return;
   const d = wrapDeltaVec(A.x, A.y, B.x, B.y, w, h);
@@ -6680,6 +6748,23 @@ export function applyTransportRecoil(
   A.vy -= ny * p * wA;
   B.vx += nx * p * catches * wB;
   B.vy += ny * p * catches * wB;
+  /*
+   * And the angular half, when the caller knows which port the matter left by.
+   *
+   * `r x F` about each body's own centre, exactly as `chain.ts`'s
+   * `applyImpulse` does it for a rope. Without this a pump is a thruster
+   * bolted to the centre of mass however far off-axis its nozzle is, and a
+   * chain has no way to change its own pose at all — which is what a stroke
+   * is. An aux stem sits about nine units off the centreline and a principal
+   * sits on it, so this is what makes pushing out of `l` and out of `r`
+   * opposite bends and pushing out of `p` a pure shove.
+   */
+  if (!lever || !(lever.amount > 0)) return;
+  const k = Math.min(1, lever.amount) * p;
+  if (A.omega !== undefined) A.omega -= (lever.ax * ny - lever.ay * nx) * k * lever.invIA;
+  if (B.omega !== undefined) {
+    B.omega += (lever.bx * ny - lever.by * nx) * k * catches * lever.invIB;
+  }
 }
 
 /** Move the closest point on polyline segment `seg` by (ux, uy). Stems stay put. */
