@@ -402,6 +402,64 @@ because the angular side is the only side that can supply it. A joint with a
 rest angle is not one option among several; given a three-port alphabet in two
 dimensions it is the only one. That is worth knowing before building it.
 
+## Large nets have no free ports at all
+
+Measured before building anything on them, in `ports.exp.ts`: a 400-body soup
+run 90 s, components counted, free ports as `sum(ports) - 2 * wires`.
+
+| net size | nets | mean free | free/body | wires/body |
+|---:|---:|---:|---:|---:|
+| 1 | 82 | 1.4 | 1.366 | 0.000 |
+| 2-3 | 30 | 2.0 | 0.859 | 0.592 |
+| 4-7 | 14 | 3.5 | 0.690 | 0.873 |
+| 8-15 | 7 | 4.6 | 0.400 | 1.000 |
+| 16-31 | 1 | 5.0 | 0.263 | 1.053 |
+| 32-63 | 1 | 4.0 | 0.111 | 1.194 |
+| 64+ | 2 | **1.0** | **0.007** | 1.417 |
+
+The largest net in the pond is **186 bodies, 279 wires, zero free ports**:
+`279 * 2 = 558 = 3 * 186`, every port consumed. Free ports do not scale
+sublinearly with size, they scale to *nothing*, because a grown net is port
+saturated.
+
+Three consequences, only the first of which was the reason for measuring:
+
+- **A boundary cannot be a motor.** Drag here is charged per body, so a net's
+  drag goes as its size; thrust from free ports would go as an absence that
+  vanishes. A 186-body organism would pay drag on 186 bodies and have nowhere
+  to push from. An Era-terminated port is a different thing entirely — a
+  *place*, paid for with a body, and a net grows however many of them it
+  invests in. That is the plan's §5 boundary, and it is the one that scales.
+- **A large net cannot latch.** Latching needs a free port at both ends, so
+  past some size a net can only change by rewriting what it already has. Its
+  budget of structural events is closed.
+- **`IN_BOUND` stops carrying information.** It is the fraction of a body that
+  is attached, and in a saturated net it is 1 for everybody. The genome input
+  that was meant to let a channel mean something different once a port is
+  matched is constant in exactly the organisms complex enough to need it.
+
+### And the momentum question this forces
+
+`pushCharges` works on *wired* ports, so unlike a free-port scheme it scales in
+a saturated net. But then the honest question cannot be dodged: an internal
+transfer must not create momentum. From `applyTransportRecoil`, A's momentum
+changes by `-n*p` and B's by `+n*p*catches`, so the pair's total is
+`n*p*(catches - 1)` — zero **iff** `transportThrust` is 0.
+
+So the 36 px/s worm at the top of this document was swimming on `thrust = 1`,
+which is a momentum pump, and the `thrust 0` control that reads as a clean
+falsification is in fact the physically correct configuration going nowhere.
+The measurements stand; what they measured was a non-conservative force.
+
+That leaves two honest thrusters. **Ejection into the field** — excretion
+recoil, through Eras as nozzles, already costed and already inside the
+expression simplex. And **shape change against anisotropic drag** — internal
+forces cannot move a centre of mass but they can change a shape, and an
+anisotropic medium turns shape change into displacement, which is how real
+undulatory swimming works. Under that split `PUSH` is not a thruster at all but
+an internal bending actuator, which makes `recoilLever` load-bearing and
+`dragAniso` the mechanism rather than a prerequisite.
+
 ### One caveat on the numbers above
 
 `lag` reads 0.00 throughout this section and means nothing there: it is

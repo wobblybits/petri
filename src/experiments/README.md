@@ -11,6 +11,7 @@ npm run experiment -- breeding          # declutter x flockAlign x spawnInterval
 npm run experiment -- economy           # the dials that ship at zero, one at a time
 npm run experiment -- worm              # one hand-built organism, not a pond
 npm run experiment -- beam              # where a body plan's bending stiffness comes from
+npm run experiment -- ports             # how many free ports a net has, against its size
 EXP_SECONDS=180 EXP_BODIES=600 npm run experiment -- breeding
 ```
 
