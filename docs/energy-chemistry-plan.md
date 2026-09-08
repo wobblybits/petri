@@ -315,6 +315,98 @@ the default.
 
 ---
 
+## 6b. Catabolism: what makes a species food
+
+Added 2026-09-08, after phase 3 shipped and the sweeps read it back.
+
+Phase 3 implemented §2's rate law with `a_ij` **diagonal** — uptake row `j`
+consumes exactly species `j`. That is "eat raw scent", and measured, it is also
+the configuration the pond likes least: at the recommended excretion rate,
+turning the four-species table *off* gave the deepest lineages and the most
+differentiated nets of anything measured (`netFst` 0.418 against 0.315).
+The data currently favours abandoning §1's central claim, which is a sign the
+implementation of that claim is wrong rather than the claim.
+
+The author's correction, and it is the right one:
+
+> everything anyone excretes is something someone else **could develop the
+> machinery to metabolize into** food
+
+`CH.energy` is the default substrate — everyone can use it raw, for free, and
+that is what makes it the ground rather than a signal. The other three are
+mass in the field that no body can touch without machinery. A lineage develops
+a **recipe**: proportions in which it can convert species 0, 1 and 3 into
+energy.
+
+### The obstacle is the gradient, not the cost
+
+Machinery is worthless until it is complete, so selection cannot climb to it.
+A recipe needing species 0 and 3 together pays a body with only species 0
+nothing, there is no slope to ascend, and the capability can arrive only by a
+simultaneous mutation. This is the same shape as §3's specialist condition and
+it is why "evolve the enzyme" mechanisms usually sit inert.
+
+**Energy is the co-substrate that fixes it.** If catabolism is always energy
+*plus* a proportion of the others rather than the others alone, then every
+increment of capability is worth something the moment it is non-zero, and the
+gradient runs continuously from a body that has none.
+
+### Conservation settles the cost balance without a constant
+
+The temptation is to make a recipe yield more. Conservation forbids it: a unit
+of matter consumed is at most a unit of energy banked, so catabolism cannot be
+an amplifier.
+
+What it can be is **access**. A lineage that develops the machinery is not
+making more energy, it is reaching a pool its competitors cannot. That needs no
+balancing term, it is conservative by construction, and it is exactly §0's
+missing ingredient — a resource gradient that must be crossed by machinery,
+spatially structured, because you do better near whatever excretes your
+substrate. It is also the first *metabolic* reason for a net to exist. §0's
+complaint is that a net buys transport and rewrite partners and never access.
+
+Two things already in place protect it. The expression simplex stops the
+trivial collapse where a lineage excretes species 0 and metabolises species 0,
+because it cannot afford both rows. And `rowCost` prices breadth, so a
+generalist recipe pays for every species it can touch.
+
+### The fork, unresolved
+
+**How many non-energy species does a recipe need?**
+
+*One plus energy* is smooth and will actually evolve, because the gradient runs
+continuously from zero. But the machinery sits in a single body, so it does not
+meet §0's "no single body embodies" bar: it buys trophic specialisation without
+requiring anyone to cooperate.
+
+*Two or more, coupled* is what genuinely needs a net — a body that can only
+process species 0 needs a neighbour supplying it, and the pair crosses a
+gradient neither can alone. That is the stronger claim and the one §0 asks for,
+and it reintroduces the cliff. Liebig's law of the minimum is the obvious
+smoother: rate limited by the scarcest substrate in the recipe, so a body
+specifying two species and finding one still runs, badly, and the pair is
+strictly better than either half.
+
+Leaning toward the second with Liebig, because the first is reachable by
+tuning what already exists and does not buy the thing the simulation is short
+of. It is the bigger change and it ships at zero either way.
+
+### What has to be measured, and the trap waiting
+
+- Does a recipe ever appear from a seeded pond, or does it need to be planted?
+  The pond library can plant one and see whether it invades, which is a much
+  cheaper question than whether it arises.
+- Does `netFst` rise when it does? That is the claim — differentiation because
+  lineages are eating different things.
+- Does the trivial equilibrium appear anyway: everyone converging on one
+  recipe and one excretion, which is `CH.energy` with extra steps?
+
+**Assume nothing about which dial matters.** Three sweeps concluded
+`excreteRate` was what held reproduction down; the real cost was phase 1's
+metered uptake, which an earlier sweep had scored as inert (eta-squared 0.02).
+It looked inert because excretion was saturating the thing it controlled. A
+catabolism matrix adds many dials at once and the same trap is set.
+
 ## 7. Order of work
 
 **Phase 0. Layout and parameters.** *Done, 2026-09-08.* The expression head
@@ -449,6 +541,25 @@ The rest of phase 5 is ready: `Fields.react` exists and ships at zero, and
 `npm run pond -- sweep --axis reactFeed=... --axis reactKill=...` already
 parses — the `F, k` grid can be queued the moment the complement is chosen.
 
+**Phase 7. Catabolism.** *Not started; §6b is the argument.* `a_ij` stops
+being diagonal: an uptake row consumes a *recipe* over the species rather than
+one of them, gated on `CH.energy` as the co-substrate so the gradient runs from
+zero. Conservative by construction — it buys access, not amplification.
+
+Ordered after the fork in §6b is settled, and it interacts with phase 5: if
+the ground goes onto `react` with one of the signalling species as its
+substrate, then that species is both something bodies excrete and something
+the ground consumes, and a recipe over it competes with the ground's own
+regrowth. That is either the most interesting coupling in the document or two
+mechanisms fighting over one channel, and which it is depends on the same
+choice phase 5 is waiting on. **They should be decided together.**
+
+The measurement that would settle it before either is built: plant a lineage
+carrying a recipe into a pond that has none, and see whether it invades. That
+is far cheaper than waiting for one to arise, the pond library does it today,
+and a mechanism that cannot invade when handed to a pond ready-made is not
+going to evolve in one.
+
 ---
 
 ## 8. Consequences to watch
@@ -476,6 +587,14 @@ parses — the `F, k` grid can be queued the moment the complement is chosen.
   every eleven seconds, for 293 bodies with an 83 s tank. Most bodies never
   rewrite. Genetic turnover is already the scarcest thing in the simulation,
   and anything that halves the latch rate is halving something near the floor.
+
+- **The measured cost of the mechanism, so far.** Against a control with the
+  chemistry off (lineage depth 68.7 over 600 simulated seconds from a 500-body
+  soup, five seeds a point), conserved excretion at the rate the sweeps picked
+  runs at **2.7x less reproduction**. That is the price of a body paying for
+  what it says, and it is not small. Most of what looked like the price was not
+  excretion at all — see the note on `uptakeVmax` in §7's phase 4 — and the
+  remaining figure is the one to beat, not to accept.
 
 - **`spawnInterval: 0.5` is both the safety net and the ceiling.** Constant
   immigration of freshly seeded bodies means the pond cannot go permanently
