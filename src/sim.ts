@@ -560,6 +560,23 @@ export class Sim {
     annihilations: 0,
     latches: 0,
     snaps: 0,
+    /**
+     * Transport, counted the same way every other event here is.
+     *
+     * `moved` is energy that crossed a wire, `hops` the number of crossings,
+     * and `pumpImpulse` the momentum those crossings put into the pond —
+     * `sum(gain * amount)` over the senders, which is exactly what
+     * `applyTransportRecoil` hands out.
+     *
+     * The three are here because a net's stroke cannot be read off any of the
+     * others. Energy that travels five wires from a full head to an empty tail
+     * kicks five times, so `moved` alone understates the thrust by the path
+     * length, and neither says anything about a net that is pumping hard in
+     * two directions at once and going nowhere. Cumulative since `clear`.
+     */
+    moved: 0,
+    hops: 0,
+    pumpImpulse: 0,
   };
   /**
    * Physics detail. When a view is passed, FAR agents keep disc contacts and a
@@ -5586,7 +5603,9 @@ export class Sim {
     Sim.phase('pulse:seed');
     spreadRequestsFast(list, this.agentStore, adj);
     Sim.phase('pulse:spread');
-    flowChargesFast(list, this.agentStore, adj, (from, to, amount) => this.recoil(from, to, amount));
+    this.tally.moved += flowChargesFast(list, this.agentStore, adj, (from, to, amount) =>
+      this.recoil(from, to, amount),
+    );
     Sim.phase('pulse:flow');
     this.updateState(list, adj, params);
     Sim.phase('state');
@@ -6135,6 +6154,8 @@ export class Sim {
     const B = this.agents.get(to.id);
     if (A && B && A.transportRecoil > 0) {
       applyTransportRecoil(A, B, amount, A.transportRecoil, this.w, this.h, B.transportThrust);
+      this.tally.hops++;
+      this.tally.pumpImpulse += A.transportRecoil * amount;
     }
   }
 

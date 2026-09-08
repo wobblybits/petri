@@ -9,6 +9,7 @@ or fails — the output is a table on stdout and a JSON file under
 ```bash
 npm run experiment -- breeding          # declutter x flockAlign x spawnInterval
 npm run experiment -- economy           # the dials that ship at zero, one at a time
+npm run experiment -- worm              # one hand-built organism, not a pond
 EXP_SECONDS=180 EXP_BODIES=600 npm run experiment -- breeding
 ```
 
@@ -39,6 +40,28 @@ swallows the table.
   instead, where they accumulate and can be queried across sessions and
   commits. Prefer it for anything you want to still know next week.
 - `canPay` is the fraction of bodies that could fund a rewrite this frame.
+
+## One organism, not a pond
+
+`organism.ts` is the other bench. A sweep over a soup wants population
+statistics and every number in `Sample` is an average over thousands of
+bodies; none of that says whether *this* net does *that* thing. A worm is one
+organism with an inside — segments in an order, a gradient along it, a stroke
+with a phase — and averaging it away is the wrong move.
+
+So a trial there is a single net built to a spec, run with the rest of the pond
+switched off, and sampled per segment. `buildWorm` lays a chain,
+`dress` hand-writes genomes, `motorsOff` returns the overrides that leave one
+motor running, and `gaitOf` reduces a run to a gait: speed, `headward`
+(is it going where its nose points), straightness, and cost of transport.
+
+Read `headward` and `straightness` together, and never `along` alone — a worm
+that turns and then swims well scores badly on its build axis. Run several
+seeds: `jitter` is what makes a seed mean anything, since nothing in a
+motors-off run consumes `Math.random`, and the difference between swimming and
+tumbling is in the spread rather than the mean.
+
+See `docs/transport-worm.md` for what the first one measured.
 
 ## Adding one
 
