@@ -939,8 +939,6 @@ export class Sim {
     Sim.phase('steer');
     this.portTorques(params, t);
     Sim.phase('portTorques');
-    this.jointAngles(params, t);
-    Sim.phase('jointAngles');
     this.declutter(params, t);
     Sim.phase('declutter');
     this.uncrossPrincipals(params, t);
@@ -1031,6 +1029,7 @@ export class Sim {
      * by the constraint rather than by its own port, and billing it for the
      * net's motion would make being carried expensive.
      */
+    this.chargeBend(params, t);
     if (params.swimCost > 0) {
       const rent = params.swimCost * t;
       for (const a of this.agents.values()) {
@@ -1267,84 +1266,94 @@ export class Sim {
   /**
    * Joints: hold the two ports across a wire at their rest angle.
    *
-   * The only restoring force a net can have, and that is arithmetic rather
-   * than taste. A wire is a distance constraint, so a net is a pin-jointed
+   * The only restoring force a net can have, and that is arithmetic rather than
+   * taste. A wire is a distance constraint, so a net is a pin-jointed
    * structure; planar rigidity wants `|E| >= 2|V| - 3` and a three-port
-   * alphabet supplies at most `3|V|/2`, and those meet only at `|V| <= 6`.
-   * Past six bodies nothing on the distance side can make a net spring back,
-   * so it has to come from here.
+   * alphabet supplies at most `3|V|/2`, and those meet only at `|V| <= 6`. Past
+   * six bodies nothing on the distance side can make a net spring back.
    *
-   * `portTorques` is emphatically not this, and the difference is the whole
-   * reason the pass exists. That one aims each port at its partner's stem
-   * *position*, and a smooth arc satisfies it for free — every port in a
-   * curved chain still points at the next body — so it constrains a body
-   * against its neighbours' positions and curvature is invisible to it. This
-   * constrains the angle between the two port *axes*, a function of the two
-   * headings and of nothing else, which an arc does not satisfy.
+   * `portTorques` is emphatically not this. That one aims each port at its
+   * partner's stem *position*, and a smooth arc satisfies it for free — every
+   * port in a curved chain still points at the next body — so it constrains a
+   * body against its neighbours' positions and curvature is invisible to it.
+   * This constrains the angle between the two port *axes*, a function of the
+   * two headings and of nothing else, which an arc does not satisfy.
    *
-   * Straight is the two axes anti-parallel, so `rel` is measured against pi
-   * and zero means straight. Each end contributes its own rest angle from the
-   * `ANGLE` head, and they add: a joint is bent by agreement between the two
-   * bodies holding it, and either can bend it alone.
+   * **A positional constraint, solved in the substep loop, not a torque.** The
+   * first version of this was a force applied before the solve, and it did not
+   * work: `finishIntegrate` derives velocity from the position delta a substep
+   * actually achieved, so an angular impulse applied outside the solver
+   * survives only insofar as it moves a pose the constraints then overrule.
+   * Measured, the joints tracked their commanded angle with a correlation of
+   * 0.02 to 0.20 and swung just as far with the muscle switched off — flapping,
+   * not following. Every other shape-holding thing here is an XPBD constraint
+   * for the same reason (`solveSpan`, `solveBend`, `solveContact`), and
+   * `portTorques` gets away with being a force only because it is an aiming
+   * servo with small errors re-applied every frame.
    *
-   * Applied as a **couple** — equal and opposite torques, from one potential —
-   * so the pair's angular momentum is untouched. That is the invariant that
-   * makes this an internal actuator rather than the momentum pump the
-   * transport recoil turned out to be: an internal actuator may change a
-   * shape and may not change a momentum. Everything the net then does with
-   * that shape it does through drag, which is where `dragAniso` comes in.
+   * Corrections are equal and opposite in the generalized coordinate, so the
+   * pair's angular momentum is untouched: an internal actuator may change a
+   * shape and may not change a momentum.
    *
-   * Public for the same reason `latchPass` is: the couple is exact in this
-   * pass and only approximately visible through a whole step, because the
-   * constraint solve re-derives `omega` from the poses it lands on. A test
-   * that wants to check conservation has to call the pass.
+   * `jointStiff` is a rigidity fraction rather than a torque per radian. At 1
+   * the joint is rigid and takes the whole correction; below it the compliance
+   * is scaled to the pair's own inverse inertia, so the same number means the
+   * same firmness whatever the bodies weigh.
    */
-  jointAngles(params: Params, dt: number): void {
-    const k = params.jointStiff;
-    if (!(k > 0) || dt <= 0) return;
+  solveJoints(params: Params, h: number): void {
+    const rigid = params.jointStiff;
+    if (!(rigid > 0) || h <= 0) return;
     const store = this.agentStore;
     const ANGLE = store.angleAll;
-    const cost = params.bendCost * dt;
+    const HEADING = store.heading;
+    const soft = rigid >= 1 ? 0 : 1 / rigid - 1;
     for (const wire of this.graph.wires.values()) {
       const A = this.agents.get(wire.a.id);
       const B = this.agents.get(wire.b.id);
       if (!A || !B || A === B) continue;
       const heldA = poseHeld(A);
       const heldB = poseHeld(B);
-      const invIA = heldA ? 0 : 1 / Math.max(1e-4, momentOfInertia(A));
-      const invIB = heldB ? 0 : 1 / Math.max(1e-4, momentOfInertia(B));
-      const denom = invIA + invIB;
-      if (denom < 1e-12) continue;
+      const wA = heldA ? 0 : 1 / Math.max(1e-4, momentOfInertia(A));
+      const wB = heldB ? 0 : 1 / Math.max(1e-4, momentOfInertia(B));
+      const w = wA + wB;
+      if (w < 1e-12) continue;
       const ua = portAxisWorld(A, wire.a.slot);
       const ub = portAxisWorld(B, wire.b.slot);
-      const restA = ANGLE[A.slot * ANGLE_SLOTS + this.slotCode(wire.a.slot)];
-      const restB = ANGLE[B.slot * ANGLE_SLOTS + this.slotCode(wire.b.slot)];
+      const want =
+        ANGLE[A.slot * ANGLE_SLOTS + this.slotCode(wire.a.slot)] +
+        ANGLE[B.slot * ANGLE_SLOTS + this.slotCode(wire.b.slot)];
+      // Straight is the two axes anti-parallel, so this is zero on a straight
+      // joint and each end's commanded angle bends it from there.
       const rel = wrapAngle(Math.atan2(ub.y, ub.x) - Math.atan2(ua.y, ua.x) - Math.PI);
-      const err = wrapAngle(rel - (restA + restB));
-      // Critically damped against the *relative* spin, which is the velocity
-      // of the coordinate being constrained. Damping the two absolute spins
-      // instead would fight a rigid rotation of the pair, which is free.
-      const damp = 2 * Math.sqrt(k / denom);
-      const gen = (k * err + damp * (B.omega - A.omega)) * dt;
-      if (!Number.isFinite(gen)) continue;
-      // Not wrapped: `omega` is an angular velocity, and a body may legitimately
-      // spin faster than a turn a second. `portTorques` does not wrap it either.
-      if (!heldA) A.omega += gen * invIA;
-      if (!heldB) B.omega -= gen * invIB;
-      /*
-       * And the bill, on the commanded angle rather than on the torque.
-       *
-       * A joint at rest costs nothing and a body holding itself bent pays
-       * continuously, which is how an isometric muscle behaves and, more to
-       * the point, is what stops this being another free gain. The last one —
-       * `transportRecoil`, which bought impulse without consuming anything —
-       * made cost of transport improve monotonically with a gene that cost
-       * nothing, and selection scored on distance would have pinned it at the
-       * clamp.
-       */
-      if (cost > 0) {
-        if (restA !== 0) A.extra -= cost * Math.abs(restA);
-        if (restB !== 0) B.extra -= cost * Math.abs(restB);
+      const C = wrapAngle(rel - want);
+      if (!Number.isFinite(C)) continue;
+      const lambda = -C / (w + w * soft);
+      if (!Number.isFinite(lambda)) continue;
+      if (!heldA) HEADING[A.slot] = wrapAngle(HEADING[A.slot] - wA * lambda);
+      if (!heldB) HEADING[B.slot] = wrapAngle(HEADING[B.slot] + wB * lambda);
+    }
+  }
+
+  /**
+   * Rent on holding a bend, charged once a frame on the commanded angle rather
+   * than on the torque.
+   *
+   * A straight joint costs nothing and a body holding itself bent pays
+   * continuously, the way an isometric muscle does. Without it the actuator is
+   * another free gain: `transportRecoil` was one, and cost of transport
+   * improved monotonically with a gene that consumed nothing.
+   */
+  private chargeBend(params: Params, dt: number): void {
+    const rate = params.bendCost * dt;
+    if (!(rate > 0)) return;
+    const store = this.agentStore;
+    const ANGLE = store.angleAll;
+    for (const wire of this.graph.wires.values()) {
+      for (const end of [wire.a, wire.b]) {
+        const a = this.agents.get(end.id);
+        if (!a || a.locked) continue;
+        const want = ANGLE[a.slot * ANGLE_SLOTS + this.slotCode(end.slot)];
+        if (want !== 0) a.extra -= rate * Math.abs(want);
       }
     }
   }
@@ -1359,23 +1368,15 @@ export class Sim {
   /**
    * Open a shared copy for the run of WASM force passes.
    *
-   * Only when every pass in that run is native: `uncrossPrincipals` and
-   * `jointAngles` are still JS, so a scene that uses either would have that
-   * pass read stale velocities and then have its own writes overwritten on
-   * unpack. Both are off by default, and when one is on each pass falls back
-   * to copying for itself.
+   * Only when every pass in that run is native: `uncrossPrincipals` is still
+   * JS, so a scene that uses it would have that pass read stale velocities and
+   * then have its own writes overwritten on unpack. It is off by default, and
+   * when it is on each pass falls back to copying for itself.
    */
   private openForceBlock(params: Params): boolean {
     this.forceBlock = false;
     if (!Sim.nativeForces || !nativeSolver.ready) return false;
     if (params.uncross > 0) return false;
-    // Same reason as `uncross`, and the same failure it would otherwise cause:
-    // `jointAngles` is still JS, so with the block open it would write `omega`
-    // into a store that `syncForces` is about to overwrite from the pack. The
-    // symptom is silent and total — the joint appears to run, every number it
-    // produces is plausible, and the simulation is bit-identical to one with
-    // the actuator switched off.
-    if (params.jointStiff > 0) return false;
     const list = this.forceList();
     if (list.length === 0) return false;
     if (!this.packPose(list)) return false;
@@ -2724,6 +2725,7 @@ export class Sim {
       }
 
       this.graph.solveWires(this.agents, params, h, this.time, frozen, this.wireDetailed);
+      this.solveJoints(params, h);
       this.solveGrab(h);
       this.clearWires(params);
       this.solveContacts(h);
@@ -3958,6 +3960,10 @@ export class Sim {
     if (!nativeSolver.ready || !nativeSolver.bodies || !nativeSolver.wiresNear || !nativeSolver.nodes) {
       return false;
     }
+    // The native path owns the whole substep loop, and `solveJoints` is still
+    // JS, so a scene with joints has to take the fallback or lose them
+    // silently — the same trade `params.uncross` makes at `openForceBlock`.
+    if (params.jointStiff > 0) return false;
     const list = this.forceList();
     const n = list.length;
     if (n === 0) return true;

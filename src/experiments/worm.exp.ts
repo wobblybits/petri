@@ -71,7 +71,7 @@ function run(c: Condition, seed: number): Gait {
       ...motorsOff(),
       upkeep: 0,
       ambientEnergy: 0,
-      jointStiff: c.jointStiff ?? 300,
+      jointStiff: c.jointStiff ?? 1,
       dragAniso: c.dragAniso ?? 1,
       bendCost: c.bendCost ?? 0,
       ...(c.portStiff !== undefined ? { portStiff: c.portStiff } : {}),
@@ -159,11 +159,11 @@ describe('experiment: a worm with one actuator', () => {
      */
     for (const portStiff of [2, 0.25]) {
       report(`portStiff ${portStiff}, aniso 3`, [
-        { label: 'stiff 300, +pi/2', portStiff, dragAniso: 3, phase: Math.PI / 2 },
-        { label: 'stiff 300, -pi/2', portStiff, dragAniso: 3, phase: -Math.PI / 2 },
-        { label: 'stiff 1500, +pi/2', portStiff, jointStiff: 1500, dragAniso: 3, phase: Math.PI / 2 },
-        { label: 'stiff 1500, -pi/2', portStiff, jointStiff: 1500, dragAniso: 3, phase: -Math.PI / 2 },
-        { label: 'stiff 1500, no muscle', portStiff, jointStiff: 1500, dragAniso: 3, amplitude: 0 },
+        { label: 'rigid 0.3, +pi/2', portStiff, jointStiff: 0.3, dragAniso: 3, phase: Math.PI / 2 },
+        { label: 'rigid 0.3, -pi/2', portStiff, jointStiff: 0.3, dragAniso: 3, phase: -Math.PI / 2 },
+        { label: 'rigid 1.0, +pi/2', portStiff, jointStiff: 1, dragAniso: 3, phase: Math.PI / 2 },
+        { label: 'rigid 1.0, -pi/2', portStiff, jointStiff: 1, dragAniso: 3, phase: -Math.PI / 2 },
+        { label: 'rigid 1.0, no muscle', portStiff, jointStiff: 1, dragAniso: 3, amplitude: 0 },
       ]);
     }
   });

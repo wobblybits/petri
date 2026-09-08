@@ -588,8 +588,10 @@ export interface Params {
    */
   excreteRate: number;
   /**
-   * Angular stiffness of a joint, holding the two ports across a wire at their
-   * rest angle. 0 = off, and off is every net this simulation has ever run.
+   * How rigid a joint is, from 0 (no joint at all, which is every net this
+   * simulation has ever run) to 1 (rigid). A fraction rather than a torque per
+   * radian, so the same number means the same firmness whatever the two bodies
+   * weigh: the compliance is scaled to the pair's own inverse inertia.
    *
    * The only restoring force a net can have, and that is a counting result
    * rather than a preference. A wire is a distance constraint, so a net is a
@@ -607,9 +609,17 @@ export interface Params {
    * deflects 14.2, and neither springs back; this is what makes them spring
    * back.
    *
-   * Applied as a couple — equal and opposite torques on the two bodies — so it
-   * is internal and conserves the pair's angular momentum. An internal
-   * actuator can change a shape and must not change a momentum.
+   * Solved as a positional constraint inside the substep loop, not applied as
+   * a torque before it. That distinction is the difference between working and
+   * not: `finishIntegrate` derives velocity from the position delta a substep
+   * achieved, so a torque applied outside the solver survives only insofar as
+   * it moves a pose the constraints then overrule. Measured with the force
+   * version, joints tracked their commanded angle at a correlation of 0.02 to
+   * 0.20 and swung just as far with the muscle switched off.
+   *
+   * Corrections are equal and opposite in the generalized coordinate, so the
+   * pair's angular momentum is untouched: an internal actuator may change a
+   * shape and may not change a momentum.
    */
   jointStiff: number;
   /**
@@ -867,7 +877,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'excreteRate', label: 'Excrete rate', min: 0, max: 2, step: 0.02 },
   { key: 'transportSpeed', label: 'Conduction speed', min: 0, max: 60, step: 0.5 },
   { key: 'dragAniso', label: 'Drag anisotropy', min: 0.25, max: 4, step: 0.05 },
-  { key: 'jointStiff', label: 'Joint stiffness', min: 0, max: 400, step: 5 },
+  { key: 'jointStiff', label: 'Joint rigidity', min: 0, max: 1, step: 0.02 },
   { key: 'bendCost', label: 'Bend cost', min: 0, max: 0.4, step: 0.005 },
   { key: 'senseScale', label: 'Sense scale', min: 0.001, max: 8, step: 0.001 },
 ];

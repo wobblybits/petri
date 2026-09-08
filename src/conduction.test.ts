@@ -185,38 +185,36 @@ describe('joint rest angle', () => {
     // partner's stem position and a smooth arc satisfies that for free, so it
     // cannot see curvature; this constrains the angle between the two port
     // axes, which an arc does not satisfy.
-    expect(foldUnder(300)).toBeLessThan(foldUnder(0));
+    expect(foldUnder(1)).toBeLessThan(foldUnder(0));
   });
 
-  it('applies a couple, so it adds no spin to the pair', () => {
+  it('corrects both ends equally and oppositely, so it adds no spin', () => {
     /*
-     * Against the pass, not against a step. The couple is exact here and only
-     * approximately visible through a whole frame, because the constraint solve
-     * re-derives `omega` from the poses it lands on — so a step-level check
-     * would be measuring the solver.
+     * Against the constraint, not against a step. It is exact here and only
+     * approximately visible through a whole frame, which is what every other
+     * constraint in the solve is like.
      */
     const params = quiet();
-    params.jointStiff = 400;
+    params.jointStiff = 1;
     const { sim, ids } = chain(params, 2);
     const a = sim.agents.get(ids[0])!;
     const b = sim.agents.get(ids[1])!;
     b.heading = 0.6;
-    a.omega = 0.3;
-    b.omega = -0.2;
-    const before = a.omega * momentOfInertia(a) + b.omega * momentOfInertia(b);
-    sim.jointAngles(params, 1 / 60);
-    const after = a.omega * momentOfInertia(a) + b.omega * momentOfInertia(b);
-    expect(a.omega, 'the joint did nothing at all').not.toBeCloseTo(0.3, 9);
-    expect(b.omega, 'the joint moved only one end').not.toBeCloseTo(-0.2, 9);
-    expect(after, 'an internal actuator may change a shape, never a momentum').toBeCloseTo(
-      before,
-      9,
-    );
+    const beforeA = a.heading;
+    const beforeB = b.heading;
+    const sum = a.heading * momentOfInertia(a) + b.heading * momentOfInertia(b);
+    sim.solveJoints(params, 1 / 480);
+    expect(a.heading, 'the joint did nothing at all').not.toBeCloseTo(beforeA, 9);
+    expect(b.heading, 'the joint moved only one end').not.toBeCloseTo(beforeB, 9);
+    expect(
+      a.heading * momentOfInertia(a) + b.heading * momentOfInertia(b),
+      'the correction has to be equal and opposite in the coordinate',
+    ).toBeCloseTo(sum, 9);
   });
 
   it('bends the joint when the head commands an angle', () => {
     const params = quiet();
-    params.jointStiff = 200;
+    params.jointStiff = 1;
     params.portStiff = 0;
     const { sim, ids } = chain(params, 2);
     const a = sim.agents.get(ids[0])!;
@@ -230,7 +228,7 @@ describe('joint rest angle', () => {
   it('charges for a commanded bend and nothing for a straight one', () => {
     const held = (rest: number): number => {
       const params = quiet();
-      params.jointStiff = 200;
+      params.jointStiff = 1;
       params.bendCost = 0.2;
       const { sim, ids } = chain(params, 2);
       const a = sim.agents.get(ids[0])!;
