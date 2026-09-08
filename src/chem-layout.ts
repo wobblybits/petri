@@ -195,7 +195,29 @@ export const ROW_COUNT = 2 * CHEM_SPECIES;
  */
 export const X_OUT = L_BASE + 2;
 export const X_BASE = X_OUT + ROW_COUNT * STATE_DIMS;
-export const CHEM_LEN = X_BASE + ROW_COUNT;
+
+/**
+ * `ks`, the half-saturation of each species' uptake, one dimensionless gene
+ * per species. The effective constant is `params.uptakeKs * ks[c]`, the way
+ * `HEAD_SCALE` converts every other dimensionless gene into its natural unit,
+ * and it seeds to 1 so a fresh body uses the global.
+ *
+ * A plain heritable gene rather than a head off `h`, which is a departure
+ * from the plan's §4 ("`vmax` and `Ks` read off `h` as heads") and a
+ * deliberate one. `X` supplies `vmax`: how much transporter a body is
+ * *expressing*, which is regulation and should depend on how hungry it is.
+ * Affinity is a property of the transporter itself — which one you have, not
+ * how much of it you made — so it has no business moving with mood, and
+ * giving it a head would cost twenty floats to model something as a decision
+ * that is not one.
+ *
+ * The pair is what matters either way: `(vmax, ks)` do not dominate each
+ * other, so a fast grazer needing rich ground and a scavenger living on
+ * scraps are both viable and neither wins everywhere. That is the plan's
+ * stated payoff and it survives the change.
+ */
+export const KS_BASE = X_BASE + ROW_COUNT;
+export const CHEM_LEN = KS_BASE + CHEM_SPECIES;
 
 /**
  * The span of `chem` a body can change while it is alive: `Wx`, `Wh`, `Wn`

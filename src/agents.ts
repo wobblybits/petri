@@ -1,19 +1,24 @@
 import { extraCapFor } from './energy.ts';
 import {
   CHEM_LEN,
+  CHEM_SPECIES,
   EMIT,
   E_OUT,
   F_BASE,
   HEAD_SCALE,
+  KS_BASE,
   L_BASE,
   IN_DEMAND,
   IN_DIMS,
   IN_SENSE,
   P_BASE,
+  ROW_COUNT,
   STATE_DIMS,
   TASTE,
   T_OUT,
   W_IN,
+  X_BASE,
+  X_OUT,
 } from './chem-layout.ts';
 import { CH } from './fields.ts';
 import type { Params } from './params.ts';
@@ -731,6 +736,7 @@ export function portLocal(kind: AgentKind, slot: PortSlot): Vec2 {
 export {
   B_STATE,
   CHEM_LEN,
+  CHEM_SPECIES,
   CRITIC_LEN,
   EMIT,
   E_OUT,
@@ -752,6 +758,12 @@ export {
   PLASTIC_LEN,
   P_BASE,
   P_OUT,
+  KS_BASE,
+  ROW_COUNT,
+  ROW_EXCRETE,
+  ROW_UPTAKE,
+  X_BASE,
+  X_OUT,
   SENSE_SCALE,
   STATE_DIMS,
   TASTE,
@@ -1100,7 +1112,84 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
     c[TASTE + 1] = S;
     c[TASTE + 3] = M;
   }
+  /*
+   * The affinity genes, at one natural unit each: a fresh body's uptake reads
+   * `params.uptakeKs` on every species, which is exactly what it read before
+   * this gene existed. `X` and its base stay at zero, so expression is flat
+   * across all eight rows and every reaction runs at whatever constant it ran
+   * at. See `chem-layout.ts`.
+   */
+  for (let k = 0; k < CHEM_SPECIES; k++) c[KS_BASE + k] = 1;
   return c;
+}
+
+/**
+ * Expression: how a body divides one unit of chemical effort across the eight
+ * rows of the reaction table. See `docs/energy-chemistry-plan.md` §3.
+ *
+ * Same shape as `emitVector` and for the same reason — relu, then normalised
+ * to a unit sum across the whole table at once. The simplex is the trade-off
+ * the plan is built on: a body cannot both shout and eat without giving
+ * something up, and extending the budget past emission to *uptake* is the
+ * strongest form of that, because it means feeding the ground trades against
+ * feeding yourself.
+ *
+ * Seeded flat at zero, which relu and the normalisation turn into an even
+ * eighth each — so a fresh body expresses every row equally and the global
+ * rate constants are what decide anything. A body that mutates its way to
+ * silence on every row stays silent rather than being amplified back out of
+ * noise, exactly as `emitVector` handles the same case.
+ */
+export function expressVector(
+  chem: Float32Array,
+  g: number,
+  h: Float64Array,
+  ho: number,
+  out: Float64Array,
+  oo: number,
+): void {
+  const h0 = h[ho];
+  const h1 = h[ho + 1];
+  const h2 = h[ho + 2];
+  const h3 = h[ho + 3];
+  let sum = 0;
+  // Eight rows by four dimensions is a loop rather than the unrolled form the
+  // four-wide vectors use: twice the rows for the same shape, and this runs
+  // once a body a frame against `emitVector`'s several times.
+  for (let r = 0; r < ROW_COUNT; r++) {
+    const o = g + X_OUT + r * STATE_DIMS;
+    const v =
+      chem[g + X_BASE + r] +
+      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+    const w = v > 0 ? v : 0;
+    out[oo + r] = w;
+    sum += w;
+  }
+  if (sum > 0) {
+    const inv = 1 / sum;
+    for (let r = 0; r < ROW_COUNT; r++) out[oo + r] *= inv;
+  } else {
+    /*
+     * Nothing expressed. Flat rather than zero: a genome seeds every entry of
+     * `X` to zero, so the pre-activation is zero on every row and relu leaves
+     * nothing to normalise — and a body expressing *no* reaction at all would
+     * be inert from birth, which is not what "ships at the neutral value"
+     * means. An eighth each is the even division, and the rate constants
+     * decide the rest.
+     */
+    const even = 1 / ROW_COUNT;
+    for (let r = 0; r < ROW_COUNT; r++) out[oo + r] = even;
+  }
+}
+
+/** This body's half-saturation for species `c`, in the field's own units. */
+export function uptakeKsOf(chem: Float32Array, g: number, c: number, globalKs: number): number {
+  const gene = chem[g + KS_BASE + c];
+  const ks = globalKs * (gene > 0 ? gene : 0);
+  // Zero affinity is division by zero downstream, and a gene mutated to or
+  // past zero is a body with an infinitely good transporter, which is not a
+  // thing. Floored at a thousandth of the global, which is a very good one.
+  return ks > globalKs * 1e-3 ? ks : globalKs * 1e-3;
 }
 
 /**

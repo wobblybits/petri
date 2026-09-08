@@ -49,6 +49,13 @@ function pondParams(): Params {
   return params;
 }
 
+/** Sum of one channel over a whole field. */
+function totalOf(f: Fields, ch: number): number {
+  let s = 0;
+  for (let k = ch; k < f.data.length; k += CHANNELS) s += f.data[k];
+  return s;
+}
+
 /** Worst absolute difference over one channel of two fields. */
 function worstDiff(a: Fields, b: Fields, ch: number): number {
   let worst = 0;
@@ -155,6 +162,73 @@ describe('field.wgsl on a device', () => {
     expect(cpuFree, 'nobody ate').toBeGreaterThan(0);
     expect(gpu.totalFree()).toBeCloseTo(cpuFree, 1);
     expect(gpu.energy.storedTotal()).toBeCloseTo(cpu.energy.storedTotal(), 0);
+  });
+
+  it('excretes every species onto the device the way the host does', async ({ skip }) => {
+    if (!device) skip();
+    /*
+     * The reaction table's excretion rows go through the *conserving* deposit
+     * rather than the scent path's density scatter, and on this side that is a
+     * `Deposit` with `conserve` set and a weight on all four channels. The
+     * host has been packing only the ground into those records since they
+     * existed; this is what says the other three arrive too, and arrive whole.
+     */
+    const params = pondParams();
+    params.energyRegrow = 0;
+    params.ambientEnergy = 0;
+    params.decay = 0;
+    params.diffuse = 0;
+    params.upkeep = 0;
+    params.excreteRate = 0.4;
+
+    const build = (): Sim => {
+      const sim = new Sim(1600, 1200, 128);
+      loadPreset(sim, 'soup', params);
+      const cx = sim.w * 0.5;
+      const cy = sim.h * 0.5;
+      for (let i = 0; i < 10; i++) {
+        const a = sim.spawn('con', cx + i * 13 - 65, cy, 0, params, true)!;
+        a.pinned = true;
+        a.extra = 1;
+      }
+      return sim;
+    };
+
+    const cpu = build();
+    const gpu = build();
+    expect(await gpu.openFieldGpu(), fieldGpu.lastError).toBe(true);
+    gpu.wantFieldReadback = true;
+
+    for (let i = 0; i < 60; i++) {
+      cpu.step(1 / 60, params);
+      await gpu.stepAsync(1 / 60, params);
+    }
+
+    const held = (s: Sim) => [...s.agents.values()].reduce((n, a) => n + a.extra, 0);
+    expect(held(cpu), 'nobody excreted').toBeLessThan(10 * 0.9);
+    expect(held(gpu)).toBeCloseTo(held(cpu), 3);
+    /*
+     * The three signal species strictly: nothing grazes them, so the only
+     * thing that could move them is the deposit under test.
+     */
+    for (const ch of [CH.conP, CH.dupP, CH.aux]) {
+      const c = totalOf(cpu.fields, ch);
+      expect(c, `nothing on channel ${ch}`).toBeGreaterThan(0);
+      expect(totalOf(gpu.fields, ch), `channel ${ch} differs`).toBeCloseTo(c, 3);
+    }
+    /*
+     * `CH.energy` loosely, and for a reason rather than a shrug: it is the one
+     * species bodies eat, the GPU harvest is credited a frame late by design,
+     * and what is standing in the field at any instant is the small difference
+     * between what was excreted and what has been grazed back. Comparing that
+     * residue strictly would be asserting the two paths agree about *when*,
+     * which they deliberately do not. What has to agree is that the species
+     * arrived at all, and the pond totals above already pin the amount.
+     */
+    expect(totalOf(cpu.fields, CH.energy)).toBeGreaterThan(0);
+    expect(totalOf(gpu.fields, CH.energy)).toBeGreaterThanOrEqual(0);
+    const excreted = 10 - held(cpu);
+    expect(Math.abs(10 - held(gpu) - excreted)).toBeLessThan(excreted * 0.05);
   });
 
   it('meters uptake on the device the way runHarvestPlan does', async ({ skip }) => {

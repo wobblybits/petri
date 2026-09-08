@@ -606,6 +606,25 @@ export interface Params {
    * constraint on how big a net can get.
    */
   eraUpkeepRatio: number;
+  /**
+   * Rate at which a body excretes its own stock into the field, per second
+   * per unit held, at even expression across the reaction table.
+   *
+   * **Zero is today, and turning it on is a switch rather than a slider.**
+   * Today a body's voice is *minted*: `effEmit` is multiplied by
+   * `params.deposit`, which is five, and nothing is taken out of the tank —
+   * with `CH.energy` firewalled out of that path precisely because five units
+   * of food a frame out of nothing would be absurd. Above zero, all four
+   * species leave the tank conserved and the minted deposit stops: the
+   * firewall becomes a stoichiometry rather than a special case, and a poor
+   * body physically cannot shout.
+   *
+   * `docs/energy-chemistry-plan.md` §3 and §8. Expect the measured signalling
+   * constants to move with it — signal amplitude drops by about the deposit
+   * multiplier, so `SENSE_SCALE` and the steering dead zone were measured
+   * against a world that no longer exists. Remeasure rather than rescale.
+   */
+  excreteRate: number;
 }
 
 export function defaultParams(): Params {
@@ -686,6 +705,7 @@ export function defaultParams(): Params {
     bodyValue: BODY_VALUE,
     eraCapRatio: ERA_CAP_RATIO,
     eraUpkeepRatio: ERA_UPKEEP_RATIO,
+    excreteRate: 0,
   };
 }
 
@@ -773,4 +793,5 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'bodyValue', label: 'Body value', min: 0.5, max: 2, step: 0.05 },
   { key: 'eraCapRatio', label: 'Era tank ratio', min: 1, max: 4, step: 0.1 },
   { key: 'eraUpkeepRatio', label: 'Era upkeep ratio', min: -1, max: 2, step: 0.05 },
+  { key: 'excreteRate', label: 'Excrete rate', min: 0, max: 2, step: 0.02 },
 ];

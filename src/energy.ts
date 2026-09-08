@@ -73,6 +73,17 @@ export const DEBT_CAP_MAX = -0.05;
 const EXTRA_FULL_EPS = 1e-6;
 
 /**
+ * One deferred conserved add: a world position, then a weight per species.
+ *
+ * Deferred adds exist because the GPU owns the field, so anything the host
+ * wants to put into it has to cross as a list rather than a write. `sim.ts`
+ * packs these into the shader's `Deposit` records with `conserve` set, and the
+ * shader's own struct has a `vec4f` of weights already — this is the host side
+ * catching up with it.
+ */
+export const PENDING_STRIDE = 2 + CHANNELS;
+
+/**
  * What a body's existence is worth: a full tank.
  *
  * Note this is more than the `REWRITE_SHARE` that built it, so a body is worth
@@ -395,7 +406,11 @@ export class EnergyGrid {
     return this.nPending;
   }
 
-  /** x, y, amount triples, `pendingAdds` of them. */
+  /**
+   * `pendingAdds` records of `PENDING_STRIDE`: x, y, then one weight per
+   * species. It was an `x, y, amount` triple while only the ground could be
+   * added to; excretion moves every species this way. See `addSpeciesAt`.
+   */
   get pendingData(): Float64Array {
     return this.pending;
   }
@@ -677,19 +692,64 @@ export class EnergyGrid {
     return got;
   }
 
+  /**
+   * A conserved add across every species at once.
+   *
+   * `addAt` is this with a vector that is zero everywhere but `CH.energy`, and
+   * it stays because that is what a corpse, a rewrite's leftovers and upkeep's
+   * rent all are. What needs the vector is excretion: under the reaction table
+   * every channel is matter a body moves out of its tank, so the deposit that
+   * carries it has to be the *conserving* one on all four — a quantity that
+   * survives however the grid is cut — rather than the density the scent path
+   * lays down. See `docs/energy-chemistry-plan.md` §3 and `Fields.addAt`.
+   */
+  addSpeciesAt(x: number, y: number, w: ArrayLike<number>): void {
+    let any = false;
+    for (let c = 0; c < CHANNELS; c++) {
+      if (w[c] !== 0) {
+        any = true;
+        break;
+      }
+    }
+    if (!any) return;
+    if (!this.inBounds(x, y)) return;
+    if (this.deferring) {
+      const o = this.reservePending();
+      this.pending[o] = x;
+      this.pending[o + 1] = y;
+      for (let c = 0; c < CHANNELS; c++) this.pending[o + 2 + c] = w[c];
+      this.nPending++;
+      return;
+    }
+    const f = this.fields;
+    if (f) {
+      for (let c = 0; c < CHANNELS; c++) if (w[c] !== 0) f.addAt(c, x, y, w[c]);
+      return;
+    }
+    // The map-backed grid has only the ground; the signal species have no
+    // home there and are simply not modelled on that path.
+    if (w[CH.energy] !== 0) this.addAt(x, y, w[CH.energy]);
+  }
+
+  /** Room for one pending record, growing the buffer if it is full. */
+  private reservePending(): number {
+    const o = this.nPending * PENDING_STRIDE;
+    if (o + PENDING_STRIDE > this.pending.length) {
+      const next = new Float64Array(Math.max(768, this.pending.length * 2));
+      next.set(this.pending);
+      this.pending = next;
+    }
+    return o;
+  }
+
   addAt(x: number, y: number, amount: number): void {
     if (amount === 0) return;
     if (!this.inBounds(x, y)) return;
     if (this.deferring) {
-      const o = this.nPending * 3;
-      if (o + 3 > this.pending.length) {
-        const next = new Float64Array(Math.max(768, this.pending.length * 2));
-        next.set(this.pending);
-        this.pending = next;
-      }
+      const o = this.reservePending();
       this.pending[o] = x;
       this.pending[o + 1] = y;
-      this.pending[o + 2] = amount;
+      for (let c = 0; c < CHANNELS; c++) this.pending[o + 2 + c] = c === CH.energy ? amount : 0;
       this.nPending++;
       return;
     }

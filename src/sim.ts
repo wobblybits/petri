@@ -17,6 +17,9 @@ import {
   stemOffset,
   B_STATE,
   CHEM_LEN,
+  CHEM_SPECIES,
+  ROW_COUNT,
+  ROW_EXCRETE,
   F_BASE,
   F_OUT,
   HEAD_SCALE,
@@ -40,6 +43,7 @@ import {
   W_NET,
   W_SELF,
   emitVector,
+  expressVector,
   tasteVector,
   effTaste,
   flockGain,
@@ -82,6 +86,7 @@ import {
   redexNeed,
   rewriteCost,
   rewriteShareOf,
+  PENDING_STRIDE,
   rewriteYield,
   seedRequest,
   settlePool,
@@ -1028,6 +1033,8 @@ export class Sim {
      * farm itself into debt, which would turn the most useful thing in the
      * economy into a way to die.
      */
+    this.runExcretion(params, t);
+    Sim.phase('excrete');
     if (params.farmRate > 0) {
       const rate = params.farmRate * t;
       for (const a of this.agents.values()) {
@@ -1071,7 +1078,7 @@ export class Sim {
      */
     this.tuneChannels(params);
     if (!this.fieldOnGpu) {
-      if (!this.scentWriteNative(params)) this.deposit(params);
+      if (this.scentMints(params) && !this.scentWriteNative(params)) this.deposit(params);
       Sim.phase('scentWrite');
       this.fields.diffuse(params.diffuse);
       Sim.phase('field:diffuse1');
@@ -3108,6 +3115,22 @@ export class Sim {
     if (this.fieldOnGpu) return true;
     if (!(await fieldGpu.init(this.fields.cols))) return false;
     /*
+     * Take the device's field as well as its arithmetic.
+     *
+     * `fieldGpu` is a module singleton and the buffers outlive whichever `Sim`
+     * last used them. `clear()` runs from `Sim.clear`, which only fires for a
+     * pond that was *already* on the device — so a second pond opening the
+     * device in the same process inherits the first one's scent, ground and
+     * accumulator, and starts life standing in somebody else's dish.
+     *
+     * The page never noticed because it has one `Sim` for the life of the tab.
+     * A sweep has one per trial: `pond/sweep.ts` runs a hundred ponds in a
+     * process, and every one after the first was reading the last one's field
+     * until this line. Found by a device parity test whose second pond
+     * excreted onto a channel the first had already filled.
+     */
+    fieldGpu.clear();
+    /*
      * Everything that writes the ground has to be told before the first frame,
      * not on the frame it first tries: `seedGround` may already have run for
      * this world, and a queued seed is only picked up by `gpuFieldStep`.
@@ -3177,7 +3200,11 @@ export class Sim {
      * possible answers.
      */
     const scratch = this.portScratch;
-    for (let i = 0; i < n; i++) {
+    // The minted voice, or nothing at all: under the reaction table a body's
+    // output leaves its tank through `runExcretion` and the conserving deposit
+    // instead. See `scentMints`.
+    const mints = this.scentMints(params);
+    for (let i = 0; mints && i < n; i++) {
       const a = list[i];
       if (a.locked) continue;
       const ports = a.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
@@ -3225,13 +3252,17 @@ export class Sim {
     const pend = this.energy.pendingData;
     for (let k = 0; k < nAdds; k++) {
       const o = nDep * dStride;
-      dep[o] = pend[k * 3];
-      dep[o + 1] = pend[k * 3 + 1];
+      const p = k * PENDING_STRIDE;
+      dep[o] = pend[p];
+      dep[o + 1] = pend[p + 1];
       dep[o + 2] = 1;
-      dep[o + 4] = 0;
-      dep[o + 5] = 0;
-      dep[o + 6] = pend[k * 3 + 2];
-      dep[o + 7] = 0;
+      // Every species, not just the ground: excretion moves all four out of a
+      // tank and each has to survive the rim the way a quantity does. The
+      // shader's `Deposit.w` has been a `vec4f` all along.
+      dep[o + 4] = pend[p + 2];
+      dep[o + 5] = pend[p + 3];
+      dep[o + 6] = pend[p + 4];
+      dep[o + 7] = pend[p + 5];
       nDep++;
     }
     this.energy.clearPending();
@@ -6264,6 +6295,91 @@ export class Sim {
       this.graph,
       this.agents,
     );
+  }
+
+  /** Four species' worth of excretion, per body, per frame. */
+  private readonly excreteScratch = new Float64Array(CHEM_SPECIES);
+
+  /**
+   * The reaction table's excretion rows: tank -> field, conserved.
+   *
+   * Mass action on the tank, which is where "absolute honesty" comes from.
+   * The rate is proportional to what the body actually holds, so a body near
+   * empty excretes near nothing however loudly its genome would like to — the
+   * simplex bounds what you can say relative to what else you say, and
+   * conservation bounds it outright. Neither implies the other and they
+   * compound.
+   *
+   * `ROW_COUNT` in the rate so that even expression — which is what a seeded
+   * genome has, every row at an eighth — runs each row at exactly
+   * `excreteRate`. Every dial in this file reduces to a number you can say out
+   * loud at the seed.
+   *
+   * Through `addSpeciesAt` and therefore through the *conserving* deposit, not
+   * the scent path's density scatter. That is the whole difference: a signal
+   * is a density that may be clipped at the rim, and this is matter that
+   * cannot be. `scentMints` is what stops the two running at once.
+   */
+  private runExcretion(params: Params, t: number): void {
+    if (!(params.excreteRate > 0)) return;
+    const store = this.agentStore;
+    const CHEM = store.chemAll;
+    const H = store.hAll;
+    const EX = store.expressAll;
+    const OUT = store.excreteAll;
+    const w = this.excreteScratch;
+    const rate = params.excreteRate * t * ROW_COUNT;
+    for (const a of this.agents.values()) {
+      const s = a.slot;
+      /*
+       * Expression is computed here on both field paths. It is a pure function
+       * of `chem` and `h`, and `unpackGenome` brings `h` back to the host
+       * every frame, so the genome shader needs no new output slot and no new
+       * binding for any of this — which is what keeps the reaction table off a
+       * pass that is already at eight storage buffers.
+       */
+      expressVector(CHEM, s * CHEM_LEN, H, s * STATE_DIMS, EX, s * ROW_COUNT);
+      const eo = s * ROW_COUNT + ROW_EXCRETE;
+      const oo = s * CHEM_SPECIES;
+      const have = a.extra > 0 ? a.extra : 0;
+      if (a.locked || have <= 0) {
+        OUT.fill(0, oo, oo + CHEM_SPECIES);
+        continue;
+      }
+      let total = 0;
+      for (let c = 0; c < CHEM_SPECIES; c++) {
+        const amt = rate * EX[eo + c] * have;
+        w[c] = amt;
+        total += amt;
+      }
+      // A long frame, or a rate above one, could ask for more than the body
+      // holds. Scaled down rather than clamped per species, so the mix a body
+      // chose survives being unable to afford all of it.
+      if (total > have) {
+        const k = have / total;
+        for (let c = 0; c < CHEM_SPECIES; c++) w[c] *= k;
+        total = have;
+      }
+      if (total <= 0) {
+        OUT.fill(0, oo, oo + CHEM_SPECIES);
+        continue;
+      }
+      a.extra -= total;
+      for (let c = 0; c < CHEM_SPECIES; c++) OUT[oo + c] = w[c];
+      this.energy.addSpeciesAt(a.x, a.y, w);
+    }
+  }
+
+  /**
+   * Whether the scent path still mints.
+   *
+   * The two ways matter reaches the field are mutually exclusive by
+   * construction: either a body's voice is minted at `params.deposit` and its
+   * tank is untouched, or it is excreted from the tank and conserved. Running
+   * both would deposit the same expression twice and mint half of it.
+   */
+  private scentMints(params: Params): boolean {
+    return !(params.excreteRate > 0);
   }
 
   private tickRewrites(params: Params, dt: number): void {

@@ -1,5 +1,5 @@
 import { KIND_CON, KIND_DUP, KIND_ERA } from './native/solver.ts';
-import { CHEM_LEN, CRITIC_LEN, PLASTIC_LEN, STATE_DIMS as STATE_W } from './chem-layout.ts';
+import { CHEM_LEN, CHEM_SPECIES, CRITIC_LEN, PLASTIC_LEN, ROW_COUNT, STATE_DIMS as STATE_W } from './chem-layout.ts';
 import type { AgentKind } from './agents.ts';
 
 /*
@@ -167,6 +167,25 @@ export class AgentStore {
    */
   emitAll!: Float64Array;
   tasteAll!: Float64Array;
+  /**
+   * This frame's expression vector: how the body divides one unit of chemical
+   * effort across the reaction table's `ROW_COUNT` rows. See `expressVector`
+   * and `docs/energy-chemistry-plan.md` §3.
+   *
+   * Materialised here for the same reason `emitAll` is — two passes want it in
+   * the same frame, excretion and uptake, and recomputing thirty-two
+   * multiply-adds a body twice is the shape of cost this store exists to
+   * remove.
+   *
+   * Computed on the host on **both** field paths, because it is a pure
+   * function of `chem` and `h` and `unpackGenome` brings `h` back every frame.
+   * That is what keeps the whole reaction table off the genome shader: it
+   * needs no new binding and no new output slot, and the arithmetic is a
+   * rounding error beside the passes that already run here.
+   */
+  expressAll!: Float64Array;
+  /** What this body excreted this frame, per species. Absolute, not a rate. */
+  excreteAll!: Float64Array;
   /**
    * Whether this body's genome reads the scent field at all.
    *
@@ -425,6 +444,8 @@ export class AgentStore {
     this.markLearn(slot);
     this.emitAll.fill(0, slot * 4, slot * 4 + 4);
     this.tasteAll.fill(0, slot * 4, slot * 4 + 4);
+    this.expressAll.fill(0, slot * ROW_COUNT, slot * ROW_COUNT + ROW_COUNT);
+    this.excreteAll.fill(0, slot * CHEM_SPECIES, slot * CHEM_SPECIES + CHEM_SPECIES);
   }
 
   private growTo(newCapacity: number): void {
@@ -524,6 +545,12 @@ export class AgentStore {
     const newTaste = new Float64Array(newCapacity * 4);
     if (this.tasteAll) newTaste.set(this.tasteAll.subarray(0, live * 4));
     this.tasteAll = newTaste;
+    const newExpress = new Float64Array(newCapacity * ROW_COUNT);
+    if (this.expressAll) newExpress.set(this.expressAll.subarray(0, live * ROW_COUNT));
+    this.expressAll = newExpress;
+    const newExcrete = new Float64Array(newCapacity * CHEM_SPECIES);
+    if (this.excreteAll) newExcrete.set(this.excreteAll.subarray(0, live * CHEM_SPECIES));
+    this.excreteAll = newExcrete;
 
     this.capacity = newCapacity;
     if (oldCapacity > 0) this.generation++;
