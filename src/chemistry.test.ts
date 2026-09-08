@@ -329,3 +329,60 @@ describe('uptake', () => {
     expect(poorEdge).toBeGreaterThan(richEdge * 1.5);
   });
 });
+
+describe('trophic yield', () => {
+  const fed = (tweak: (p: Params) => void): { free: number; ground: number } => {
+    const p = chemistryParams();
+    p.ambientEnergy = 1;
+    p.uptakeVmax = 1.5;
+    tweak(p);
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    for (const a of sim.agents.values()) a.extra = 0;
+    for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
+    return { free: sim.totalFree(), ground: sim.energy.storedTotal() };
+  };
+
+  it('feeds everyone at a yield of one, which is today', () => {
+    const base = fed(() => {});
+    expect(base.free).toBeGreaterThan(0);
+  });
+
+  it('starves a body that cannot feed itself, and leaves the ground alone', () => {
+    /*
+     * Obligate dependency, as one dial. Applied to the *rate*, so a body with
+     * no yield does not draw and the ground it is standing on is untouched —
+     * conservative without a second write per body per species, and it means
+     * a starving body is not also a wasteful one.
+     */
+    const base = fed(() => {});
+    const obligate = fed((p) => {
+      p.yDirect = 0;
+      p.yEra = 0;
+    });
+    expect(obligate.free).toBe(0);
+    expect(obligate.ground).toBeGreaterThan(base.ground);
+  });
+
+  it('makes an Era the net’s mouth without a mint', () => {
+    // §5's replacement for `ERA_UPKEEP_RATIO`: an Era's income comes from the
+    // ground under it, not from a rule keyed on its glyph.
+    const p = chemistryParams();
+    p.ambientEnergy = 1;
+    p.uptakeVmax = 1.5;
+    p.yDirect = 0.2;
+    p.yEra = 2;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    const cx = sim.w * 0.5;
+    const cy = sim.h * 0.5;
+    const era = sim.spawn('era', cx - 60, cy, 0, p, true)!;
+    const con = sim.spawn('con', cx + 60, cy, 0, p, true)!;
+    era.pinned = true;
+    con.pinned = true;
+    era.extra = 0;
+    con.extra = 0;
+    for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
+    expect(era.extra).toBeGreaterThan(con.extra * 2);
+  });
+});

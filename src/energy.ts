@@ -980,6 +980,7 @@ export class HarvestPlan {
     const LOCKED = store.locked;
     const EXPRESS = store.expressAll;
     const CHEM = store.chemAll;
+    const KIND = store.kindCode;
     const EXTRA = store.extra;
     const CAP = store.energyCap;
     const X = store.x;
@@ -1107,10 +1108,12 @@ export class HarvestPlan {
            */
           const xo = sl * ROW_COUNT + ROW_UPTAKE;
           const g = sl * CHEM_LEN;
+          const yield_ = KIND[sl] === KIND_ERA ? kinetics.yEra : kinetics.yDirect;
           for (let c = 0; c < CHANNELS; c++) {
             // Off the table, only the ground has a rate; see `UptakeKinetics`.
             const on = kinetics.table || c === CH.energy;
-            rooms[ro + HARVEST_VMAX + c] = on ? kinetics.cap * ROW_COUNT * EXPRESS[xo + c] : 0;
+            rooms[ro + HARVEST_VMAX + c] =
+              on ? kinetics.cap * ROW_COUNT * EXPRESS[xo + c] * yield_ : 0;
             rooms[ro + HARVEST_KS + c] = uptakeKsOf(CHEM, g, c, kinetics.ks);
           }
         }
@@ -1166,6 +1169,26 @@ export interface UptakeKinetics {
    * shipped.
    */
   table: boolean;
+  /**
+   * Yield on what a body takes up directly, and on what an Era does.
+   *
+   * Applied to the *rate*, which is what makes it conservative without a
+   * second grid write: at `yDirect` 0 a body draws nothing and the ground it
+   * is standing on is untouched, which is exactly "obligate trophic
+   * dependency" — it has to be fed by its net or die. At 1, today.
+   *
+   * `yEra` above 1 is §5's replacement for `ERA_UPKEEP_RATIO`: an Era's income
+   * comes from the ground under it rather than from a mint keyed on its glyph,
+   * so `#Eras` is a net's boundary size against an upkeep charged per body,
+   * and surface-to-volume becomes a real constraint on how big a net can get.
+   *
+   * Before moving `yDirect` far, check the larval window: a fresh spawn has
+   * about `EXTRA_CAP / upkeep` seconds of tank, and if mean time-to-encounter
+   * with a net is not well under that, obligate dependency kills the soup
+   * rather than structuring it.
+   */
+  yDirect: number;
+  yEra: number;
 }
 
 /**

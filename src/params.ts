@@ -3,6 +3,7 @@ import { FIELD_CELL } from './fields.ts';
 // and they live where the economy that uses them lives; writing the numbers
 // again here is exactly the duplication `chem-layout.ts` exists to warn about.
 import { BODY_VALUE, ERA_CAP_RATIO, ERA_UPKEEP_RATIO } from './energy.ts';
+import { SENSE_SCALE } from './chem-layout.ts';
 
 export interface Params {
   deposit: number;
@@ -625,6 +626,31 @@ export interface Params {
    * against a world that no longer exists. Remeasure rather than rescale.
    */
   excreteRate: number;
+  /**
+   * What one unit of a signal reading is worth on the way into `x`.
+   *
+   * A `Params` field rather than the `SENSE_SCALE` constant it defaults to,
+   * because the number is a property of *how signal reaches the field*, and
+   * `excreteRate` changes that completely. `SENSE_SCALE` was measured as the
+   * p90 reading at a body's own position — 4.16, 4.24 and 4.53 over soups of
+   * 60, 400 and 2000 — and remeasured on this build it still reads 4.26, 4.60
+   * and 5.19, so the constant is right for the pond it was measured in.
+   *
+   * **Under conserved excretion it reads about 0.002**, measured the same way
+   * at the same three sizes: 0.0016, 0.0017, 0.0024. Not the ~5x the plan's §8
+   * predicted, and the extra three orders are worth understanding rather than
+   * absorbing. Two things compound. The minted deposit is unbounded in time —
+   * nothing is taken out of a tank to pay for it — so the field accumulates to
+   * whatever decay allows, while excretion is bounded by what the bodies
+   * actually hold. And the scent path lays a *density*, scaled by cell area,
+   * where a conserved add lays a *quantity*; a unit of matter spread over a
+   * million-cell dish simply does not read like a unit of shouting.
+   *
+   * Left at the minted value, because moving it would move the pond that
+   * ships. A run with `excreteRate` on wants this near 0.002 or its sense
+   * genes are reading a signal three orders below the range `phi` can resolve.
+   */
+  senseScale: number;
 }
 
 export function defaultParams(): Params {
@@ -706,6 +732,7 @@ export function defaultParams(): Params {
     eraCapRatio: ERA_CAP_RATIO,
     eraUpkeepRatio: ERA_UPKEEP_RATIO,
     excreteRate: 0,
+    senseScale: SENSE_SCALE,
   };
 }
 
@@ -794,4 +821,5 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'eraCapRatio', label: 'Era tank ratio', min: 1, max: 4, step: 0.1 },
   { key: 'eraUpkeepRatio', label: 'Era upkeep ratio', min: -1, max: 2, step: 0.05 },
   { key: 'excreteRate', label: 'Excrete rate', min: 0, max: 2, step: 0.02 },
+  { key: 'senseScale', label: 'Sense scale', min: 0.001, max: 8, step: 0.001 },
 ];

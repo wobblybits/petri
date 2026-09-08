@@ -37,7 +37,6 @@ import {
   IN_DIMS,
   IN_FULL,
   IN_SENSE,
-  SENSE_SCALE,
   STATE_DIMS,
   W_IN,
   W_NET,
@@ -985,6 +984,8 @@ export class Sim {
         cap: params.uptakeVmax * t,
         ks: params.uptakeKs,
         table: params.excreteRate > 0,
+        yDirect: params.yDirect,
+        yEra: params.yEra,
       });
     }
     Sim.phase('harvestSlots');
@@ -3186,6 +3187,8 @@ export class Sim {
       cap: params.uptakeVmax * dt,
       ks: params.uptakeKs,
       table: params.excreteRate > 0,
+      yDirect: params.yDirect,
+      yEra: params.yEra,
     });
     Sim.phase('gpu:plan');
     // Three ports a body, plus whatever died, farmed, spilled or was refunded
@@ -3449,7 +3452,7 @@ export class Sim {
     // sample, so `senseAll` means one thing on both paths. Channel 2 is the
     // ground and reads against a full cell; the others against a strong
     // local signal.
-    const sScale = 1 / SENSE_SCALE;
+    const sScale = 1 / params.senseScale;
     const gScale = this.groundScale;
     for (let i = 0; i < n; i++) {
       const o = i * sStride;
@@ -3580,7 +3583,7 @@ export class Sim {
     Sim.phase('gpu:packGenome');
 
     if (
-      !genomeGpu.submit(samples, n, nNei, this.groundScale, CH.energy, {
+      !genomeGpu.submit(samples, n, nNei, this.groundScale, CH.energy, params.senseScale, {
         rate: params.learnRate,
         critic: params.learnCritic,
         trace: params.learnTrace,
@@ -5668,7 +5671,7 @@ export class Sim {
     const X = store.x;
     const Y = store.y;
     const gScale = this.groundScale;
-    const sScale = 1 / SENSE_SCALE;
+    const sScale = 1 / params.senseScale;
     const READS = store.readsField;
     const x = this.stateInput;
     const mean = this.stateMean;

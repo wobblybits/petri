@@ -1,5 +1,5 @@
 import shader from './genome.wgsl?raw';
-import { CHEM_LEN, HEAD_SCALE, LEARN_STRIDE, SENSE_SCALE } from '../chem-layout.ts';
+import { CHEM_LEN, HEAD_SCALE, LEARN_STRIDE } from '../chem-layout.ts';
 
 /**
  * WebGPU host for the genome pass.
@@ -296,9 +296,10 @@ export class GenomeGpu {
     nei: number,
     groundScale: number,
     energyCh: number,
+    senseScale: number,
     learn: { rate: number; critic: number; trace: number; discount: number; maxWeight: number },
   ): Promise<boolean> {
-    if (!this.submit(samples, n, nei, groundScale, energyCh, learn)) return false;
+    if (!this.submit(samples, n, nei, groundScale, energyCh, senseScale, learn)) return false;
     return this.collect();
   }
 
@@ -309,6 +310,7 @@ export class GenomeGpu {
     nei: number,
     groundScale: number,
     energyCh: number,
+    senseScale: number,
     learn: { rate: number; critic: number; trace: number; discount: number; maxWeight: number },
   ): boolean {
     const device = this.device;
@@ -323,7 +325,7 @@ export class GenomeGpu {
       const f32 = new Float32Array(u);
       u32[0] = n;
       u32[1] = CHEM_LEN;
-      f32[2] = 1 / SENSE_SCALE;
+      f32[2] = 1 / senseScale;
       f32[3] = groundScale;
       f32[4] = HEAD_SCALE.cruise;
       f32[5] = HEAD_SCALE.turn;
