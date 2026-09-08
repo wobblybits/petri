@@ -1,4 +1,5 @@
 import { CHEM_LEN, EMIT, TASTE } from '../chem-layout.ts';
+import { CH, CHANNELS } from '../fields.ts';
 import type { Sim } from '../sim.ts';
 
 /*
@@ -98,6 +99,22 @@ export interface Diversity {
    * whether nets are doing internal work or merely re-acquiring structure.
    */
   commutesPerLatch: number | null;
+  /**
+   * Standing stock of the three signalling species across the whole field.
+   *
+   * The number that says whether anybody is saying anything. It matters most
+   * when reading `excreteRate`, because that dial trades two things against
+   * each other and reproduction only shows one of them: excretion is what puts
+   * signal into the world *and* what empties a body's tank, and the minted
+   * deposit is off whenever it is on. So a rate low enough to leave the pond
+   * fertile can also be low enough to leave it silent, and a pond nobody can
+   * hear is not a cheaper version of a signalling one — it is a different
+   * simulation with the same parameters.
+   *
+   * The ground is excluded for the reason `maxSignal` excludes it: it is the
+   * substance rather than something anyone is saying.
+   */
+  signalTotal: number;
 }
 
 /** Grouped variance decomposition over a set of loci. Returns F_ST, or null. */
@@ -230,6 +247,12 @@ export function measureDiversity(sim: Sim): Diversity {
   const maxLine = Math.max(0, ...lineCount.values());
   const maxNet = netSizes.length > 0 ? Math.max(...netSizes) : 0;
 
+  let signalTotal = 0;
+  const field = sim.fields.data;
+  for (let k = 0; k < field.length; k += CHANNELS) {
+    for (let c = 0; c < CHANNELS; c++) if (c !== CH.energy) signalTotal += field[k + c];
+  }
+
   return {
     bodies: n,
     lines: lineCount.size,
@@ -247,5 +270,6 @@ export function measureDiversity(sim: Sim): Diversity {
     netFst: fst(chem, slots, compOf, drifted, (i) => (compCount.get(compOf[i]) ?? 0) >= 2),
     lineFst: fst(chem, slots, lineOf, drifted),
     commutesPerLatch: sim.census().commutesPerLatch,
+    signalTotal,
   };
 }

@@ -42,6 +42,7 @@ export const METRICS: Record<string, string> = {
   commutes: 'commutes',
   commutes_per_latch: 'com/latch',
   commutes_per_latch_window: 'com/latch*',
+  signal_total: 'signal',
   commute_edge: 'comEdge',
   can_pay: 'canPay',
   free: 'free',
