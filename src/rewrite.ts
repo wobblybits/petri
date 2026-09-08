@@ -886,6 +886,7 @@ function snapshotTargets(
  */
 export const TRAIT_KEYS = [
   'requestDecay',
+  'conductSpeed',
   'energyCap',
   'debtCap',
   'rescueTo',
@@ -923,6 +924,14 @@ export const CHEM_SLOPE_MAX = 1;
 
 export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: number }> = {
   requestDecay: { min: 0.5, max: 0.98, mutate: 0.03 },
+  /*
+   * The whole slider range, and the floor is zero rather than something small
+   * on purpose: a body that conducts at zero relays nothing at all, which is
+   * insulation, and insulation is a real thing for a net to evolve. The
+   * ceiling is one hop a frame at 60 Hz, which is as fast as the substance
+   * itself can move.
+   */
+  conductSpeed: { min: 0, max: 60, mutate: 2 },
   energyCap: { min: EXTRA_CAP * 0.5, max: EXTRA_CAP * 2, mutate: EXTRA_CAP * 0.1 },
   /*
    * Strictly negative. A reflecting barrier at zero would let the gene sit

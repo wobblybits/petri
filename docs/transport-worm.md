@@ -197,9 +197,84 @@ mouth at the nose swims nose-first, a mouth amidships swims nowhere.
 
 A peristaltic muscle whose direction is a phenotype needs directed transfer —
 some term that moves energy along a chosen wire because a body decided to,
-rather than because the far end is hungrier. That does not exist, and it is a
-real addition rather than a dial. Worth weighing against what it buys: the
-rescue semantics are load-bearing everywhere else.
+rather than because the far end is hungrier. That did not exist. It does now;
+see below.
+
+## Two operators, and what each one fixed
+
+`params.transportSpeed` and `params.pushRate`, both shipping at zero.
+
+**Conduction speed.** The diagnosis above was half right. Energy was never
+instantaneous — `flowCharges` moves one hop a frame — but the *signal* was:
+`spreadRequests` relaxes to convergence every frame from a field that has just
+been overwritten, so it has no memory and no delay. `requestDecay` was already
+the space constant of that cable; what was missing was the time constant. With
+a speed, the relayed part of the field lags toward its target at `conductSpeed`
+hops a second, so need takes `hops / speed` to arrive, path length decides
+timing, and — the half that matters — it *recedes* at the same rate, so a pulse
+has a falling edge. A body's own claim stays instant, because a cell knows its
+own state now and hears about its neighbours' late. `conductSpeed` is a
+heritable trait beside `requestDecay`, not a head: conduction velocity is a
+property of tissue, not a mood. Fast-and-far against slow-and-local is then an
+axis a net can differentiate along.
+
+**Directed push.** A `PUSH` head with one row per port, so a body pumps matter
+out of a port it chose, into a neighbour that may be perfectly comfortable.
+Per *port* rather than per neighbour is the trick: a body cannot name who it is
+wired to, but it does have a fixed anatomy — a principal points along the
+heading, an aux against it — so the same gene is opposite thrusts in the body's
+own frame. Bounded by the donor's spare and the receiver's room, so it is
+conserved and cannot force-feed. The recoil is the one every transfer already
+earned.
+
+Measured with the economy taken out from under it — every tank pinned at half
+cap, so nobody claims, `flowCharges` has nothing to do, and every transfer in
+the run is a push:
+
+| condition | along | headward | straight | moved | hops |
+|---|---:|---:|---:|---:|---:|
+| push from an aux | **+212** | **+1.00** | 1.00 | 40.5 | 16194 |
+| push from the nose | **-245** | **-1.00** | 1.00 | 47.9 | 18893 |
+| push off | +63 | 0.75 | 0.97 | **0.0** | **0** |
+
+**One gene reverses the swim.** `headward` goes from +1.00 to -1.00 on nothing
+but which port the segment pumps out of, at straightness 1.00 over five seeds.
+Direction is a phenotype now, and it is anatomy times expression rather than a
+consequence of where the food happens to be.
+
+Two bounds worth knowing, both found by tripping over them. Push is capped by
+the receiver's room, so a pond of *full* bodies cannot push at all — the first
+version of this measurement read zero transfers for exactly that reason. And it
+is capped by the donor's spare, so a starving segment cannot pump: in the
+obligate mid-mouth configuration the worm dies before the actuator can show
+anything (`intact` false, impulse 4k against 26k in the fed runs). A muscle
+needs a full tank and somewhere to put what it moves.
+
+## And phase still does not matter — for a better reason
+
+With the actuator working, the phase sweep is flat again: 210.9 / 213.3 / 212.4
+px/s for phase 0, +pi/2 and -pi/2, and a measured `lag` of 0.00.
+
+This time the reason is not the demand field. It is the medium.
+`dampVelocities` is isotropic and linear in the world frame, so a thruster's
+contribution to displacement depends on how hard it pushed and which way, and
+not at all on *when*. A set of co-directed thrusters therefore sums to the same
+displacement however their firing is staggered — a phase gradient redistributes
+the impulse in time and time-averages away.
+
+For phase to buy anything, one of two things has to be true. Either thrust
+direction varies along the body, so that a wave is a wave of *direction* rather
+than of timing — reachable today, by giving alternate segments different `PUSH`
+rows. Or the medium has to care when: anisotropic drag, tangential against
+normal, which is what makes a real body wave propel and which this sim does not
+have. That was flagged at the very start of this work as the reason sine-wave
+swimming was out of reach, and it has now been arrived at from the opposite
+direction: with a perfect internal clock, a working directed actuator and a
+phase gradient, phase is *still* inert, because the water does not notice.
+
+That makes anisotropic drag the single remaining ingredient for gait, and it is
+a few lines in `dampVelocities` and its wasm twin — project the velocity onto
+the heading and damp the two components differently.
 
 ## What this does not yet show
 

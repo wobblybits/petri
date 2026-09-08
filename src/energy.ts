@@ -1752,6 +1752,88 @@ export function spreadRequestsFast(
 }
 
 /**
+ * The need field with a finite conduction speed, and therefore with memory.
+ *
+ * `spreadRequestsFast` relaxes to convergence every frame from a field that was
+ * just overwritten, so it answers "what is the largest need visible from here,
+ * right now" and nothing else. That is a potential: one global maximum, no
+ * history, and — the part that matters — **no falling edge**. A body that stops
+ * needing simply stops contributing, and the field around it is rebuilt flat on
+ * the same frame. Nothing in it can travel, so nothing in it can carry a phase.
+ *
+ * This is the same field with a time constant. Each body lags toward the
+ * largest need its neighbours held *last* frame, attenuated by the relayer's
+ * own `requestDecay`, at a rate set by the relayer's own `conductSpeed`:
+ *
+ *     relay_i  <- relay_i + (max_j(prev_j * decay_j) - relay_i) * min(1, speed_i * dt)
+ *     request_i = max(own claim_i, relay_i)
+ *
+ * Three consequences, all of them the point.
+ *
+ * Need now takes `hops / speed` seconds to arrive, so **path length decides
+ * timing** and two bodies at different distances from a source hear it at
+ * different moments. It also *recedes* at that rate, so a pulse has a falling
+ * edge and is a pulse rather than a level. And because the lag is per body,
+ * a net can have fast tissue and slow tissue — `conductSpeed` high and
+ * `requestDecay` low is an axon; the reverse is something that integrates
+ * locally and passes little on.
+ *
+ * A body's **own** claim stays instantaneous, which is not a compromise: a cell
+ * knows its own state now and hears about its neighbours' late. Only the
+ * relayed term is delayed.
+ *
+ * Double-buffered through `requestPrev` so every body reads one generation of
+ * its neighbours. Without that the answer depends on roster order, which
+ * changes whenever anything is born — the same discipline, and the same
+ * reason, as `hPrev` in the state pass.
+ */
+export function spreadRequestsWave(
+  list: Agent[],
+  store: AgentStore,
+  adj: WireAdjacency,
+  dt: number,
+  speed?: number,
+): void {
+  const { off, nei } = adj;
+  const REQUEST = store.request;
+  const PREV = store.requestPrev;
+  const DECAY = store.requestDecay;
+  const SPEED = store.conductSpeed;
+  const n = list.length;
+  // The claim this frame is whatever `pulseRequests` seeded; the relayed part
+  // is everything the field held above it last frame. Separating them is what
+  // keeps a body's own need instant while its neighbours' is not.
+  for (let i = 0; i < n; i++) {
+    const s = list[i].slot;
+    PREV[s] = REQUEST[s] > PREV[s] ? REQUEST[s] : PREV[s];
+  }
+  for (let i = 0; i < n; i++) {
+    const s = list[i].slot;
+    let best = 0;
+    for (let k = off[i]; k < off[i + 1]; k++) {
+      const other = list[nei[k]];
+      if (!other) continue;
+      const so = other.slot;
+      const keep = Math.min(0.99, Math.max(0, DECAY[so]));
+      const v = PREV[so] * keep;
+      if (v > best) best = v;
+    }
+    const rate = speed ?? SPEED[s];
+    const k = rate > 0 ? Math.min(1, rate * dt) : 1;
+    let relay = PREV[s] + (best - PREV[s]) * k;
+    if (!(relay > REQUEST_FLOOR)) relay = 0;
+    REQUEST[s] = REQUEST[s] > relay ? REQUEST[s] : relay;
+  }
+  // Carry this frame's field forward as next frame's `prev`. Copied rather
+  // than swapped because `request` is reseeded from scratch every frame by
+  // `pulseRequests`, and the claim half of it must not persist.
+  for (let i = 0; i < n; i++) {
+    const s = list[i].slot;
+    PREV[s] = REQUEST[s];
+  }
+}
+
+/**
  * One hop of flow down the field, per frame. Returns the energy moved.
  *
  * A body gives to its neediest neighbour, and only to one that is needier

@@ -9,6 +9,9 @@ import {
   KS_BASE,
   L_BASE,
   P_BASE,
+  PUSH_BASE,
+  PUSH_OUT,
+  PUSH_SLOTS,
   ROW_EXCRETE,
   ROW_UPTAKE,
   STATE_DIMS,
@@ -179,6 +182,18 @@ export interface Dress {
    */
   uptakeGain?: Partial<Record<keyof typeof CH, number[]>>;
   excreteGain?: Partial<Record<keyof typeof CH, number[]>>;
+  /**
+   * The `PUSH` head: how hard this body pumps matter out of each port, as
+   * `[p, l, r]` bases and an optional matrix row per port off the state.
+   *
+   * A port is a direction in the body's own frame — the principal along the
+   * heading, an aux against it — so this is the gene that decides which way a
+   * segment thrusts, and driving it off `h` is what puts that on a clock.
+   */
+  push?: number[];
+  pushGain?: number[][];
+  /** Per-body conduction speed, in hops a second. The need field's time constant. */
+  conductSpeed?: number;
   /** `Wh`, row-major `[d][e]`: how much of last frame's `h_e` enters `v_d`. */
   wh?: number[][];
   /** The recurrent state itself, at build. An oscillator started at zero never starts. */
@@ -225,6 +240,18 @@ export function dress(a: Agent, d: Dress): void {
       for (let k = 0; k < STATE_DIMS; k++) c[X_OUT + r * STATE_DIMS + k] = row![k] ?? 0;
     }
   }
+  if (d.push) {
+    for (let k = 0; k < PUSH_SLOTS; k++) c[PUSH_BASE + k] = (d.push[k] ?? 0) / HEAD_SCALE.push;
+  }
+  if (d.pushGain) {
+    for (let k = 0; k < PUSH_SLOTS; k++) {
+      const row = d.pushGain[k];
+      for (let j = 0; j < STATE_DIMS; j++) {
+        c[PUSH_OUT + k * STATE_DIMS + j] = (row?.[j] ?? 0) / HEAD_SCALE.push;
+      }
+    }
+  }
+  if (d.conductSpeed !== undefined) a.conductSpeed = d.conductSpeed;
   if (d.wh) {
     for (let dd = 0; dd < STATE_DIMS; dd++) {
       for (let e = 0; e < STATE_DIMS; e++) c[W_SELF + dd * STATE_DIMS + e] = d.wh[dd]?.[e] ?? 0;

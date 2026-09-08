@@ -217,7 +217,39 @@ export const X_BASE = X_OUT + ROW_COUNT * STATE_DIMS;
  * stated payoff and it survives the change.
  */
 export const KS_BASE = X_BASE + ROW_COUNT;
-export const CHEM_LEN = KS_BASE + CHEM_SPECIES;
+
+/**
+ * `PUSH`, state -> directed transfer: how hard this body pumps matter out of
+ * each of its three ports, one row per slot in `p`, `l`, `r` order.
+ *
+ * The head that makes locomotion a decision rather than a consequence. Every
+ * other transfer in the sim is a rescue — `flowCharges` sends energy to
+ * whichever neighbour is worst off — so a net can only pump toward its own
+ * poverty, and the direction it swims is set by where its shortage happens to
+ * be. That is why a phase-locked chain of clocked segments showed no phase in
+ * its transport at all: the wave had nowhere to live.
+ *
+ * Per *port* rather than per neighbour, and that is the whole trick. A body
+ * has no way to name the neighbour it wants, and should not — but it does have
+ * a fixed anatomy, because a principal's axis points along the heading and an
+ * aux's points against it. So "push out of `p`" and "push out of `l`" are
+ * opposite directions in the body's own frame whatever it is wired to, and the
+ * recoil (which is the same one `flowCharges` earns) turns that into thrust one
+ * way or the other. Direction becomes anatomy times phenotype.
+ *
+ * Row-major by slot: `PUSH_OUT + slot * STATE_DIMS + d`, with its base at
+ * `PUSH_BASE + slot`. Seeded to zero, so nothing pushes until a genome moves,
+ * and gated behind `params.pushRate` besides.
+ *
+ * Not a simplex, unlike `X`. Expression divides one unit of chemical effort
+ * between things a body must choose between; pushing out of two ports at once
+ * is not a contradiction, it is a body squeezing itself from both ends. The
+ * budget that bounds it is the tank.
+ */
+export const PUSH_SLOTS = 3;
+export const PUSH_OUT = KS_BASE + CHEM_SPECIES;
+export const PUSH_BASE = PUSH_OUT + PUSH_SLOTS * STATE_DIMS;
+export const CHEM_LEN = PUSH_BASE + PUSH_SLOTS;
 
 /**
  * The span of `chem` a body can change while it is alive: `Wx`, `Wh`, `Wn`
@@ -280,6 +312,7 @@ export const HEAD_SCALE = {
   recoil: 100,
   cruise: 40,
   turn: 2,
+  push: 1,
 } as const;
 
 /**

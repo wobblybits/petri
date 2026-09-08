@@ -627,6 +627,60 @@ export interface Params {
    */
   excreteRate: number;
   /**
+   * How fast unmet need travels along a wire, in hops per second. **0 is the
+   * old path**, and the old path is instantaneous.
+   *
+   * `spreadRequests` relaxes the need field to convergence every frame, from
+   * scratch: a body's shortfall is visible at the far end of the net on the
+   * frame it appears, and the field carries no memory from one frame to the
+   * next. That makes it a *potential* — every body holding the largest need it
+   * can see, attenuated per hop — and a potential has one global maximum and
+   * cannot carry a phase. Measured: a chain of bodies whose spending was driven
+   * by exactly phase-locked clocks showed no phase relation at all between
+   * their tanks, because the field was rebuilt flat around whoever happened to
+   * be neediest that frame.
+   *
+   * With a speed, the relayed part of the field lags toward its target instead
+   * of arriving, so need spreads at a finite rate and — this is the half that
+   * matters — *recedes* at one too. A pulse gets a falling edge, which is what
+   * makes it a pulse rather than a level. Path length then decides when a
+   * signal arrives, so two bodies at different distances from a source hear it
+   * at different times, and the field is directional rather than diffuse.
+   *
+   * `requestDecay` is the space constant of the same cable and has been there
+   * all along; this is the time constant it never had. A body's own claim is
+   * still instant — a cell knows its own state now — and only what it hears
+   * from its neighbours is delayed.
+   *
+   * At 60 and a 60 Hz frame this is one whole hop a frame, which is the
+   * fastest the substance itself can move under `flowCharges` and so the
+   * natural ceiling. Slower is a body that conducts poorly.
+   */
+  transportSpeed: number;
+  /**
+   * Fraction of a body's spare energy it may push out of a wire per second,
+   * because it decided to rather than because the far end is hungrier.
+   * 0 = off, and off is where every transfer is a rescue.
+   *
+   * `flowCharges` answers "who near me is worst off", which is the right
+   * question for keeping a net alive and the wrong one for timing a stroke:
+   * direction of travel is set by where the shortage is, so a net can only ever
+   * pump toward its own poverty. This is the other operator — a body moves
+   * matter out of a chosen port at a rate its own state sets, into a neighbour
+   * that may be perfectly comfortable.
+   *
+   * That is what makes locomotion a phenotype. The recoil is the same one
+   * `flowCharges` gets, so pushing out of a port shoves the body the other way
+   * along it, and which port a body pushes from is decided by the `PUSH` head
+   * against a fixed anatomy — a principal points along the heading and an aux
+   * against it. So a body can pump forwards or backwards, and a chain of them
+   * with a phase offset is a stroke.
+   *
+   * Bounded by what the donor can spare and what the receiver can hold, so it
+   * is conserved and cannot force-feed a full body.
+   */
+  pushRate: number;
+  /**
    * What one unit of a signal reading is worth on the way into `x`.
    *
    * A `Params` field rather than the `SENSE_SCALE` constant it defaults to,
@@ -732,6 +786,8 @@ export function defaultParams(): Params {
     eraCapRatio: ERA_CAP_RATIO,
     eraUpkeepRatio: ERA_UPKEEP_RATIO,
     excreteRate: 0,
+    transportSpeed: 0,
+    pushRate: 0,
     senseScale: SENSE_SCALE,
   };
 }
@@ -821,5 +877,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'eraCapRatio', label: 'Era tank ratio', min: 1, max: 4, step: 0.1 },
   { key: 'eraUpkeepRatio', label: 'Era upkeep ratio', min: -1, max: 2, step: 0.05 },
   { key: 'excreteRate', label: 'Excrete rate', min: 0, max: 2, step: 0.02 },
+  { key: 'transportSpeed', label: 'Conduction speed', min: 0, max: 60, step: 0.5 },
+  { key: 'pushRate', label: 'Push rate', min: 0, max: 4, step: 0.05 },
   { key: 'senseScale', label: 'Sense scale', min: 0.001, max: 8, step: 0.001 },
 ];

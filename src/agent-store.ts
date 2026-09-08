@@ -1,5 +1,5 @@
 import { KIND_CON, KIND_DUP, KIND_ERA } from './native/solver.ts';
-import { CHEM_LEN, CHEM_SPECIES, CRITIC_LEN, PLASTIC_LEN, ROW_COUNT, STATE_DIMS as STATE_W } from './chem-layout.ts';
+import { CHEM_LEN, CHEM_SPECIES, CRITIC_LEN, PLASTIC_LEN, PUSH_SLOTS, ROW_COUNT, STATE_DIMS as STATE_W } from './chem-layout.ts';
 import type { AgentKind } from './agents.ts';
 
 /*
@@ -76,6 +76,12 @@ export class AgentStore {
   chemAll!: Float32Array;
   recovering!: Uint8Array;
   requestDecay!: Float64Array;
+  /**
+   * Hops a second this body relays unmet need at. The time constant of the
+   * same cable `requestDecay` gives a space constant to; see
+   * `params.transportSpeed`.
+   */
+  conductSpeed!: Float64Array;
   energyCap!: Float64Array;
   debtCap!: Float64Array;
   rescueTo!: Float64Array;
@@ -184,6 +190,15 @@ export class AgentStore {
    * rounding error beside the passes that already run here.
    */
   expressAll!: Float64Array;
+  /** This frame's `PUSH` head, `PUSH_SLOTS` a body in `p`, `l`, `r` order. */
+  pushAll!: Float64Array;
+  /**
+   * Last frame's need field, so the lagged relay reads one generation of its
+   * neighbours rather than a mixture. The same discipline `hPrev` follows in
+   * `updateState`, and for the same reason: without it the answer depends on
+   * roster order, which changes whenever anything is born.
+   */
+  requestPrev!: Float64Array;
   /** What this body excreted this frame, per species. Absolute, not a rate. */
   excreteAll!: Float64Array;
   /**
@@ -418,6 +433,8 @@ export class AgentStore {
     this.markChem(slot);
     this.recovering[slot] = 0;
     this.requestDecay[slot] = 0;
+    this.conductSpeed[slot] = 0;
+    this.requestPrev[slot] = 0;
     this.energyCap[slot] = 0;
     this.debtCap[slot] = 0;
     this.rescueTo[slot] = 0;
@@ -445,6 +462,7 @@ export class AgentStore {
     this.emitAll.fill(0, slot * 4, slot * 4 + 4);
     this.tasteAll.fill(0, slot * 4, slot * 4 + 4);
     this.expressAll.fill(0, slot * ROW_COUNT, slot * ROW_COUNT + ROW_COUNT);
+    this.pushAll.fill(0, slot * PUSH_SLOTS, slot * PUSH_SLOTS + PUSH_SLOTS);
     this.excreteAll.fill(0, slot * CHEM_SPECIES, slot * CHEM_SPECIES + CHEM_SPECIES);
   }
 
@@ -496,6 +514,8 @@ export class AgentStore {
     this.chemAll = newChemAll;
     this.recovering = growU8(this.recovering);
     this.requestDecay = growF64(this.requestDecay);
+    this.conductSpeed = growF64(this.conductSpeed);
+    this.requestPrev = growF64(this.requestPrev);
     this.energyCap = growF64(this.energyCap);
     this.debtCap = growF64(this.debtCap);
     this.rescueTo = growF64(this.rescueTo);
@@ -548,6 +568,9 @@ export class AgentStore {
     const newExpress = new Float64Array(newCapacity * ROW_COUNT);
     if (this.expressAll) newExpress.set(this.expressAll.subarray(0, live * ROW_COUNT));
     this.expressAll = newExpress;
+    const newPush = new Float64Array(newCapacity * PUSH_SLOTS);
+    if (this.pushAll) newPush.set(this.pushAll.subarray(0, live * PUSH_SLOTS));
+    this.pushAll = newPush;
     const newExcrete = new Float64Array(newCapacity * CHEM_SPECIES);
     if (this.excreteAll) newExcrete.set(this.excreteAll.subarray(0, live * CHEM_SPECIES));
     this.excreteAll = newExcrete;

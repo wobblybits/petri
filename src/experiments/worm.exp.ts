@@ -120,6 +120,15 @@ interface Condition {
    */
   mouthAt?: 'head' | 'middle';
   excreteRate?: number;
+  /**
+   * The stroke: every segment pushes out of one aux port, gated by its own
+   * clock, so the wave along the body is a wave of *thrust* rather than a wave
+   * of shortage. `pushRate` scales it; `pushSlot` picks the port and so the
+   * direction (0 = principal, forward-facing; 1 = an aux, rearward-facing).
+   */
+  pushRate?: number;
+  pushSlot?: number;
+  transportSpeed?: number;
   thrust?: number;
   recoil?: number;
   segments?: number;
@@ -129,6 +138,17 @@ interface Condition {
   params?: Partial<Params>;
   /** Pin the head at its cap every frame, so the fuel supply is not what is under test. */
   feed?: boolean;
+  /**
+   * Pin *every* segment at its cap every frame.
+   *
+   * The actuator with the economy taken out from under it. Push is bounded by
+   * what a body holds above break-even, so a starving segment cannot pump —
+   * and in the obligate configurations it starves, which confounds the one
+   * question this is asking. With every tank held full nobody is short, so
+   * `flowCharges` has nothing to do and every transfer in the run is a push.
+   * Whatever moves, the `PUSH` head moved.
+   */
+  feedAll?: boolean;
 }
 
 function run(c: Condition, seed: number): Gait {
@@ -136,7 +156,7 @@ function run(c: Condition, seed: number): Gait {
   const thrust = c.thrust ?? 1;
   const recoil = c.recoil ?? 100;
   // Ground-fed conditions name a `uptakeVmax`; the motor bench feeds by puppet.
-  const feed = c.feed ?? c.uptakeVmax === undefined;
+  const feed = c.feedAll ? false : (c.feed ?? c.uptakeVmax === undefined);
   const spec: OrganismSpec = {
     seconds: SECONDS,
     seed,
@@ -149,6 +169,8 @@ function run(c: Condition, seed: number): Gait {
         ? { uptakeVmax: c.uptakeVmax, ambientEnergy: 1, energyRegrow: 0.04, upkeep: 0.015 }
         : {}),
       ...(c.excreteRate !== undefined ? { excreteRate: c.excreteRate } : {}),
+      ...(c.pushRate !== undefined ? { pushRate: c.pushRate } : {}),
+      ...(c.transportSpeed !== undefined ? { transportSpeed: c.transportSpeed } : {}),
       ...(c.params ?? {}),
     },
     dressWorm: (sim: Sim, ids: number[]) => {
@@ -221,6 +243,19 @@ function run(c: Condition, seed: number): Gait {
                   excrete: { aux: 1 },
                   uptakeGain: { energy: [0, 0, -c.cpg.drive, 0] },
                   excreteGain: { aux: [0, 0, c.cpg.drive, 0] },
+                  ...(c.pushRate
+                    ? {
+                        // Base at half, driven by the same state dim the
+                        // metabolism is on, so a segment pushes hardest at one
+                        // point in its cycle and not at all at the other. The
+                        // phase offset between segments is then a phase offset
+                        // between strokes.
+                        push: [0, 0, 0].map((_, k) => (k === (c.pushSlot ?? 1) ? 0.5 : 0)),
+                        pushGain: [0, 1, 2].map((k) =>
+                          k === (c.pushSlot ?? 1) ? [0, 0, 1.5, 0] : [0, 0, 0, 0],
+                        ),
+                      }
+                    : {}),
                 }
             : {}),
           ...(c.mouths !== undefined && c.mouths > 0
@@ -244,9 +279,16 @@ function run(c: Condition, seed: number): Gait {
         }
       }
     },
-    drive: !feed
-      ? undefined
-      : feed
+    drive: c.feedAll
+      ? (sim: Sim, ids: number[]) => {
+          for (const id of ids) {
+            const a = sim.agents.get(id);
+            if (a) a.extra = a.energyCap * 0.5;
+          }
+        }
+      : !feed
+        ? undefined
+        : feed
         ? (sim: Sim, ids: number[]) => {
             const head = sim.agents.get(ids[ids.length - 1]!);
             if (head) head.extra = head.energyCap;
@@ -410,6 +452,31 @@ describe('experiment: a muscle the net drives itself', () => {
    */
   const CPG = { gain: 1.2, step: 0.05, amplitude: 0.3, drive: 1.5, phase: 0 };
   const base = { uptakeVmax: 4, excreteRate: 0.2, params: { upkeep: 0.05 } };
+
+  it('pushes on a clock, and the phase decides the direction', () => {
+    const A = {
+      recoil: 25,
+      pushRate: 1.5,
+      feedAll: true,
+      params: { upkeep: 0, ambientEnergy: 0 },
+    };
+    report('the actuator alone: every tank held full, so every transfer is a push', [
+      { label: 'aux, phase 0', ...A, pushSlot: 1, cpg: { ...CPG, phase: 0 } },
+      { label: 'aux, +pi/2', ...A, pushSlot: 1, cpg: { ...CPG, phase: Math.PI / 2 } },
+      { label: 'aux, -pi/2', ...A, pushSlot: 1, cpg: { ...CPG, phase: -Math.PI / 2 } },
+      { label: 'nose, phase 0', ...A, pushSlot: 0, cpg: { ...CPG, phase: 0 } },
+      { label: 'nose, +pi/2', ...A, pushSlot: 0, cpg: { ...CPG, phase: Math.PI / 2 } },
+      { label: 'push off', ...A, pushRate: 0, pushSlot: 1, cpg: { ...CPG, phase: Math.PI / 2 } },
+    ]);
+    const P = { ...base, recoil: 25, pushRate: 1.5, transportSpeed: 6 };
+    report('directed push, mouth amidships', [
+      { label: 'push aux, phase 0', ...P, mouthAt: 'middle', pushSlot: 1, cpg: { ...CPG, phase: 0 } },
+      { label: 'push aux, +pi/2', ...P, mouthAt: 'middle', pushSlot: 1, cpg: { ...CPG, phase: Math.PI / 2 } },
+      { label: 'push aux, -pi/2', ...P, mouthAt: 'middle', pushSlot: 1, cpg: { ...CPG, phase: -Math.PI / 2 } },
+      { label: 'push nose, +pi/2', ...P, mouthAt: 'middle', pushSlot: 0, cpg: { ...CPG, phase: Math.PI / 2 } },
+      { label: 'no push, +pi/2', ...base, recoil: 25, mouthAt: 'middle', cpg: { ...CPG, phase: Math.PI / 2 } },
+    ]);
+  });
 
   it('runs a wave along itself', () => {
     report('phase gradient, mouth amidships, recoil 25', [

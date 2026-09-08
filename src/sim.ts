@@ -27,6 +27,9 @@ import {
   L_OUT,
   P_BASE,
   P_OUT,
+  PUSH_BASE,
+  PUSH_OUT,
+  PUSH_SLOTS,
   PLASTIC_LEN,
   CRITIC_LEN,
   LEARN_CRITIC,
@@ -93,6 +96,7 @@ import {
   settlePool,
   stakeMet,
   spreadRequestsFast,
+  spreadRequestsWave,
   tickUpkeepFast,
   WireAdjacency,
 } from './energy.ts';
@@ -1018,7 +1022,7 @@ export class Sim {
     // answer it for itself — three full passes, each resolving both endpoints
     // and measuring the rope, for a set that cannot change between them.
     this.collectReadyRedexes(params);
-    this.pulseRequests(params);
+    this.pulseRequests(params, t);
     this.accrueRedexes(params);
     this.startRewrites(params);
     this.tickRewrites(params, t);
@@ -5520,7 +5524,7 @@ export class Sim {
     };
   }
 
-  private pulseRequests(params: Params): void {
+  private pulseRequests(params: Params, dt: number): void {
     /*
      * Three claims are made on a body here, and the largest wins. That used to
      * be collected in a `Map` from agent id to the running maximum, cleared
@@ -5601,11 +5605,13 @@ export class Sim {
     }
     const adj = this.wireAdjacency();
     Sim.phase('pulse:seed');
-    spreadRequestsFast(list, this.agentStore, adj);
+    if (params.transportSpeed > 0) spreadRequestsWave(list, this.agentStore, adj, dt);
+    else spreadRequestsFast(list, this.agentStore, adj);
     Sim.phase('pulse:spread');
     this.tally.moved += flowChargesFast(list, this.agentStore, adj, (from, to, amount) =>
       this.recoil(from, to, amount),
     );
+    this.pushCharges(params, dt);
     Sim.phase('pulse:flow');
     this.updateState(list, adj, params);
     Sim.phase('state');
@@ -5705,6 +5711,7 @@ export class Sim {
     const FS = store.flockSep;
     const TT = store.transportThrust;
     const TR = store.transportRecoil;
+    const PUSH = store.pushAll;
     const PLASTIC = store.plasticAll;
     const TRACE = store.traceAll;
     const CRITIC = store.criticAll;
@@ -5936,6 +5943,16 @@ export class Sim {
       FS[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 1, H, ho, S) * HEAD_SCALE.sep, -60, 120);
       TT[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 0, H, ho, S) * HEAD_SCALE.thrust, 0, 1);
       TR[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 1, H, ho, S) * HEAD_SCALE.recoil, 0, 200);
+      // One row a port, in `p`, `l`, `r` order. Clamped at zero because a
+      // negative push is a pull, and a pull is the neighbour's push seen from
+      // the other end — modelling it twice would let two bodies disagree about
+      // which way matter went.
+      const pusho = slot * PUSH_SLOTS;
+      for (let k = 0; k < PUSH_SLOTS; k++) {
+        PUSH[pusho + k] = clamp(
+          headAt(CHEM, g, PUSH_OUT, PUSH_BASE, k, H, ho, S) * HEAD_SCALE.push, 0, 1,
+        );
+      }
 
       /*
        * What this body learns from the frame it has just had.
@@ -6457,6 +6474,66 @@ export class Sim {
       a.extra -= total;
       for (let c = 0; c < CHEM_SPECIES; c++) OUT[oo + c] = w[c];
       this.energy.addSpeciesAt(a.x, a.y, w);
+    }
+  }
+
+  /**
+   * Directed transfer: matter a body moves out of a chosen port because its own
+   * state said to, not because the far end is hungrier.
+   *
+   * The other operator. `flowCharges` is a rescue — it finds the neediest
+   * neighbour and sends there — so the direction a net pumps is decided by
+   * where its shortage happens to be, and a net can only ever pump toward its
+   * own poverty. Measured on the worm bench, that is why a chain driven by
+   * exactly phase-locked clocks swam the same speed in every phase: the wave
+   * had nowhere to live, because nothing in the transport layer took an
+   * instruction.
+   *
+   * This takes one. The `PUSH` head has a row per port, and a port has a fixed
+   * direction in the body's own frame — a principal points along the heading,
+   * an aux against it — so "push out of `p`" and "push out of `l`" are opposite
+   * thrusts whatever the body is wired to. The recoil is the same one every
+   * other transfer earns (`Sim.recoil`), which is what makes this locomotion
+   * rather than bookkeeping.
+   *
+   * Conserved, and it cannot force-feed: bounded by what the donor holds above
+   * break-even and by the room left in the receiver. A body pushing into a full
+   * neighbour achieves nothing, which is the coupling that makes a pump need
+   * somewhere to pump *to* — a muscle only works against a load.
+   */
+  private pushCharges(params: Params, dt: number): void {
+    const rate = params.pushRate;
+    if (!(rate > 0) || dt <= 0) return;
+    const store = this.agentStore;
+    const PUSH = store.pushAll;
+    const LOCKED = store.locked;
+    const list = this.forceList();
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      const s = a.slot;
+      if (LOCKED[s]) continue;
+      const po = s * PUSH_SLOTS;
+      const slots = a.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
+      for (let k = 0; k < slots.length; k++) {
+        const drive = PUSH[po + k];
+        if (!(drive > 0)) continue;
+        const wire = this.graph.wireAtSlot(a.id, slots[k]);
+        if (!wire) continue;
+        const peerRef = wire.a.id === a.id && wire.a.slot === slots[k] ? wire.b : wire.a;
+        const peer = this.agents.get(peerRef.id);
+        if (!peer || peer === a || LOCKED[peer.slot]) continue;
+        const spare = a.extra > 0 ? a.extra : 0;
+        const room = peer.energyCap - peer.extra;
+        if (!(spare > 0) || !(room > 0)) continue;
+        let give = rate * dt * drive * spare;
+        if (give > spare) give = spare;
+        if (give > room) give = room;
+        if (!(give > 1e-9)) continue;
+        a.extra -= give;
+        peer.extra += give;
+        this.tally.moved += give;
+        this.recoil(a, peer, give);
+      }
     }
   }
 

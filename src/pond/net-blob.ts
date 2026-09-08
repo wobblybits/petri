@@ -45,7 +45,7 @@ import type { AgentKind, PortSlot } from '../agents.ts';
  */
 
 /** Bumped when the payload's meaning changes in a way a reader must notice. */
-export const NET_FORMAT = 1;
+export const NET_FORMAT = 2;
 
 const MAGIC = 'petri-net';
 
@@ -70,6 +70,11 @@ export const SCALAR_FIELDS = [
   'debtCap',
   'rescueTo',
   'assort',
+  // Appended rather than slotted in beside `requestDecay`, which is where it
+  // belongs conceptually: the two are the space and time constants of one
+  // cable. Field order here is a storage fact and must not move, so the new
+  // one goes on the end and `NET_FORMAT` records that it is there.
+  'conductSpeed',
 ] as const;
 export type ScalarField = (typeof SCALAR_FIELDS)[number];
 
@@ -124,6 +129,7 @@ export interface NetBody {
   heading: number;
   extra: number;
   requestDecay: number;
+  conductSpeed: number;
   energyCap: number;
   debtCap: number;
   rescueTo: number;
@@ -358,6 +364,7 @@ export function decodeNet(input: Uint8Array): NetData {
       debtCap: scalar[so + 3],
       rescueTo: scalar[so + 4],
       assort: scalar[so + 5],
+      conductSpeed: scalar[so + 6],
       born: ancestry[i * 2],
       lineage: ancestry[i * 2 + 1],
       chem: chem.subarray(i * L.chem, (i + 1) * L.chem),

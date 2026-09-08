@@ -393,6 +393,12 @@ export class Agent {
    * rewrite.ts) — which is the only place a population's traits can drift.
    */
   /** How much of this body's own demand survives one more hop outward. */
+  get conductSpeed(): number {
+    return this.store.conductSpeed[this.slot];
+  }
+  set conductSpeed(v: number) {
+    this.store.conductSpeed[this.slot] = v;
+  }
   get requestDecay(): number {
     return this.store.requestDecay[this.slot];
   }
@@ -543,6 +549,7 @@ export function cloneAgent(a: Agent): Agent {
   clone.chem.set(a.chem);
   clone.recovering = a.recovering;
   clone.requestDecay = a.requestDecay;
+  clone.conductSpeed = a.conductSpeed;
   clone.energyCap = a.energyCap;
   clone.debtCap = a.debtCap;
   clone.rescueTo = a.rescueTo;
@@ -758,6 +765,9 @@ export {
   PLASTIC_LEN,
   P_BASE,
   P_OUT,
+  PUSH_BASE,
+  PUSH_OUT,
+  PUSH_SLOTS,
   KS_BASE,
   ROW_COUNT,
   ROW_EXCRETE,
@@ -1246,6 +1256,7 @@ export function createAgent(
   store.turn[slot] = params.turnRate;
   agent.recovering = false;
   agent.requestDecay = params.requestDecay;
+  agent.conductSpeed = params.transportSpeed;
   agent.energyCap = extraCapFor(kind, params.eraCapRatio);
   agent.debtCap = params.debtCap;
   agent.rescueTo = params.rescueTo;

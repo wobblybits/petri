@@ -142,6 +142,7 @@ function captureComponent(sim: Sim, ids: number[], wires: GraphWire[]): Captured
       heading: a.heading,
       extra: a.extra,
       requestDecay: a.requestDecay,
+      conductSpeed: a.conductSpeed,
       energyCap: a.energyCap,
       debtCap: a.debtCap,
       rescueTo: a.rescueTo,
@@ -295,6 +296,7 @@ export function plantNet(
     a.drive = 0;
     a.extra = b.extra;
     a.requestDecay = b.requestDecay;
+    a.conductSpeed = b.conductSpeed;
     a.energyCap = b.energyCap;
     a.debtCap = b.debtCap;
     a.rescueTo = b.rescueTo;
