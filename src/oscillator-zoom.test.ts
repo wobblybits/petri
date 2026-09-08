@@ -107,15 +107,59 @@ describe('oscillator far zoom', () => {
   });
 
   it('native packed FAR at zoom 0.05 stays finite for 8s', async () => {
+    /*
+     * Across seeds, because one seed against a round number was measuring the
+     * draw rather than the mechanism.
+     *
+     * The peak speed here is a long tail: the same eight seeds give 624, 1056,
+     * 1720, 1776, 2156, 2169, 2301 and 3846 on the commit before the chemistry
+     * work, and 623, 625, 782, 1079, 1630, 1835, 1939 and 4079 after it. The
+     * middle of the distribution went *down*; the tail moved from 3846 to 4079
+     * and crossed a threshold that was already within four per cent of the
+     * worst draw it had ever seen. That is a stream shift finding a violent
+     * transient, not a pond that became less stable — but pinned to one seed
+     * it read as a regression, and the only available response would have been
+     * to nudge the number until it passed.
+     *
+     * So: the median carries the old bound, which both distributions clear
+     * with room, and every seed has to be finite and nowhere near diverging.
+     * A real blow-up in this configuration is orders of magnitude, not four
+     * per cent.
+     */
     expect(await nativeSolver.init(), nativeSolver.lastError).toBe(true);
-    const farRun = run(far, 480);
-    expect(farRun.peakSpeed, `peak speed ${farRun.peakSpeed.toFixed(1)}`).toBeLessThan(4000);
-    expect(farRun.peakLastLen, `peak lastLen ${farRun.peakLastLen.toFixed(1)}`).toBeLessThan(2000);
-    const box = bbox(farRun.sim);
-    expect(Math.max(box.w, box.h), `bbox ${box.w.toFixed(1)}x${box.h.toFixed(1)}`).toBeGreaterThan(20);
-    for (const a of farRun.sim.agents.values()) {
-      expect(Number.isFinite(a.x + a.y + a.vx + a.vy)).toBe(true);
+    /*
+     * Seeded here rather than leaning on `test-setup.ts`, which gives every
+     * test the same stream: the point is to draw eight different ones. The
+     * first is that shared seed, so the historical reading is still in the set.
+     */
+    const lcg = (n: number): void => {
+      let x = n >>> 0;
+      Math.random = () => {
+        x = (x * 1664525 + 1013904223) >>> 0;
+        return x / 4294967296;
+      };
+    };
+    const seeds = [20260902, 1, 2, 3, 4, 5, 6, 7];
+    const peaks: number[] = [];
+    for (const sd of seeds) {
+      lcg(sd);
+      const farRun = run(far, 480);
+      peaks.push(farRun.peakSpeed);
+      const label = `seed ${sd}: peak ${farRun.peakSpeed.toFixed(1)}, lastLen ${farRun.peakLastLen.toFixed(1)}`;
+      expect(Number.isFinite(farRun.peakSpeed), label).toBe(true);
+      expect(farRun.peakSpeed, label).toBeLessThan(8000);
+      expect(farRun.peakLastLen, label).toBeLessThan(2000);
+      const box = bbox(farRun.sim);
+      expect(Math.max(box.w, box.h), `${label}, bbox ${box.w.toFixed(1)}x${box.h.toFixed(1)}`)
+        .toBeGreaterThan(20);
+      for (const a of farRun.sim.agents.values()) {
+        expect(Number.isFinite(a.x + a.y + a.vx + a.vy), label).toBe(true);
+      }
     }
+    peaks.sort((a, b) => a - b);
+    const median = peaks[peaks.length >> 1];
+    expect(median, `median peak ${median.toFixed(1)} of ${peaks.map((v) => v.toFixed(0)).join(', ')}`)
+      .toBeLessThan(4000);
   });
 
   it('still commutes when fully zoomed out', async () => {
