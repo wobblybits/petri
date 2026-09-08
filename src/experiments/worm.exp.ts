@@ -55,6 +55,7 @@ interface Condition {
   dragAniso?: number;
   bendCost?: number;
   segments?: number;
+  portStiff?: number;
   params?: Partial<Params>;
 }
 
@@ -73,6 +74,7 @@ function run(c: Condition, seed: number): Gait {
       jointStiff: c.jointStiff ?? 300,
       dragAniso: c.dragAniso ?? 1,
       bendCost: c.bendCost ?? 0,
+      ...(c.portStiff !== undefined ? { portStiff: c.portStiff } : {}),
       ...(c.params ?? {}),
     },
     dressWorm: (sim: Sim, ids: number[]) => {
@@ -145,6 +147,24 @@ function report(title: string, conditions: Condition[]): void {
 }
 
 describe('experiment: a worm with one actuator', () => {
+  it('sweeps the muscle against the servo that holds the chain straight', () => {
+    /*
+     * `portTorques` runs at `portStiff * 320`, so the shipped 2 is a gain of
+     * 640 aiming every port at its neighbour — against which a joint stiffness
+     * of 300 is not obviously the louder voice. If the aiming servo is
+     * swallowing the stroke, softening it is what lets the stroke out.
+     */
+    for (const portStiff of [2, 0.25]) {
+      report(`portStiff ${portStiff}, aniso 3`, [
+        { label: 'stiff 300, +pi/2', portStiff, dragAniso: 3, phase: Math.PI / 2 },
+        { label: 'stiff 300, -pi/2', portStiff, dragAniso: 3, phase: -Math.PI / 2 },
+        { label: 'stiff 1500, +pi/2', portStiff, jointStiff: 1500, dragAniso: 3, phase: Math.PI / 2 },
+        { label: 'stiff 1500, -pi/2', portStiff, jointStiff: 1500, dragAniso: 3, phase: -Math.PI / 2 },
+        { label: 'stiff 1500, no muscle', portStiff, jointStiff: 1500, dragAniso: 3, amplitude: 0 },
+      ]);
+    }
+  });
+
   it('asks whether phase can matter now that the medium notices', () => {
     /*
      * `along` is the number to read, with its sign: the two phase directions
