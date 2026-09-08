@@ -20,7 +20,8 @@ import {
   X_BASE,
 } from '../chem-layout.ts';
 import { CH } from '../fields.ts';
-import { rotate } from '../wrap.ts';
+import { portAxisWorld } from '../chain.ts';
+import { rotate, wrapAngle } from '../wrap.ts';
 import { seededRandom } from './harness.ts';
 
 /*
@@ -485,6 +486,26 @@ export interface SegmentSample {
   gap: number;
 }
 
+/**
+ * One joint, at one instant: what the two bodies are actually holding across
+ * the wire, and what their `ANGLE` heads asked for.
+ *
+ * The quantity the actuator commands, which is not the quantity `bend`
+ * measures. `bend` is a segment's heading against the worm's *build axis*, so a
+ * body slowly turning as a whole swamps any joint oscillation riding on top of
+ * it — measured, `bendSwing` sat at 1.2 to 1.36 whether the muscle was on or
+ * off, which said the instrument could not see the actuator rather than that
+ * the actuator was absent. This is the relative angle: a function of the two
+ * headings and of nothing else, exactly as `Sim.jointAngles` computes it, so
+ * whole-body rotation cancels out of it.
+ */
+export interface JointSample {
+  /** Relative angle across the joint. Zero is straight. */
+  rel: number;
+  /** The sum of the two ends' commanded rest angles. */
+  want: number;
+}
+
 export interface OrganismSample {
   t: number;
   /** Centre of mass of the surviving segments, and its displacement from the start. */
@@ -500,6 +521,8 @@ export interface OrganismSample {
   moved: number;
   hops: number;
   segments: SegmentSample[];
+  /** One per consecutive pair, tail first. Shorter than `segments` by one. */
+  joints: JointSample[];
 }
 
 export interface OrganismTrial {
@@ -582,6 +605,31 @@ function sampleOrganism(
   const cy = m > 0 ? my / m : origin.y;
   const dx = cx - origin.x;
   const dy = cy - origin.y;
+  const joints: JointSample[] = [];
+  const ANGLE = sim.agentStore.angleAll;
+  const code = (slot: string): number => (slot === 'p' ? 0 : slot === 'l' ? 1 : 2);
+  for (let i = 0; i + 1 < ids.length; i++) {
+    const a = sim.agents.get(ids[i]!);
+    const wire = a ? sim.graph.wireAtSlot(a.id, 'p') : null;
+    if (!a || !wire) {
+      joints.push({ rel: NaN, want: NaN });
+      continue;
+    }
+    const mine = wire.a.id === a.id ? wire.a : wire.b;
+    const theirs = wire.a.id === a.id ? wire.b : wire.a;
+    const b = sim.agents.get(theirs.id);
+    if (!b) {
+      joints.push({ rel: NaN, want: NaN });
+      continue;
+    }
+    const ua = portAxisWorld(a, mine.slot);
+    const ub = portAxisWorld(b, theirs.slot);
+    joints.push({
+      rel: wrapAngle(Math.atan2(ub.y, ub.x) - Math.atan2(ua.y, ua.x) - Math.PI),
+      want:
+        ANGLE[a.slot * 3 + code(mine.slot)] + ANGLE[b.slot * 3 + code(theirs.slot)],
+    });
+  }
   let wires = 0;
   const set = new Set(ids);
   for (const w of sim.graph.wires.values()) {
@@ -599,6 +647,7 @@ function sampleOrganism(
     moved: sim.tally.moved,
     hops: sim.tally.hops,
     segments,
+    joints,
   };
 }
 
@@ -737,15 +786,30 @@ export interface Gait {
    */
   tankSwing: number;
   /**
-   * Mean best-correlation lag between segment `i`'s tank trace and `i+1`'s, in
-   * seconds, over the body.
-   *
-   * The definitive one. Zero is a standing wave — every segment spending
-   * together, which moves nothing because the demand field stays flat.
-   * Non-zero is a *travelling* wave, and its sign is the direction the wave
-   * runs: positive means the rear leads the segment ahead of it.
+   * Peak-to-peak of each joint's actual relative angle, averaged over the body.
+   * The bend the worm really has, with whole-body rotation cancelled out.
    */
-  waveLag: number;
+  jointSwing: number;
+  /** The same for what the heads asked for: how hard the muscle was driven. */
+  jointDrive: number;
+  /**
+   * Mean correlation between what a joint was told to hold and what it held.
+   *
+   * The question `jointSwing` alone cannot answer. A joint can swing because
+   * the body is being thrown about and still be ignoring its command entirely;
+   * near 1 says the actuator is in charge of the joint, near 0 says it is a
+   * passenger, and negative says it is being driven backwards by something
+   * stronger.
+   */
+  jointTrack: number;
+  /**
+   * Mean best-correlation lag between consecutive joints' angles, in seconds.
+   *
+   * Zero is a standing wave — every joint bending together, which cannot
+   * propel because it is reciprocal. Non-zero is a *travelling* wave and its
+   * sign is the direction it runs.
+   */
+  jointLag: number;
   /** Peak-to-peak of each segment's bend and of each gap, averaged over segments. */
   bendSwing: number;
   gapSwing: number;
@@ -792,6 +856,51 @@ export function gaitOf(trial: OrganismTrial): Gait {
   const dt = trial.samples.length > 1 ? trial.samples[1]!.t - trial.samples[0]!.t : 1;
   const trace = (i: number): number[] =>
     trial.samples.map((s) => s.segments[i]?.extra ?? NaN).filter((v) => Number.isFinite(v));
+  const jointTrace = (i: number, key: 'rel' | 'want'): number[] =>
+    trial.samples.map((s) => s.joints[i]?.[key] ?? NaN).filter((v) => Number.isFinite(v));
+  const swingOf = (v: number[]): number => (v.length < 2 ? 0 : Math.max(...v) - Math.min(...v));
+  const corr = (a: number[], b: number[], lag = 0): number => {
+    let sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0, m = 0;
+    for (let k = 0; k < a.length; k++) {
+      const j = k + lag;
+      if (j < 0 || j >= b.length) continue;
+      const va = a[k]!;
+      const vb = b[j]!;
+      sa += va; sb += vb; saa += va * va; sbb += vb * vb; sab += va * vb; m++;
+    }
+    if (m < 8) return 0;
+    const cov = sab / m - (sa / m) * (sb / m);
+    const va = saa / m - (sa / m) * (sa / m);
+    const vb = sbb / m - (sb / m) * (sb / m);
+    const denom = Math.sqrt(Math.max(1e-12, va * vb));
+    return cov / denom;
+  };
+  const nJoints = trial.samples[0]?.joints.length ?? 0;
+  let jointSwing = 0, jointDrive = 0, jointTrack = 0, jointCount = 0;
+  for (let i = 0; i < nJoints; i++) {
+    const rel = jointTrace(i, 'rel');
+    const want = jointTrace(i, 'want');
+    if (rel.length < 8) continue;
+    jointSwing += swingOf(rel);
+    jointDrive += swingOf(want);
+    jointTrack += corr(rel, want);
+    jointCount++;
+  }
+  const jointWindow = Math.max(1, Math.floor(trial.samples.length / 5));
+  let jointLagSum = 0, jointLagCount = 0;
+  for (let i = 0; i + 1 < nJoints; i++) {
+    const a = jointTrace(i, 'rel');
+    const b = jointTrace(i + 1, 'rel');
+    if (a.length < 8 || b.length < 8) continue;
+    let best = -Infinity;
+    let bestLag = 0;
+    for (let L = -jointWindow; L <= jointWindow; L++) {
+      const r = corr(a, b, L);
+      if (r > best) { best = r; bestLag = L; }
+    }
+    jointLagSum += bestLag;
+    jointLagCount++;
+  }
   let tankSwing = 0;
   let tankCount = 0;
   for (let i = 0; i < n; i++) {
@@ -880,7 +989,10 @@ export function gaitOf(trial: OrganismTrial): Gait {
     headward: trial.headward,
     demandTilt: tiltCount > 0 ? tiltSum / tiltCount : 0,
     tankSwing: tankCount > 0 ? tankSwing / tankCount : 0,
-    waveLag: lagCount > 0 ? (lagSum / lagCount) * dt : 0,
+    jointSwing: jointCount > 0 ? jointSwing / jointCount : 0,
+    jointDrive: jointCount > 0 ? jointDrive / jointCount : 0,
+    jointTrack: jointCount > 0 ? jointTrack / jointCount : 0,
+    jointLag: jointLagCount > 0 ? (jointLagSum / jointLagCount) * dt : 0,
     bendSwing: bendCount > 0 ? bendSwing / bendCount : 0,
     gapSwing: gapCount > 0 ? gapSwing / gapCount : 0,
     intact: last.alive === n && last.wires === first.wires,
@@ -897,7 +1009,10 @@ export function gaitTable(rows: { label: string; gait: Gait }[]): string {
     ['headward', (g) => g.headward.toFixed(2)],
     ['tilt', (g) => g.demandTilt.toFixed(3)],
     ['tank', (g) => g.tankSwing.toFixed(2)],
-    ['lag', (g) => g.waveLag.toFixed(2)],
+    ['jSwing', (g) => g.jointSwing.toFixed(3)],
+    ['jDrive', (g) => g.jointDrive.toFixed(3)],
+    ['jTrack', (g) => g.jointTrack.toFixed(2)],
+    ['jLag', (g) => g.jointLag.toFixed(2)],
     ['moved', (g) => g.moved.toFixed(2)],
     ['hops', (g) => String(g.hops)],
     ['cot', (g) => (Number.isFinite(g.costOfTransport) ? g.costOfTransport.toFixed(4) : '-')],
