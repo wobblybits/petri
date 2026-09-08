@@ -386,20 +386,68 @@ better than a part in ten thousand. Two things had to be got right first.
 
 `census()` reports `commutesPerLatch`, §8's tripwire.
 
-**Phase 3. The body reaction table.** Eight rows, one simplex, `emitVector`
-generalised. This is the phase that moves `state-hash` and the signalling
-constants; see section 8.
+**Phase 3. The body reaction table.** *Done, 2026-09-08.* Eight rows, one
+simplex, on both field paths. `expressVector` divides one unit of chemical
+effort across the table — relu then normalised, flat at the seed, the same
+silence rule `emitVector` follows.
 
-**Phase 4. Trophic dependency.** `yDirect` from 1 toward 0, after measuring
-the larval encounter time.
+- **Excretion**, above `excreteRate` zero: all four species leave the tank
+  conserved and the minted scent deposit stops. One or the other, never both;
+  `scentMints` enforces it at the three places a deposit is laid. The rate is
+  mass action on the tank, so a poor body physically cannot shout.
+- **Uptake**, four species with per-body rates and affinities. `EnergyGrid`
+  gained a species dimension; the harvest's flow buffer gained a stride.
+- **`KS_BASE`**, a per-species affinity gene, is a plain heritable gene rather
+  than the head §4 asks for. `X` supplies `vmax` — how much transporter a body
+  expresses, which is regulation. Affinity is *which* transporter it has, so
+  it has no business moving with mood, and a head would spend twenty floats
+  modelling a decision that is not one. The non-dominating `(vmax, ks)` pair,
+  which is what §4's argument rests on, survives.
 
-**Phase 5. The ground.** Explicit complement species; food promoted onto
-`react`; `F, k` sweep; `grow` demoted to a fallback dial.
+**Phase 6 turned out not to be a phase.** The genome shader was never
+involved: expression is a pure function of `chem` and `h`, and `unpackGenome`
+brings `h` back to the host every frame, so the whole table is computed here
+on both paths. That pass binds eight storage buffers of a guaranteed eight and
+had nothing to spend; it did not need to. `field.wgsl`'s `harvest` did have to
+learn four species, and it did so by widening a stride rather than adding a
+binding, for the same reason.
 
-**Phase 6. GPU.** `field.wgsl` has to carry the reaction table, and this adds
-a fifth item to the tripwire at `Sim.openFieldGpu`: `grow` and `tuneChannels`
-already sit inside `if (!this.fieldOnGpu)`, and the body table's uptake reads
-and writes `fields.data` the same way `EnergyGrid.take` does.
+**The coupling worth knowing about.** Metering uptake across all four species
+while the scent path still *mints* is a matter fountain: a body deposits five
+times its voice into three channels out of nothing and eats it back. Measured,
+that ran at twice the rate cap and filled every tank. So the species rows
+follow `excreteRate` and not `uptakeVmax`.
+
+**Phase 4. Trophic dependency.** *Done as dials, 2026-09-08.* `yDirect` and
+`yEra` scale the uptake *rate*, which makes obligate dependency conservative
+without a second grid write per body per species: at `yDirect` 0 a body draws
+nothing and the ground under it is untouched, so a starving body is not also a
+wasteful one. Both ship at 1. **The larval-window measurement §5 asks for has
+not been done**, and should be before `yDirect` moves far.
+
+**Phase 5. The ground.** *Not started, and it has a structural question the
+plan does not answer.*
+
+§6 wants food promoted onto `react` as the autocatalytic activator with "its
+complement as substrate". But §1 fixes the vocabulary at four species, and
+after phase 3 all four are body reaction rows — there is no spare channel for
+an explicit complement. The complement would have to *be* one of `conP`,
+`dupP` or `aux`, which is either the best idea in the document or a
+significant change to what those species are:
+
+> everything anyone excretes is something someone else can eat, be poisoned by,
+> or misread
+
+reads very well if the substrate food grows from is a species bodies excrete —
+fertilising becomes a real trophic act rather than `farmRate`'s special case,
+and §2's `fertilise` catalysis is already a rehearsal for it. But it makes one
+of the three signalling channels structurally special, which is exactly what
+§9 says not to do, and choosing *which* is a decision with a large blast
+radius. It wants the author, not an overnight guess.
+
+The rest of phase 5 is ready: `Fields.react` exists and ships at zero, and
+`npm run pond -- sweep --axis reactFeed=... --axis reactKill=...` already
+parses — the `F, k` grid can be queued the moment the complement is chosen.
 
 ---
 

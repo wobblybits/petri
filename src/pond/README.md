@@ -292,6 +292,42 @@ Both F_ST calibrations are pinned by tests: genomes shuffled at random between
 nets must read near the floor (or the statistic is measuring group *sizes*),
 and one constant genome per net must saturate.
 
+## The chemistry dials
+
+`docs/energy-chemistry-plan.md` phases 0 to 4 are in, and every one of them
+ships at the value that reproduces the pond before it. Turning them on is a
+sweep, not a default.
+
+| dial | 0 / today | what it does |
+| --- | --- | --- |
+| `uptakeVmax` | 0 | uptake becomes a *rate* against the ground's density instead of take-what-fits |
+| `uptakeKs` | 0.25 | half-saturation; with `uptakeVmax` it is the non-dominating grazer/scavenger pair |
+| `excreteRate` | 0 | **the switch.** All four species leave the tank conserved, and the minted scent deposit stops |
+| `senseScale` | 4.3 | what one unit of signal is worth on the way in. See below |
+| `yDirect`, `yEra` | 1, 1 | uptake yield; `yDirect` 0 is obligate trophic dependency, `yEra` above 1 makes an Era the net's mouth |
+| `upkeepExcrete` | 0 | rent returns to the ground rather than vanishing |
+| `bodyValue` | `EXTRA_CAP` | at `REWRITE_SHARE` a commute stops minting |
+| `eraCapRatio`, `eraUpkeepRatio` | 2, −0.2 | at 1, 1 the two rules keyed on an Era's glyph are gone |
+| `rowCost`, `hillN` | 0, 1 | the two superadditivity dials §3 argues division of labour needs. **Declared, not yet read** |
+
+**`senseScale` has to move with `excreteRate`.** Measured as the p90 signal
+reading at a body's own position over soups of 60, 400 and 2000 — the same
+measurement the constant was set by — a minted pond reads 4.26 / 4.60 / 5.19
+and an excreting one reads **0.0016 / 0.0017 / 0.0024**. Left at 4.3, a run
+with `excreteRate` on has sense genes reading three orders below anything
+`phi` can resolve. A useful starting point:
+
+```bash
+npm run pond -- run --seconds 600 \
+  --set excreteRate=0.5 --set uptakeVmax=1.5 --set senseScale=0.002
+```
+
+Two couplings the code enforces rather than trusting you to remember. Uptake
+covers all four species only when `excreteRate` is on — metered uptake with
+the deposit still minting is a matter fountain, since a body would eat back
+five times the voice it never paid for. And excretion and the minted deposit
+are mutually exclusive at all three places a deposit is laid.
+
 ## Reading it from the lab page
 
 Nothing in `db.ts` is importable from a page — `node:sqlite` is not. The
