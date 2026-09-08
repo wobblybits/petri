@@ -673,6 +673,28 @@ export interface Params {
    * bodies are dense and the ground is grazed out.
    */
   catCoSubstrate: number;
+  /**
+   * How many patches the ground is laid down in, at the same total mass.
+   * 0 spreads it over the whole disk, which is what every preset does.
+   *
+   * A `Params` field rather than a runner flag so that it can be a *sweep
+   * axis*: "does the pond develop differently when food is somewhere rather
+   * than everywhere" is a question about a grid point, not about an
+   * invocation. `soupCount` is setup-time and lives here for the same reason.
+   *
+   * The mass is held constant across every setting on purpose. A patchy dish
+   * against a thinner one compares how much food there is, which is not the
+   * question; against a uniform one at the same total it compares structure,
+   * which is. For less food, move `ambientEnergy`.
+   *
+   * Read once, at setup, by `pond/ground.ts` — and note what the pond already
+   * does with it: `Fields.grow` skips a cell at zero, so a patch grazed bare
+   * only comes back by diffusion from a living neighbour, and a region cleared
+   * outright stays dead. That is regeneration with a history rather than a
+   * refill timer, which is most of what §6 wants from a reaction-diffusion
+   * ground, for free.
+   */
+  groundPatches: number;
 }
 
 export function defaultParams(): Params {
@@ -756,6 +778,7 @@ export function defaultParams(): Params {
     excreteRate: 0,
     senseScale: SENSE_SCALE,
     catCoSubstrate: 0,
+    groundPatches: 0,
   };
 }
 
@@ -846,4 +869,5 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'excreteRate', label: 'Excrete rate', min: 0, max: 2, step: 0.02 },
   { key: 'senseScale', label: 'Sense scale', min: 0.001, max: 8, step: 0.001 },
   { key: 'catCoSubstrate', label: 'Catabolism needs ground', min: 0, max: 1, step: 0.05 },
+  { key: 'groundPatches', label: 'Ground patches', min: 0, max: 128, step: 1 },
 ];

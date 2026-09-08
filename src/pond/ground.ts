@@ -30,21 +30,20 @@ import type { Sim } from '../sim.ts';
  * dish's 12,769, the difference being `uniformMass`'s approximation at the rim.
  */
 
-export type GroundMode = 'uniform' | 'patches' | 'none';
-
-export interface GroundSpec {
-  mode: GroundMode;
-  /** Patches to spread the mass over, when `mode` is `patches`. */
-  patches: number;
-}
-
-export function parseGround(spec: string): GroundSpec {
-  if (spec === 'uniform' || spec === 'none') return { mode: spec, patches: 0 };
+/**
+ * `--ground <spec>` as the CLI spells it, resolved to `params.groundPatches`.
+ *
+ * Sugar over the parameter, not a second source of truth: a sweep sets the
+ * parameter directly through `--axis groundPatches=0,4,16` and never comes
+ * through here.
+ */
+export function parseGround(spec: string): number {
+  if (spec === 'uniform') return 0;
   const m = /^patches(?::(\d+))?$/.exec(spec);
-  if (!m) throw new Error(`pond: --ground wants uniform, none, or patches[:n], got ${JSON.stringify(spec)}`);
+  if (!m) throw new Error(`pond: --ground wants uniform or patches[:n], got ${JSON.stringify(spec)}`);
   const patches = m[1] ? Number(m[1]) : 24;
   if (!(patches > 0)) throw new Error('pond: --ground patches wants a positive count');
-  return { mode: 'patches', patches };
+  return patches;
 }
 
 /**
@@ -66,14 +65,14 @@ export function uniformMass(sim: Sim): number {
 /**
  * Rearrange the ground without changing how much of it there is.
  *
- * `uniform` leaves what the preset laid down. `none` takes it away, which is
- * the barren control. `patches` clears the dish and puts the same mass back in
- * `spec.patches` places on a sunflower spiral — even coverage without a grid's
- * corners, and the same arrangement every time, so a seed is still a
- * reproducible thing.
+ * Zero leaves what the preset laid down. Above it, the dish is cleared and the
+ * same mass goes back in that many places on a sunflower spiral — even
+ * coverage without a grid's corners, and the same arrangement every time, so a
+ * seed is still a reproducible thing. A barren dish is `ambientEnergy` at 0,
+ * which needs nothing from here.
  */
-export function layGround(sim: Sim, spec: GroundSpec): void {
-  if (spec.mode === 'uniform') return;
+export function layGround(sim: Sim, patches: number): void {
+  if (!(patches > 0)) return;
   const mass = uniformMass(sim);
   /*
    * Clearing has to reach the device. `pendingSeed` is what `seedGround` uses
@@ -83,9 +82,8 @@ export function layGround(sim: Sim, spec: GroundSpec): void {
    */
   sim.energy.pendingSeed = 0;
   sim.fields.fillDisk(CH.energy, 0);
-  if (spec.mode === 'none') return;
 
-  const n = spec.patches;
+  const n = patches;
   const each = mass / n;
   const cx = sim.w * 0.5;
   const cy = sim.h * 0.5;

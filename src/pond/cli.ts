@@ -47,8 +47,9 @@ run options
   --min-bodies <n>     smallest component worth storing  (default 2)
   --limit <n>          store only the n largest components per harvest
   --gpu auto|on|off    field and genome on the GPU, via Dawn  (default auto)
-  --ground <spec>      uniform | none | patches[:n]   (default uniform)
-                       the same total mass, arranged differently
+  --ground <spec>      uniform | patches[:n]           (default uniform)
+                       the same total mass, arranged differently. Sugar for
+                       --set groundPatches=n, which a sweep can put on an axis
   --set <key>=<value>  override one Params field; repeatable
   --note <text>        free text on the run row
 
@@ -248,6 +249,9 @@ async function cmdRun(args: Args): Promise<void> {
     }
     const gpu: 'auto' | 'on' | 'off' = gpuFlag;
     const params = paramsWith(sets);
+    // Sugar over `groundPatches`, so a one-off run reads well and a sweep can
+    // still put the same thing on an axis.
+    if (flags.has('ground')) params.groundPatches = parseGround(flags.get('ground')!);
     const worldFlag = flags.get('world') ?? '1600x1200';
     const [ww, wh] = worldFlag.split('x').map(Number);
     if (!Number.isFinite(ww) || !Number.isFinite(wh)) {
@@ -267,7 +271,6 @@ async function cmdRun(args: Args): Promise<void> {
       minBodies: num(flags, 'min-bodies', 2),
       limit: flags.has('limit') ? num(flags, 'limit', 0) : null,
       gpu,
-      ground: parseGround(flags.get('ground') ?? 'uniform'),
     };
 
     const runId = db.startRun({
@@ -512,7 +515,10 @@ async function cmdSweep(args: Args): Promise<void> {
     name,
     grid,
     seeds,
-    base: Object.fromEntries(sets),
+    base: {
+      ...Object.fromEntries(sets),
+      ...(flags.has('ground') ? { groundPatches: parseGround(flags.get('ground')!) } : {}),
+    },
     seconds: num(flags, 'seconds', 120),
     dt: num(flags, 'dt', 1 / 60),
     soupCount: num(flags, 'bodies', 400),
@@ -520,7 +526,6 @@ async function cmdSweep(args: Args): Promise<void> {
     world: { w: ww, h: wh },
     sampleEvery: num(flags, 'sample-every', 10),
     gpu: gpuFlag as 'auto' | 'on' | 'off',
-    ground: parseGround(flags.get('ground') ?? 'uniform'),
     keepNets: flags.has('keep-nets'),
     note: flags.get('note') ?? null,
   };

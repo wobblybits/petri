@@ -32,27 +32,19 @@ const groundTotal = (sim: Sim): number => {
 
 describe('ground layout', () => {
   it('parses the spec, and refuses one it cannot', () => {
-    expect(parseGround('uniform')).toEqual({ mode: 'uniform', patches: 0 });
-    expect(parseGround('none')).toEqual({ mode: 'none', patches: 0 });
-    expect(parseGround('patches')).toEqual({ mode: 'patches', patches: 24 });
-    expect(parseGround('patches:7')).toEqual({ mode: 'patches', patches: 7 });
+    expect(parseGround('uniform')).toBe(0);
+    expect(parseGround('patches')).toBe(24);
+    expect(parseGround('patches:7')).toBe(7);
     expect(() => parseGround('patches:0')).toThrow(/positive/);
-    expect(() => parseGround('lumpy')).toThrow(/uniform, none, or patches/);
+    expect(() => parseGround('lumpy')).toThrow(/uniform or patches/);
   });
 
   it('leaves a uniform dish alone', () => {
     const { sim } = pond();
     const before = groundTotal(sim);
     expect(before).toBeGreaterThan(0);
-    layGround(sim, { mode: 'uniform', patches: 0 });
+    layGround(sim, 0);
     expect(groundTotal(sim)).toBe(before);
-  });
-
-  it('empties the dish for the barren control', () => {
-    const { sim } = pond();
-    expect(groundTotal(sim)).toBeGreaterThan(0);
-    layGround(sim, { mode: 'none', patches: 0 });
-    expect(groundTotal(sim)).toBeCloseTo(0, 6);
   });
 
   it('puts the same mass into patches that it took out of the dish', () => {
@@ -70,7 +62,7 @@ describe('ground layout', () => {
     // rim that the two agree to a few per cent, which is what makes it usable.
     expect(Math.abs(analytic - before) / before).toBeLessThan(0.05);
 
-    layGround(sim, { mode: 'patches', patches: 12 });
+    layGround(sim, 12);
     expect(groundTotal(sim)).toBeCloseTo(analytic, 3);
   });
 
@@ -85,7 +77,7 @@ describe('ground layout', () => {
     const flatCells = occupied(flat.sim).length;
 
     const patchy = pond();
-    layGround(patchy.sim, { mode: 'patches', patches: 12 });
+    layGround(patchy.sim, 12);
     const patchyCells = occupied(patchy.sim).length;
 
     // Same mass, a tiny fraction of the cells. That is the structure the
@@ -104,7 +96,7 @@ describe('ground layout', () => {
     params.upkeep = 0;
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', params);
-    layGround(sim, { mode: 'patches', patches: 1 });
+    layGround(sim, 1);
     // One patch, at the centre by construction.
     const on = sim.spawn('con', sim.w * 0.5, sim.h * 0.5, 0, params, true)!;
     const off = sim.spawn('con', sim.w * 0.5 + 900, sim.h * 0.5, 0, params, true)!;
