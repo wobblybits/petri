@@ -98,15 +98,122 @@ head at its cap, upkeep as the sink — so the measurement is about the motor an
 not about the economy. The `no feeder` row shows the economy still bites: with
 no supply the worm starves from the tail and loses segments (`intact` false).
 
+## The ground can drive it, once uptake is a rate
+
+Re-measured on `pond-and-chemistry`. Everything above reproduces: the wasm
+solver is now on in the experiments project (it was silently falling through to
+the JS twin), which moves the pump from 34.7 to 36.2 px/s and leaves every
+conclusion where it was. `thrust 0` still moves the same 263.6 over the same
+11,186 hops and still goes nowhere.
+
+The flat-field finding was downstream of one line — the old harvest took
+whatever fitted in the tank, instantly. Phase 1's Monod uptake makes income a
+*rate*, and the question becomes askable. Three ways to ask it, three answers,
+all on real ground with no puppet feeder:
+
+| condition | px/s | headward | straight | moved | hops |
+|---|---:|---:|---:|---:|---:|
+| still, uniform, vmax 0.25 | 2.4 | 0.32 | 0.40 | 85.6 | 3129 |
+| still, uniform, vmax 4 | 8.2 | 0.97 | 0.99 | 34.0 | 122 |
+| kicked, vmax 4 | 13.0 | 1.00 | 1.00 | 27.3 | 145 |
+| **one mouth, vmax 4** | **28.7** | **0.98** | **0.98** | 246.4 | 5124 |
+
+It self-starts. And the coherence runs *backwards* to the flow: `vmax` 0.25
+moves nearly three times the energy over twenty-five times the transfers and
+manages a third of the speed at `headward` 0.32, because a worm where every
+segment is hungry pumps in every direction at once. A worm where only the
+trailing segment occasionally falls behind pumps one way, rarely, and gets
+somewhere. **Coherence comes from the scarcity of transfers, not their
+abundance.**
+
+The mouth row is the one that matters. One segment expressing the ground's
+uptake row — which by the simplex silences the other seven on everybody else —
+is §5's obligate trophic dependency, built rather than dialled, and it reaches
+four fifths of what the puppet feeder bought from a worm that feeds itself.
+
+## A clock the net keeps, and the wave that would not travel
+
+The pump above is still the net *conducting* a gradient something else made. A
+muscle is the other thing: the net decides when to spend, on its own schedule.
+
+The machinery for that is the expression head. `Wh` as a rotation with gain
+limit-cycles under `phi` (see `oscillator`), and `X` reads `h`, so a segment
+can shift effort between taking energy in and putting `aux` back out on a clock
+of its own. A phase offset per segment makes that a wave along the body.
+
+Three things had to line up, and each was found by its failure:
+
+- **A single oscillating row does nothing.** `expressVector` normalises across
+  the eight, so one row alone keeps a share of 1 however hard it is driven. A
+  rhythm has to move share *between* rows.
+- **The body cannot be allowed to eat.** With every segment on ambient ground
+  the clock ran perfectly and changed nothing: `h[2]` swung ±0.26 and the
+  shares swung 0.30/0.70, while the tank sat pinned at cap, because uptake at
+  `vmax * ROW_COUNT * share` is ~9.6/s against an excretion of 0.35/s. That is
+  §0's finding — a body on ambient ground is a complete self-sufficient
+  organism — reappearing inside the muscle. Fixed with a deliberately terrible
+  affinity gene on every segment but the mouth.
+- **The tank has to be brought to the clock.** Excretion is mass action on the
+  tank, so it asymptotes at zero and can never by itself put a body into debt —
+  and `rescueNeed`, which is what the demand field listens to, only latches
+  *below* zero. A full tank drains toward zero and then waits on upkeep for a
+  minute. Small tanks and a deeper debt cap put the metabolic cycle on the
+  clock's timescale.
+
+With all three, the clocked worm swims: **20.1 px/s, straightness 0.93,
+`headward` 0.98**, on real ground, no puppet, no shove, its spending scheduled
+by a rhythm the net generates. That is the internally-driven version.
+
+**But the phase of the wave does nothing at all.**
+
+| mouth at the nose, recoil 25 | px/s | along | straight | lag |
+|---|---:|---:|---:|---:|
+| phase 0 (every segment in sync) | 19.5 | 1068 | 0.93 | 0.14 |
+| phase +pi/2 | 20.1 | 1000 | 0.88 | 1.09 |
+| phase -pi/2 | 20.1 | 1112 | 0.93 | -1.14 |
+
+Reversing the wave was supposed to reverse the swim. It does not move it. And
+the control that isolates the question — the mouth moved amidships, so the
+standing gradient is symmetric and cancels and the wave is the only thing left
+that could decide a direction — goes nowhere in every phase condition:
+`headward` 0.02 to 0.05, `along` and `perp` identical across all three.
+
+### Why, and it is structural
+
+`spreadRequests` is a **max-relaxation**: every body ends up holding the
+largest need it can see, attenuated per hop. That is a potential with a single
+global maximum, and a potential cannot carry a phase. `flowCharges` then moves
+energy one hop up it per frame, toward whoever is neediest right now. So a
+travelling wave of demand is flattened, on the frame it is created, into
+whichever segment happens to be neediest — and the measured `lag` between
+adjacent tanks is noise (0.14, 1.09, -1.14) even though the clocks driving them
+are exactly phase-locked.
+
+**The transport layer is a diffusive rescue network, not an actuator bus.** It
+answers "who is worst off and how far away", which is the right question for
+keeping a net alive and the wrong one for timing a stroke. Direction of travel
+is therefore set by *where the source is*, not by anything the net computes: a
+mouth at the nose swims nose-first, a mouth amidships swims nowhere.
+
+A peristaltic muscle whose direction is a phenotype needs directed transfer —
+some term that moves energy along a chosen wire because a body decided to,
+rather than because the far end is hungrier. That does not exist, and it is a
+real addition rather than a dial. Worth weighing against what it buys: the
+rescue semantics are load-bearing everywhere else.
+
 ## What this does not yet show
 
-- **A rhythm.** The stroke is continuous, not cyclic. The demand field is a
-  standing gradient here; an oscillating one needs `h` driving taste or the
-  farm gene, which means writing the state matrices rather than only the bases.
 - **A steerable worm.** `headward` is high because the body only ever goes
   where its nose points, but nothing chooses where the nose points.
+- **Robustness.** Several of the strong clocked conditions lose segments
+  (`intact` false): one mouth cannot supply a long obligate chain, and a
+  segment that starves takes its wire with it.
 - **Anything evolutionary.** No reproduction: a Con chain with no active pair
   cannot rewrite, which is what makes it a stable body and also a sterile one.
+  And the plan's own §3 argument says the polarity above is not reachable by
+  selection at `rowCost = 0, hillN = 1`: with a linear budget and concave
+  payoffs the optimum is interior and every segment becomes a generalist. Those
+  two dials decide whether any of this is evolvable rather than only buildable.
 
 ## Reproducing
 

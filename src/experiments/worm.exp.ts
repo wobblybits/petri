@@ -3,6 +3,8 @@ import type { Params } from '../params.ts';
 import type { Sim } from '../sim.ts';
 import {
   dress,
+  oscillator,
+  oscillatorPhase,
   gaitOf,
   gaitTable,
   motorsOff,
@@ -98,6 +100,26 @@ interface Condition {
   mouths?: number;
   /** Initial speed along the build axis, to ask whether a gait sustains as against self-starts. */
   kick?: number;
+  /**
+   * The clock. `phase` is the phase step per segment from tail to head, in
+   * radians — 0 is every segment spending together, positive and negative are
+   * the two directions a wave can run.
+   */
+  cpg?: { gain: number; step: number; amplitude: number; phase: number; drive: number };
+  /**
+   * Where the one segment that can eat sits.
+   *
+   * `head` gives the worm a standing head-to-tail gradient whatever the clock
+   * is doing, and that gradient turns out to dominate — the source is fixed, so
+   * every transfer ultimately runs rearward and the clock only jitters the
+   * timing. `middle` removes it: energy enters amidships with equal distances
+   * to both ends, the standing gradient is symmetric and cancels, and the only
+   * thing left that can decide which way matter travels is the phase of the
+   * wave. That is the condition under which the sign of `phase` is a
+   * prediction rather than a hope.
+   */
+  mouthAt?: 'head' | 'middle';
+  excreteRate?: number;
   thrust?: number;
   recoil?: number;
   segments?: number;
@@ -118,7 +140,7 @@ function run(c: Condition, seed: number): Gait {
   const spec: OrganismSpec = {
     seconds: SECONDS,
     seed,
-    sampleEvery: 2,
+    sampleEvery: c.cpg ? 0.1 : 2,
     worm: { segments, kinds: 'con', heading: 0, jitter: 0.08 },
     params: {
       ...bench(),
@@ -126,6 +148,7 @@ function run(c: Condition, seed: number): Gait {
       ...(c.uptakeVmax !== undefined
         ? { uptakeVmax: c.uptakeVmax, ambientEnergy: 1, energyRegrow: 0.04, upkeep: 0.015 }
         : {}),
+      ...(c.excreteRate !== undefined ? { excreteRate: c.excreteRate } : {}),
       ...(c.params ?? {}),
     },
     dressWorm: (sim: Sim, ids: number[]) => {
@@ -154,6 +177,52 @@ function run(c: Condition, seed: number): Gait {
            * and has to be fed through the wires or die. That is §5's obligate
            * trophic dependency, built rather than dialled.
            */
+          /*
+           * The clock, the mouth, and the two rows the clock moves effort
+           * between.
+           *
+           * Three things had to line up, and each was found by its failure.
+           *
+           * A rhythm has to move share *between* rows: `expressVector`
+           * normalises over the eight, so one oscillating row keeps a share of
+           * 1 and does nothing at all. So uptake and excretion are driven in
+           * antiphase off the same state dim — as `h[2]` rises the segment
+           * shifts from taking the ground in to putting `aux` back out.
+           *
+           * The body cannot be allowed to eat. With every segment on ambient
+           * ground the clock ran perfectly and changed nothing: uptake at
+           * `vmax * ROW_COUNT * share` is around 9.6 a second against an
+           * excretion of 0.35, so the tank sat pinned at cap and no demand ever
+           * appeared. That is §0's finding — a body on ambient ground is a
+           * complete self-sufficient organism — reappearing inside the muscle.
+           * So every segment but the mouth gets a deliberately terrible
+           * affinity gene, which is the `(vmax, ks)` axis pushed to one end: it
+           * still expresses a transporter, the transporter is just no good, and
+           * its only real income is what the wires bring.
+           *
+           * And the tank has to be small. Excretion is mass action on the tank,
+           * so it asymptotes at zero and can never by itself put a body into
+           * debt — and `rescueNeed`, which is what the demand field actually
+           * listens to, only latches below zero. A full 1.25 tank drains toward
+           * zero and then waits on upkeep at 0.015 a second, which is a minute
+           * of nothing. The cycle time has to be brought to the clock, not the
+           * other way round.
+           */
+          ...(c.cpg
+            ? (c.mouthAt === 'middle' ? i === Math.floor(ids.length / 2) : isHead)
+              ? { uptake: { energy: 1 } }
+              : {
+                  wh: oscillator(c.cpg.gain, c.cpg.step),
+                  h: oscillatorPhase(c.cpg.amplitude, i * c.cpg.phase),
+                  ks: { energy: 2000 },
+                  energyCap: 0.4,
+                  debtCap: -0.2,
+                  uptake: { energy: 1 },
+                  excrete: { aux: 1 },
+                  uptakeGain: { energy: [0, 0, -c.cpg.drive, 0] },
+                  excreteGain: { aux: [0, 0, c.cpg.drive, 0] },
+                }
+            : {}),
           ...(c.mouths !== undefined && c.mouths > 0
             ? isMouth
               ? { uptake: { energy: 1 } }
@@ -162,7 +231,13 @@ function run(c: Condition, seed: number): Gait {
           // Primed: the body of the worm starts a hair in debt, which latches
           // `recovering` on frame one. Otherwise upkeep takes 80 s to walk a
           // full tank under break-even and the run measures the wait.
-          extra: isHead ? 1.25 : -0.05,
+          extra: c.cpg
+            ? (c.mouthAt === 'middle' ? i === Math.floor(ids.length / 2) : isHead)
+              ? 1.25
+              : 0.4
+            : isHead
+              ? 1.25
+              : -0.05,
         });
         if (c.kick) {
           a.vx = c.kick;
@@ -209,6 +284,8 @@ function meanGait(c: Condition): { gait: Gait; speedSd: number } {
       pumpEfficiency: avg((g) => g.pumpEfficiency),
       headward: avg((g) => g.headward),
       demandTilt: avg((g) => g.demandTilt),
+      tankSwing: avg((g) => g.tankSwing),
+      waveLag: avg((g) => g.waveLag),
       bendSwing: avg((g) => g.bendSwing),
       gapSwing: avg((g) => g.gapSwing),
       intact: gaits.every((g) => g.intact),
@@ -303,6 +380,59 @@ describe('experiment: can the ground drive the pump?', () => {
       { label: '1 mouth', uptakeVmax: 4, mouths: 1 },
       { label: '2 mouths', uptakeVmax: 4, mouths: 2 },
       { label: '1 mouth vmax 16', uptakeVmax: 16, mouths: 1 },
+    ]);
+  });
+});
+
+describe('experiment: a muscle the net drives itself', () => {
+  /*
+   * Everything above is the net conducting a gradient somebody else made — a
+   * feeder at the nose, or ground that happens to be thinner behind. The net is
+   * a pipe, and locomotion is a side effect of eating. A muscle is the other
+   * thing: the net decides when to spend, on a clock it keeps itself, and the
+   * spending is what moves it.
+   *
+   * The clock is `Wh` as a rotation with gain, which limit-cycles under `phi`
+   * (see `oscillator`). It runs in state dims 2 and 3, where nothing else
+   * lives. The expression head turns that clock into metabolism: each segment
+   * shifts effort between taking energy in and putting `aux` back out, in
+   * antiphase, so it alternately fills and empties. A phase offset per segment
+   * makes that a wave along the body, and a wave means that at any instant some
+   * segments are flush and others are short — which is a demand gradient the
+   * net made, on its own schedule, out of its own state.
+   *
+   * The prediction that makes this falsifiable: `phase 0` is every segment
+   * spending at once, so the field stays flat and there is no stroke. A
+   * positive and a negative phase step are the same worm with the wave running
+   * the other way, and should swim in opposite directions. `lag` is the metric
+   * that shows the wave, `tank` that there is a rhythm at all, and `headward`
+   * which way it went.
+   */
+  const CPG = { gain: 1.2, step: 0.05, amplitude: 0.3, drive: 1.5, phase: 0 };
+  const base = { uptakeVmax: 4, excreteRate: 0.2, params: { upkeep: 0.05 } };
+
+  it('runs a wave along itself', () => {
+    report('phase gradient, mouth amidships, recoil 25', [
+      { label: 'phase 0 (sync)', ...base, recoil: 25, mouthAt: 'middle', cpg: { ...CPG, phase: 0 } },
+      { label: 'phase +pi/2', ...base, recoil: 25, mouthAt: 'middle', cpg: { ...CPG, phase: Math.PI / 2 } },
+      { label: 'phase -pi/2', ...base, recoil: 25, mouthAt: 'middle', cpg: { ...CPG, phase: -Math.PI / 2 } },
+    ]);
+    report('phase gradient, mouth at the nose, recoil 25', [
+      { label: 'phase 0 (sync)', ...base, recoil: 25, cpg: { ...CPG, phase: 0 } },
+      { label: 'phase +pi/2', ...base, recoil: 25, cpg: { ...CPG, phase: Math.PI / 2 } },
+      { label: 'phase -pi/2', ...base, recoil: 25, cpg: { ...CPG, phase: -Math.PI / 2 } },
+    ]);
+    report('phase gradient, recoil 100', [
+      { label: 'phase 0 (sync)', ...base, cpg: { ...CPG, phase: 0 } },
+      { label: 'phase +pi/2', ...base, cpg: { ...CPG, phase: Math.PI / 2 } },
+      { label: 'phase -pi/2', ...base, cpg: { ...CPG, phase: -Math.PI / 2 } },
+      { label: 'phase +pi/4', ...base, cpg: { ...CPG, phase: Math.PI / 4 } },
+      { label: 'no clock (mouth)', ...base, mouths: 1 },
+    ]);
+    report('spend rate', [
+      { label: 'excrete 0.05', ...base, excreteRate: 0.05, cpg: { ...CPG, phase: Math.PI / 2 } },
+      { label: 'excrete 0.2', ...base, excreteRate: 0.2, cpg: { ...CPG, phase: Math.PI / 2 } },
+      { label: 'excrete 0.6', ...base, excreteRate: 0.6, cpg: { ...CPG, phase: Math.PI / 2 } },
     ]);
   });
 });

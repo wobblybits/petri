@@ -11,6 +11,9 @@ import {
   P_BASE,
   ROW_EXCRETE,
   ROW_UPTAKE,
+  STATE_DIMS,
+  W_SELF,
+  X_OUT,
   TASTE,
   X_BASE,
 } from '../chem-layout.ts';
@@ -164,6 +167,22 @@ export interface Dress {
   excrete?: Partial<Record<keyof typeof CH, number>>;
   /** Per-species uptake affinity gene. Which transporter, as against how much. */
   ks?: Partial<Record<keyof typeof CH, number>>;
+  /**
+   * How each reaction row reads the recurrent state: the `X` matrix, one row
+   * of `STATE_DIMS` per species named.
+   *
+   * This is what makes a reaction a *phenotype* rather than a constant, and so
+   * what lets the net rather than the environment decide when a body spends.
+   * Note the simplex: `expressVector` relus and then normalises across all
+   * eight rows, so driving one row alone does nothing at all — its share stays
+   * 1. A rhythm has to move share *between* rows, which means at least two.
+   */
+  uptakeGain?: Partial<Record<keyof typeof CH, number[]>>;
+  excreteGain?: Partial<Record<keyof typeof CH, number[]>>;
+  /** `Wh`, row-major `[d][e]`: how much of last frame's `h_e` enters `v_d`. */
+  wh?: number[][];
+  /** The recurrent state itself, at build. An oscillator started at zero never starts. */
+  h?: number[];
   extra?: number;
   energyCap?: number;
   debtCap?: number;
@@ -193,6 +212,27 @@ export function dress(a: Agent, d: Dress): void {
   }
   if (d.ks) {
     for (const [name, v] of Object.entries(d.ks)) c[KS_BASE + CH[name as keyof typeof CH]] = v!;
+  }
+  if (d.uptakeGain) {
+    for (const [name, row] of Object.entries(d.uptakeGain)) {
+      const r = ROW_UPTAKE + CH[name as keyof typeof CH];
+      for (let k = 0; k < STATE_DIMS; k++) c[X_OUT + r * STATE_DIMS + k] = row![k] ?? 0;
+    }
+  }
+  if (d.excreteGain) {
+    for (const [name, row] of Object.entries(d.excreteGain)) {
+      const r = ROW_EXCRETE + CH[name as keyof typeof CH];
+      for (let k = 0; k < STATE_DIMS; k++) c[X_OUT + r * STATE_DIMS + k] = row![k] ?? 0;
+    }
+  }
+  if (d.wh) {
+    for (let dd = 0; dd < STATE_DIMS; dd++) {
+      for (let e = 0; e < STATE_DIMS; e++) c[W_SELF + dd * STATE_DIMS + e] = d.wh[dd]?.[e] ?? 0;
+    }
+  }
+  if (d.h) {
+    const h = a.h;
+    for (let k = 0; k < STATE_DIMS; k++) h[k] = d.h[k] ?? 0;
   }
   if (d.thrust !== undefined) c[P_BASE] = d.thrust / HEAD_SCALE.thrust;
   if (d.recoil !== undefined) c[P_BASE + 1] = d.recoil / HEAD_SCALE.recoil;
@@ -247,6 +287,53 @@ export function motorsOff(): Partial<Params> {
     snapRadius: 0,
     spawnInterval: 0,
   };
+}
+
+/**
+ * A limit-cycle oscillator in two state dims: `Wh` as a rotation with gain.
+ *
+ * With `phi(v) = v / (1 + |v|)` and a gain above one, a linear rotation grows
+ * until the squash balances it, which is a stable cycle of radius `(g-1)/g` in
+ * the ideal radial case. `phi` here is applied **per component**, not to the
+ * vector, so the circle is squared off and the rotational symmetry is broken —
+ * and that has a consequence worth knowing before picking numbers: a strong,
+ * slow rotation does not cycle at all, it locks into a corner fixed point.
+ * Measured over the (gain, step) plane, gain 1.3 and 1.4 lock at 0.05 rad a
+ * frame and cycle at 0.1; everything at or below gain 1.2 cycles throughout.
+ *
+ * Useful pairs, as peak-to-peak swing and period: (1.3, 0.2) gives 0.53 over
+ * 0.55 s, (1.4, 0.1) gives 0.64 over 1.72 s, (1.1, 0.1) gives 0.21 over 1.08 s.
+ * Period is set by the step and amplitude by the gain, very nearly
+ * independently, which makes them two clean dials.
+ *
+ * Dims 2 and 3 by default, deliberately: `seedChem` wires `Wx[0][IN_DEMAND]`
+ * to 1, so `h[0]` already carries the net's unmet need at a magnitude that
+ * would swamp a cycle this size. Leaving it alone keeps the metabolism's own
+ * signal intact and gives the clock somewhere private to run.
+ */
+export function oscillator(gain: number, step: number, dims: [number, number] = [2, 3]): number[][] {
+  const m: number[][] = [];
+  for (let d = 0; d < STATE_DIMS; d++) m.push(new Array(STATE_DIMS).fill(0));
+  const [i, j] = dims;
+  const c = Math.cos(step);
+  const s = Math.sin(step);
+  m[i]![i] = gain * c;
+  m[i]![j] = -gain * s;
+  m[j]![i] = gain * s;
+  m[j]![j] = gain * c;
+  return m;
+}
+
+/** Initial state on that cycle, at phase `phase`. */
+export function oscillatorPhase(
+  amplitude: number,
+  phase: number,
+  dims: [number, number] = [2, 3],
+): number[] {
+  const h = new Array(STATE_DIMS).fill(0);
+  h[dims[0]] = amplitude * Math.cos(phase);
+  h[dims[1]] = amplitude * Math.sin(phase);
+  return h;
 }
 
 // ----------------------------------------------------------------- sampling
@@ -510,6 +597,22 @@ export interface Gait {
    * about.
    */
   demandTilt: number;
+  /**
+   * Peak-to-peak of each segment's tank, averaged over segments: is there a
+   * rhythm at all? A pump run off a standing gradient holds its tanks roughly
+   * level; a muscle empties and refills them.
+   */
+  tankSwing: number;
+  /**
+   * Mean best-correlation lag between segment `i`'s tank trace and `i+1`'s, in
+   * seconds, over the body.
+   *
+   * The definitive one. Zero is a standing wave — every segment spending
+   * together, which moves nothing because the demand field stays flat.
+   * Non-zero is a *travelling* wave, and its sign is the direction the wave
+   * runs: positive means the rear leads the segment ahead of it.
+   */
+  waveLag: number;
   /** Peak-to-peak of each segment's bend and of each gap, averaged over segments. */
   bendSwing: number;
   gapSwing: number;
@@ -553,6 +656,62 @@ export function gaitOf(trial: OrganismTrial): Gait {
     }
   }
   const moved = last.moved - first.moved;
+  const dt = trial.samples.length > 1 ? trial.samples[1]!.t - trial.samples[0]!.t : 1;
+  const trace = (i: number): number[] =>
+    trial.samples.map((s) => s.segments[i]?.extra ?? NaN).filter((v) => Number.isFinite(v));
+  let tankSwing = 0;
+  let tankCount = 0;
+  for (let i = 0; i < n; i++) {
+    const t = trace(i);
+    if (t.length < 2) continue;
+    tankSwing += Math.max(...t) - Math.min(...t);
+    tankCount++;
+  }
+  // Cross-correlation over a window of +/- a fifth of the run, which is more
+  // than a period of anything worth calling a gait and short enough that the
+  // overlap stays long.
+  const maxLag = Math.max(1, Math.floor(trial.samples.length / 5));
+  let lagSum = 0;
+  let lagCount = 0;
+  for (let i = 0; i + 1 < n; i++) {
+    const a = trace(i);
+    const b = trace(i + 1);
+    if (a.length < 8 || b.length < 8) continue;
+    let bestLag = 0;
+    let best = -Infinity;
+    for (let L = -maxLag; L <= maxLag; L++) {
+      let sa = 0;
+      let sb = 0;
+      let saa = 0;
+      let sbb = 0;
+      let sab = 0;
+      let m = 0;
+      for (let k = 0; k < a.length; k++) {
+        const j = k + L;
+        if (j < 0 || j >= b.length) continue;
+        const va = a[k]!;
+        const vb = b[j]!;
+        sa += va;
+        sb += vb;
+        saa += va * va;
+        sbb += vb * vb;
+        sab += va * vb;
+        m++;
+      }
+      if (m < 8) continue;
+      const cov = sab / m - (sa / m) * (sb / m);
+      const va = saa / m - (sa / m) * (sa / m);
+      const vb = sbb / m - (sb / m) * (sb / m);
+      const denom = Math.sqrt(Math.max(1e-12, va * vb));
+      const r = cov / denom;
+      if (r > best) {
+        best = r;
+        bestLag = L;
+      }
+    }
+    lagSum += bestLag;
+    lagCount++;
+  }
   let tiltSum = 0;
   let tiltCount = 0;
   const half = Math.floor(n / 2);
@@ -589,6 +748,8 @@ export function gaitOf(trial: OrganismTrial): Gait {
     pumpEfficiency: last.pumpImpulse > 1e-9 ? dist / last.pumpImpulse : 0,
     headward: trial.headward,
     demandTilt: tiltCount > 0 ? tiltSum / tiltCount : 0,
+    tankSwing: tankCount > 0 ? tankSwing / tankCount : 0,
+    waveLag: lagCount > 0 ? (lagSum / lagCount) * dt : 0,
     bendSwing: bendCount > 0 ? bendSwing / bendCount : 0,
     gapSwing: gapCount > 0 ? gapSwing / gapCount : 0,
     intact: last.alive === n && last.wires === first.wires,
@@ -604,6 +765,8 @@ export function gaitTable(rows: { label: string; gait: Gait }[]): string {
     ['straight', (g) => g.straightness.toFixed(2)],
     ['headward', (g) => g.headward.toFixed(2)],
     ['tilt', (g) => g.demandTilt.toFixed(3)],
+    ['tank', (g) => g.tankSwing.toFixed(2)],
+    ['lag', (g) => g.waveLag.toFixed(2)],
     ['moved', (g) => g.moved.toFixed(2)],
     ['hops', (g) => String(g.hops)],
     ['impulse', (g) => g.pumpImpulse.toFixed(1)],
