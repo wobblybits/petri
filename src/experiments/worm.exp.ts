@@ -88,6 +88,16 @@ function bench(): Partial<Params> {
 
 interface Condition {
   label: string;
+  /**
+   * Metered uptake, and with it the ground as a supply. At 0 the old
+   * take-what-fits path runs and a body on ground tops up to cap in one frame,
+   * which is the flat field the `ground on` control shows stalling.
+   */
+  uptakeVmax?: number;
+  /** Expression: which segments carry a mouth, counted from the head. 0 = every body eats alike. */
+  mouths?: number;
+  /** Initial speed along the build axis, to ask whether a gait sustains as against self-starts. */
+  kick?: number;
   thrust?: number;
   recoil?: number;
   segments?: number;
@@ -103,18 +113,27 @@ function run(c: Condition, seed: number): Gait {
   const segments = c.segments ?? SEGMENTS;
   const thrust = c.thrust ?? 1;
   const recoil = c.recoil ?? 100;
-  const feed = c.feed ?? true;
+  // Ground-fed conditions name a `uptakeVmax`; the motor bench feeds by puppet.
+  const feed = c.feed ?? c.uptakeVmax === undefined;
   const spec: OrganismSpec = {
     seconds: SECONDS,
     seed,
     sampleEvery: 2,
     worm: { segments, kinds: 'con', heading: 0, jitter: 0.08 },
-    params: { ...bench(), portStiff: c.portStiff ?? 2, ...(c.params ?? {}) },
+    params: {
+      ...bench(),
+      portStiff: c.portStiff ?? 2,
+      ...(c.uptakeVmax !== undefined
+        ? { uptakeVmax: c.uptakeVmax, ambientEnergy: 1, energyRegrow: 0.04, upkeep: 0.015 }
+        : {}),
+      ...(c.params ?? {}),
+    },
     dressWorm: (sim: Sim, ids: number[]) => {
       for (let i = 0; i < ids.length; i++) {
         const a = sim.agents.get(ids[i]!);
         if (!a) continue;
         const isHead = i === ids.length - 1;
+        const isMouth = c.mouths !== undefined && c.mouths > 0 && i >= ids.length - c.mouths;
         dress(a, {
           // Mute and tasteless. Steering is off anyway, but an empty field
           // keeps the state pass reading zeros, so `h` stays at phi(0) and
@@ -128,19 +147,36 @@ function run(c: Condition, seed: number): Gait {
           align: 0,
           sep: 0,
           ...(c.rescueTo !== undefined ? { rescueTo: c.rescueTo } : {}),
+          /*
+           * A mouth is one row of the expression simplex. Writing it silences
+           * the other seven, which is the point: a segment that is not a mouth
+           * expresses nothing on uptake, cannot draw from the ground under it,
+           * and has to be fed through the wires or die. That is §5's obligate
+           * trophic dependency, built rather than dialled.
+           */
+          ...(c.mouths !== undefined && c.mouths > 0
+            ? isMouth
+              ? { uptake: { energy: 1 } }
+              : { excrete: { aux: 1 } }
+            : {}),
           // Primed: the body of the worm starts a hair in debt, which latches
           // `recovering` on frame one. Otherwise upkeep takes 80 s to walk a
           // full tank under break-even and the run measures the wait.
           extra: isHead ? 1.25 : -0.05,
         });
+        if (c.kick) {
+          a.vx = c.kick;
+        }
       }
     },
-    drive: feed
-      ? (sim: Sim, ids: number[]) => {
-          const head = sim.agents.get(ids[ids.length - 1]!);
-          if (head) head.extra = head.energyCap;
-        }
-      : undefined,
+    drive: !feed
+      ? undefined
+      : feed
+        ? (sim: Sim, ids: number[]) => {
+            const head = sim.agents.get(ids[ids.length - 1]!);
+            if (head) head.extra = head.energyCap;
+          }
+        : undefined,
   };
   return gaitOf(runOrganism(spec));
 }
@@ -172,6 +208,7 @@ function meanGait(c: Condition): { gait: Gait; speedSd: number } {
       costOfTransport: avg((g) => (Number.isFinite(g.costOfTransport) ? g.costOfTransport : 0)),
       pumpEfficiency: avg((g) => g.pumpEfficiency),
       headward: avg((g) => g.headward),
+      demandTilt: avg((g) => g.demandTilt),
       bendSwing: avg((g) => g.bendSwing),
       gapSwing: avg((g) => g.gapSwing),
       intact: gaits.every((g) => g.intact),
@@ -225,6 +262,47 @@ describe('experiment: a worm that swims on transport', () => {
       { label: '4 segments', segments: 4 },
       { label: '8 segments', segments: 8 },
       { label: '16 segments', segments: 16 },
+    ]);
+  });
+});
+
+describe('experiment: can the ground drive the pump?', () => {
+  /*
+   * The gradient without a puppet.
+   *
+   * Metered uptake (`uptakeVmax > 0`) is the change that makes this askable at
+   * all. Under the old take-what-fits harvest a body on ground filled to cap in
+   * one frame, so no segment could be in deficit and the demand field was flat
+   * — the `ground on` control above, at zero hops. Monod makes income a rate,
+   * so income collapses where the ground is thin.
+   *
+   * The hypothesis: a *moving* worm strips the ground it passes over, so its
+   * rear sits in its own grazed wake while its nose is over fresh ground. That
+   * is a head-to-tail gradient made by nothing but motion, and the recoil it
+   * produces points nose-first — which makes more wake. Read `tilt` first: it
+   * is the cause, and speed without a positive tilt is not this mechanism.
+   *
+   * Three questions, because they have different answers:
+   *   self-start  a still worm. Is there any asymmetry to amplify?
+   *   sustain     given an initial shove. Does the wake keep it going?
+   *   mouth       expression makes the head the only segment that can eat, so
+   *               the gradient does not wait on motion at all.
+   */
+  it('grazes its own wake', () => {
+    report('self-start (still, uniform)', [
+      { label: 'vmax 0.25', uptakeVmax: 0.25 },
+      { label: 'vmax 1', uptakeVmax: 1 },
+      { label: 'vmax 4', uptakeVmax: 4 },
+    ]);
+    report('sustain (kicked)', [
+      { label: 'vmax 1 kick 60', uptakeVmax: 1, kick: 60 },
+      { label: 'vmax 4 kick 60', uptakeVmax: 4, kick: 60 },
+      { label: 'vmax 4 kick 120', uptakeVmax: 4, kick: 120 },
+    ]);
+    report('mouth (expression)', [
+      { label: '1 mouth', uptakeVmax: 4, mouths: 1 },
+      { label: '2 mouths', uptakeVmax: 4, mouths: 2 },
+      { label: '1 mouth vmax 16', uptakeVmax: 16, mouths: 1 },
     ]);
   });
 });

@@ -1,7 +1,19 @@
 import { Sim } from '../sim.ts';
 import { defaultParams, type Params } from '../params.ts';
 import { refreshReadsField, type Agent, type AgentKind, type PortSlot } from '../agents.ts';
-import { EMIT, TASTE, HEAD_SCALE, P_BASE, L_BASE, F_BASE, CHEM_LEN } from '../chem-layout.ts';
+import {
+  CHEM_LEN,
+  EMIT,
+  F_BASE,
+  HEAD_SCALE,
+  KS_BASE,
+  L_BASE,
+  P_BASE,
+  ROW_EXCRETE,
+  ROW_UPTAKE,
+  TASTE,
+  X_BASE,
+} from '../chem-layout.ts';
 import { CH } from '../fields.ts';
 import { seededRandom } from './harness.ts';
 
@@ -137,6 +149,21 @@ export interface Dress {
   turn?: number;
   align?: number;
   sep?: number;
+  /**
+   * Expression bases, by reaction row: what share of one unit of chemical
+   * effort this body puts on taking each species in and putting each back out.
+   *
+   * Bases rather than the `X` matrix, for the reason the rest of `dress` uses
+   * bases — a body with `h = 0` then expresses exactly what is written here.
+   * Any row left unset stays at its seed of zero, and a body with *every* row
+   * zero falls through `expressVector` to a flat eighth each, which is what
+   * the shipped genome does. So writing one row does not merely raise it; it
+   * silences the other seven.
+   */
+  uptake?: Partial<Record<keyof typeof CH, number>>;
+  excrete?: Partial<Record<keyof typeof CH, number>>;
+  /** Per-species uptake affinity gene. Which transporter, as against how much. */
+  ks?: Partial<Record<keyof typeof CH, number>>;
   extra?: number;
   energyCap?: number;
   debtCap?: number;
@@ -153,6 +180,19 @@ export function dress(a: Agent, d: Dress): void {
   if (d.taste) {
     for (let k = 0; k < 4; k++) c[TASTE + k] = 0;
     for (const [name, v] of Object.entries(d.taste)) c[TASTE + CH[name as keyof typeof CH]] = v!;
+  }
+  if (d.uptake) {
+    for (const [name, v] of Object.entries(d.uptake)) {
+      c[X_BASE + ROW_UPTAKE + CH[name as keyof typeof CH]] = v!;
+    }
+  }
+  if (d.excrete) {
+    for (const [name, v] of Object.entries(d.excrete)) {
+      c[X_BASE + ROW_EXCRETE + CH[name as keyof typeof CH]] = v!;
+    }
+  }
+  if (d.ks) {
+    for (const [name, v] of Object.entries(d.ks)) c[KS_BASE + CH[name as keyof typeof CH]] = v!;
   }
   if (d.thrust !== undefined) c[P_BASE] = d.thrust / HEAD_SCALE.thrust;
   if (d.recoil !== undefined) c[P_BASE + 1] = d.recoil / HEAD_SCALE.recoil;
@@ -457,6 +497,19 @@ export interface Gait {
   pumpEfficiency: number;
   /** Path-weighted mean cosine between travel and the body's own forward. See `OrganismTrial`. */
   headward: number;
+  /**
+   * Where the demand sits along the body: mean `request` over the rear half
+   * minus the front half, averaged over the run.
+   *
+   * The one number that says which way the pump is pointing, and it is a
+   * *cause* rather than an effect — `flowCharges` moves energy up this
+   * gradient, and the recoil then points from receiver toward sender. Positive
+   * means the tail is the needy end, so energy runs rearward and the worm is
+   * pushed nose-first. Negative is a worm pumping itself backwards. Near zero
+   * is the flat field that stalls, which is what the whole ground question is
+   * about.
+   */
+  demandTilt: number;
   /** Peak-to-peak of each segment's bend and of each gap, averaged over segments. */
   bendSwing: number;
   gapSwing: number;
@@ -500,6 +553,30 @@ export function gaitOf(trial: OrganismTrial): Gait {
     }
   }
   const moved = last.moved - first.moved;
+  let tiltSum = 0;
+  let tiltCount = 0;
+  const half = Math.floor(n / 2);
+  for (const s of trial.samples) {
+    let rear = 0;
+    let front = 0;
+    let nr = 0;
+    let nf = 0;
+    for (let i = 0; i < n; i++) {
+      const r = s.segments[i]?.request;
+      if (r === undefined || !Number.isFinite(r)) continue;
+      if (i < half) {
+        rear += r;
+        nr++;
+      } else {
+        front += r;
+        nf++;
+      }
+    }
+    if (nr > 0 && nf > 0) {
+      tiltSum += rear / nr - front / nf;
+      tiltCount++;
+    }
+  }
   return {
     along: last.along,
     perp: last.perp,
@@ -511,6 +588,7 @@ export function gaitOf(trial: OrganismTrial): Gait {
     costOfTransport: dist > 1e-6 ? moved / dist : Infinity,
     pumpEfficiency: last.pumpImpulse > 1e-9 ? dist / last.pumpImpulse : 0,
     headward: trial.headward,
+    demandTilt: tiltCount > 0 ? tiltSum / tiltCount : 0,
     bendSwing: bendCount > 0 ? bendSwing / bendCount : 0,
     gapSwing: gapCount > 0 ? gapSwing / gapCount : 0,
     intact: last.alive === n && last.wires === first.wires,
@@ -525,6 +603,7 @@ export function gaitTable(rows: { label: string; gait: Gait }[]): string {
     ['px/s', (g) => g.speed.toFixed(2)],
     ['straight', (g) => g.straightness.toFixed(2)],
     ['headward', (g) => g.headward.toFixed(2)],
+    ['tilt', (g) => g.demandTilt.toFixed(3)],
     ['moved', (g) => g.moved.toFixed(2)],
     ['hops', (g) => String(g.hops)],
     ['impulse', (g) => g.pumpImpulse.toFixed(1)],
