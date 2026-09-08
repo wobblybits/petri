@@ -769,6 +769,13 @@ export class Graph {
     endB: readonly (Agent | undefined)[],
   ): void {
     if (params.snapRadius <= 0) return;
+    /*
+     * Only free ports latch, and a grown net has none: free ports per body
+     * fall to 0.007 past 64 bodies, and the largest net measured had zero of
+     * them. So this pass is structurally unable to grow a large net, whatever
+     * its radius — past some size a net's only remaining source of change is
+     * rewriting what it already holds. See `Sim.freePortMask`.
+     */
     const list = this.snapAgents;
     const frame = this.snapFrame;
     // Sealing is rare and usually nothing is sealed at all, in which case the

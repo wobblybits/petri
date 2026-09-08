@@ -1641,6 +1641,28 @@ export class Sim {
    *
    * By slot, not by id: this is asked of every body by both GPU packs, and
    * the caller is holding the body when it asks.
+   *
+   * **A grown net has no free ports, and this is the fact to check before
+   * building anything on them.** Measured over a 400-body soup at 90 s
+   * (`src/experiments/ports.exp.ts`), free ports per body against component
+   * size: 1.366 at size 1, 0.690 at 4-7, 0.263 at 16-31, and **0.007 past 64**.
+   * The largest net in that pond was 186 bodies, 279 wires and *zero* free
+   * ports — 279 x 2 = 558 = 3 x 186, every port consumed. Free ports do not
+   * become scarce with size, they run out: a grown net is port saturated.
+   *
+   * So any mechanism keyed on a free port is a mechanism that stops working on
+   * exactly the organisms worth having. Three that follow, and the first is
+   * the one people keep rediscovering:
+   *
+   * - A boundary cannot be a motor. Drag is charged per body, so a net's drag
+   *   goes as its size while thrust from free ports goes as an absence that
+   *   vanishes. An Era-terminated port is the opposite thing — a place, bought
+   *   with a body, and a net has however many it invested in.
+   * - `Graph.snap` needs a free port at both ends, so a large net cannot latch
+   *   at all. Past some size its budget of structural events is closed and it
+   *   can only rewrite what it already has.
+   * - `IN_BOUND` is 1 for everybody in a saturated net; see its note in
+   *   `chem-layout.ts`.
    */
   private freePortMask(a: Agent): number {
     const g = this.graph;

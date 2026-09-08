@@ -50,6 +50,14 @@ export const STATE_DIMS = 4;
  * anything about position in a net, and the one that lets a channel mean
  * something different once a port is matched.
  *
+ * That last claim has a measured limit, and it bites where it matters most: a
+ * grown net is **port saturated**, so `IN_BOUND` is 1 for every body in it and
+ * carries no information at all in exactly the organisms complex enough to
+ * need it. Free ports per body fall to 0.007 past 64 bodies and the largest net
+ * measured had none whatsoever. See `Sim.freePortMask` for the numbers and
+ * `src/experiments/ports.exp.ts` for the count. If a body needs to know where
+ * it sits in a large net, this input cannot tell it.
+ *
  * `IN_DEMAND` is an input and deliberately not part of `h`. It is a
  * max-relaxation of what bodies are actually short of, which is what makes it
  * a potential `flowCharges` can move energy down. Let a genome decide what to
