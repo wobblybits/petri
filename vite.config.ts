@@ -263,6 +263,9 @@ export default defineConfig({
           include: ['src/experiments/**/*.exp.ts'],
           fileParallelism: false,
           testTimeout: 3_600_000,
+          // A sweep must measure the solver that ships, not its JS twin.
+          // See src/experiments/setup.ts.
+          setupFiles: ['./src/test-setup.ts', './src/experiments/setup.ts'],
         },
       },
     ],
