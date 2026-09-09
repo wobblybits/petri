@@ -48,6 +48,30 @@ export interface Wire {
    */
   collapse: number;
   /**
+   * How hard this wire is currently pulling its ends together because energy
+   * just crossed it, 0..1, relaxing toward 0 at `wireTugTau`.
+   *
+   * Set to the share of a tank the transfer carried, so a crumb tugs like a
+   * crumb — see `Sim.recoil`, which has the measurement that made it
+   * proportional rather than a saturating pulse.
+   *
+   * The stroke of a crawler. A transfer shortens the wire, and `grip` decides
+   * which end that moves: the body that just sent is empty and slides, the
+   * body that just received is full and holds, so the pair steps toward the
+   * receiver. Then the wire relaxes while the gradient rebuilds and the roles
+   * swap back, and it steps again the same way.
+   *
+   * It has to *lag*, which is the whole reason this is a stored number and
+   * not a function of the two tanks. A shape that is a memoryless function of
+   * the same fullness that sets the grip is locked in phase with it, the
+   * cycle in configuration space encloses no area, and Purcell's scallop
+   * cannot swim however hard it flaps. The lag is the second degree of
+   * freedom. It is a spring's memory, not an accumulated difference being
+   * erased, which is what `docs/concepts.md` means when it says nothing
+   * decays.
+   */
+  tug: number;
+  /**
    * Shortest sounding length this wire will report, half its uncollapsed
    * rest. A rope squeezed below half its rest has buckled rather than
    * tightened, and letting the pitch keep climbing turns a wire retracting
@@ -473,7 +497,7 @@ export class Graph {
     if (!this.isFree(a) || !this.isFree(b)) return null;
     const id = this.nextWireId++;
     const len = Math.max(1, latchLen);
-    const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full' };
+    const wire: Wire = { id, a, b, collapse: 0, tug: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full' };
     this.wires.set(id, wire);
     this.setWireAt(a.id, a.slot, id);
     this.setWireAt(b.id, b.slot, id);
@@ -646,6 +670,29 @@ export class Graph {
       }
     }
     return wire;
+  }
+
+  /**
+   * Relax every wire's tug toward zero, and hand a transfer its wire.
+   *
+   * `relaxTugs` is the lag; `tugWire` is what a transfer calls. Kept here
+   * rather than on `Sim` because `tug` is a wire's own state and nothing else
+   * should be reaching into it.
+   */
+  relaxTugs(dt: number, tau: number): void {
+    const keep = Math.exp(-dt / Math.max(1e-3, tau));
+    for (const wire of this.wires.values()) {
+      if (wire.tug > 0) wire.tug = wire.tug < 1e-4 ? 0 : wire.tug * keep;
+    }
+  }
+
+  /** The wire joining these two, if one exists. Three port lookups, not a scan. */
+  wireBetween(aId: number, bId: number): Wire | undefined {
+    for (const slot of NODE_SLOTS) {
+      const w = this.wireAtSlot(aId, slot);
+      if (w && (w.a.id === bId || w.b.id === bId)) return w;
+    }
+    return undefined;
   }
 
   /** Cheap degree test: a few port lookups rather than a scan of every wire. */
@@ -1061,12 +1108,16 @@ export class Graph {
    * instead of freezing solid.
    */
   syncRest(time: number, params: Params, detailed?: (wire: Wire) => boolean): void {
+    const tug = Math.max(0, params.wireTug);
     for (const wire of this.wires.values()) {
       const base = this.restLength(wire, time, params);
       const phase = wire.id * 2.399963;
       const rate = 0.55 + (wire.id % 7) * 0.11;
       const breathe = 1 + params.wireBreathe * Math.sin(time * rate + phase);
-      const raw = base * breathe;
+      let raw = base * breathe;
+      // The stroke. Floored rather than allowed to reach nothing: a wire that
+      // hauls its ends into contact is a rewrite, and this is not one.
+      if (tug > 0 && wire.tug > 0) raw *= Math.max(0.25, 1 - tug * wire.tug);
       wire.rest = Number.isFinite(raw) ? clamp(raw, 4, REST_CAP) : params.wireMinRest;
       wire.pitchFloor = wire.rest * 0.5;
       // Applied under the floor on purpose: a collapsing wire has to be able

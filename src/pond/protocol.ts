@@ -159,7 +159,18 @@ export const PROTOCOLS: Protocol[] = [
       'before touching the genome.',
     arms: [{ name: 'default', set: {} }],
     axes: { groundPatches: [0, 8, 48] },
-    base: { energyRegrow: 0 },
+    /*
+     * `learnRate` pinned off, not inherited.
+     *
+     * The couplings table says a learning horizon held across a layout axis
+     * is a confound: patch spacing sets the trip to the reward, and the
+     * horizon has to cover it. This protocol is not about learning — it asks
+     * whether hungry bodies find structured ground at all — so it holds the
+     * fixed-weight pond its prediction was written for, rather than accepting
+     * a confound it has no use for. `baldwin-hunger` is the one that turns
+     * learning on, and it chooses its horizon and accepts the hold in writing.
+     */
+    base: { energyRegrow: 0, learnRate: 0 },
     seeds: 5,
     seconds: 180,
     soupCount: 500,
@@ -201,7 +212,8 @@ export const PROTOCOLS: Protocol[] = [
       'nets, and the next lever is scarcity (contested-ground), not layout.',
     arms: [{ name: 'default', set: {} }],
     axes: { groundPatches: [0, 8] },
-    base: { energyRegrow: 0 },
+    // Fixed weights, for the reason `forage-engages` gives above.
+    base: { energyRegrow: 0, learnRate: 0 },
     seeds: 8,
     seconds: 600,
     soupCount: 500,

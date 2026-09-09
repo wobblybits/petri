@@ -74,6 +74,7 @@ import {
   type Rewrite,
 } from './rewrite.ts';
 import {
+  EXTRA_CAP,
   agentValue,
   BODY_VALUE,
   deathYield,
@@ -988,6 +989,7 @@ export class Sim {
     this.dampVelocities(params, t);
     Sim.phase('damp');
 
+    this.graph.relaxTugs(t, params.wireTugTau);
     this.graph.refreshLengths(this.agents, this.w, this.h, this.rewriteFrozen, this.wireDetailed);
     this.snapTautWires(params);
     Sim.phase('refreshLengths');
@@ -4222,7 +4224,29 @@ export class Sim {
     }
   }
 
-  /** One drag law for bodies; the rope is damped inside the substep loop. */
+  /** Fullness steps the grip table divides itself into. See `dampVelocities`. */
+  private static readonly GRIP_STEPS = 64;
+
+  /** Per-frame `exp(-rate * dt)` by fullness, rebuilt only when grip is on. */
+  private readonly gripKeep = new Float64Array(Sim.GRIP_STEPS + 1);
+
+  /**
+   * One drag law for bodies; the rope is damped inside the substep loop.
+   *
+   * `grip` makes the linear rate a body's own, off its tank fraction, which
+   * is what lets a net's internal pumping carry it anywhere — see the
+   * parameter, which has the argument and the arithmetic.
+   *
+   * The exponential is read off a 64-step table rather than taken per body.
+   * `Math.exp` is by an order of magnitude the most expensive thing in this
+   * loop, `dt` is the same for everyone, and fullness is the only other thing
+   * that enters it, so 64 of them serve fifty thousand bodies. Interpolated
+   * rather than snapped: two bodies a hair apart in fullness should stay a
+   * hair apart in drag, and a step function there would quietly sort the pond
+   * into 64 kinds. At `grip` 0 the table is flat and the interpolation returns
+   * `linKeep` exactly, but the loop below still branches past it — a dial at
+   * its shipping value should cost nothing.
+   */
   private dampVelocities(params: Params, dt: number): void {
     const linKeep = Math.exp(-Math.max(0, params.drag) * dt);
     const angKeep = Math.exp(-Math.max(0, params.angDrag) * dt);
@@ -4232,11 +4256,40 @@ export class Sim {
     const VX = store.vx;
     const VY = store.vy;
     const OMEGA = store.omega;
+    const grip = params.grip;
+    if (grip === 0) {
+      for (const agent of this.agents.values()) {
+        const s = agent.slot;
+        if (LOCKED[s] || PINNED[s]) continue;
+        VX[s] *= linKeep;
+        VY[s] *= linKeep;
+        OMEGA[s] *= angKeep;
+      }
+      return;
+    }
+    const steps = Sim.GRIP_STEPS;
+    const table = this.gripKeep;
+    const base = Math.max(0, params.drag);
+    for (let i = 0; i <= steps; i++) {
+      // Clamped at the rate, not at the keep: a negative rate is an energy
+      // source, and `exp` of it silently amplifies instead of failing.
+      table[i] = Math.exp(-Math.max(0, base + grip * (i / steps)) * dt);
+    }
+    const EXTRA = store.extra;
+    const CAP = store.energyCap;
     for (const agent of this.agents.values()) {
       const s = agent.slot;
       if (LOCKED[s] || PINNED[s]) continue;
-      VX[s] *= linKeep;
-      VY[s] *= linKeep;
+      // The same clamp the genome's `IN_FULL` gets, so grip and the body's own
+      // sense of how full it is never disagree.
+      const cap = CAP[s];
+      const raw = cap > 0 ? EXTRA[s] / cap : 0;
+      const full = raw <= 0 ? 0 : raw >= 1 ? 1 : raw;
+      const u = full * steps;
+      const i = u < steps ? u | 0 : steps - 1;
+      const keep = table[i] + (table[i + 1] - table[i]) * (u - i);
+      VX[s] *= keep;
+      VY[s] *= keep;
       OMEGA[s] *= angKeep;
     }
   }
@@ -5627,7 +5680,12 @@ export class Sim {
     Sim.phase('pulse:seed');
     spreadRequestsFast(list, this.agentStore, adj);
     Sim.phase('pulse:spread');
-    flowChargesFast(list, this.agentStore, adj, (from, to, amount) => this.recoil(from, to, amount));
+    // No `quantum` here: each sender uses its own, seeded from the parameter
+    // at birth exactly as `transportRecoil` is, so a net's rhythm can be a
+    // property of the net rather than of the dish.
+    flowChargesFast(list, this.agentStore, adj, (from, to, amount) => this.recoil(from, to, amount), {
+      grid: this.energy,
+    });
     Sim.phase('pulse:flow');
     this.updateState(list, adj, params);
     Sim.phase('state');
@@ -6172,6 +6230,26 @@ export class Sim {
    * parent species swims alone.
    */
   private recoil(from: { id: number }, to: { id: number }, amount: number): void {
+    // The stroke: the wire that carried it pulls its ends together, and
+    // `grip` decides which end that moves.
+    //
+    // In proportion to what crossed, as a fraction of a tank at the receiving
+    // end, so a crumb tugs like a crumb. It was a saturating pulse first —
+    // any transfer pulled the wire fully — and that made the mechanism free:
+    // metered from 240 units a second down to 3, the worm still swam at 4 of
+    // its 6.65 px/s, because the stroke was paid for in transfer *events* and
+    // not in energy. A wire should cost what it delivers.
+    //
+    // The largest recent transfer wins rather than the latest, so a small
+    // packet arriving behind a large one cannot cut the pull short. Letting
+    // go is `wireTugTau`'s job and nothing else's.
+    const w = this.graph.wireBetween(from.id, to.id);
+    if (w) {
+      const B = this.agents.get(to.id);
+      const cap = B && B.energyCap > 0 ? B.energyCap : EXTRA_CAP;
+      const share = Math.min(1, amount / cap);
+      if (share > w.tug) w.tug = share;
+    }
     const A = this.agents.get(from.id);
     const B = this.agents.get(to.id);
     if (A && B && A.transportRecoil > 0) {

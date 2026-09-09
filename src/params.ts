@@ -195,6 +195,113 @@ export interface Params {
   swimNoise: number;
   drag: number;
   angDrag: number;
+  /**
+   * How much a full tank drags: added to `drag`, in proportion to how full a
+   * body is. 0 = one drag law for every body, which is the pond as it was.
+   *
+   * Locomotion had a hole in it. `drag` is one rate applied to every body
+   * alike, and the rope shares its corrections by mass, so no arrangement of
+   * internal forces can move a net's centre of mass. `applyTransportRecoil`
+   * says as much outright: at `transportThrust` 0 the pair is equal and
+   * opposite and the flock's centre never moves. A net therefore travelled
+   * only because thrust *withheld* part of the receiver's kick — a
+   * reactionless drive, minting momentum wherever energy flows.
+   *
+   * Friction that differs body to body is the way out, and the one every
+   * crawler takes. Gray and Hancock's flagellum swims because a slender
+   * segment drags about twice as hard sideways as lengthwise, and a snake's
+   * belly does the same against sand; an earthworm and a crawling cell
+   * instead *modulate* their grip, anchoring one end while the other slides.
+   * The pond's stroke is longitudinal — a kick runs along a wire — so the
+   * anisotropic version buys it nothing: a straight chain has no transverse
+   * wave, and Purcell's scallop still cannot swim. Modulated grip is the one
+   * that fits, and the pond already carries the state to modulate on.
+   *
+   * So a transfer does two things at once. It kicks the pair apart along the
+   * wire, and it changes which of the two is anchored: the sender is lighter
+   * on its feet by exactly what it just sent, the receiver heavier by the
+   * same. An impulse `p` into a body of mass `m` at rate `k` carries it
+   * `p / (m k)` before it stops, so the pair's centre ends up
+   *
+   *     |p| * (1/k_sender - 1/k_receiver) / (m_sender + m_receiver)
+   *
+   * along the sender's recoil. Mass cancels out of the *direction*: which way
+   * a net goes is decided only by which end is grippier. The rope cannot undo
+   * it either, because a mass-weighted position correction moves the two
+   * bodies and not their centre.
+   *
+   * The sign is left open, because the pond should settle it rather than this
+   * file. Transport runs down the demand gradient, so a sender is usually the
+   * fuller of the two:
+   *
+   *   - **Positive** — full grips, empty slides. The receiver is the one that
+   *     slides, so a net holding a gradient walks toward its hungry end,
+   *     *with* the flow: it carries itself toward whatever it is feeding.
+   *   - **Negative** — full slides, empty grips. The sender slides, so the net
+   *     walks back toward its supply, *against* the flow, which is the
+   *     direction `transportThrust` already drifts it.
+   *
+   * The sum is clamped at zero, so a rate can be cancelled but never
+   * inverted: negative drag is an energy source and the soup comes apart in
+   * seconds. Angular drag is left alone, so this does one thing.
+   *
+   * Two jobs at once even so, which `docs/concepts.md` asks to be visible. It
+   * sets a net's stroke, and it sets how far a *loner* coasts — a hungry body
+   * and a fed one no longer swim alike.
+   *
+   * Nothing happens in a pond that is topped up: a stroke needs a difference
+   * in fullness across a wire, and `full_mean` at 1.0 says there is none.
+   * Read `demand_mean` before reading `net_drift`.
+   *
+   * Global for now, unlike `transportThrust` and `transportRecoil` beside it,
+   * which are heritable. Making a lineage's own grip heritable is the obvious
+   * next move and costs a genome head; it is worth spending once a sign is
+   * known to carry a net at all.
+   */
+  grip: number;
+  /**
+   * How far a wire shortens when energy has just crossed it, as a fraction of
+   * its rest length. 0 = the wire ignores what flows through it, which is the
+   * pond as it was.
+   *
+   * `grip` decides which end of a pair is anchored; this is what actually
+   * takes the step. A transfer shortens the wire in proportion to what
+   * crossed, as a fraction of a tank at the receiving end, and the body that
+   * just sent is the empty one, so it is the one that slides: the pair steps
+   * toward the receiver. Then the wire relaxes at `wireTugTau` while the gradient
+   * rebuilds and the roles swap back, and the next step goes the same way.
+   * Sender adheres, pulls, releases; receiver floats, is pulled, adheres.
+   * That is an inchworm, and it is the first thing here that is one.
+   *
+   * The lag matters more than the depth. A shape that is a memoryless
+   * function of the same fullness `grip` reads is locked in phase with it,
+   * the cycle encloses no area in configuration space, and Purcell's scallop
+   * theorem says it goes nowhere however hard it works — which is why
+   * `Wire.tug` is a stored number that relaxes rather than a formula over the
+   * two tanks. It is a spring's memory and not a difference being erased.
+   *
+   * This is also what `docs/concepts.md` already asks of Shape: tension held
+   * by energy flowing along a wire, so a net that moves no energy is slack.
+   * That heading said stiffness; this moves the rest length, which is the
+   * other half of the same tension and the half a rewrite already uses to
+   * haul its ends together — see `Wire.collapse`.
+   *
+   * Floored at a quarter of the rest length in `syncRest`: a wire that pulls
+   * its ends into contact is a rewrite, and this is not one.
+   */
+  wireTug: number;
+  /**
+   * Seconds for a wire's tug to relax, and therefore the stroke's phase.
+   *
+   * The one dial the mechanism is actually sensitive to. Too fast and the
+   * wire is back at rest before `grip` has noticed which end is full, so
+   * there is no lag and nothing swims. Too slow and the wire never lets go,
+   * which is an anchor rather than a stroke — the same failure `grip` at 100
+   * shows on its own. It wants to sit near the interval between packets,
+   * which `transportQuantum` sets, so the two are coupled and the couplings
+   * table says so.
+   */
+  wireTugTau: number;
   /** Shoaling. See `declutter` for what this costs reproduction, and why the
    *  two only matter together. */
   flockAlign: number;
@@ -431,6 +538,65 @@ export interface Params {
    * `transportRecoil`, seeded from this slider and free to drift by breeding.
    */
   transportRecoil: number;
+  /**
+   * Whole units a transfer moves along a wire. 0 = the continuous law, which
+   * is the pond as it was.
+   *
+   * Transport has always been a trickle. A body gives whatever the demand
+   * gradient asks for that frame, and at steady state that is about 4e-4 —
+   * so `transportRecoil` at its default of 100 delivers an impulse of 0.04
+   * against settled speeds of 20 to 60 px/s. Two thirty-trial sweeps found
+   * neither `transportRecoil` nor `transportThrust` registering a resolved
+   * effect on anything at all, and `grip` turned out to be damping the dish
+   * rather than swimming it: its effect on `net_drift` was the same size with
+   * the kicks switched off. The momentum machinery is not wrong, it is three
+   * orders under its own noise.
+   *
+   * A packet is what puts it above. Above zero a transfer is one whole unit
+   * or nothing, and only a body already holding a whole unit can send one, so
+   * a donor accumulates, fires, and accumulates again. At 0.5 against a tank
+   * of 1.25 that is a kick of 50 rather than 0.04.
+   *
+   * It also gives `grip` the clock it was missing. A net under a standing
+   * gradient has a nearly static fullness pattern, so grip anchors one end
+   * and the other pivots — which is what a pond at grip 100 visibly does.
+   * Packets make the pattern *travel*: the sender drops a whole unit, the
+   * receiver gains one, and the packet hops along the chain. A moving anchor
+   * is what a crawler has and a static one does not.
+   *
+   * Neither the receiver's demand nor its room bounds the amount any more.
+   * Demand still decides *whether* to send — a transfer needs a neighbour
+   * strictly needier than the donor — but a whole packet crosses either way,
+   * and what will not fit is deposited on the ground under the receiver, the
+   * same place a rewrite's leftovers go. This is the second path that can
+   * overfill a body; `payUpkeep` was the first.
+   *
+   * Heritable, like `transportRecoil` and `transportThrust` beside it: this
+   * only seeds a fresh body's own quantum, and the flow law reads whichever
+   * body is *sending*. Moving the slider does nothing to anything already
+   * alive.
+   *
+   * That is the interesting half. A body accumulates until it holds a packet
+   * and then fires, which makes it a relaxation oscillator whose period is its
+   * quantum over its income — so bodies with *different* quanta are coupled
+   * oscillators at different natural frequencies, which is the standard
+   * account of how gut peristalsis comes to travel one way rather than pulse
+   * in place. Measured on the worm bench with a source at one end and a sink
+   * at the other and nothing else imposed: uniform quanta swim at 0.115 px/s,
+   * which is the bench's noise floor, and quanta varying along the body swim
+   * at 0.93 to 1.27. The wave does not have to be tidy — a scattered mix with
+   * barely a consistent direction still swims — but it does have to vary
+   * *along* the line of travel. Varying it across the body buys nothing.
+   *
+   * Two things to watch. A chain of bodies all holding less than a packet
+   * cannot feed each other at all, where the continuous law would have shared
+   * out thin — so read `died` and `can_pay`, and keep this well under
+   * `REWRITE_SHARE`. And the throughput the bench needed for those speeds was
+   * tens of thousands of units in thirty seconds, which is a pair swapping a
+   * packet back and forth near frame rate rather than anything a pond's
+   * income could pay for.
+   */
+  transportQuantum: number;
   /**
    * How much of the receiver's kick is withheld, 0–1, and therefore how much
    * of a pump's recoil survives as motion of the pair.
@@ -738,6 +904,9 @@ export function defaultParams(): Params {
     swimNoise: 0.35,
     drag: 0.55,
     angDrag: 2.4,
+    grip: 0,
+    wireTug: 0,
+    wireTugTau: 0.3,
     flockAlign: 5.5,
     flockSep: 48,
     maxAgents: 100000,
@@ -759,6 +928,7 @@ export function defaultParams(): Params {
     debtCap: -1,
     requestDecay: 0.95,
     transportRecoil: 100,
+    transportQuantum: 0,
     transportThrust: 1.0,
     learnRate: 0.02,
     learnCritic: 0.2,
@@ -808,6 +978,9 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'swimNoise', label: 'Swim noise', min: 0, max: 2, step: 0.05 },
   { key: 'drag', label: 'Fluid drag', min: 0, max: 4, step: 0.05 },
   { key: 'angDrag', label: 'Spin damp', min: 0, max: 8, step: 0.05 },
+  { key: 'grip', label: 'Grip (tank)', min: -2, max: 4, step: 0.05 },
+  { key: 'wireTug', label: 'Wire tug', min: 0, max: 0.6, step: 0.01 },
+  { key: 'wireTugTau', label: 'Tug relax (s)', min: 0.05, max: 3, step: 0.05 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
   { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },
   { key: 'snapRadius', label: 'Snap reach', min: 4, max: 48, step: 1 },
@@ -851,6 +1024,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'requestDecay', label: 'Demand decay', min: 0.5, max: 0.98, step: 0.01 },
   { key: 'transportRecoil', label: 'Pump recoil (seed)', min: 0, max: 200, step: 5 },
   { key: 'transportThrust', label: 'Pump thrust (seed)', min: 0, max: 1, step: 0.05 },
+  { key: 'transportQuantum', label: 'Transport quantum', min: 0, max: 1, step: 0.05 },
   { key: 'learnRate', label: 'Learn rate', min: 0, max: 0.02, step: 0.0005 },
   { key: 'learnCritic', label: 'Learn critic', min: 0, max: 0.2, step: 0.005 },
   { key: 'learnTrace', label: 'Learn trace decay', min: 0.5, max: 0.995, step: 0.005 },

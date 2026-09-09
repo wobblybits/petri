@@ -454,6 +454,12 @@ export class Agent {
   }
 
   /** How hard this body recoils, per unit of energy it pumps to a neighbour. */
+  get transportQuantum(): number {
+    return this.store.transportQuantum[this.slot];
+  }
+  set transportQuantum(v: number) {
+    this.store.transportQuantum[this.slot] = v;
+  }
   get transportRecoil(): number {
     return this.store.transportRecoil[this.slot];
   }
@@ -549,6 +555,7 @@ export function cloneAgent(a: Agent): Agent {
   clone.assort = a.assort;
   clone.transportThrust = a.transportThrust;
   clone.transportRecoil = a.transportRecoil;
+  clone.transportQuantum = a.transportQuantum;
   clone.csHeading = a.csHeading;
   clone.csCos = a.csCos;
   clone.csSin = a.csSin;
@@ -1252,6 +1259,7 @@ export function createAgent(
   agent.assort = params.assortBias;
   agent.transportThrust = params.transportThrust;
   agent.transportRecoil = params.transportRecoil;
+  agent.transportQuantum = params.transportQuantum;
   return agent;
 }
 

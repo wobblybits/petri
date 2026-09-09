@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { fixedParams } from './test-params.ts';
 import { CH } from './fields.ts';
 import { B_STATE, IN_BOUND, IN_DEMAND, IN_DIMS, IN_FULL, IN_SENSE, L_BASE, L_OUT, STATE_DIMS, W_IN, W_NET, W_SELF, refreshReadsField } from './agents.ts';
 import { defaultParams } from './params.ts';
@@ -17,7 +18,7 @@ import { Sim } from './sim.ts';
  */
 
 function pond(): { sim: Sim; params: ReturnType<typeof defaultParams> } {
-  const params = defaultParams();
+  const params = fixedParams();
   params.spawnInterval = 0;
   params.rewriteDuration = 0;
   params.upkeep = 0;

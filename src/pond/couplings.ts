@@ -122,6 +122,36 @@ export const COUPLINGS: readonly Coupling[] = [
     fix: 'choose farmRate against the Era income each arm actually has',
     unless: { key: 'farmRate', is: 0 },
   },
+  {
+    axis: 'grip',
+    constant: 'transportRecoil',
+    why:
+      'grip only turns an impulse into displacement, and the impulse along a wire is the recoil; ' +
+      'at recoil 0 grip is not a net stroke at all but a change to how far a lone body coasts, ' +
+      'which is a different mechanism answering a different question',
+    fix: 'hold transportRecoil above zero when asking whether grip carries a net; run recoil 0 as the loner control',
+    unless: { key: 'grip', is: 0 },
+  },
+  {
+    axis: 'transportQuantum',
+    constant: 'transportRecoil',
+    why:
+      'the kick is recoil times the amount moved, and quantising changes the amount by three orders: ' +
+      'a continuous transfer is ~4e-4 and a 0.5 packet is 0.5, so one recoil means a nudge of 0.04 in ' +
+      'one arm and 50 in the other',
+    fix: 'scale transportRecoil down as the quantum goes up, or read the two arms as different ponds',
+    unless: { key: 'transportRecoil', is: 0 },
+  },
+  {
+    axis: 'transportQuantum',
+    constant: 'wireTugTau',
+    why:
+      'the quantum sets how long a body takes to accumulate a packet, and the tug has to have let go ' +
+      'before the next one lands or the wire is an anchor rather than a stroke; one relaxation time ' +
+      'cannot suit two packet intervals',
+    fix: 'choose wireTugTau against the packet interval in each arm, or sweep the two together',
+    unless: { key: 'wireTug', is: 0 },
+  },
 ];
 
 export interface CouplingWarning {

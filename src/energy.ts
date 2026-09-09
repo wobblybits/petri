@@ -850,6 +850,7 @@ export type SlotBody = Pick<
   | 'energyCap'
   | 'debtCap'
   | 'rescueTo'
+  | 'transportQuantum'
 >;
 
 /**
@@ -1443,10 +1444,12 @@ export function tickUpkeep(
        * worth anything the moment they topped up, and the conservation the
        * rest of the economy is careful about had a hole in it.
        *
-       * This is the only path that can overfill a body: harvest and transport
-       * are both bounded by the room the receiver actually has, and a rewrite's
-       * leftovers already go to the grid. If another producer ever appears it
-       * should come through here too.
+       * Harvest is bounded by the room the receiver actually has, and a
+       * rewrite's leftovers already go to the grid. Transport was in that
+       * list until `transportQuantum`: a whole packet crosses whether or not
+       * the far end has room, so `flowCharges` spills through `deliver` for
+       * the same reason and to the same place. If another producer ever
+       * appears it should come through one of the two.
        */
       if (grid) grid.addAt(a.x, a.y, next - a.energyCap);
       a.extra = a.energyCap;
@@ -1796,17 +1799,93 @@ export function spreadRequestsFast(
  * uses it to recoil the two bodies against each other; nothing about the
  * energy accounting depends on it.
  */
+/**
+ * How a transfer is sized, for both `flowCharges` and its fast twin.
+ *
+ * `quantum` 0 is the continuous law: a body gives whatever the gradient asks
+ * for, which at steady state is about 4e-4 a frame. Above zero a transfer is
+ * one whole packet or nothing, and only a body holding at least a packet can
+ * send one — so a donor accumulates, fires, and accumulates again.
+ *
+ * The point is not the discreteness for its own sake. `transportRecoil`
+ * scales the kick with the amount moved, so a continuous pond kicks at 0.04
+ * against ambient speeds of 20-60 px/s and the whole momentum machinery sits
+ * three orders under its own noise — measured, twice, in `docs/experiments.md`.
+ * A packet is what puts the impulse above it.
+ *
+ * `grid` is where a receiver's overflow goes, and is required once `quantum`
+ * is on: a whole packet is sent whether or not the far end has room, so the
+ * remainder has to land somewhere or the pond quietly mints a hole in its own
+ * conservation. Same destination a rewrite's leftovers take.
+ */
+export interface FlowOptions {
+  /**
+   * Override every body's own quantum with this one. Omit — which is what the
+   * simulation does — and each sender uses its own `transportQuantum`, seeded
+   * from the parameter at birth exactly as `transportRecoil` is.
+   *
+   * A per-body quantum is what lets a net's *structure* set its rhythm. A
+   * body accumulates until it holds a packet and then fires, which is a
+   * relaxation oscillator whose period is its quantum over its income; give
+   * neighbouring bodies different quanta and the chain is a row of coupled
+   * oscillators at different natural frequencies, which is the standard model
+   * for how gut peristalsis comes to travel in one direction. Nothing here
+   * makes a kind special: two bodies differ because they were seeded or bred
+   * differently, not because of what they are.
+   */
+  quantum?: number;
+  /** Where a full receiver's overflow is deposited. Required with `quantum`. */
+  grid?: EnergyGrid;
+}
+
+/**
+ * The packet the two flow laws share: send, spill what will not fit, report.
+ *
+ * The recoil is billed on the whole packet rather than on what the receiver
+ * kept, because the impulse is the sender ejecting it — what happens at the
+ * far end cannot reach back and make the push smaller.
+ */
+function deliver(
+  give: number,
+  toCap: number,
+  toExtra: number,
+  x: number,
+  y: number,
+  grid: EnergyGrid | undefined,
+): number {
+  const room = toCap - toExtra;
+  if (give <= room) return toExtra + give;
+  const spill = give - Math.max(0, room);
+  if (spill > 0) {
+    if (!grid) {
+      throw new Error('flowCharges: a packet overflowed with no grid to take it; the spill would be minted away');
+    }
+    grid.addAt(x, y, spill);
+  }
+  return room > 0 ? toCap : toExtra;
+}
+
 export function flowCharges(
   list: SlotBody[],
   adj: WireAdjacency,
   onMoved?: (from: SlotBody, to: SlotBody, amount: number) => void,
+  opts: FlowOptions = {},
 ): number {
+  const forced = opts.quantum;
+  const quantumOf = (a: SlotBody): number => {
+    const q = forced !== undefined ? forced : a.transportQuantum;
+    return q > 0 ? q : 0;
+  };
   const { off, nei } = adj;
   const donors: number[] = [];
   for (let i = 0; i < list.length; i++) {
     const a = list[i];
     if (a.locked) continue;
-    if (spareEnergy(a) > FLOW_EPS) donors.push(i);
+    // A donor must hold a whole packet before it can send one. At quantum 0
+    // that floor is FLOW_EPS, which is the continuous law exactly.
+    const spare = spareEnergy(a);
+    const q = quantumOf(a);
+    if (spare > FLOW_EPS && spare >= (q > 0 ? q : FLOW_EPS)) donors.push(i);
   }
   // Neediest donor first, so a body that is itself being fed passes on what it
   // does not need in the same frame rather than sitting on it.
@@ -1841,10 +1920,19 @@ export function flowCharges(
     // Because the field decays per hop, a distant shortage is fed in smaller
     // increments than a near one. That is the intended shape: demand you can
     // barely see moves less energy than demand next door.
-    const give = Math.min(spareEnergy(d), best.request, best.energyCap - best.extra);
-    if (give <= FLOW_EPS) continue;
+    let give: number;
+    const quantum = quantumOf(d);
+    if (quantum > 0) {
+      // Whole packet or nothing, and the donor list already guaranteed it has
+      // one. Neither the receiver's demand nor its room bounds this any more:
+      // demand decided *whether* to send, and the overflow has somewhere to go.
+      give = quantum;
+    } else {
+      give = Math.min(spareEnergy(d), best.request, best.energyCap - best.extra);
+      if (give <= FLOW_EPS) continue;
+    }
     d.extra -= give;
-    best.extra += give;
+    best.extra = deliver(give, best.energyCap, best.extra, best.x, best.y, opts.grid);
     taken.add(bestSlot);
     moved += give;
     onMoved?.(d, best, give);
@@ -1872,14 +1960,19 @@ export function flowChargesFast(
   store: AgentStore,
   adj: WireAdjacency,
   onMoved?: (from: Agent, to: Agent, amount: number) => void,
+  opts: FlowOptions = {},
 ): number {
   const n = list.length;
+  const forced = opts.quantum;
   const { off, nei } = adj;
   const LOCKED = store.locked;
   const REQUEST = store.request;
   const EXTRA = store.extra;
   const CAP = store.energyCap;
   const ID = store.id;
+  const X = store.x;
+  const Y = store.y;
+  const QUANT = store.transportQuantum;
   if (flowDonors.length < n) {
     flowDonors = new Int32Array(n);
     flowSlot = new Int32Array(n);
@@ -1903,7 +1996,8 @@ export function flowChargesFast(
     // spareEnergy(a) > FLOW_EPS, inlined: spareEnergy is `extra > 0 ? extra
     // : 0`, and FLOW_EPS > 0, so the comparison is equivalent to extra
     // itself exceeding FLOW_EPS.
-    if (EXTRA[s] > FLOW_EPS) donors[count++] = i;
+    const q = forced !== undefined ? forced : QUANT[s];
+    if (EXTRA[s] > FLOW_EPS && EXTRA[s] >= (q > 0 ? q : FLOW_EPS)) donors[count++] = i;
   }
   // Neediest donor first, so a body that is itself being fed passes on what it
   // does not need in the same frame rather than sitting on it.
@@ -1931,11 +2025,18 @@ export function flowChargesFast(
       }
     }
     if (bestIdx < 0) continue;
-    const spareD = EXTRA[ds] > 0 ? EXTRA[ds] : 0;
-    const give = Math.min(spareD, REQUEST[bestSlot], CAP[bestSlot] - EXTRA[bestSlot]);
-    if (give <= FLOW_EPS) continue;
+    let give: number;
+    const dq = forced !== undefined ? forced : QUANT[ds];
+    if (dq > 0) {
+      // See `flowCharges`: whole packet or nothing, overflow to the ground.
+      give = dq;
+    } else {
+      const spareD = EXTRA[ds] > 0 ? EXTRA[ds] : 0;
+      give = Math.min(spareD, REQUEST[bestSlot], CAP[bestSlot] - EXTRA[bestSlot]);
+      if (give <= FLOW_EPS) continue;
+    }
     EXTRA[ds] -= give;
-    EXTRA[bestSlot] += give;
+    EXTRA[bestSlot] = deliver(give, CAP[bestSlot], EXTRA[bestSlot], X[bestSlot], Y[bestSlot], opts.grid);
     taken[bestIdx] = 1;
     moved += give;
     onMoved?.(list[di], list[bestIdx], give);

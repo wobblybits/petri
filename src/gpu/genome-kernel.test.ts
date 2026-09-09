@@ -240,6 +240,17 @@ describe('the genome shader computes what updateState computes', () => {
      * which is the part worth testing.
      */
     const params = defaultParams();
+    /*
+     * Fixed weights, which is what this mirror models.
+     *
+     * `mirrorState` reads a state weight as the gene plus an optional
+     * learning row, and this test supplies no row — so with `learnRate` above
+     * zero the CPU is using deltas the mirror cannot see, and `h` diverges by
+     * 0.026 for a reason that has nothing to do with the shader. Parity of
+     * the learning row itself is a different test, and there is not one: the
+     * `learn` argument here is unexercised.
+     */
+    params.learnRate = 0;
     params.spawnInterval = 0;
     params.rewriteDuration = 0;
     params.snapRadius = 0;

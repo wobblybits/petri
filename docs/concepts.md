@@ -34,9 +34,30 @@ not also be asked to do. Nothing else belongs here; measurements go in
 - Shape. Lives in wire physics. Tension is held by energy flowing along a
   wire, so a net that moves no energy is slack. Not yet true: stiffness is a
   free global constant.
-- Locomotion
+- Locomotion. Lives in the drag law, whose rate is `drag + grip * fullness`.
+  A net moves itself by moving energy through itself: a transport kick is
+  equal and opposite, and under one rate for every body it cancels at the
+  centre of mass, so `grip` is the only thing that lets a stroke become
+  travel. Nothing else may create motion a net did not pay for;
+  `transportThrust`, which does, is a reactionless drive and is what this
+  replaces. A speed-dependent term was built beside it and withdrawn: it swam
+  (1.63 px/s on the worm bench against grip's 2.31, and the two did not add),
+  but one heading gets one mechanic, and grip is the one whose stroke depends
+  on the energy pattern a net controls rather than on where its heavy bodies
+  happen to be. Not yet true: `transportThrust` is still on at 1; grip is a
+  free global constant where the stroke should be the net's own; and turned up
+  it anchors a net rather than walking it, because a crawler needs its grip to
+  travel and only `transportQuantum` makes the fullness pattern move.
 - Communication within a net
-- Transport of energy within a net
+- Transport of energy within a net. Lives in the demand gradient: a body gives
+  to whichever neighbour is strictly needier, and `transportQuantum` sets
+  whether that is a trickle or a packet. Demand decides whether to send;
+  above zero the quantum decides how much, a body must hold a whole packet to
+  send one, and what will not fit at the far end goes to the ground. The
+  packet is also the pond's only clock — locomotion and shape have no other
+  source of phase — so this mechanic is asked to do two things and that is
+  known. Not yet true: it ships at 0, the trickle, under which the momentum
+  it carries is three orders below the pond's own noise.
 - Growth
 - Breeding: nets connecting at free terminals
 - Freeing terminals: death and detachment within a net

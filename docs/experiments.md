@@ -197,6 +197,8 @@ magnitude, not the value.
 | `signal_total` | is anyone saying anything | last | — | the pair to `born_mean` when reading `excreteRate` |
 | `forage_ratio` | ground under bodies over dish mean; 1 is indifference | **peak** | 0.18 | a transient: peaks in the first minute, decays to parity |
 | `demand_mean` | mean `DEMAND` over bodies — was anyone hungry | peak | — | engagement gauge for every foraging or transport question |
+| `net_drift` | how fast nets travel: size-weighted mean speed of a net's centre, px/s | last | — | **tracks the pond's mobility, not its swimming**: it followed the population step for step across `grip`. Read against a `transportRecoil` 0 control |
+| `net_coherence` | that speed over what independent bodies would give; 1 is indifference | last | — | removes the pond's speed but not its structure: the ceiling is `sqrt(N)`, so a dial that grows nets raises it. Read beside `net_dominance` |
 | `full_mean` | mean tank fraction | last | — | 1.0 throughout means the economy is not in play |
 | `signal_p90`, `sense_read_p90` | p90 signal at bodies, raw and × `senseScale` | last | — | `sense_read_p90` far from ~1 means sense genes are out of `phi`'s range (§1.A) |
 | `locus_demand_h0`, `locus_self_00`, `locus_food_h0` | population means of three named genes: `Wx[0][DEMAND]`, `Wh[0][0]`, `T[food][0]` — the seeded foraging pathway and hunger memory | last | — | the Baldwin question is a claim about these, not about an aggregate |

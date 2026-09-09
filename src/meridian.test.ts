@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { fixedParams } from './test-params.ts';
 import { portAxis, stemWorld, type Agent } from './agents.ts';
-import { defaultParams } from './params.ts';
 import { Sim } from './sim.ts';
 import { angleDelta, wrapDeltaVec } from './wrap.ts';
 
@@ -26,7 +26,7 @@ function portAlignment(
 
 describe('wire meridian alignment', () => {
   const baseParams = () => {
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.flockAlign = 5.5;
     params.flockSep = 36;

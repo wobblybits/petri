@@ -61,7 +61,10 @@ const tiny: Protocol = {
   nullReading: 'n',
   arms: [{ name: 'a', set: { excreteRate: 0 } }, { name: 'b', set: { excreteRate: 0.015 } }],
   axes: { groundPatches: [0, 8] },
-  base: { energyRegrow: 0 },
+  // Fixed weights, like the registered layout protocols: a learning horizon
+  // held across a patch-spacing axis is a coupling, and this fixture is for
+  // testing the excreteRate ones.
+  base: { energyRegrow: 0, learnRate: 0 },
   seeds: 3,
   seconds: 120,
   soupCount: 100,
@@ -76,7 +79,7 @@ describe('planning', () => {
     expect(plan.points).toBe(2);
     expect(plan.trials).toBe(12);
     expect(plan.arms[0].sweep).toBe('tiny/a');
-    expect(plan.arms[1].base).toEqual({ energyRegrow: 0, excreteRate: 0.015 });
+    expect(plan.arms[1].base).toEqual({ energyRegrow: 0, learnRate: 0, excreteRate: 0.015 });
     expect(plan.arms[0].seeds).toEqual([1, 2, 3]);
     expect(planProtocol(tiny, { seeds: 5 }).trials).toBe(20);
   });

@@ -124,6 +124,10 @@ export const METRICS: Record<string, MetricSpec> = {
   signal_total: col('signal_total', 'signal'),
   // A transient: bodies find the patches while hungry and stop when fed.
   forage_ratio: col('forage_ratio', 'forage', 'peak'),
+  // Net motion: how fast nets travel, and whether that is the net's own doing.
+  // Both are snapshots and neither means anything without a control run.
+  net_drift: js('$.diversity.netDrift', 'netDrift'),
+  net_coherence: js('$.diversity.netCoherence', 'netCoh'),
   // Engagement gauges. See `measureDiversity`.
   demand_mean: js('$.diversity.demandMean', 'demand', 'peak'),
   full_mean: js('$.diversity.fullMean', 'full'),

@@ -135,6 +135,59 @@ export interface Diversity {
    */
   forageRatio: number | null;
   /**
+   * How fast nets actually travel: the size-weighted mean speed of a net's
+   * centre of mass, in px/s, over components of two or more.
+   *
+   * The number the whole locomotion question reduces to. Under one drag law
+   * for every body a net's centre cannot be moved by anything the net itself
+   * does — the rope corrects positions by mass and the recoil is equal and
+   * opposite — so before `grip` and `transportThrust` this could only be
+   * external: neighbours shoving, the flock pulling. It is a snapshot, so it
+   * measures drift and jostling alike; `netCoherence` is the half that tells
+   * them apart, and neither means anything without a control run.
+   *
+   * Measured, and worth knowing before quoting it: **this tracks how mobile
+   * the pond is, not how well it swims.** Over 30 trials on a hungry pond it
+   * ran 47.8, 30.4, 20.2 px/s at `grip` -2, 0 and 2 — monotone, resolved at
+   * eta-squared 0.64, and matched step for step by the population, 371, 326
+   * and 284 bodies. A dial that damps every full body damps the whole dish,
+   * and this falls whether or not anything is swimming. The control that
+   * separates them is `transportRecoil` at 0: no kicks, so whatever the dial
+   * still does there is mobility, and the difference is the stroke. That is
+   * the coupling row, and it is in the table for this reason.
+   *
+   * Null when there is no net to measure.
+   */
+  netDrift: number | null;
+  /**
+   * The same speed over what it would be if the net's bodies were moving
+   * independently. 1 is indifference, the way `forageRatio`'s is.
+   *
+   * N bodies with unrelated directions leave their centre moving at about
+   * `1/sqrt(N)` of their own speed, so the baseline is
+   * `sqrt(sum(m_i^2 |v_i|^2)) / sum(m_i)` — exact for unequal masses, and the
+   * denominator that makes independence read 1 whatever the net's size. A
+   * perfectly rigid net all going one way reads `sum(m_i) / sqrt(sum(m_i^2))`
+   * — `sqrt(N)` when its bodies weigh the same, and less when they do not, an
+   * Era among Cons costing it a little. So the *ceiling* moves with a net's
+   * size and its mix: read it beside `nets_effective` and `net_dominance`, or
+   * against a control at the same population, never as an absolute.
+   *
+   * What it separates is a net that is going somewhere from a net that is
+   * being pushed there, which raw speed cannot. Wires already correlate their
+   * endpoints, so a net dragged bodily by the flock scores above 1 too; the
+   * claim this supports is a difference against a control, not a level.
+   *
+   * The normalisation removes the pond's *speed* but not its *structure*, and
+   * the same 30 trials showed why that matters: this ran 2.09, 2.44 and 3.15
+   * at `grip` 2, 0 and -2, and the largest net's share of the pond ran
+   * 0.066, 0.073 and 0.166 the same way. A bigger net has a higher ceiling,
+   * so a dial that grows nets raises this without anything swimming better.
+   * Read it against a control at the same `net_dominance`, or divide by the
+   * square root of the mean net size before comparing across dials.
+   */
+  netCoherence: number | null;
+  /**
    * Engagement gauges: was the mechanism a question is about switched on at
    * all in this pond? See `docs/experiments.md` §1.B.
    *
@@ -268,6 +321,67 @@ function fst(
   return Math.min(1, Math.max(0, 1 - withinVar / totalVar));
 }
 
+/**
+ * Net motion: how fast a net's centre of mass is going, and how much of that
+ * is the net agreeing with itself rather than N bodies happening to average.
+ *
+ * Both size-weighted over nets, so a pond's one big net counts for more than
+ * its many pairs — the same weighting `netFst` uses, and for the same reason:
+ * a statistic about nets should not be decided by whichever pairs latched
+ * this second. Components of one are skipped; a lone body's centre is itself
+ * and its coherence is 1 by construction, which would drown the measure in a
+ * soup.
+ */
+function netMotion(
+  sim: Sim,
+  comps: Map<number, number>,
+  compCount: Map<number, number>,
+): { drift: number | null; coherence: number | null } {
+  const store = sim.agentStore;
+  const VX = store.vx;
+  const VY = store.vy;
+  const MASS = store.mass;
+  // px, py: net momentum. m: net mass. sq: sum of (m_i |v_i|)^2, the
+  // independent-motion baseline's numerator. speed: sum of m_i |v_i|.
+  const acc = new Map<number, { px: number; py: number; m: number; sq: number }>();
+  for (const a of sim.agents.values()) {
+    const root = comps.get(a.id) ?? a.id;
+    if ((compCount.get(root) ?? 0) < 2) continue;
+    const s = a.slot;
+    const m = Math.max(0.08, MASS[s]);
+    const vx = VX[s];
+    const vy = VY[s];
+    let e = acc.get(root);
+    if (!e) acc.set(root, (e = { px: 0, py: 0, m: 0, sq: 0 }));
+    e.px += m * vx;
+    e.py += m * vy;
+    e.m += m;
+    e.sq += m * m * (vx * vx + vy * vy);
+  }
+  if (acc.size === 0) return { drift: null, coherence: null };
+  let driftSum = 0;
+  let cohSum = 0;
+  let cohWeight = 0;
+  let weight = 0;
+  for (const [root, e] of acc) {
+    const size = compCount.get(root) ?? 0;
+    const speed = e.m > 0 ? Math.hypot(e.px, e.py) / e.m : 0;
+    driftSum += size * speed;
+    weight += size;
+    // A net standing perfectly still has no direction to be coherent about,
+    // so it is left out of the ratio rather than counted as indifferent.
+    const baseline = e.m > 0 ? Math.sqrt(e.sq) / e.m : 0;
+    if (baseline > 0) {
+      cohSum += size * (speed / baseline);
+      cohWeight += size;
+    }
+  }
+  return {
+    drift: weight > 0 ? driftSum / weight : null,
+    coherence: cohWeight > 0 ? cohSum / cohWeight : null,
+  };
+}
+
 /** Every measure above, off a live pond. Reads, never writes. */
 /**
  * `params` only to say what the larval window should be read against: the
@@ -372,6 +486,8 @@ export function measureDiversity(sim: Sim, params?: Params): Diversity {
   const dishMean = diskCells > 0 ? groundTotal / diskCells : 0;
   const forageRatio = n > 0 && dishMean > 0 ? atBodies / n / dishMean : null;
 
+  const motion = netMotion(sim, comps, compCount);
+
   let signalTotal = 0;
   const larval = sim.larval.read();
   const field = sim.fields.data;
@@ -398,6 +514,8 @@ export function measureDiversity(sim: Sim, params?: Params): Diversity {
     commutesPerLatch: sim.census().commutesPerLatch,
     signalTotal,
     forageRatio,
+    netDrift: motion.drift,
+    netCoherence: motion.coherence,
     demandMean: n > 0 ? demandSum / n : 0,
     fullMean: n > 0 ? fullSum / n : 0,
     signalP90,

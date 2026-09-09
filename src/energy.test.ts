@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { fixedParams } from './test-params.ts';
 import {
   agentValue,
   atCap,
@@ -35,7 +36,7 @@ import {
   WireAdjacency,
 } from './energy.ts';
 import { Sim } from './sim.ts';
-import { defaultParams, type Params } from './params.ts';
+import { type Params } from './params.ts';
 import { loadPreset } from './presets.ts';
 import { CH, CHANNELS } from './fields.ts';
 
@@ -63,7 +64,7 @@ function body(
 ): SlotBody {
   return {
     id, kind, x, y, extra, request, locked, recovering: false,
-    energyCap, requestDecay, debtCap, rescueTo,
+    energyCap, requestDecay, debtCap, rescueTo, transportQuantum: 0,
   };
 }
 
@@ -692,7 +693,7 @@ describe('settle pool', () => {
 describe('sim energy', () => {
   it('blocks commute when the pair has no extras', () => {
     const sim = new Sim(800, 600);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.ambientEnergy = 0;
     params.upkeep = 0;
@@ -713,7 +714,7 @@ describe('sim energy', () => {
     // was in debt, nobody was asking, and 3.75 units sat parked nine hops away
     // for the rest of the run.
     const sim = new Sim(1200, 600);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.ambientEnergy = 0;
     params.upkeep = 0;
@@ -741,7 +742,7 @@ describe('sim energy', () => {
 
   it('lets a commute fire when both agents hold an extra', () => {
     const sim = new Sim(800, 600);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.ambientEnergy = 0;
     params.upkeep = 0;
@@ -758,7 +759,7 @@ describe('sim energy', () => {
 
   it('lets a commute fire when both tanks are full but smaller than a share', () => {
     const sim = new Sim(800, 600);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.ambientEnergy = 0;
     params.upkeep = 0;
@@ -778,7 +779,7 @@ describe('sim energy', () => {
 
   it('returns annihilation energy to the grid when the net vanishes', () => {
     const sim = new Sim(800, 600);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.ambientEnergy = 0;
     params.upkeep = 0;
@@ -795,7 +796,7 @@ describe('sim energy', () => {
 
   it('walks a neighbour extra onto a hungry commute pair', () => {
     const sim = new Sim(800, 600);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.ambientEnergy = 0;
     params.upkeep = 0;
@@ -822,7 +823,7 @@ describe('sim energy', () => {
   /** Two wired Cons on barren ground. Era is excluded: it never starves. */
   function pair(aExtra: number, bExtra: number, upkeep = 1) {
     const sim = new Sim(320, 200);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.ambientEnergy = 0;
     params.upkeep = upkeep;
@@ -946,7 +947,7 @@ describe('sim energy', () => {
 
   it('drops wires at −1 and still snaps in debt', () => {
     const sim = new Sim(320, 200);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.ambientEnergy = 0;
     params.upkeep = 0;
@@ -997,7 +998,7 @@ describe('conservation', () => {
    * this is a test of what the dials *can* do, not of what the pond does.
    */
   function conservativeParams(): Params {
-    const p = defaultParams();
+    const p = fixedParams();
     p.soupCount = 120;
     // The drive, off. `grow` is a source and `decay` a sink; both are the
     // dish, and the dish is allowed to be driven. This test is about bodies.
@@ -1051,7 +1052,7 @@ describe('conservation', () => {
      * it. It hid in the production dish because the loss goes as perimeter
      * over area.
      */
-    const p = defaultParams();
+    const p = fixedParams();
     p.soupCount = 0;
     p.spawnInterval = 0;
     p.energyRegrow = 0;
@@ -1068,7 +1069,7 @@ describe('conservation', () => {
     // The other half of the same rule. Without it the dish would fill with
     // everything anything had ever said.
     const sim = new Sim(1600, 1200, 128);
-    const p = defaultParams();
+    const p = fixedParams();
     p.soupCount = 0;
     p.spawnInterval = 0;
     p.energyRegrow = 0;
@@ -1103,6 +1104,28 @@ describe('conservation', () => {
     expect(worst / before, `drifted ${worst} of ${before}`).toBeLessThan(1e-4);
   });
 
+  it('conserves across a whole pond on the shipping path', () => {
+    /*
+     * The one that matters. `flowChargesFast` is what runs, it is a hand-kept
+     * twin of the reference above, and nothing else in the suite compares the
+     * two — so this drives the real thing for nine hundred frames of a pond
+     * that latches, commutes and annihilates, with packets crossing wires and
+     * spilling onto the ground throughout, and checks the books still balance.
+     */
+    const p = conservativeParams();
+    p.transportQuantum = 0.5;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    const before = pondTotal(sim, p.bodyValue);
+    let worst = 0;
+    for (let i = 0; i < 900; i++) {
+      sim.step(1 / 60, p);
+      worst = Math.max(worst, Math.abs(pondTotal(sim, p.bodyValue) - before));
+    }
+    expect(sim.tally.annihilations + sim.tally.commutes, 'no rewrites ran').toBeGreaterThan(4);
+    expect(worst / before, `drifted ${worst} of ${before}`).toBeLessThan(1e-4);
+  });
+
   it('destroys the rent when upkeepExcrete is off, which is today', () => {
     // The dial's other end, so the test above cannot pass by the invariant
     // being vacuous. Rent vanishing is what the pond does now.
@@ -1113,5 +1136,96 @@ describe('conservation', () => {
     const before = pondTotal(sim, p.bodyValue);
     for (let i = 0; i < 900; i++) sim.step(1 / 60, p);
     expect(pondTotal(sim, p.bodyValue)).toBeLessThan(before * 0.999);
+  });
+});
+
+describe('quantised transport', () => {
+  /*
+   * Transport as packets rather than a trickle.
+   *
+   * The continuous law gives whatever the gradient asks for, which at steady
+   * state is about 4e-4 a frame — so `transportRecoil` at 100 lands an impulse
+   * of 0.04 against settled speeds of 20 to 60 px/s, and two sweeps found the
+   * whole momentum machinery invisible because of it. A packet is what puts
+   * the impulse above the pond's own noise. These are about the arithmetic of
+   * the packet; whether it makes anything swim is a measurement, not a test.
+   */
+  const packet = 0.5;
+
+  it('will not let a body send what it does not yet hold', () => {
+    // The accumulate-and-fire half. Under the continuous law this donor gives
+    // its 0.4 away immediately; under a packet it has to wait until it has one.
+    const agents = new Map([
+      [1, body(1, 0, 0, 0, 1)],
+      [2, body(2, 10, 0, 0.4, 0)],
+    ]);
+    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
+    const grid = new EnergyGrid(10, 0);
+    expect(flowCharges(list, adj, undefined, { quantum: packet, grid })).toBe(0);
+    expect(agents.get(2)!.extra, 'the donor keeps it all').toBeCloseTo(0.4, 9);
+    expect(agents.get(1)!.extra).toBe(0);
+    expect(grid.storedTotal(), 'and nothing leaked to the ground').toBeCloseTo(0, 9);
+    // The same pond under the law it replaces, so this cannot pass vacuously.
+    expect(flowCharges(list, adj)).toBeCloseTo(0.4, 9);
+  });
+
+  it('sends a whole packet, however little the receiver asked for', () => {
+    // Demand still decides *whether* to send — the receiver must be strictly
+    // needier — but it no longer decides how much. That cap is what kept every
+    // transfer down to the size of the gradient.
+    const agents = new Map([
+      [1, body(1, 0, 0, 0, 0.2)],
+      [2, body(2, 10, 0, 1, 0)],
+    ]);
+    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
+    const grid = new EnergyGrid(10, 0);
+    const moved = flowCharges(list, adj, undefined, { quantum: packet, grid });
+    expect(moved, 'a packet, not the 0.2 the gradient asked for').toBeCloseTo(packet, 9);
+    expect(agents.get(1)!.extra).toBeCloseTo(0.5, 9);
+    expect(agents.get(2)!.extra).toBeCloseTo(0.5, 9);
+  });
+
+  it('spills what will not fit onto the ground under the receiver', () => {
+    // A whole packet crosses whether or not the far end has room, so the
+    // remainder has to land somewhere. The same place a rewrite's leftovers go.
+    const agents = new Map([
+      [1, body(1, 0, 0, 1, 1)],
+      [2, body(2, 10, 0, 1, 0)],
+    ]);
+    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
+    const grid = new EnergyGrid(10, 0);
+    const cap = agents.get(1)!.energyCap;
+    const before = agents.get(1)!.extra + agents.get(2)!.extra;
+    flowCharges(list, adj, undefined, { quantum: packet, grid });
+    expect(agents.get(1)!.extra, 'receiver fills to the brim').toBeCloseTo(cap, 9);
+    expect(agents.get(2)!.extra, 'donor is a whole packet lighter').toBeCloseTo(0.5, 9);
+    expect(grid.storedTotal()).toBeCloseTo(packet - (cap - 1), 9);
+    const after = agents.get(1)!.extra + agents.get(2)!.extra + grid.storedTotal();
+    expect(after, 'nothing minted, nothing lost').toBeCloseTo(before, 9);
+  });
+
+  it('refuses to lose an overflow it has nowhere to put', () => {
+    // Silently dropping the spill would put a hole in the one invariant this
+    // file exists to protect, and it would only show up as a slow leak. It
+    // throws where the loss would happen rather than up front, so a run whose
+    // receivers all have room is not made to carry a grid it never needs.
+    const roomy = new Map([[1, body(1, 0, 0, 0, 1)], [2, body(2, 10, 0, 1, 0)]]);
+    const a = net(roomy, [{ a: { id: 1 }, b: { id: 2 } }]);
+    expect(() => flowCharges(a.list, a.adj, undefined, { quantum: packet })).not.toThrow();
+
+    // The receiver has 0.25 of room and a whole packet is coming.
+    const full = new Map([[1, body(1, 0, 0, 1, 1)], [2, body(2, 10, 0, 1, 0)]]);
+    const b = net(full, [{ a: { id: 1 }, b: { id: 2 } }]);
+    expect(() => flowCharges(b.list, b.adj, undefined, { quantum: packet })).toThrow(/grid/);
+  });
+
+  it('is the old law exactly at zero', () => {
+    const agents = new Map([[1, body(1, 0, 0, 0, 0.7)], [2, body(2, 10, 0, 1, 0)]]);
+    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
+    const plain = new Map([[1, body(1, 0, 0, 0, 0.7)], [2, body(2, 10, 0, 1, 0)]]);
+    const two = net(plain, [{ a: { id: 1 }, b: { id: 2 } }]);
+    const withOpts = flowCharges(list, adj, undefined, { quantum: 0 });
+    expect(withOpts).toBe(flowCharges(two.list, two.adj));
+    expect(agents.get(1)!.extra).toBe(plain.get(1)!.extra);
   });
 });

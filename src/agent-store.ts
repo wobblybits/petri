@@ -83,6 +83,8 @@ export class AgentStore {
   assort!: Float64Array;
   transportThrust!: Float64Array;
   transportRecoil!: Float64Array;
+  /** Whole units this body sends in one transfer. See `params.transportQuantum`. */
+  transportQuantum!: Float64Array;
   /**
    * Which wire holds each of this body's three ports, or -1 for a free one.
    * Three entries a body: `slot * 3 + 0/1/2` for principal, left, right.
@@ -443,6 +445,7 @@ export class AgentStore {
     this.assort[slot] = 0;
     this.transportThrust[slot] = 0;
     this.transportRecoil[slot] = 0;
+    this.transportQuantum[slot] = 0;
     this.csHeading[slot] = 0;
     this.csCos[slot] = 0;
     this.csSin[slot] = 0;
@@ -522,6 +525,7 @@ export class AgentStore {
     this.assort = growF64(this.assort);
     this.transportThrust = growF64(this.transportThrust);
     this.transportRecoil = growF64(this.transportRecoil);
+    this.transportQuantum = growF64(this.transportQuantum);
     // Three a body, and -1 rather than 0 is the free marker, so a fresh tail
     // cannot read as "port held by wire 0".
     const newPortWire = new Int32Array(newCapacity * 3).fill(-1);

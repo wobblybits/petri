@@ -267,3 +267,104 @@ describe('foraging', () => {
     expect(measureDiversity(sim).forageRatio).toBeNull();
   });
 });
+
+describe('net motion', () => {
+  /** `n` bodies wired into one chain, at rest, in an otherwise empty dish. */
+  function chain(n: number, kinds: ('con' | 'era')[] = []): { sim: Sim; bodies: ReturnType<Sim['spawn']>[] } {
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    params.ambientEnergy = 0;
+    const sim = new Sim(1600, 1200, 128);
+    const bodies = [];
+    for (let i = 0; i < n; i++) {
+      bodies.push(sim.spawn(kinds[i] ?? 'con', 700 + i * 60, 600, 0, params, true)!);
+    }
+    for (let i = 1; i < n; i++) {
+      sim.graph.attach({ id: bodies[i - 1]!.id, slot: 'l' }, { id: bodies[i]!.id, slot: 'r' }, 60, 0);
+    }
+    return { sim, bodies };
+  }
+
+  it('reads a net going one way at its own speed, and sqrt(n) over chance', () => {
+    // The known answer. Four bodies of equal mass all doing 10 px/s east put
+    // their centre at 10 px/s, and four unrelated directions would have put it
+    // at 10/sqrt(4) — so a net that agrees with itself reads exactly sqrt(4).
+    const { sim, bodies } = chain(4);
+    for (const b of bodies) b!.vx = 10;
+    const d = measureDiversity(sim);
+    expect(d.netDrift!).toBeCloseTo(10, 9);
+    expect(d.netCoherence!).toBeCloseTo(2, 9);
+  });
+
+  it('reads unrelated directions as 1, whatever the speed', () => {
+    // Two bodies at right angles: the centre goes at 10/sqrt(2), which is
+    // exactly what independence predicts. 1 is indifference, as in forageRatio.
+    const { sim, bodies } = chain(2);
+    bodies[0]!.vx = 10;
+    bodies[1]!.vy = 10;
+    const d = measureDiversity(sim);
+    expect(d.netDrift!).toBeCloseTo(10 / Math.SQRT2, 9);
+    expect(d.netCoherence!).toBeCloseTo(1, 9);
+  });
+
+  it('cancels: a net whose halves oppose is going nowhere', () => {
+    const { sim, bodies } = chain(2);
+    bodies[0]!.vx = 10;
+    bodies[1]!.vx = -10;
+    const d = measureDiversity(sim);
+    expect(d.netDrift!).toBeCloseTo(0, 9);
+    expect(d.netCoherence!).toBeCloseTo(0, 9);
+  });
+
+  it('weights the centre by mass, so a light body does not vote as a heavy one', () => {
+    // An Era is 0.45 to a Con's 1. Both going one way still reads coherent,
+    // but the ceiling is (m1+m2)/sqrt(m1^2+m2^2) = 1.32, not sqrt(2): with
+    // unequal masses, chance alone already moves the centre further.
+    const { sim, bodies } = chain(2, ['era', 'con']);
+    for (const b of bodies) b!.vx = 10;
+    const d = measureDiversity(sim);
+    expect(d.netDrift!).toBeCloseTo(10, 9);
+    const m0 = bodies[0]!.mass;
+    const m1 = bodies[1]!.mass;
+    expect(d.netCoherence!).toBeCloseTo((m0 + m1) / Math.hypot(m0, m1), 6);
+    expect(d.netCoherence!).toBeLessThan(Math.SQRT2);
+  });
+
+  it('says nothing rather than zero when there is no net to measure', () => {
+    const params = defaultParams();
+    params.soupCount = 20;
+    params.spawnInterval = 0;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', params);
+    // A soup of singletons. Every body is its own component, its centre is
+    // itself and its coherence is 1 by construction, which would read as a
+    // pond full of perfectly coordinated nets.
+    const d = measureDiversity(sim);
+    expect(d.nets).toBe(0);
+    expect(d.netDrift).toBeNull();
+    expect(d.netCoherence).toBeNull();
+  });
+
+  it('lets the big net outvote the many pairs', () => {
+    // Size-weighted, like netFst: a statistic about nets should not be decided
+    // by whichever pairs latched this second.
+    const params = defaultParams();
+    params.spawnInterval = 0;
+    const sim = new Sim(1600, 1200, 128);
+    const big = [];
+    for (let i = 0; i < 8; i++) big.push(sim.spawn('con', 300 + i * 40, 400, 0, params, true)!);
+    for (let i = 1; i < 8; i++) {
+      sim.graph.attach({ id: big[i - 1]!.id, slot: 'l' }, { id: big[i]!.id, slot: 'r' }, 40, 0);
+    }
+    for (const b of big) b.vx = 100;
+    for (let p = 0; p < 3; p++) {
+      const a = sim.spawn('con', 300 + p * 120, 900, 0, params, true)!;
+      const b = sim.spawn('con', 340 + p * 120, 900, 0, params, true)!;
+      sim.graph.attach({ id: a.id, slot: 'l' }, { id: b.id, slot: 'r' }, 40, 0);
+    }
+    const d = measureDiversity(sim);
+    expect(d.nets).toBe(4);
+    // Eight bodies at 100 and six at rest: 8/14 of 100, not 1/4 of it.
+    expect(d.netDrift!).toBeCloseTo((8 / 14) * 100, 6);
+  });
+});

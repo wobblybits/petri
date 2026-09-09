@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { fixedParams } from './test-params.ts';
 import { boundRadius, portWorld, stemWorld, seedChem} from './agents.ts';
-import { defaultParams } from './params.ts';
 import { loadPreset } from './presets.ts';
 import { queryHit, SLOP } from './collide.ts';
 import { closestPointOnSegment, WIRE_RADIUS } from './geom.ts';
@@ -26,7 +26,7 @@ import { AGENT_BAND, WIRE_HAIRLINE_PX, WIRE_STROKE_PX, wiresDrawable } from './a
 const hairlineZoom = WIRE_HAIRLINE_PX / WIRE_STROKE_PX;
 
 function fastParams() {
-  const params = defaultParams();
+  const params = fixedParams();
   params.wireShrink = 0.08;
   params.wireMinRest = 40;
   params.rewriteDuration = 0.12;
@@ -50,7 +50,7 @@ describe('scent steering', () => {
   });
 
   it('does not mix an agent’s own principal channel', () => {
-    const params = defaultParams();
+    const params = fixedParams();
     // Kind now only seeds the weights; a body senses through its own genome.
     // mixScent reads through the body, because the weights are modulated by
     // its inner state; a bare genome is not enough to ask the question with.
@@ -72,7 +72,7 @@ describe('scent steering', () => {
     // not along its heading. Resolution-independent by construction.
     for (const kind of ['era', 'con', 'dup'] as const) {
       const sim = new Sim(240, 160);
-      const params = defaultParams();
+      const params = fixedParams();
       params.faceAttract = 0;
       params.snapWell = 0;
       params.snapRadius = 0;
@@ -116,7 +116,7 @@ describe('scent steering', () => {
      */
     for (const kind of ['era', 'con', 'dup'] as const) {
       const sim = new Sim(240, 160);
-      const params = defaultParams();
+      const params = fixedParams();
       params.faceAttract = 0;
       params.snapWell = 0;
       params.snapRadius = 0;
@@ -147,7 +147,7 @@ describe('scent steering', () => {
 
   it('does not self-propel when the principal port is latched', () => {
     const sim = new Sim(320, 200);
-    const params = defaultParams();
+    const params = fixedParams();
     params.flockAlign = 0;
     params.flockSep = 0;
     params.snapRadius = 0;
@@ -164,7 +164,7 @@ describe('scent steering', () => {
 
   it('pushes overlapping free agents apart', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.faceAttract = 0;
     params.snapWell = 0;
@@ -177,7 +177,7 @@ describe('scent steering', () => {
 
   it('pushes overlapping wired agents apart', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.faceAttract = 0;
     params.snapWell = 0;
@@ -192,7 +192,7 @@ describe('scent steering', () => {
 
   it('collision changes linear velocity', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.faceAttract = 0;
     params.snapWell = 0;
@@ -207,7 +207,7 @@ describe('scent steering', () => {
 
   it('a rope drapes around a visitor instead of cutting through it', () => {
     const sim = new Sim(320, 200);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.stepSpeed = 0;
     params.flockAlign = 0;
@@ -251,7 +251,7 @@ describe('scent steering', () => {
 describe('simulation presets', () => {
   it('seeds a soup with the configured agent count', () => {
     const sim = new Sim(480, 320);
-    const params = defaultParams();
+    const params = fixedParams();
     expect(params.spawnInterval).toBe(0.5);
     loadPreset(sim, 'soup', params);
     expect(sim.agents.size).toBe(params.soupCount);
@@ -259,7 +259,7 @@ describe('simulation presets', () => {
 
   it('steps a soup without throwing', () => {
     const sim = new Sim(480, 320);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.soupCount = 28;
     loadPreset(sim, 'soup', params);
@@ -270,7 +270,7 @@ describe('simulation presets', () => {
 
   it('auto-spawns a free agent about every ten seconds', () => {
     const sim = new Sim(400, 240);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 10;
     params.snapRadius = 0;
     params.maxAgents = 80;
@@ -294,7 +294,7 @@ describe('simulation presets', () => {
    */
   it('keeps a wired body audible, but stops its filled ports marking', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.decay = 0;
     params.diffuse = 0;
     params.deposit = 4;
@@ -318,7 +318,7 @@ describe('simulation presets', () => {
 
   it('starving agents still deposit from free ports', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.decay = 0;
     params.diffuse = 0;
     params.deposit = 4;
@@ -354,7 +354,7 @@ describe('simulation presets', () => {
 
   it('snap joins facing ports and only once', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 28;
     params.snapArc = 0.45;
     params.wireShrink = 20;
@@ -371,7 +371,7 @@ describe('simulation presets', () => {
 
   it('does not latch when snap reach is zero', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.rewriteDuration = 20;
     sim.spawn('era', 90, 80, 0, params, true);
@@ -382,7 +382,7 @@ describe('simulation presets', () => {
 
   it('starving agents still snap', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 28;
     params.snapArc = 0.45;
     params.wireShrink = 20;
@@ -401,7 +401,7 @@ describe('simulation presets', () => {
 
   it('does not snap ports that are close but not facing or touching', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 90;
     params.snapArc = 0.3;
     params.wireShrink = 20;
@@ -414,7 +414,7 @@ describe('simulation presets', () => {
 
   it('latches when free port tips touch even outside the snap arc', () => {
     const sim = new Sim(320, 200);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 40;
     params.snapArc = 0.12;
     params.wireShrink = 20;
@@ -479,7 +479,7 @@ describe('simulation presets', () => {
 
   it('tracks the mass-weighted center of all shapes', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     const a = sim.spawn('era', 0, 0, 0, params, true)!;
     const b = sim.spawn('era', 100, 0, 0, params, true)!;
     const com = sim.centerOfMass()!;
@@ -492,7 +492,7 @@ describe('simulation presets', () => {
 
 describe('conservative mechanics', () => {
   function passiveParams() {
-    const params = defaultParams();
+    const params = fixedParams();
     params.stepSpeed = 0;
     params.turnRate = 0;
     params.snapRadius = 0;
@@ -569,7 +569,7 @@ describe('conservative mechanics', () => {
 });
 
 function quietParams() {
-  const params = defaultParams();
+  const params = fixedParams();
   params.flockAlign = 0;
   params.flockSep = 0;
   params.snapRadius = 0;
@@ -936,7 +936,7 @@ describe('physics lod', () => {
 
   it('does not inflate a FAR wired pair whose stems sit inside the bound discs', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.faceAttract = 0;
     params.snapWell = 0;
@@ -957,7 +957,7 @@ describe('physics lod', () => {
 
   it('still separates overlapping agents when they are FAR', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.faceAttract = 0;
     params.snapWell = 0;
@@ -970,7 +970,7 @@ describe('physics lod', () => {
 
   it('does not emit Hertzian contacts for FAR pairs', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.faceAttract = 0;
     params.snapWell = 0;
@@ -983,7 +983,7 @@ describe('physics lod', () => {
 
   it('keeps Hertzian contacts when the same pair is NEAR', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.faceAttract = 0;
     params.snapWell = 0;
@@ -996,7 +996,7 @@ describe('physics lod', () => {
 
   it('stepAsync without a GPU device still separates FAR overlap', async () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.faceAttract = 0;
     params.snapWell = 0;
@@ -1009,7 +1009,7 @@ describe('physics lod', () => {
 
   it('does not change the no-view path: overlapping triangles still sit on SAT', () => {
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.faceAttract = 0;
     params.snapWell = 0;
@@ -1024,7 +1024,7 @@ describe('physics lod', () => {
 
   it('does not promote a whole chain because one end is on screen', () => {
     const sim = new Sim(2000, 200);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.spawnInterval = 0;
     params.stepSpeed = 0;
@@ -1142,7 +1142,7 @@ describe('physics lod', () => {
     // rope is under it, so the nodes go. Derived zoom: this test went stale
     // the first time the hairline threshold moved.
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.stepSpeed = 0;
     params.spawnInterval = 0;
@@ -1159,7 +1159,7 @@ describe('physics lod', () => {
   it('demotes bodies on apparent size, independently of the wire hairline', () => {
     const build = () => {
       const sim = new Sim(240, 160);
-      const params = defaultParams();
+      const params = fixedParams();
       params.snapRadius = 0;
       params.stepSpeed = 0;
       params.spawnInterval = 0;
@@ -1197,7 +1197,7 @@ describe('native mixed solve', () => {
   it('SAT still separates overlapping triangles with no view', async () => {
     expect(await nativeSolver.init(), nativeSolver.lastError).toBe(true);
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.faceAttract = 0;
     params.snapWell = 0;
@@ -1213,7 +1213,7 @@ describe('native mixed solve', () => {
   it('keeps Hertzian contacts when the same pair is NEAR', async () => {
     expect(await nativeSolver.init(), nativeSolver.lastError).toBe(true);
     const sim = new Sim(240, 160);
-    const params = defaultParams();
+    const params = fixedParams();
     params.snapRadius = 0;
     params.faceAttract = 0;
     params.snapWell = 0;
@@ -1247,7 +1247,7 @@ describe('native mixed solve', () => {
 describe('far zoom', () => {
   it('keeps poses and rest lengths finite when the camera is fully zoomed out', () => {
     const sim = new Sim(800, 600);
-    const params = defaultParams();
+    const params = fixedParams();
     params.upkeep = 0;
     params.spawnInterval = 0;
     params.soupCount = 28;
@@ -1359,6 +1359,7 @@ describe('transport recoil', () => {
       debtCap: EXTRA_FLOOR,
       rescueTo: 0.9,
       locked: false,
+      transportQuantum: 0,
       vx: 0,
       vy: 0,
       mass: 1,
@@ -1387,7 +1388,7 @@ describe('transport recoil', () => {
 
 describe('per-agent transport traits', () => {
   it("recoils by the sender's own transportRecoil and the receiver's own transportThrust", () => {
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.ambientEnergy = 0;
     params.upkeep = 0;
