@@ -45,6 +45,7 @@ export const METRICS: Record<string, string> = {
   commutes_per_latch_window: 'com/latch*',
   signal_total: 'signal',
   forage_ratio: 'forage',
+  forage_ratio_peak: 'forage^',
   commute_edge: 'comEdge',
   can_pay: 'canPay',
   free: 'free',
@@ -68,7 +69,7 @@ export interface TrialRow {
  */
 export function sweepTrials(db: PondDb, sweep: string): TrialRow[] {
   // Not a column: derived below from the last two samples. See its note.
-  const derived = new Set(['commutes_per_latch_window']);
+  const derived = new Set(['commutes_per_latch_window', 'forage_ratio_peak']);
   const cols = Object.keys(METRICS).filter((c) => !derived.has(c));
   const runs = db.db
     .prepare('SELECT id, seed, point FROM run WHERE sweep = ? ORDER BY id')
@@ -90,6 +91,20 @@ export function sweepTrials(db: PondDb, sweep: string): TrialRow[] {
   const window = db.db.prepare(
     'SELECT commutes, latches FROM sample WHERE run_id = ? ORDER BY t DESC LIMIT 2',
   );
+  /*
+   * The largest value anywhere in the run, for measures that are *transient*.
+   *
+   * The last sample is the wrong view of anything that happens and then stops.
+   * Foraging is exactly that: a patchy pond sits on 1.6x better ground than
+   * chance while its bodies are hungry, fills up over the next minute, and is
+   * back at parity by the end — so the closing reading says "no foraging" from
+   * a run that plainly foraged. A peak is the cheapest honest summary of a
+   * curve with a hump in it; the timeline itself is in `sample` for anything
+   * that needs the shape.
+   */
+  const peak = db.db.prepare(
+    'SELECT MAX(forage_ratio) AS v FROM sample WHERE run_id = ? AND t > 0',
+  );
   const out: TrialRow[] = [];
   for (const r of runs) {
     const row = last.get(r.id) as Record<string, unknown> | undefined;
@@ -99,6 +114,8 @@ export function sweepTrials(db: PondDb, sweep: string): TrialRow[] {
       const v = row[c];
       values[c] = v === null || v === undefined ? null : Number(v);
     }
+    const top = peak.get(r.id) as { v: number | null } | undefined;
+    values.forage_ratio_peak = top && top.v !== null ? Number(top.v) : null;
     const pair = window.all(r.id) as { commutes: number; latches: number }[];
     if (pair.length === 2) {
       const dLatch = Number(pair[0].latches) - Number(pair[1].latches);
