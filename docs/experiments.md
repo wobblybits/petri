@@ -21,6 +21,16 @@ npm run pond -- protocol forage-engages         # the real thing, at its seed bu
 npm run pond -- analyze --protocol forage-engages
 ```
 
+A protocol answers a question that is already sharp. When it is not — when
+what you have is nineteen dials and no idea which three matter — sample them
+instead and let the library say (§7):
+
+```bash
+npm run pond -- import ponds/*.db               # one library, not thirty-eight
+npm run pond -- sweep --name survey1 --random 120 --sample 'excreteRate=0..0.06,uptakeVmax=0..8,…'
+npm run pond -- explore                         # what moved together, and where it was conditional
+```
+
 ---
 
 ## 1. What went wrong, and the rule each failure became
@@ -266,7 +276,75 @@ variance.** Rules of thumb, from the CV table:
 
 ---
 
-## 7. Pipeline hazards
+## 7. Sampling instead of gridding
+
+A grid over two axes at five seeds spends thirty runs learning about two
+dimensions, and what it learns informs that grid and nothing else. Thirty
+draws over nineteen axes learn about nineteen — Bergstra and Bengio's
+argument, whose precondition is that only a few dimensions matter, which is
+what this pond keeps demonstrating: `excreteRate` explained 68 to 93 per cent
+of the variance in a sweep where `uptakeVmax` explained two to eight and was
+unresolved.
+
+The decisive practical difference is that draws **compose**. A grid point
+informs its own grid; a random draw joins every regression ever run over the
+library. Which is the whole reason the runs belong in one database — and
+`pond import a.db b.db …` is how the ones that did not get there.
+
+```
+pond sweep --name survey1 --random 120 --sample 'excreteRate=0..0.06,uptakeVmax=0..8,uptakeKs,…'
+pond explore                      # the whole library
+pond explore --name survey1       # one sweep of it
+```
+
+`--sample` takes bare keys, whose ranges come from `SLIDERS`, or `key=lo..hi`
+to override — and overriding is often right, because **a slider range is an
+assumption**. `learnDiscount` stops at 0.995, a 3.3-second horizon, when
+travel to a patch takes 5 to 12; a search bounded by the slider inherits the
+belief that the answer is inside it. Draws are a Latin hypercube (each axis
+cut into `count` bins, one draw per bin, bins shuffled independently), ranges
+spanning 10× with a floor above zero are drawn log-uniform, and an axis whose
+slider steps by 1 or more is a count and snaps — the sim floors
+`groundPatches`, so an unsnapped 5.2 would store a value that never ran.
+
+### What `explore` does, and what it cannot
+
+Four passes, none of them causal. This is a map of a library that was not
+designed as an experiment; its job is to say which experiment to run.
+
+| pass | question | blind to |
+|---|---|---|
+| joint PCA | what moves together at all, parameters and outcomes in one column space | direction; a component is a correlation, not a cause |
+| PLS | which directions link parameters **to** outcomes | the same |
+| k-means | what kinds of pond this makes, read back to what made them | anything the chosen outcomes do not measure |
+| conditional | where one dial changes what another means | main effects — that is the point |
+
+Only the last sees an interaction, and interactions are where this simulation
+keeps hiding things (§4). It splits the library at each parameter's median
+and correlates driver with outcome in each half; the `swing` is how much the
+correlation moved.
+
+Three behaviours worth knowing, each of which the first real library forced:
+
+- **A metric most of the library predates is dropped, loudly, rather than
+  dropping the library.** `fullMean` was added to `measureDiversity` after
+  those runs were made, and requiring it vetoed all thirty.
+- **Parameters that never moved apart fold into one named column**, printed
+  as `excreteRate~-senseScale~catCoSubstrate` (a `-` marks one that ran
+  backwards). A sweep that sets three dials together makes them one dial;
+  before this, every finding printed three times with the loading split three
+  ways.
+- **The setup goes in beside the parameters** — duration, founders, dish
+  cells. Runs in a library differ in all three, and a regression blind to
+  that credits whichever parameter moved alongside them.
+
+Read the noise floor it prints. With *n* runs, a loading below about
+1/√n is a coin; at 30 runs that is 0.18, which is most of what a small
+library will show you.
+
+---
+
+## 8. Pipeline hazards
 
 Things that produce a plausible wrong number rather than an error.
 

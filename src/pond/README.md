@@ -339,6 +339,55 @@ Two instances found the hard way in one afternoon, both now rows in it:
   and manufacture ground as they spread. Layouts seeded at equal mass ended 50%
   apart. The clean control for a layout question is `energyRegrow = 0`.
 
+## One library, not one file per question
+
+The runs from a single session once ended up in **thirty-eight separate
+database files**, one per question, and in the six largest of them 131 runs
+varied only 6 of the 80 parameters. That is the habit this format exists to
+break. A run in a file of its own informs the sweep it belonged to and
+nothing else; a run in the library joins every regression asked of it
+afterwards.
+
+```bash
+npm run pond -- import ponds/old/*.db      # fold them in; safe to repeat
+```
+
+Every imported run remembers where it came from as `file#id`, unique in the
+destination, so a second import of the same file does nothing and the command
+can be pointed at a directory whenever. Sources are opened **read-only** and
+columns are intersected per table, so a file written before `net_fst` existed
+imports without being migrated or damaged. Ids are remapped on the way in —
+`parent_run`, `parent_net`, and the `plant` rows that say which stored net
+seeded which run — and a file lands inside one transaction, because a
+half-import is worse than none: the origins of the runs that made it would
+make the next attempt skip them and strand their samples for good.
+
+## Sampling, and what `explore` reads back
+
+`--axis` crosses a grid. `--random n --sample a,b,c` draws a Latin hypercube
+instead, which is the right shape when the question is *which* dials matter:
+
+```bash
+npm run pond -- sweep --name survey1 --random 120 \
+  --sample 'excreteRate=0..0.06,uptakeVmax=0..8,uptakeKs,hillN,groundPatches=0..64,…'
+npm run pond -- explore                    # the whole library
+npm run pond -- explore --name survey1     # one sweep of it
+```
+
+Ranges come from `SLIDERS`, or `key=lo..hi` to override — and overriding is
+often right, because a slider range is an assumption. Points are seeded off
+the sweep's name, so re-running redraws the same points and a resumed sweep
+lines up with the rows already stored.
+
+`explore` runs four passes over whatever the library holds: a joint PCA with
+parameters and outcomes in one column space, a PLS across the blocks,
+k-means on the outcomes for the regimes, and a conditional screen — the only
+one of the four that sees an interaction. It prints its own noise floor
+(about 1/√n), folds parameters that never moved apart into one named column,
+and drops a metric most of the library predates rather than dropping the
+library. `docs/experiments.md` §7 is the account of what each pass can and
+cannot tell you.
+
 ## Protocols
 
 A sweep does not know what question it is asking. A **protocol**
