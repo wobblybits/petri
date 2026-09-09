@@ -173,9 +173,24 @@ function num(flags: Map<string, string>, key: string, fallback: number): number 
   return n;
 }
 
+/**
+ * The working tree a run came from — `9a3f21c`, or `9a3f21c+dirty`.
+ *
+ * The suffix matters more than it looks. A run row records the commit so the
+ * library can be read a month later, and an uncommitted edit to `src/` makes
+ * that hash a lie about what actually ran: a sweep once inherited
+ * `learnRate 0.02` and `learnDiscount 0.99` from a browser session someone
+ * was in the middle of, held them as constants across 120 trials, and
+ * recorded a commit where both were 0 and 0.95. The parameters are stored in
+ * full, so nothing was lost — but nothing said to go and look, either.
+ *
+ * Only `src/`, because a note or a plan edited mid-run changes no arithmetic.
+ */
 function gitCommit(): string | null {
   try {
-    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
+    const head = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
+    const dirty = execFileSync('git', ['status', '--porcelain', '--', 'src'], { encoding: 'utf8' }).trim();
+    return dirty ? `${head}+dirty` : head;
   } catch {
     return null;
   }
