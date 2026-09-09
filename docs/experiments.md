@@ -375,3 +375,43 @@ Things that produce a plausible wrong number rather than an error.
 - `matrix_drift` is not comparable across a genome-width change; the run row
   records `chem_len`.
 - A sweep applies `--set` uniformly. That is the mechanism behind §1.A.
+- **A sweep inherits its held constants from the working tree.** Whatever
+  `defaultParams()` says at the moment the process starts is what every trial
+  holds, so an edit someone is in the middle of becomes a constant across 120
+  runs. Pin anything a finding depends on with `--set` rather than trusting
+  the file, and read the run row's commit: `9a3f21c+dirty` means the hash does
+  not describe what ran.
+- **Turning a mechanism off can take more dials than it has a name.**
+  `grip = 0` is not locomotion off: `transportQuantum` at 0.5 changes the pond
+  on its own with grip at zero — measured, 183 bodies against 481 at 60
+  simulated seconds. Locomotion off is `grip=0 wireTug=0 transportQuantum=0`,
+  and with those and the pre-learning defaults HEAD reproduces `7a4086e`
+  bit-for-bit. Before using a dial as a control, check that zeroing it
+  actually restores the old pond.
+
+---
+
+## 9. What is in the library, and what pools with what
+
+`ponds/pond.db` holds every run. Pooling them is only valid where the
+simulation did not change underneath, and it changed twice in one day.
+
+| sweep | n | design | pond |
+|---|---|---|---|
+| `survey1` | 120 | 19 chemistry axes, sampled | learning off, no locomotion |
+| `survey2` | 120 | the same 19 axes | the same, plus the larval instrumentation |
+| `phys1` | 120 | 18 physics axes, sampled | the same, learning pinned off |
+| `chem3` | 120 | the 19 chemistry axes again | **learning on, locomotion on** |
+| `combo-old` / `combo-new` | 32 each | `wireShrink` × `spawnInterval`, 8 seeds | the two ponds, side by side |
+
+- **`survey1 + survey2` pool.** The commit between them added the larval
+  window, which is instrumentation: same seed, same pond, every column of
+  every sample bit-identical. Pass `--drop maxAgents` — `survey2` set a fuse
+  at 8000 that the peak population of 3788 never reached, so it is a label for
+  which sweep a run came from and not a parameter.
+- **`chem3` does not pool with them.** `learnCritic` 0.02 → 0.2, `learnTrace`
+  and `learnDiscount` 0.95 → 0.99, and locomotion shipped on. Read it as its
+  own 120-run sample of the newer pond.
+- **`explore` says so itself.** A parameter constant within every sweep and
+  different between them is named as a label rather than reported as a
+  finding; that is what catches this class.
