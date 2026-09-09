@@ -119,6 +119,24 @@ export class AgentStore {
   born!: Int32Array;
   lineage!: Int32Array;
   /**
+   * Simulated seconds at which this slot's body arrived, or `-1` once it has
+   * latched at least once.
+   *
+   * The larval-window question — does a body reach a net before its tank runs
+   * out — needs the age of a body that has never joined anything, and nothing
+   * else here records when a body began. Written once by `allocate` from
+   * `now`, which the Sim sets at the top of a frame, so no creation path has
+   * to be found and threaded: `createAgent`, a rewrite's children and a
+   * planted net all go through `allocate`. Read only when a body latches or
+   * dies. See `src/larval.ts`.
+   */
+  arrivedAt!: Float64Array;
+  /**
+   * The simulated time `allocate` stamps onto a new slot. The Sim owns the
+   * clock; this is the store's copy of it, set once a frame.
+   */
+  now = 0;
+  /**
    * Fraction of this body's ports that are attached, 0 to 1.
    *
    * Derived from the graph, cached here because `updateState` reads it per
@@ -370,6 +388,7 @@ export class AgentStore {
     }
     this.id[slot] = id;
     this.idToSlot.set(id, slot);
+    this.arrivedAt[slot] = this.now;
     return slot;
   }
 
@@ -429,6 +448,7 @@ export class AgentStore {
     this.csSin[slot] = 0;
     this.born[slot] = 0;
     this.lineage[slot] = 0;
+    this.arrivedAt[slot] = 0;
     this.bound[slot] = 0;
     this.hAll.fill(0, slot * STATE_W, slot * STATE_W + STATE_W);
     this.senseAll.fill(0, slot * SENSE_W, slot * SENSE_W + SENSE_W);
@@ -515,6 +535,7 @@ export class AgentStore {
     this.csSin = growF64(this.csSin);
     this.born = growI32(this.born);
     this.lineage = growI32(this.lineage);
+    this.arrivedAt = growF64(this.arrivedAt);
     this.bound = growF64(this.bound);
     const newH = new Float64Array(newCapacity * STATE_W);
     if (this.hAll) newH.set(this.hAll.subarray(0, live * STATE_W));

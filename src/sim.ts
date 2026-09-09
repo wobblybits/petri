@@ -60,6 +60,7 @@ import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
 import { CH, CHANNELS, FERTILISE_CH, FIELD_CELL, FIELD_CELLS, Fields, worldBoundRadius } from './fields.ts';
 import { Graph, ropeIsLive, wrapPos, type Wire } from './graph.ts';
+import { LarvalWindow } from './larval.ts';
 import type { Params } from './params.ts';
 import {
   advanceRewrite,
@@ -619,6 +620,32 @@ export class Sim {
    */
   static defaultFieldCells = FIELD_CELLS;
 
+  /**
+   * Time from arrival to first latch, and how many never got there.
+   *
+   * Cumulative over the run rather than per interval: a body that arrives
+   * late in a sample window and latches in the next one belongs to neither,
+   * and the question is about the population, not the minute.
+   */
+  readonly larval = new LarvalWindow();
+
+  /**
+   * A body's first wire, in the terms `larval` counts.
+   *
+   * `arrivedAt` doubles as the flag: `-1` means "has latched", so a body that
+   * detaches and re-latches is not counted twice. Only the first latch
+   * answers the larval question — after that the body has been fed by a net
+   * and its tank is no longer the clock.
+   */
+  private noteFirstLatch(id: number): void {
+    const slot = this.agentStore.slotFor(id);
+    if (slot === undefined) return;
+    const arrived = this.agentStore.arrivedAt[slot];
+    if (arrived < 0) return;
+    this.agentStore.arrivedAt[slot] = -1;
+    this.larval.latchedAfter(this.time - arrived);
+  }
+
   constructor(w: number, h: number, fieldCells = Sim.defaultFieldCells) {
     this.w = Math.max(1, w);
     this.h = Math.max(1, h);
@@ -628,6 +655,8 @@ export class Sim {
     this.graph = new Graph(this.agentStore);
     this.graph.onLatch = (ev) => {
       this.tally.latches++;
+      this.noteFirstLatch(ev.agentA);
+      this.noteFirstLatch(ev.agentB);
       audio.push(ev, this.graph, this.agents);
     };
     audio.contacts = this.contacts;
@@ -676,6 +705,10 @@ export class Sim {
     this.fields.clear();
     this.energy.clear();
     this.time = 0;
+    // A fresh store starts every slot at `arrivedAt = 0`, so the histogram
+    // has to go with it or the next pond's first latches are measured from
+    // the last pond's clock.
+    this.larval.reset();
     this.nextId = 1;
     this.rosterVersion++;
     this.worldPinned = false;
@@ -764,6 +797,8 @@ export class Sim {
   kill(id: number): void {
     const agent = this.agents.get(id);
     if (!agent) return;
+    const slot = this.agentStore.slotFor(id);
+    if (slot !== undefined && this.agentStore.arrivedAt[slot] >= 0) this.larval.diedAlone();
     this.energy.addAt(agent.x, agent.y, deathYield(agent, this.bodyValue));
     this.graph.detachAgent(id);
     this.agents.delete(id);
@@ -866,6 +901,9 @@ export class Sim {
   private beginFrame(dt: number, params: Params): number {
     const t = clamp(dt, 0, 0.05);
     this.time += t;
+    // The store stamps a new slot with this, so every creation path records
+    // an arrival without any of them having to be found. See `larval.ts`.
+    this.agentStore.now = this.time;
     this.trackHome(t);
     /*
      * One centre for the whole world grid, pinned once and never moved.

@@ -200,15 +200,25 @@ magnitude, not the value.
 | `full_mean` | mean tank fraction | last | — | 1.0 throughout means the economy is not in play |
 | `signal_p90`, `sense_read_p90` | p90 signal at bodies, raw and × `senseScale` | last | — | `sense_read_p90` far from ~1 means sense genes are out of `phi`'s range (§1.A) |
 | `locus_demand_h0`, `locus_self_00`, `locus_food_h0` | population means of three named genes: `Wx[0][DEMAND]`, `Wh[0][0]`, `T[food][0]` — the seeded foraging pathway and hunger memory | last | — | the Baldwin question is a claim about these, not about an aggregate |
+| **`latch_p50`**, `latch_p90` | **the larval window**: seconds from a body's arrival to its first latch | last | — | cumulative over the run, so `@last` is the whole population. Read against `tank_life`, never alone |
+| `loneliness` | share of arrivals that died having never latched | last | — | a rewrite consumes wired bodies, so this is starvation and collision |
+| `tank_life` | `EXTRA_CAP / upkeep`, the seconds a full tank buys | last | — | the scale `latch_p50` is compared to; null when `upkeep` is 0 |
 
 Summary modes: `last`, `peak`, `trough` (over `t > 0`), `mean` and `slope`
 (per simulated minute, over `t ≥ warmup`), `window` (change per second over
 the last sample interval). Any metric takes any mode: `net_fst@slope`,
 `bodies@trough`.
 
-Not yet measured and wanted: **time to first latch** against tank life (the
-larval-window question); the learned-weight norm on the GPU path at sample
-time (the host mirror is stale; only harvests drain it).
+**The larval window, and what it decides.** `yDirect = 0` is obligate trophic
+dependency: a body draws nothing from the ground and lives on what a net
+sends it. Whether that structures the soup or kills it is one comparison —
+`latch_p50` against `tank_life`. Well under, and a body reliably reaches a
+net before its tank runs out, so dependency is a pressure. Near or over, and
+dependency is a cull. `loneliness` is the same question asked of the tail.
+`docs/energy-chemistry-plan.md` §5 asks for this before `yDirect` moves far.
+
+Still not measured and wanted: the learned-weight norm on the GPU path at
+sample time (the host mirror is stale; only harvests drain it).
 
 ---
 

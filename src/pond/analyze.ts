@@ -132,6 +132,11 @@ export const METRICS: Record<string, MetricSpec> = {
   locus_demand_h0: js('$.diversity.loci.wDemandH0', 'Wx[0][DEM]'),
   locus_self_00: js('$.diversity.loci.wSelf00', 'Wh[0][0]'),
   locus_food_h0: js('$.diversity.loci.tFoodH0', 'T[food][0]'),
+  // The larval window. Read `latch_p50` against `tank_life`, not on its own.
+  latch_p50: js('$.diversity.latchP50', 'latchP50'),
+  latch_p90: js('$.diversity.latchP90', 'latchP90'),
+  loneliness: js('$.diversity.loneliness', 'alone'),
+  tank_life: js('$.diversity.tankLife', 'tankLife'),
 };
 
 /** `net_fst@slope` -> the metric and the fold it asks for. */

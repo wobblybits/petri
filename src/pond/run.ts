@@ -189,7 +189,7 @@ export async function runPond(
     }
 
     const samples: PondSample[] = [];
-    const take = (at: number): PondSample => ({ ...sampleSim(sim, at), diversity: measureDiversity(sim) });
+    const take = (at: number): PondSample => ({ ...sampleSim(sim, at), diversity: measureDiversity(sim, params) });
     const harvests: PondRunResult['harvests'] = [];
     const harvest = async (t: number, frame: number): Promise<void> => {
       /*

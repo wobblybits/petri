@@ -1,5 +1,7 @@
 import { CHEM_LEN, EMIT, IN_DEMAND, STATE_DIMS, TASTE, T_OUT, W_IN, W_SELF } from '../chem-layout.ts';
+import { EXTRA_CAP } from '../energy.ts';
 import { CH, CHANNELS } from '../fields.ts';
+import type { Params } from '../params.ts';
 import type { Sim } from '../sim.ts';
 
 /*
@@ -169,6 +171,25 @@ export interface Diversity {
    * random. Read off `chem`, which is the host's to write on every path.
    */
   loci: { wDemandH0: number; wSelf00: number; tFoodH0: number };
+  /**
+   * The larval window: how long a body is alone before it joins anything.
+   *
+   * Cumulative over the whole run rather than the last interval, so it is a
+   * property of the pond and not of the minute. `latchP50` against the tank
+   * life `EXTRA_CAP / upkeep` — about 83 s at the defaults — is the number
+   * that says whether obligate trophic dependency would structure this soup
+   * or kill it, which the plan asks for before `yDirect` moves far.
+   * `loneliness` is the share of arrivals that died having never latched.
+   */
+  latchP50: number | null;
+  latchP90: number | null;
+  loneliness: number | null;
+  /**
+   * Seconds of upkeep a full tank buys, at this run's `upkeep`. The scale
+   * `latchP50` has to be read against, recorded beside it because a reader a
+   * month later will not have the parameters to hand.
+   */
+  tankLife: number | null;
 }
 
 /** Grouped variance decomposition over a set of loci. Returns F_ST, or null. */
@@ -248,7 +269,11 @@ function fst(
 }
 
 /** Every measure above, off a live pond. Reads, never writes. */
-export function measureDiversity(sim: Sim): Diversity {
+/**
+ * `params` only to say what the larval window should be read against: the
+ * tank life is `EXTRA_CAP / upkeep`, and the upkeep is not on the Sim.
+ */
+export function measureDiversity(sim: Sim, params?: Params): Diversity {
   const store = sim.agentStore;
   const chem = store.chemAll;
   const comps = sim.graph.componentIds(sim.agents, sim.rosterVersion);
@@ -348,6 +373,7 @@ export function measureDiversity(sim: Sim): Diversity {
   const forageRatio = n > 0 && dishMean > 0 ? atBodies / n / dishMean : null;
 
   let signalTotal = 0;
+  const larval = sim.larval.read();
   const field = sim.fields.data;
   for (let k = 0; k < field.length; k += CHANNELS) {
     for (let c = 0; c < CHANNELS; c++) if (c !== CH.energy) signalTotal += field[k + c];
@@ -380,5 +406,9 @@ export function measureDiversity(sim: Sim): Diversity {
       wSelf00: n > 0 ? wSelf00 / n : 0,
       tFoodH0: n > 0 ? tFoodH0 / n : 0,
     },
+    latchP50: larval.p50,
+    latchP90: larval.p90,
+    loneliness: larval.loneliness,
+    tankLife: params && params.upkeep > 0 ? EXTRA_CAP / params.upkeep : null,
   };
 }
