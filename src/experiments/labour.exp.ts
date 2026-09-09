@@ -45,9 +45,29 @@ const SEGMENTS = Number(process.env.EXP_SEGMENTS ?? 8);
 const SECONDS = Number(process.env.EXP_SECONDS ?? 120);
 const SEEDS = [1, 2, 3];
 
+/**
+ * A body plan, as a share of expression per segment.
+ *
+ * `flat` is the seed and what an unevolved body actually is: every row at zero,
+ * which `expressVector` turns into an eighth each, so it pays for all eight
+ * rows and does every job badly.
+ *
+ * The other two are the real comparison, and getting to them meant fixing the
+ * first version of this experiment. With `excreteRate` at zero there is exactly
+ * **one** economically live row in the whole reaction table — the ground's
+ * uptake — so there is no labour to divide, and the only "specialist" a net can
+ * form is one body doing the job while the rest freeload. That is not a
+ * division of labour, it is a passenger list, and it is why the first
+ * specialist here was one mouth and seven inert segments.
+ *
+ * Turning on `excreteRate` and `fertilise` gives a second job that is genuinely
+ * worth doing: a body excreting the fertiliser channel makes the ground it
+ * stands on regrow faster, which is the mutualism `params.fertilise` was added
+ * for. Now there are two jobs, and the question is real.
+ */
 interface Plan {
   label: string;
-  specialist: boolean;
+  kind: 'flat' | 'generalist' | 'specialist';
 }
 
 interface Outcome {
@@ -59,7 +79,7 @@ interface Outcome {
   moved: number;
 }
 
-function run(plan: Plan, rowCost: number, hillN: number, seed: number): Outcome {
+function run(plan: Plan, rowCost: number, hillN: number, seed: number, fertilise = 3): Outcome {
   const realRandom = Math.random;
   Math.random = seededRandom(seed);
   try {
@@ -69,9 +89,26 @@ function run(plan: Plan, rowCost: number, hillN: number, seed: number): Outcome 
       uptakeVmax: 2,
       rowCost,
       hillN,
-      ambientEnergy: 1,
-      energyRegrow: 0.04,
+      /*
+       * Food-limited on purpose, and this had to be found the hard way. At the
+       * shipped ambient of 1 a cell holds two and a half tanks and every body
+       * sits pinned at cap — `meanExtra` 0.398 against a cap of 0.4 — so the
+       * ground is not the binding constraint and *nothing that increases the
+       * supply of ground can matter*. Measured: `fertilise` at 0, 3 and 12 gave
+       * byte-identical ponds. Half the specialist's bodies were doing a job
+       * worth exactly zero, so it losing proved only that.
+       *
+       * A quarter of a unit a cell against a body needing 0.9 over the trial
+       * puts the ground in charge, which is the only regime in which a second
+       * job exists to divide.
+       */
+      ambientEnergy: 0.25,
+      energyRegrow: 0.08,
       upkeep: 0.015,
+      // The second job. Without these the reaction table has one live row and
+      // there is nothing to divide.
+      excreteRate: 0.05,
+      fertilise,
     };
     const sim = new Sim(4000, 4000, 256);
     sim.pinWorld(2000, 2000, params);
@@ -86,7 +123,6 @@ function run(plan: Plan, rowCost: number, hillN: number, seed: number): Outcome 
     for (let i = 0; i < ids.length; i++) {
       const a = sim.agents.get(ids[i]!);
       if (!a) continue;
-      const isMouth = i === ids.length - 1;
       dress(a, {
         emit: {},
         taste: {},
@@ -114,7 +150,21 @@ function run(plan: Plan, rowCost: number, hillN: number, seed: number): Outcome 
          * since a body expressing literally nothing would take the flat
          * fallback and pay for all eight.
          */
-        ...(plan.specialist ? (isMouth ? { uptake: { energy: 1 } } : { uptake: { aux: 1 } }) : {}),
+        /*
+         * Two jobs: eat the ground, and fertilise it so it comes back faster.
+         * The generalist does both at half a share and pays for two rows; the
+         * specialist does one at a whole share and pays for one. Interleaved
+         * rather than split end to end, because fertiliser acts on the cell it
+         * lands in and a fertiliser at the far end of the worm would be
+         * manuring ground nobody is grazing.
+         */
+        ...(plan.kind === 'generalist'
+          ? { uptake: { energy: 1 }, excrete: { conP: 1 } }
+          : plan.kind === 'specialist'
+            ? i % 2 === 0
+              ? { uptake: { energy: 1 } }
+              : { excrete: { conP: 1 } }
+            : {}),
       });
     }
     const dt = 1 / 60;
@@ -133,8 +183,8 @@ function run(plan: Plan, rowCost: number, hillN: number, seed: number): Outcome 
   }
 }
 
-function mean(plan: Plan, rowCost: number, hillN: number): Outcome {
-  const runs = SEEDS.map((s) => run(plan, rowCost, hillN, s));
+function mean(plan: Plan, rowCost: number, hillN: number, fertilise = 3): Outcome {
+  const runs = SEEDS.map((s) => run(plan, rowCost, hillN, s, fertilise));
   const avg = (f: (o: Outcome) => number) => runs.reduce((a, o) => a + f(o), 0) / runs.length;
   return {
     meanExtra: avg((o) => o.meanExtra),
@@ -154,8 +204,9 @@ function table(title: string, rows: { label: string; o: Outcome }[]): void {
   }
 }
 
-const GENERALIST: Plan = { label: 'generalist', specialist: false };
-const SPECIALIST: Plan = { label: 'specialist', specialist: true };
+const FLAT: Plan = { label: 'flat (the seed)', kind: 'flat' };
+const GENERALIST: Plan = { label: 'generalist', kind: 'generalist' };
+const SPECIALIST: Plan = { label: 'specialist', kind: 'specialist' };
 
 describe('experiment: can division of labour pay?', () => {
   it('checks the two plans differ at all before reading anything into them', () => {
@@ -169,6 +220,7 @@ describe('experiment: can division of labour pay?', () => {
     const g = mean(GENERALIST, 0, 1);
     const s = mean(SPECIALIST, 0, 1);
     table('null control, neutral dials', [
+      { label: 'flat (the seed)', o: mean(FLAT, 0, 1) },
       { label: 'generalist', o: g },
       { label: 'specialist', o: s },
     ]);
@@ -179,11 +231,42 @@ describe('experiment: can division of labour pay?', () => {
     console.log(differ ? '\n  OK: the plans are distinguishable.' : '\n  DEAD INSTRUMENT: identical.');
   });
 
-  it('sweeps the two superadditivity dials', () => {
+  it('checks the second job is worth doing at all', () => {
+    /*
+     * The control the fair-champion comparison depends on, and the one whose
+     * absence would void it. A specialist net puts half its bodies on
+     * fertilising; if fertilising is worth nothing then half of it is idle by
+     * construction and losing proves only that. So: does the fertiliser
+     * channel actually buy anything? Run the same plans with `fertilise` off
+     * and on, and read the difference.
+     *
+     * If the two columns match, the second job is a fiction and the whole
+     * division-of-labour question has not been asked yet.
+     */
+    for (const plan of [FLAT, GENERALIST, SPECIALIST]) {
+      table(`${plan.label}: does fertilising pay?`, [
+        { label: '  fertilise 0', o: mean(plan, 0, 1, 0) },
+        { label: '  fertilise 12', o: mean(plan, 0, 1, 12) },
+        { label: '  fertilise 200', o: mean(plan, 0, 1, 200) },
+        { label: '  fertilise 5000', o: mean(plan, 0, 1, 5000) },
+      ]);
+    }
+  });
+
+  it('sweeps the row cost finely, against a fair champion', () => {
+    /*
+     * Finely, and with `alive` beside the tank, because the first pass found
+     * the crossover sitting at the top of the slider in a region where *both*
+     * plans were collapsing — the specialist mostly won by dying less. What
+     * matters is whether there is a cost at which specialisation pays while
+     * the economy still works, and that needs resolution between 0.01 and 0.02
+     * rather than a jump across it.
+     */
     for (const hillN of [1, 2]) {
       table(
         `hillN ${hillN}`,
-        [0, 0.005, 0.01, 0.02].flatMap((rowCost) => [
+        [0, 0.005, 0.01, 0.0125, 0.015, 0.02].flatMap((rowCost) => [
+          { label: `  rowCost ${rowCost} flat`, o: mean(FLAT, rowCost, hillN) },
           { label: `  rowCost ${rowCost} generalist`, o: mean(GENERALIST, rowCost, hillN) },
           { label: `  rowCost ${rowCost} specialist`, o: mean(SPECIALIST, rowCost, hillN) },
         ]),

@@ -1,86 +1,101 @@
 # Can division of labour pay?
 
-Measured 2026-09-09 with `src/experiments/labour.exp.ts`, eight Con segments,
-three seeds, sixty simulated seconds.
+Measured 2026-09-09 with `src/experiments/labour.exp.ts`. Eight Con segments in
+a chain, three seeds, sixty simulated seconds.
 
 Everything the worm work has built — a mouth feeding a chain through its wires,
 a polarised body plan, obligate trophic dependency — is *buildable*. Whether it
 is **reachable by selection** is a different question, and
-`docs/energy-chemistry-plan.md` §3 already answers it in the abstract:
-specialisation beats splitting only when `f(1) > 2·f(1/2)`, and a linear budget
-against a concave payoff puts the optimum in the interior. The expression
-simplex is that linear budget and Monod saturation is that concave payoff. So
-the prediction is that every body becomes a generalist unless something buys
-the superadditivity back, and the plan ships two candidates at neutral:
-`rowCost`, a fixed price per expressed row, and `hillN`, which makes uptake
-convex at low density.
+`docs/energy-chemistry-plan.md` §3 answers it in the abstract: specialisation
+beats splitting only when `f(1) > 2·f(1/2)`, and a linear budget against a
+concave payoff puts the optimum in the interior. The expression simplex is that
+budget; Monod saturation is that payoff. The plan ships two candidate sources
+of the missing superadditivity at neutral — `rowCost`, a fixed price per
+expressed row, and `hillN`, which makes uptake convex at low density.
 
-## The two plans
+## The answer
 
-**Generalist** — every segment at the seed, which `expressVector` turns into a
-flat eighth on all eight rows. Every segment eats from its own cell and pays
-`rowCost` eight times over.
+**Division of labour does not pay here, at any setting either dial can take.**
 
-**Specialist** — one mouth expressing the ground's uptake row alone, so it draws
-at eight times the rate; every other segment expresses a single inert row and
-must be fed through the wires. One row a body.
+The generalist wins at every `rowCost` from 0 to 0.02 and at both `hillN` 1 and
+2 — and `hillN` 2 makes the specialist *worse*, not better, which is the
+opposite of what it was added for.
 
-Fitness proxy is the mean tank across surviving bodies, with the body count
-beside it because a plan that cannot feed itself loses its far end rather than
-merely thinning.
+| hillN 1 | rowCost 0 | 0.005 | 0.01 | 0.0125 | 0.015 | 0.02 |
+|---|---|---|---|---|---|---|
+| generalist | **0.398** | **0.398** | **0.394** | **0.390** | **0.385** | **0.364** |
+| specialist | 0.367 | 0.367 | 0.364 | 0.358 | 0.348 | 0.317 |
 
-## Result
+It still wins when the second job is made enormously valuable: at `fertilise`
+5000 the generalist reaches 0.345 against the specialist's 0.122.
 
-| | rowCost 0 | 0.005 | 0.01 | 0.02 |
+The reason is in the `moved` column, which is 0.00 for every generalist run and
+33 to 1,900 for the specialists. **A generalist net never has to move anything.**
+Splitting jobs across bodies forces energy through the wires, and transport is
+lossy in the way that counts: a body waiting for a delivery is a body that is
+short in the meantime. That cost is structural and no row-count saving covers
+it — the biggest saving on offer is 2 rows against 1.
+
+## Two earlier versions of this were wrong, and how
+
+**The first crossover was an artifact of an unfair champion.** With
+`excreteRate` at zero there is exactly *one* economically live row in the whole
+reaction table — the ground's uptake — so there is no labour to divide, and the
+only "specialist" a net can form is one body doing the job while seven
+freeload. That is a passenger list. Against a generalist paying for all eight
+rows it is a 8× row-cost saving, which is not what division of labour costs,
+and it produced an apparent crossover at `rowCost` 0.02. A real two-job split
+pays 1 row against 2, and there is no crossover at all.
+
+**The second version measured a job worth nothing.** Turning on `excreteRate`
+and `fertilise` gives a genuine second job — a body excreting the fertiliser
+channel makes the ground it stands on regrow faster. But at the shipped
+ambient of 1 a cell holds two and a half tanks and every body sits pinned at
+cap (`meanExtra` 0.398 against a cap of 0.4), so the ground is not the binding
+constraint and nothing that increases the supply of ground can matter.
+Measured, `fertilise` at 0, 3 and 12 gave byte-identical ponds. Half the
+specialist's bodies were doing a job worth exactly zero.
+
+The trial now runs food-limited, at a quarter of a unit a cell against a body
+needing 0.9 over the trial.
+
+## A calibration finding worth having on its own
+
+**`fertilise` does nothing across its entire slider range.** Its useful values
+are about three orders of magnitude above where it ships:
+
+| fertilise | 0 | 12 | 200 | 5000 |
 |---|---|---|---|---|
-| **hillN 1** generalist | **0.400** (8) | **0.399** (8) | **0.398** (8) | −0.085 (5.0) |
-| **hillN 1** specialist | 0.295 (8) | 0.285 (8) | 0.241 (8) | **−0.038** (6.3) |
-| **hillN 2** generalist | **0.400** (8) | **0.397** (8) | −0.133 (0.7) | −0.200 (6.3) |
-| **hillN 2** specialist | 0.244 (8) | 0.138 (8) | **−0.018** (6.0) | **+0.029** (5.7) |
+| generalist | 0.127 | 0.127 | 0.132 | **0.345** |
 
-**At the shipped dials the generalist wins outright**, at every seed, with full
-tanks against the specialist's 0.295. The plan's argument holds: division of
-labour is not reachable at `rowCost = 0, hillN = 1`, so a hand-built polarised
-worm is a thing this simulation can be shown and not a thing it can find.
-
-Both dials buy the crossover and they compound — `hillN` 2 halves the
-`rowCost` needed, from 0.02 to 0.01. So the mechanism the plan proposed does
-work.
-
-## The caveat that matters
-
-**The crossover is at the edge of the economy, not inside it.** `rowCost` 0.02
-is the top of its slider, and at the settings where the specialist wins both
-plans are in collapse — negative tanks, bodies dying. The specialist mostly
-wins by dying less. There is exactly one cell in the table where it is actually
-solvent while the generalist is not: `hillN` 2 with `rowCost` 0.02, at +0.029
-against −0.200.
-
-So division of labour is reachable, but only in a narrow band near the point
-where the pond stops working, and the defaults sit firmly in the generalist
-regime. Widening that band — a cheaper row cost that still buys
-superadditivity, or a third source of it — is a balance question the plan does
-not answer.
+The slider runs to 8. The mechanism is connected and correct — it is the
+scaling that is off, because a body's excreted density is tiny against a
+multiplier applied to an already-small growth rate. Anyone turning `fertilise`
+up to look for mutualism will see nothing and conclude the idea does not work.
 
 ## What this does not show
 
-A hand-built comparison of two fixed plans says which the economy *favours*,
-not that selection would *find* it: there is no reproduction here and no
-mutation between the two. The specialist design is also crude — one mouth and
-seven inert segments — so it is a lower bound on what a polarised body could
-manage rather than a fair representative of one. And in the crossover region
-the comparison is between two failing designs, which is a weaker claim than a
-crossover between two working ones.
+It is a hand-built comparison of fixed plans: it says which the economy
+*favours*, not that selection would *find* it. There is no reproduction and no
+mutation between the two. It is one topology (a chain), one length, and one
+pair of jobs. A body plan where the two jobs are spatially interleaved more
+tightly than a 48-unit segment spacing allows, or where the second job's
+product does not have to diffuse to be useful, might change the transport
+arithmetic that decides it.
+
+What would settle it properly is reproduction: let the pond breed with
+`rowCost` and `hillN` non-zero and see what expression profile the survivors
+actually carry. That needs commutes, which needs active pairs, which a stable
+worm by construction does not have.
 
 ## Reproducing
 
 ```bash
 npm run experiment -- labour
-EXP_SECONDS=120 EXP_SEGMENTS=12 npm run experiment -- labour
 ```
 
-Note the tank sizing. At the shipped cap of 1.25 against an upkeep of 0.015 a
-body takes 83 s just to reach break-even, and a first pass at 60 s read `moved`
-0.00 for both plans — the specialist's segments had not yet gone short, so
-nothing had asked and no transport had happened. The trial caps tanks at 0.4 so
-the run measures a steady state rather than the drain down to one.
+The null control runs first and on purpose. Four times in this work a "nothing
+happened" result has been a disconnected instrument rather than a fact about
+the pond, and each time the tell was a control that should have differed and
+did not. Here it caught two: the tank sizing that had both plans coasting on
+the energy they were built with, and the fertiliser job that was worth nothing.
