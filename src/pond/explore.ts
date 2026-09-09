@@ -57,6 +57,24 @@ export function matrix(rows: number[][], names: string[]): Matrix {
  * eigenvalue of zero, and it makes the output long enough that the six things
  * that did vary are hard to find in it.
  */
+/**
+ * Whether a column carries a real spread, or only floating-point dust.
+ *
+ * Relative, because an absolute floor is wrong at both ends. A constant
+ * column is rarely exactly constant: nine identical doubles summed and
+ * divided by nine need not give the double back, and the residue scales with
+ * the magnitude — dust on `maxAgents` at 100000 is around 1e-11, which any
+ * fixed 1e-12 floor waves through as signal.
+ *
+ * This project has now produced three confident numbers from that residue:
+ * an eta-squared of 1.0 for a metric defined as a constant, a "the dropped
+ * runs differ" warning naming three parameters that had not moved, and a
+ * standardised column of pure noise waiting to happen on the wide dials.
+ */
+export function varies(mean: number, sd: number): boolean {
+  return sd > Math.max(Math.abs(mean), 1) * 1e-12;
+}
+
 export function standardise(m: Matrix): Matrix {
   const keep: number[] = [];
   const mean: number[] = [];
@@ -71,7 +89,7 @@ export function standardise(m: Matrix): Matrix {
       v += d * d;
     }
     const sigma = Math.sqrt(v / m.rows);
-    if (sigma > 1e-12) {
+    if (varies(mu, sigma)) {
       keep.push(j);
       mean.push(mu);
       sd.push(sigma);

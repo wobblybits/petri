@@ -8,6 +8,7 @@ import {
   pca,
   pls,
   standardise,
+  varies,
 } from './explore.ts';
 
 /*
@@ -280,5 +281,24 @@ describe('conditional effects', () => {
     }
     const found = conditionalEffects(standardise(matrix(px, ['driver', 'other'])), standardise(matrix(py, ['y'])));
     expect(found[0].swing).toBeLessThan(0.25);
+  });
+});
+
+describe('telling a spread from floating-point dust', () => {
+  it('scales with the column, because an absolute floor is wrong at both ends', () => {
+    // Nine identical doubles summed and divided by nine need not give the
+    // double back, and the residue grows with the magnitude.
+    expect(varies(1.25 / 0.015, 1e-14)).toBe(false);
+    expect(varies(100000, 1e-11)).toBe(false);
+    // Small columns are not held to a large absolute floor either: a rate
+    // that really does move by 1e-9 has moved.
+    expect(varies(0.0001, 1e-9)).toBe(true);
+    expect(varies(0, 0)).toBe(false);
+  });
+
+  it('keeps a constant column out of the standardised matrix at any magnitude', () => {
+    const rows = Array.from({ length: 9 }, (_, i) => [100000, 83.33333333333333, i]);
+    const m = standardise(matrix(rows, ['maxAgents', 'tankLife', 'real']));
+    expect(m.names).toEqual(['real']);
   });
 });

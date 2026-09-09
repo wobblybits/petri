@@ -8,6 +8,7 @@ import {
   pca,
   pls,
   standardise,
+  varies,
   type Conditional,
   type Matrix,
 } from './explore.ts';
@@ -141,6 +142,25 @@ export function exploreLibrary(db: PondDb, opts: ExploreOptions = {}): ExploreRe
       `${trials.length - keep.length} of ${trials.length} runs dropped for missing metrics: ` +
         cost.map((e) => `${e.k} (${e.n})`).join(', '),
     );
+    /*
+     * And say whether they were a random third. A null is usually a pond that
+     * did not do the thing — `commutes_per_latch` is null when nothing
+     * latched in the window — so the runs a metric costs are exactly the ones
+     * where some parameter pushed the pond into silence. Dropping them
+     * quietly restricts the sample to ponds that worked, and every loading
+     * below is then conditional on that.
+     *
+     * Measured once, on `phys1`: one metric cost 36 per cent of the runs, and
+     * the first principal component came back with its signs reversed.
+     */
+    const lost = trials.filter((t) => !live.every((k) => has(t, k)));
+    for (const b of biases(keep, lost)) {
+      notes.push(
+        `the dropped runs were not a random sample: ${b.name} averages ${fmt(b.lostMean)} in them ` +
+          `against ${fmt(b.keptMean)} in the rest (${b.d.toFixed(1)} sd apart), ` +
+          'so everything below is conditional on that',
+      );
+    }
   }
 
   const empty: ExploreReport = {
@@ -278,6 +298,30 @@ export function exploreLibrary(db: PondDb, opts: ExploreOptions = {}): ExploreRe
 }
 
 /**
+ * Parameters on which the dropped runs differ from the kept ones by half a
+ * standard deviation or more — the shape of a sample that is no longer random.
+ */
+function biases(
+  kept: TrialRow[],
+  lost: TrialRow[],
+): { name: string; keptMean: number; lostMean: number; d: number }[] {
+  if (kept.length < 4 || lost.length < 4) return [];
+  const out = [];
+  const mean = (xs: number[]): number => xs.reduce((p, q) => p + q, 0) / xs.length;
+  for (const name of Object.keys(kept[0].params ?? {})) {
+    const a = kept.map((t) => t.params?.[name] ?? 0);
+    const b = lost.map((t) => t.params?.[name] ?? 0);
+    const all = [...a, ...b];
+    const m = mean(all);
+    const sd = Math.sqrt(all.reduce((p, q) => p + (q - m) * (q - m), 0) / all.length);
+    if (!varies(m, sd)) continue;
+    const d = Math.abs(mean(a) - mean(b)) / sd;
+    if (d >= 0.5) out.push({ name, keptMean: mean(a), lostMean: mean(b), d });
+  }
+  return out.sort((x, y) => y.d - x.d).slice(0, 4);
+}
+
+/**
  * Collapse parameters that never moved independently into one column.
  *
  * A sweep that sets three dials together at every point makes them one dial
@@ -328,6 +372,8 @@ const round = (v: number): string => {
   const d = Math.max(0, 3 - Math.floor(Math.log10(Math.abs(v))) - 1);
   return Number(v.toFixed(Math.min(d, 6))).toString();
 };
+
+const fmt = (v: number): string => round(v);
 
 const sig = (v: number): string => (v >= 0 ? '+' : '-') + Math.abs(v).toFixed(2);
 const list = (l: Loading[], none: string): string =>

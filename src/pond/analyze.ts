@@ -1,4 +1,5 @@
 import type { PondDb } from './db.ts';
+import { varies } from './explore.ts';
 
 /*
  * The reading half of a sweep.
@@ -468,10 +469,11 @@ export function effects(trials: TrialRow[], metrics?: string[]): Effect[] {
        * `ssBetween / ssTotal` over that noise is a ratio of two rounding
        * errors, which came out as **1.0 at the top of the effect table** for
        * `tank_life`, a metric defined as a constant over a held `upkeep`.
-       * Nothing about it is wrong except that it is not an answer.
+       * Nothing about it is wrong except that it is not an answer. `varies`
+       * is the shared predicate — this was the first of three places to need
+       * it, and the third was found by the second.
        */
-      const scale = Math.max(Math.abs(grand.mean), 1e-12);
-      if (!(grand.sd > scale * 1e-9)) continue;
+      if (!varies(grand.mean, grand.sd)) continue;
       let ssBetween = 0;
       let noise = 0;
       let low = { level: 0, mean: Infinity };
