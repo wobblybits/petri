@@ -5752,8 +5752,11 @@ export class Sim {
     if (params.transportSpeed > 0) spreadRequestsWave(list, this.agentStore, adj, dt);
     else spreadRequestsFast(list, this.agentStore, adj);
     Sim.phase('pulse:spread');
-    this.tally.moved += flowChargesFast(list, this.agentStore, adj, () => {
+    this.tally.moved += flowChargesFast(list, this.agentStore, adj, (from, to, amount) => {
       this.tally.hops++;
+      if (params.transportRecoil > 0) {
+        applyTransportRecoil(from, to, amount, params.transportRecoil, this.w, this.h);
+      }
     });
     Sim.phase('pulse:flow');
     this.updateState(list, adj, params);
@@ -6706,6 +6709,55 @@ export class Sim {
     }
     if (done.length) this.rewrites = this.rewrites.filter((rw) => !done.includes(rw));
   }
+}
+
+/**
+ * A charge crossing a wire shoves its two ends apart along it.
+ *
+ * **A stopgap, and labelled as one.** Deleting this along with the momentum
+ * pump it was tangled up with left the pond visibly stiff and settled, which
+ * `experiments` measured as wires per body going from 0.57 to 1.02 over a 45 s
+ * soup at the shipped defaults. It is back so the dish is usable while the
+ * real mechanism is worked out; it is not the real mechanism.
+ *
+ * What is genuinely fixed here is the momentum. The version this replaces had
+ * a `transportThrust` gene deciding how much of the sender's kick the receiver
+ * cancelled, so above zero the pair kept a net impulse and a net could swim by
+ * moving matter around inside itself. It cannot: an internal transfer creates
+ * no momentum. The gene is gone, the cancellation is not optional, and the
+ * gain is a constant of the medium rather than something selection can pin.
+ *
+ * What is *not* right is the shape of the idea. Transport is movement — matter
+ * going from one place to another along a path — and the wire is that path, so
+ * the wire's length is the distance travelled. Modelling that as an
+ * instantaneous force pair at the two ends is a way of not modelling the
+ * movement at all, and the structural turnover it happens to produce (a kick
+ * stretches a wire, `snapTautWires` tears the taut ones) is an accident rather
+ * than a design. A pond should not depend on its plumbing for its structural
+ * turnover. The direction being explored instead is transport acting on wire
+ * length directly, which would also retire `wireBreathe` — a global sinusoid
+ * applied to every rest length whose own comment concedes that without it "a
+ * settled net freezes".
+ */
+export function applyTransportRecoil(
+  A: { x: number; y: number; vx: number; vy: number; mass: number; locked: boolean },
+  B: { x: number; y: number; vx: number; vy: number; mass: number; locked: boolean },
+  amount: number,
+  gain: number,
+  w: number,
+  h: number,
+): void {
+  if (A.locked || B.locked || !(amount > 0) || !(gain > 0)) return;
+  const d = wrapDeltaVec(A.x, A.y, B.x, B.y, w, h);
+  const dist = Math.hypot(d.x, d.y);
+  if (!(dist > 1e-6)) return;
+  const p = gain * amount;
+  const nx = d.x / dist;
+  const ny = d.y / dist;
+  A.vx -= (nx * p) / Math.max(0.08, A.mass);
+  A.vy -= (ny * p) / Math.max(0.08, A.mass);
+  B.vx += (nx * p) / Math.max(0.08, B.mass);
+  B.vy += (ny * p) / Math.max(0.08, B.mass);
 }
 
 /** Move the closest point on polyline segment `seg` by (ux, uy). Stems stay put. */

@@ -623,6 +623,22 @@ export interface Params {
    */
   jointStiff: number;
   /**
+   * How hard a charge crossing a wire shoves its two ends apart, per unit
+   * moved. 0 = transport is mechanically silent.
+   *
+   * A parameter of the medium rather than a gene, which is the difference
+   * between this and the version it replaces. As a heritable gain it was free —
+   * it bought impulse without consuming anything — so selection scored on
+   * distance would pin it at its clamp; and since the kick is now equal and
+   * opposite it cannot produce net thrust for selection to score at all.
+   *
+   * **Reinstated as a stopgap.** Removing it left the pond stiff and settled —
+   * wires per body 0.57 to 1.02 over a 45 s soup — and the dish has to be
+   * usable meanwhile. See `applyTransportRecoil` for why the shape of the idea
+   * is still wrong and what is meant to replace it.
+   */
+  transportRecoil: number;
+  /**
    * Normal drag over tangential drag. **1 is isotropic**, which is what this
    * sim has always been, and 2 is roughly what resistive-force theory gives a
    * slender body in a viscous medium. `drag` stays the tangential coefficient,
@@ -785,6 +801,7 @@ export function defaultParams(): Params {
     eraUpkeepRatio: ERA_UPKEEP_RATIO,
     excreteRate: 0,
     transportSpeed: 0,
+    transportRecoil: 100,
     dragAniso: 1,
     jointStiff: 0,
     bendCost: 0,
@@ -876,6 +893,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'eraUpkeepRatio', label: 'Era upkeep ratio', min: -1, max: 2, step: 0.05 },
   { key: 'excreteRate', label: 'Excrete rate', min: 0, max: 2, step: 0.02 },
   { key: 'transportSpeed', label: 'Conduction speed', min: 0, max: 60, step: 0.5 },
+  { key: 'transportRecoil', label: 'Transport recoil', min: 0, max: 200, step: 5 },
   { key: 'dragAniso', label: 'Drag anisotropy', min: 0.25, max: 4, step: 0.05 },
   { key: 'jointStiff', label: 'Joint rigidity', min: 0, max: 1, step: 0.02 },
   { key: 'bendCost', label: 'Bend cost', min: 0, max: 0.4, step: 0.005 },
