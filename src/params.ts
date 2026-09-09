@@ -253,55 +253,31 @@ export interface Params {
    * in fullness across a wire, and `full_mean` at 1.0 says there is none.
    * Read `demand_mean` before reading `net_drift`.
    *
+   * With `transportRecoil` this is now the whole of locomotion, and the two
+   * together need no phase. A recoil is an impulse pair; grip makes the two
+   * ends coast different distances from it, so the pair's centre ends up
+   * `|p| * (1/k_sender - 1/k_receiver) / (m_sender + m_receiver)` along the
+   * sender's recoil — first order in the impulse, and settled per transfer
+   * rather than per cycle.
+   *
+   * A contracting wire was built beside it and withdrawn. `wireTug` shortened
+   * the wire a transfer had just crossed and `wireTugTau` relaxed it again,
+   * which reads like an inchworm and is not one: both the pull and the grip
+   * were driven by the same packet at the same instant and then decayed, so
+   * the loop they traced in (length, grip) closed on a line and its area was
+   * only whatever the difference between two relaxation times left behind.
+   * A gait needs two degrees of freedom with a phase between them that
+   * something can *set*; a packet clock plus two exponentials is one degree
+   * of freedom and a race. It also spent the wire's rest length, which is
+   * what decides whether two bodies ever meet — turned up far enough to swim
+   * it held every pair too tight to rewrite. See `docs/concepts.md`.
+   *
    * Global for now, unlike `transportThrust` and `transportRecoil` beside it,
    * which are heritable. Making a lineage's own grip heritable is the obvious
    * next move and costs a genome head; it is worth spending once a sign is
    * known to carry a net at all.
    */
   grip: number;
-  /**
-   * How far a wire shortens when energy has just crossed it, as a fraction of
-   * its rest length. 0 = the wire ignores what flows through it, which is the
-   * pond as it was.
-   *
-   * `grip` decides which end of a pair is anchored; this is what actually
-   * takes the step. A transfer shortens the wire in proportion to what
-   * crossed, as a fraction of a tank at the receiving end, and the body that
-   * just sent is the empty one, so it is the one that slides: the pair steps
-   * toward the receiver. Then the wire relaxes at `wireTugTau` while the gradient
-   * rebuilds and the roles swap back, and the next step goes the same way.
-   * Sender adheres, pulls, releases; receiver floats, is pulled, adheres.
-   * That is an inchworm, and it is the first thing here that is one.
-   *
-   * The lag matters more than the depth. A shape that is a memoryless
-   * function of the same fullness `grip` reads is locked in phase with it,
-   * the cycle encloses no area in configuration space, and Purcell's scallop
-   * theorem says it goes nowhere however hard it works — which is why
-   * `Wire.tug` is a stored number that relaxes rather than a formula over the
-   * two tanks. It is a spring's memory and not a difference being erased.
-   *
-   * This is also what `docs/concepts.md` already asks of Shape: tension held
-   * by energy flowing along a wire, so a net that moves no energy is slack.
-   * That heading said stiffness; this moves the rest length, which is the
-   * other half of the same tension and the half a rewrite already uses to
-   * haul its ends together — see `Wire.collapse`.
-   *
-   * Floored at a quarter of the rest length in `syncRest`: a wire that pulls
-   * its ends into contact is a rewrite, and this is not one.
-   */
-  wireTug: number;
-  /**
-   * Seconds for a wire's tug to relax, and therefore the stroke's phase.
-   *
-   * The one dial the mechanism is actually sensitive to. Too fast and the
-   * wire is back at rest before `grip` has noticed which end is full, so
-   * there is no lag and nothing swims. Too slow and the wire never lets go,
-   * which is an anchor rather than a stroke — the same failure `grip` at 100
-   * shows on its own. It wants to sit near the interval between packets,
-   * which `transportQuantum` sets, so the two are coupled and the couplings
-   * table says so.
-   */
-  wireTugTau: number;
   /** Shoaling. See `declutter` for what this costs reproduction, and why the
    *  two only matter together. */
   flockAlign: number;
@@ -905,8 +881,6 @@ export function defaultParams(): Params {
     drag: 0.55,
     angDrag: 2.4,
     grip: 2,
-    wireTug: 0.3,
-    wireTugTau: 0.3,
     flockAlign: 5.5,
     flockSep: 48,
     maxAgents: 100000,
@@ -979,8 +953,6 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'drag', label: 'Fluid drag', min: 0, max: 4, step: 0.01 },
   { key: 'angDrag', label: 'Spin damp', min: 0, max: 8, step: 0.05 },
   { key: 'grip', label: 'Grip (tank)', min: -4, max: 12, step: 0.05 },
-  { key: 'wireTug', label: 'Wire tug', min: 0, max: 2.5, step: 0.02 },
-  { key: 'wireTugTau', label: 'Tug relax (s)', min: 0.05, max: 3, step: 0.05 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
   { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },
   { key: 'snapRadius', label: 'Snap reach', min: 4, max: 48, step: 1 },

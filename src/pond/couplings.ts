@@ -142,16 +142,6 @@ export const COUPLINGS: readonly Coupling[] = [
     fix: 'scale transportRecoil down as the quantum goes up, or read the two arms as different ponds',
     unless: { key: 'transportRecoil', is: 0 },
   },
-  {
-    axis: 'transportQuantum',
-    constant: 'wireTugTau',
-    why:
-      'the quantum sets how long a body takes to accumulate a packet, and the tug has to have let go ' +
-      'before the next one lands or the wire is an anchor rather than a stroke; one relaxation time ' +
-      'cannot suit two packet intervals',
-    fix: 'choose wireTugTau against the packet interval in each arm, or sweep the two together',
-    unless: { key: 'wireTug', is: 0 },
-  },
 ];
 
 export interface CouplingWarning {

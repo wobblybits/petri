@@ -74,7 +74,6 @@ import {
   type Rewrite,
 } from './rewrite.ts';
 import {
-  EXTRA_CAP,
   agentValue,
   BODY_VALUE,
   deathYield,
@@ -989,7 +988,6 @@ export class Sim {
     this.dampVelocities(params, t);
     Sim.phase('damp');
 
-    this.graph.relaxTugs(t, params.wireTugTau);
     this.graph.refreshLengths(this.agents, this.w, this.h, this.rewriteFrozen, this.wireDetailed);
     this.snapTautWires(params);
     Sim.phase('refreshLengths');
@@ -6230,26 +6228,6 @@ export class Sim {
    * parent species swims alone.
    */
   private recoil(from: { id: number }, to: { id: number }, amount: number): void {
-    // The stroke: the wire that carried it pulls its ends together, and
-    // `grip` decides which end that moves.
-    //
-    // In proportion to what crossed, as a fraction of a tank at the receiving
-    // end, so a crumb tugs like a crumb. It was a saturating pulse first —
-    // any transfer pulled the wire fully — and that made the mechanism free:
-    // metered from 240 units a second down to 3, the worm still swam at 4 of
-    // its 6.65 px/s, because the stroke was paid for in transfer *events* and
-    // not in energy. A wire should cost what it delivers.
-    //
-    // The largest recent transfer wins rather than the latest, so a small
-    // packet arriving behind a large one cannot cut the pull short. Letting
-    // go is `wireTugTau`'s job and nothing else's.
-    const w = this.graph.wireBetween(from.id, to.id);
-    if (w) {
-      const B = this.agents.get(to.id);
-      const cap = B && B.energyCap > 0 ? B.energyCap : EXTRA_CAP;
-      const share = Math.min(1, amount / cap);
-      if (share > w.tug) w.tug = share;
-    }
     const A = this.agents.get(from.id);
     const B = this.agents.get(to.id);
     if (A && B && A.transportRecoil > 0) {

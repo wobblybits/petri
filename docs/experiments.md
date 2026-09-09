@@ -384,7 +384,7 @@ Things that produce a plausible wrong number rather than an error.
 - **Turning a mechanism off can take more dials than it has a name.**
   `grip = 0` is not locomotion off: `transportQuantum` at 0.5 changes the pond
   on its own with grip at zero — measured, 183 bodies against 481 at 60
-  simulated seconds. Locomotion off is `grip=0 wireTug=0 transportQuantum=0`,
+  simulated seconds. Locomotion off is `grip=0 transportQuantum=0`,
   and with those and the pre-learning defaults HEAD reproduces `7a4086e`
   bit-for-bit. Before using a dial as a control, check that zeroing it
   actually restores the old pond.

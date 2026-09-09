@@ -38,26 +38,41 @@ not also be asked to do. Nothing else belongs here; measurements go in
   A net moves itself by moving energy through itself: a transport kick is
   equal and opposite, and under one rate for every body it cancels at the
   centre of mass, so `grip` is the only thing that lets a stroke become
-  travel. Nothing else may create motion a net did not pay for;
-  `transportThrust`, which does, is a reactionless drive and is what this
-  replaces. A speed-dependent term was built beside it and withdrawn: it swam
-  (1.63 px/s on the worm bench against grip's 2.31, and the two did not add),
-  but one heading gets one mechanic, and grip is the one whose stroke depends
-  on the energy pattern a net controls rather than on where its heavy bodies
-  happen to be. Not yet true: `transportThrust` is still on at 1; grip is a
-  free global constant where the stroke should be the net's own; and turned up
-  it anchors a net rather than walking it, because a crawler needs its grip to
-  travel and only `transportQuantum` makes the fullness pattern move.
+  travel. The pair's centre keeps
+  `|p| * (1/k_sender - 1/k_receiver) / (m_sender + m_receiver)` of the kick,
+  which is first order in the impulse and needs no cycle and no phase — mass
+  cancels from the direction, so which way a net goes is decided only by which
+  end is grippier. Nothing else may create motion a net did not pay for;
+  `transportThrust`, which does, is a reactionless drive and is retired at 0.
+  Two mechanics were built beside it and withdrawn. A speed-dependent term
+  swam (1.63 px/s on the worm bench against grip's 2.31, and the two did not
+  add), but one heading gets one mechanic, and grip is the one whose stroke
+  depends on the energy pattern a net controls rather than on where its heavy
+  bodies happen to be. A contracting wire (`wireTug`, `wireTugTau`) read like
+  an inchworm and was not one: the pull and the grip were driven by the same
+  packet at the same instant and then decayed, so the loop they traced in
+  (length, grip) closed on a line, and its area was only what the difference
+  between two relaxation times left over. A gait wants two degrees of freedom
+  with a phase something can *set*; a packet clock and two exponentials are
+  one degree of freedom and a race. It also spent the wire's rest length,
+  which is what decides whether two bodies ever meet, so a tug hard enough to
+  swim held every pair too tight to rewrite. Not yet true: grip is a free
+  global constant where the stroke should be the net's own; and turned up it
+  anchors a net rather than walking it, because a crawler needs its grip to
+  travel and only `transportQuantum` makes the fullness pattern move. A real
+  gait wants a clock that is not the packet — the body's own recurrent state
+  is one, being self-coupled and coupled to its wired neighbours — and two
+  heads off it, so the phase between anchor and stroke is a gene.
 - Communication within a net
 - Transport of energy within a net. Lives in the demand gradient: a body gives
   to whichever neighbour is strictly needier, and `transportQuantum` sets
   whether that is a trickle or a packet. Demand decides whether to send;
   above zero the quantum decides how much, a body must hold a whole packet to
   send one, and what will not fit at the far end goes to the ground. The
-  packet is also the pond's only clock — locomotion and shape have no other
-  source of phase — so this mechanic is asked to do two things and that is
-  known. Not yet true: it ships at 0, the trickle, under which the momentum
-  it carries is three orders below the pond's own noise.
+  packet is also the pond's only clock, which is the whole reason locomotion
+  cannot yet have a gait — so this mechanic is asked to do two things and that
+  is known. It ships at 0.5, the packet; at 0, the trickle, the momentum it
+  carries is three orders below the pond's own noise.
 - Growth
 - Breeding: nets connecting at free terminals
 - Freeing terminals: death and detachment within a net
