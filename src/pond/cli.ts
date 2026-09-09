@@ -8,6 +8,7 @@ import { NET_FORMAT, layoutComplaint, readHeader } from './net-blob.ts';
 import { parseGround } from './ground.ts';
 import { latinHypercube, parseAxis } from './sample.ts';
 import { exploreLibrary, renderExplore } from './explore-report.ts';
+import { importRuns } from './import.ts';
 import { paramsWith, runPond, type SeedNet } from './run.ts';
 import { DEFAULT_WARMUP, effectTable, effects, pointTable, sweepTrials } from './analyze.ts';
 import { checkCouplings, formatCouplings } from './couplings.ts';
@@ -38,6 +39,7 @@ petri pond — a headless pond, and the library it writes to
   npm run pond -- sweep  --name n ...   run a parameter grid into the library
   npm run pond -- analyze --name n      what the sweep says, and which dial did it
   npm run pond -- explore [--name n]    what varies together across the library
+  npm run pond -- import <files...>     fold other library files into --db
   npm run pond -- protocols             the experiments written down (docs/experiments.md)
   npm run pond -- protocol <name>       run one: preflight, every arm, then the report
   npm run pond -- analyze --protocol n  read a protocol's runs back against its prediction
@@ -85,6 +87,11 @@ sweep options
   --keep-nets          store the largest nets of each trial too
   --gpu auto|on|off    as for run
   --dry-run            print the grid and the cost, run nothing
+
+import options
+  --db <path>          the library to fold into        (default ponds/pond.db)
+                       Every run remembers the file it came from, so importing
+                       the same file twice does nothing.
 
 explore options
   --name <text>        one sweep only; omit to read the whole library
@@ -509,6 +516,29 @@ function cmdAnalyze(args: Args): void {
   }
 }
 
+function cmdImport(args: Args): void {
+  if (args.rest.length === 0) throw new Error('pond: import needs one or more .db files to read');
+  const db = new PondDb(args.flags.get('db') ?? 'ponds/pond.db');
+  try {
+    let runs = 0;
+    let skipped = 0;
+    for (const file of args.rest) {
+      const r = importRuns(db, file);
+      runs += r.runs;
+      skipped += r.skipped;
+      process.stdout.write(
+        `${r.file.padEnd(16)} ${String(r.runs).padStart(4)} runs  ` +
+          `${String(r.nets).padStart(5)} nets  ${String(r.samples).padStart(6)} samples` +
+          (r.skipped > 0 ? `  (${r.skipped} already here)` : '') +
+          '\n',
+      );
+    }
+    process.stdout.write(`\n${runs} run(s) imported, ${skipped} already present\n`);
+  } finally {
+    db.close();
+  }
+}
+
 function cmdExplore(args: Args): void {
   const db = new PondDb(args.flags.get('db') ?? 'ponds/pond.db');
   try {
@@ -766,6 +796,7 @@ async function main(): Promise<void> {
   else if (args.command === 'sweep') await cmdSweep(args);
   else if (args.command === 'analyze' || args.command === 'analyse') cmdAnalyze(args);
   else if (args.command === 'explore') cmdExplore(args);
+  else if (args.command === 'import') cmdImport(args);
   else if (args.command === 'protocols') cmdProtocols();
   else if (args.command === 'protocol') await cmdProtocol(args);
   else if (args.command === 'format') {

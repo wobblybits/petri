@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS run (
   note        TEXT,
   census      TEXT,                       -- JSON: the closing census and tally
   sweep       TEXT,                       -- name of the sweep this run belongs to
-  point       TEXT                        -- JSON: the grid point, for grouping
+  point       TEXT,                       -- JSON: the grid point, for grouping
+  origin      TEXT                        -- 'file#id' if imported; see import.ts
 );
 
 -- One row per connected component saved out of a run.
@@ -166,6 +167,9 @@ CREATE TABLE IF NOT EXISTS sample (
  */
 const MIGRATIONS: { table: string; column: string; decl: string }[] = [
   { table: 'run', column: 'sweep', decl: 'TEXT' },
+  // `file#id` of the database a run was imported from; NULL if it ran here.
+  // What makes `pond import` idempotent — see `import.ts`.
+  { table: 'run', column: 'origin', decl: 'TEXT' },
   { table: 'run', column: 'point', decl: 'TEXT' },
   { table: 'sample', column: 'lines_effective', decl: 'REAL' },
   { table: 'sample', column: 'line_dominance', decl: 'REAL' },
@@ -243,6 +247,9 @@ export interface RunRow {
   chem_len: number;
   note: string | null;
   census: string | null;
+  sweep: string | null;
+  point: string | null;
+  origin: string | null;
 }
 
 export interface NetRow extends NetStats {
@@ -305,6 +312,15 @@ export class PondDb {
         this.db.exec(`ALTER TABLE ${m.table} ADD COLUMN ${m.column} ${m.decl}`);
       }
     }
+    /*
+     * After the migrations, not inside `SCHEMA`: an old file has no `origin`
+     * column until the loop above adds it, and indexing a column that does
+     * not exist yet fails the open. NULLs are all distinct to SQLite, so runs
+     * made here never collide, and a second import of a file cannot double a
+     * run even under a race.
+     */
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS run_by_origin ON run(origin)');
+
     const have = this.meta('schema_version');
     if (have === null) this.setMeta('schema_version', String(SCHEMA_VERSION));
     else if (Number(have) < SCHEMA_VERSION) this.setMeta('schema_version', String(SCHEMA_VERSION));
