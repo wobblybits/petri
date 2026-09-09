@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS sample (
   line_fst         REAL,
   commutes_per_latch REAL,
   signal_total     REAL,
+  forage_ratio     REAL,
   json           TEXT    NOT NULL,        -- the whole Sample, for what has no column
   PRIMARY KEY (run_id, t)
 );
@@ -178,6 +179,7 @@ const MIGRATIONS: { table: string; column: string; decl: string }[] = [
   { table: 'sample', column: 'line_fst', decl: 'REAL' },
   { table: 'sample', column: 'commutes_per_latch', decl: 'REAL' },
   { table: 'sample', column: 'signal_total', decl: 'REAL' },
+  { table: 'sample', column: 'forage_ratio', decl: 'REAL' },
 ];
 
 /** The eleven diversity columns, in the order `insertSample` binds them. */
@@ -199,6 +201,7 @@ function divCols(d: Record<string, unknown> | undefined): (number | null)[] {
     num('lineFst'),
     num('commutesPerLatch'),
     num('signalTotal'),
+    num('forageRatio'),
   ];
 }
 
@@ -323,9 +326,9 @@ export class PondDb {
         commute_share, commute_chance, commute_edge, matrix_drift,
         lines_effective, line_dominance, nets, nets_effective, net_dominance,
         kinds_effective, var_drifted, var_seeded, net_fst, line_fst, commutes_per_latch,
-        signal_total, json)
+        signal_total, forage_ratio, json)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-              ?,?,?,?,?,?,?,?,?,?,?,?,
+              ?,?,?,?,?,?,?,?,?,?,?,?,?,
               ?)
     `);
   }

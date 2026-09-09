@@ -115,6 +115,23 @@ export interface Diversity {
    * substance rather than something anyone is saying.
    */
   signalTotal: number;
+  /**
+   * How much more ground a body is standing on than a body placed at random
+   * would be. 1 is indifference; above 1 is foraging.
+   *
+   * The precondition for every question about resource structure, and much
+   * cheaper to answer than any of them: it is a spatial statistic on one
+   * frame, not an evolutionary outcome over ten minutes, so its seed-to-seed
+   * variance is a fraction of `bornMean`'s. If bodies do not find the patches,
+   * nothing downstream of "does structure change how nets develop" can mean
+   * anything, and there is no point buying seeds to resolve it.
+   *
+   * The denominator is the dish mean — total ground over the disk's cells,
+   * counted from its area rather than by testing the mask — so a body dropped
+   * uniformly scores 1 whatever the layout. Null when there is no ground to
+   * stand on, or nobody to stand on it.
+   */
+  forageRatio: number | null;
 }
 
 /** Grouped variance decomposition over a set of loci. Returns F_ST, or null. */
@@ -247,6 +264,26 @@ export function measureDiversity(sim: Sim): Diversity {
   const maxLine = Math.max(0, ...lineCount.values());
   const maxNet = netSizes.length > 0 ? Math.max(...netSizes) : 0;
 
+  /*
+   * Sampled at each body's own position, the same bilinear read the genome
+   * gets. On the GPU path `fields.data` is a stale mirror — the runner asks
+   * for a readback on the frame before a sample precisely so this and `ground`
+   * are true when they are read.
+   */
+  let atBodies = 0;
+  const probe = new Float64Array(CHANNELS);
+  for (const a of sim.agents.values()) {
+    sim.fields.sampleAll(a.x, a.y, probe, 0);
+    atBodies += probe[CH.energy];
+  }
+  const f = sim.fields;
+  const cell = f.worldW / f.cols;
+  const diskCells = (Math.PI * sim.worldR * sim.worldR) / (cell * cell);
+  let groundTotal = 0;
+  for (let k = CH.energy; k < f.data.length; k += CHANNELS) groundTotal += f.data[k];
+  const dishMean = diskCells > 0 ? groundTotal / diskCells : 0;
+  const forageRatio = n > 0 && dishMean > 0 ? atBodies / n / dishMean : null;
+
   let signalTotal = 0;
   const field = sim.fields.data;
   for (let k = 0; k < field.length; k += CHANNELS) {
@@ -271,5 +308,6 @@ export function measureDiversity(sim: Sim): Diversity {
     lineFst: fst(chem, slots, lineOf, drifted),
     commutesPerLatch: sim.census().commutesPerLatch,
     signalTotal,
+    forageRatio,
   };
 }
