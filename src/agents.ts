@@ -5,6 +5,7 @@ import {
   EMIT,
   E_OUT,
   F_BASE,
+  G_BASE,
   HEAD_SCALE,
   KS_BASE,
   L_BASE,
@@ -743,6 +744,9 @@ export function portLocal(kind: AgentKind, slot: PortSlot): Vec2 {
 export {
   B_STATE,
   CHEM_LEN,
+  GAIT_ANCHOR_MAX,
+  G_BASE,
+  G_OUT,
   CHEM_SPECIES,
   CRITIC_LEN,
   EMIT,
@@ -1013,6 +1017,35 @@ export function flockGain(v: number): number {
 
 
 /**
+ * The gait's two amplitudes.
+ *
+ * Bases, not matrix entries: a fresh body strides at a constant amplitude and
+ * a lineage is free to make either one depend on `h` — on hunger, on how
+ * wired-in it is, on what it can smell — by drifting `G`. That is the same
+ * shape `F`, `P` and `L` already have, and the same reason: a behaviour
+ * should start as the constant it would otherwise have been hardcoded to and
+ * become a phenotype by evolving, not by being declared one.
+ *
+ * `anchor` is in units of drag rate, so 0.5 gene x `HEAD_SCALE.anchor` is a
+ * swing of ±1/s about whatever `drag + grip * fullness` is already asking
+ * for — the same order as `grip` itself at a half-full tank, which is what
+ * makes it able to change which end of a pair is the anchored one rather
+ * than merely modulating how anchored both are.
+ *
+ * `stroke` is a force along the wire, in units of `HEAD_SCALE.stroke`. One
+ * gene is about what a body at the pond's cruise spends holding station, so
+ * the stroke is the same order as the swimming it replaces rather than a
+ * nudge on top of it.
+ */
+const GAIT_ANCHOR = 0.2;
+const GAIT_STROKE = 1;
+
+function seedGait(c: Float32Array): void {
+  c[G_BASE] = GAIT_ANCHOR;
+  c[G_BASE + 1] = GAIT_STROKE;
+}
+
+/**
  * The hardcoded weights, written out as a genome.
  *
  * Emit is one-hot on the channel that kind's principal used to lay into. Taste
@@ -1076,6 +1109,7 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
   c[P_BASE + 1] = params.transportRecoil / HEAD_SCALE.recoil;
   c[L_BASE] = params.stepSpeed / HEAD_SCALE.cruise;
   c[L_BASE + 1] = params.turnRate / HEAD_SCALE.turn;
+  seedGait(c);
   if (kind === 'con') {
     c[EMIT] = 1;
     c[TASTE + 1] = M;

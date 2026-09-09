@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { G_BASE } from './agents.ts';
 import { defaultParams, type Params } from './params.ts';
 import { applyTransportRecoil, Sim } from './sim.ts';
 
@@ -42,6 +43,9 @@ function stillParams(): Params {
   params.ambientEnergy = 0;
   params.rewriteDuration = 0;
   params.angDrag = 0;
+  // The gait is the other half of the drag law and these are about `grip`.
+  // Its own tests turn it back on.
+  params.gaitRate = 0;
   return params;
 }
 
@@ -80,11 +84,21 @@ describe('grip', () => {
     const h = pair(heavy);
     run(h.sim, heavy, 1);
     expect(h.full.vx, 'a full tank grips').toBeLessThan(h.empty.vx);
+    /*
+     * Four places, not six. The table used to be indexed by fullness, so a
+     * body at 0 or 1 landed exactly on a node and the read was the
+     * arithmetic. It is indexed by total rate now — the gait's anchor is a
+     * third term and there is nothing narrower to key on — so no particular
+     * fullness lands on a node, and linear interpolation of a convex `exp`
+     * leaves about 1e-5 relative. That is 1.4e-7 of the speed being measured
+     * and nothing physical reads it; the claim here is which way the drag
+     * goes, and that is unchanged.
+     */
     expect(h.empty.vx, 'an empty one is untouched: grip scales with fullness').toBeCloseTo(
       100 * Math.exp(-heavy.drag),
-      6,
+      4,
     );
-    expect(h.full.vx).toBeCloseTo(100 * Math.exp(-(heavy.drag + 2)), 6);
+    expect(h.full.vx).toBeCloseTo(100 * Math.exp(-(heavy.drag + 2)), 4);
 
     // Chosen against this pond's own `drag` rather than a fixed -0.4, which
     // silently drove the rate negative once `drag` came down and the clamp,
@@ -94,7 +108,7 @@ describe('grip', () => {
     const s = pair(slick);
     run(s.sim, slick, 1);
     expect(s.full.vx, 'a full tank slides').toBeGreaterThan(s.empty.vx);
-    expect(s.full.vx).toBeCloseTo(100 * Math.exp(-(slick.drag + slick.grip)), 6);
+    expect(s.full.vx).toBeCloseTo(100 * Math.exp(-(slick.drag + slick.grip)), 4);
   });
 
   it('cancels drag but never inverts it', () => {
@@ -110,16 +124,17 @@ describe('grip', () => {
   });
 
   it('interpolates rather than sorting the pond into buckets', () => {
-    // The rate comes off a 64-step table. Two bodies a hair apart in fullness
-    // have to stay a hair apart in drag, or the table quietly becomes a
-    // speciation mechanism.
+    // The rate comes off a 256-step table, spanning `drag + grip` here. Two
+    // bodies a hair apart in fullness have to stay a hair apart in drag, or
+    // the table quietly becomes a speciation mechanism.
     const params = stillParams();
     params.grip = 2;
     const sim = new Sim(4000, 4000);
     const a = sim.spawn('con', 1500, 2000, 0, params, true)!;
     const b = sim.spawn('con', 2500, 2000, 0, params, true)!;
-    // Both inside one 1/64 bucket, which spans 0.500 to 0.516: a table read
-    // without interpolation hands them the identical rate.
+    // Both inside one bucket — a step is 2.55/256 = 0.0100 of rate, and these
+    // two are 0.004 apart — so a table read without interpolation hands them
+    // the identical rate.
     a.extra = a.energyCap * 0.5;
     b.extra = b.energyCap * 0.502;
     a.vx = 100;
@@ -199,5 +214,89 @@ describe('grip', () => {
 
     expect(Math.abs(displace(0)), 'tied together and pumping, and going nowhere').toBeLessThan(0.5);
     expect(displace(2), 'the same pump, now a stroke').toBeGreaterThan(2);
+  });
+});
+
+describe('the gait', () => {
+  /**
+   * The stroke, with no pump at all.
+   *
+   * `grip` needs an impulse to work on: it turns a transport kick into travel
+   * by letting the two ends coast different distances. The gait needs none.
+   * Every body carries a phase; its cosine goes into the drag rate and its
+   * sine into the rest length of its wires, so a wire shortens while the
+   * bodies on it are anchoring and lengthens while they let go. Displacement
+   * over a cycle is `-∮ L̇ β dt`, and sine against cosine is what stops that
+   * integral being zero.
+   *
+   * The two bodies here run in step — one clock, one rate, and no coupling
+   * between them. That is not a simplification, it is the mechanism: the
+   * pair's centre moves as long as the two ends respond *differently* to the
+   * same anchor, and `drag + grip * fullness` already makes them differ
+   * whenever there is a gradient across the wire. Give them the same tank and
+   * it stops, which is the last case below.
+   */
+  const walk = (over: Partial<Params> = {}, opts: { fullB?: number; flip?: boolean } = {}): number => {
+    const params = stillParams();
+    params.gaitRate = 2;
+    params.grip = 2;
+    Object.assign(params, over);
+    const sim = new Sim(4000, 4000);
+    const a = sim.spawn('con', 1960, 2000, 0, params, true)!;
+    const b = sim.spawn('con', 2040, 2000, 0, params, true)!;
+    if (opts.flip) {
+      // The stroke's amplitude, negated on both ends: same clock, same grip,
+      // the muscle pulling when it used to push.
+      a.chem[G_BASE + 1] = -a.chem[G_BASE + 1];
+      b.chem[G_BASE + 1] = -b.chem[G_BASE + 1];
+    }
+    sim.graph.attach({ id: a.id, slot: 'l' }, { id: b.id, slot: 'r' }, 80, 0);
+    const hold = () => {
+      a.extra = a.energyCap;
+      b.extra = b.energyCap * (opts.fullB ?? 0);
+    };
+    // Let the latch finish reeling in before anything is measured, so the
+    // one-shot shrink is not read as travel.
+    for (let f = 0; f < 300; f++) {
+      hold();
+      sim.step(1 / 60, params);
+    }
+    const before = (a.x + b.x) / 2;
+    for (let f = 0; f < 60 * 20; f++) {
+      hold();
+      sim.step(1 / 60, params);
+    }
+    return (a.x + b.x) / 2 - before;
+  };
+
+  it('walks a wired pair on its own clock, with nothing pumping', () => {
+    // 5.2 px over twenty seconds at the shipped dials, against a settling
+    // floor of nothing at all: with the clock stopped this rig is exactly
+    // static, so the bar is about resolving the stroke, not beating noise.
+    expect(Math.abs(walk({ gaitRate: 0 })), 'no clock, no stroke').toBeLessThan(0.05);
+    expect(Math.abs(walk()), 'the clock alone carries the pair').toBeGreaterThan(1);
+  });
+
+  it('needs the two ends to differ, which is what makes it cost energy', () => {
+    /*
+     * The stroke is `∮ F (1/k_a - 1/k_b) dt / M`. Both ends share the clock,
+     * so `F` and the anchor are common to them and cancel out of the
+     * difference; what is left is the difference in their *baselines*, and
+     * that is `grip * fullness`. Give the pair the same tank, or take `grip`
+     * away, and there is nothing for the impulse to be asymmetric about.
+     *
+     * Which is the property worth having. A net only walks while it is
+     * holding a gradient, so locomotion is paid for out of the same economy
+     * that feeds it, rather than being free.
+     */
+    expect(Math.abs(walk({}, { fullB: 1 })), 'two equal tanks go nowhere').toBeLessThan(0.05);
+    expect(Math.abs(walk({ grip: 0 })), 'and neither do two equal rates').toBeLessThan(0.05);
+  });
+
+  it('reverses when the stroke does, which is what selection has to steer by', () => {
+    const fwd = walk();
+    const back = walk({}, { flip: true });
+    expect(Math.abs(back), 'still walking').toBeGreaterThan(1);
+    expect(Math.sign(back), 'the other way').not.toBe(Math.sign(fwd));
   });
 });

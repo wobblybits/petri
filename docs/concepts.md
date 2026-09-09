@@ -60,9 +60,30 @@ not also be asked to do. Nothing else belongs here; measurements go in
   global constant where the stroke should be the net's own; and turned up it
   anchors a net rather than walking it, because a crawler needs its grip to
   travel and only `transportQuantum` makes the fullness pattern move. A real
-  gait wants a clock that is not the packet — the body's own recurrent state
-  is one, being self-coupled and coupled to its wired neighbours — and two
-  heads off it, so the phase between anchor and stroke is a gene.
+  gait wants a clock that is not the packet. `gaitRate` is one: every body
+  carries a phase, and `G`'s two heads scale its cosine into the body's own
+  drag rate and into an impulse along each of its wires. That is the same
+  first-order mechanism — an impulse, then two ends coasting different
+  distances from it — put on a clock the net owns rather than on whenever a
+  packet crossed, and it is heritable in the way that matters: the amplitudes
+  are heads off `h`, their product is the speed, and their relative sign is
+  the direction.
+
+  Two things were learned building it and are worth not re-learning. The
+  clock cannot come out of `h`: `phi` saturates each dimension separately, so
+  a rotation in `Wh` slow enough to be a gait has a loop gain barely above 1,
+  and there any steady input — `IN_FULL` is one — collapses it onto a fixed
+  point. And the stroke cannot be a length: a wire's rest length is served by
+  an XPBD span constraint, and a position correction split by inverse mass
+  moves the two bodies and not their centre, at any phase, which is the
+  deeper reason `wireTug` never swam. Measured, a wired pair driven that way
+  travels 0.000 px in twenty seconds and the same pair driven by an impulse
+  travels 5.2.
+
+  Not yet true: the clock's *rate* is a free global constant, so bodies
+  cannot drift out of lock and back — there is no coupling term, and a
+  per-body rate wants one first. `Wn` already carries the mean of a body's
+  wired neighbours and is the obvious place for it.
 - Communication within a net
 - Transport of energy within a net. Lives in the demand gradient: a body gives
   to whichever neighbour is strictly needier, and `transportQuantum` sets

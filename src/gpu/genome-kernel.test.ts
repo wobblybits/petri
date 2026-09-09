@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import shader from './genome.wgsl?raw';
 import {
-  B_STATE, CHEM_LEN, EMIT, E_OUT, F_BASE, F_OUT, HEAD_SCALE, IN_DIMS, L_BASE, L_OUT,
+  B_STATE, CHEM_LEN, EMIT, E_OUT, F_BASE, F_OUT, GAIT_ANCHOR_MAX, G_BASE, G_OUT,
+  HEAD_SCALE, IN_DIMS, L_BASE, L_OUT,
   LEARN_CRITIC, LEARN_PREV_V, LEARN_STRIDE, LEARN_TRACE,
   P_BASE, P_OUT, PLASTIC_LEN, X_OUT, SENSE_SCALE, STATE_DIMS, TASTE, T_OUT, W_IN, W_NET, W_SELF,
 } from '../chem-layout.ts';
@@ -43,7 +44,7 @@ describe('the genome shader matches the genome layout', () => {
     // the program writes, and every number it produces will be plausible.
     const want: Record<string, number> = {
       STATE_DIMS, IN_DIMS, EMIT, TASTE, E_OUT, T_OUT, W_IN, W_SELF, W_NET,
-      B_STATE, F_OUT, F_BASE, P_OUT, P_BASE, L_OUT, L_BASE,
+      B_STATE, F_OUT, F_BASE, P_OUT, P_BASE, L_OUT, L_BASE, G_OUT, G_BASE,
       // The learning row is indexed by the same hand-copied constants and
       // carries the same hazard.
       PLASTIC_LEN, LEARN_TRACE, LEARN_CRITIC, LEARN_PREV_V, LEARN_STRIDE,
@@ -53,10 +54,12 @@ describe('the genome shader matches the genome layout', () => {
     }
   });
 
-  it('writes the eighteen floats a body the host unpacks', () => {
+  it('writes the twenty floats a body the host unpacks', () => {
     // h(4) + emit(4) + taste(4) + six heads. The host reads them back by this
     // stride, so a mismatch shifts every field by a body.
-    expect(shaderConst('OUT_STRIDE')).toBe(4 + 4 + 4 + 6);
+    // state(4), emit(4), taste(4), then the heads: cruise, turn, align,
+    // sep, thrust, recoil, anchor, swell.
+    expect(shaderConst('OUT_STRIDE')).toBe(4 + 4 + 4 + 8);
   });
 
   it('has no genome offset the layout does not derive', () => {
@@ -66,6 +69,7 @@ describe('the genome shader matches the genome layout', () => {
     const known = new Set([
       'STATE_DIMS', 'IN_DIMS', 'EMIT', 'TASTE', 'E_OUT', 'T_OUT', 'W_IN', 'W_SELF',
       'W_NET', 'B_STATE', 'F_OUT', 'F_BASE', 'P_OUT', 'P_BASE', 'L_OUT', 'L_BASE',
+      'G_OUT', 'G_BASE',
       'OUT_STRIDE', 'PLASTIC_LEN', 'LEARN_TRACE', 'LEARN_CRITIC', 'LEARN_PREV_V',
       'LEARN_STRIDE',
     ]);
@@ -87,7 +91,7 @@ describe('the genome shader matches the genome layout', () => {
       'n', 'chemLen', 'senseScale', 'groundScale',
       'sCruise', 'sTurn', 'sAlign', 'sSep', 'sThrust', 'sRecoil', 'energyCh',
       'learnRate', 'learnCritic', 'learnTrace', 'learnDiscount', 'maxWeight',
-      'pad0', 'pad1', 'pad2', 'pad3',
+      'sAnchor', 'sStroke', 'pad2', 'pad3',
     ]);
     // A uniform buffer's size has to be a whole number of sixteen-byte
     // blocks, which is what the pads are for.
@@ -107,20 +111,19 @@ describe('the genome shader matches the genome layout', () => {
 
   it('reads inside the genome it is given', () => {
     /*
-     * The furthest the shader can reach is the last locomotion weight, at
-     * `L_BASE + 2`. It must stay inside the genome; if it ever reaches past
-     * it, this is what fails.
+     * The shader now reaches the end of the genome. `G`, the gait head, is
+     * the last block, so `G_BASE + 2` is both the furthest read and
+     * `CHEM_LEN` — assert the equality, which is what notices a field added
+     * after it that the shader has not been taught about.
      *
-     * This used to assert equality, on the grounds that a field added after
-     * `L_BASE` should be noticed. `X`, the expression head, is that field —
-     * added by `docs/energy-chemistry-plan.md` phase 0 and read by nothing on
-     * either side until phase 3. So the invariant is stated as what it always
-     * meant: the shader stops at `X_OUT`, and everything from there to
-     * `CHEM_LEN` is the part it does not know about yet. Phase 3 moves this
-     * line, deliberately and with the shader.
+     * The chemistry block between `X_OUT` and `G_OUT` is the part in the
+     * middle the shader still steps over: added by
+     * `docs/energy-chemistry-plan.md` phase 0 and read by nothing on either
+     * side until phase 3. Its own reach is checked separately.
      */
     expect(L_BASE + 2).toBe(X_OUT);
-    expect(X_OUT).toBeLessThanOrEqual(CHEM_LEN);
+    expect(X_OUT).toBeLessThan(G_OUT);
+    expect(G_BASE + 2).toBe(CHEM_LEN);
   });
 });
 
@@ -148,7 +151,7 @@ function mirrorState(a: {
   const S = STATE_DIMS;
   const { chem, hPrev, facts, slots, samples, off, nei, n } = a;
   const learn = a.learn;
-  const out = new Float32Array(n * 18);
+  const out = new Float32Array(n * 20);
   const phi = (v: number): number => v / (1 + Math.abs(v));
   const cl = (v: number, lo: number, hi: number): number => Math.min(Math.max(v, lo), hi);
   for (let i = 0; i < n; i++) {
@@ -197,7 +200,7 @@ function mirrorState(a: {
       sum += w;
     }
     if (sum > 1e-6) for (let c = 0; c < 4; c++) emit[c] /= sum;
-    const o = i * 18;
+    const o = i * 20;
     for (let d = 0; d < S; d++) out[o + d] = h[d];
     for (let c = 0; c < 4; c++) out[o + 4 + c] = emit[c];
     for (let c = 0; c < 4; c++) out[o + 8 + c] = chem[g + TASTE + c] + dot(T_OUT, c);
@@ -209,6 +212,8 @@ function mirrorState(a: {
     out[o + 15] = cl(head(F_OUT, F_BASE, 1, HEAD_SCALE.sep), -60, 120);
     out[o + 16] = cl(head(P_OUT, P_BASE, 0, HEAD_SCALE.thrust), 0, 1);
     out[o + 17] = cl(head(P_OUT, P_BASE, 1, HEAD_SCALE.recoil), 0, 200);
+    out[o + 18] = cl(head(G_OUT, G_BASE, 0, HEAD_SCALE.anchor), -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
+    out[o + 19] = cl(head(G_OUT, G_BASE, 1, HEAD_SCALE.stroke), -60, 60);
   }
   return out;
 }
@@ -340,7 +345,7 @@ describe('the genome shader computes what updateState computes', () => {
     let moved = 0;
     for (let i = 0; i < n; i++) {
       const s = list[i].slot;
-      const o = i * 18;
+      const o = i * 20;
       for (let d = 0; d < STATE_DIMS; d++) {
         worstH = Math.max(worstH, Math.abs(got[o + d] - store.hAll[s * STATE_DIMS + d]));
         if (Math.abs(store.hAll[s * STATE_DIMS + d]) > 1e-3) moved++;

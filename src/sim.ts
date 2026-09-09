@@ -22,6 +22,9 @@ import {
   ROW_EXCRETE,
   F_BASE,
   F_OUT,
+  GAIT_ANCHOR_MAX,
+  G_BASE,
+  G_OUT,
   HEAD_SCALE,
   L_BASE,
   L_OUT,
@@ -985,6 +988,8 @@ export class Sim {
     this.syncForces();
     Sim.phase('syncForces');
     this.applyRadiationLoss();
+    this.advanceGait(params, t);
+    this.strokeWires(t);
     this.dampVelocities(params, t);
     Sim.phase('damp');
 
@@ -4222,31 +4227,128 @@ export class Sim {
     }
   }
 
-  /** Fullness steps the grip table divides itself into. See `dampVelocities`. */
-  private static readonly GRIP_STEPS = 64;
+  /** Rate steps the drag table divides itself into. See `dampVelocities`. */
+  private static readonly GRIP_STEPS = 256;
 
-  /** Per-frame `exp(-rate * dt)` by fullness, rebuilt only when grip is on. */
+  /** Per-frame `exp(-rate * dt)` by total rate, rebuilt only when it varies. */
   private readonly gripKeep = new Float64Array(Sim.GRIP_STEPS + 1);
+
+  /**
+   * Turn every body's clock, and work out what this frame's stroke comes to.
+   *
+   * `anchor` is `gaitAnchor * cos(phase)` and goes into the drag rate below;
+   * `stroke` is `gaitStroke * cos(phase)` and becomes an equal and opposite
+   * impulse along every wire on the body, in `strokeWires`. Both on the same
+   * cosine, because the pair's centre keeps `∮ F (1/k_a - 1/k_b) dt / M` and
+   * that goes as the cosine of the angle between them — largest in phase.
+   *
+   * The phase is a register rather than a readout of `h`, and that is the
+   * second attempt. A rotation seeded into `Wh` is an oscillator on paper:
+   * `phi` saturates each dimension separately, so holding a period near the
+   * drag time constant forces a loop gain barely above 1, and there any
+   * steady input collapses the state onto a fixed point within a few
+   * hundred frames. `IN_FULL` is a steady input. Measured over the map, at
+   * gain 1.3 and a 60-frame period a drive of 0.05 already kills it, and
+   * spending a third dimension on adaptation only widens that to about 0.2.
+   *
+   * What stayed heritable is what matters. The amplitudes are heads off `h`,
+   * so a body strides on its own account and by how hungry it is, and their
+   * relative sign is which way it walks.
+   */
+  private advanceGait(params: Params, dt: number): void {
+    const store = this.agentStore;
+    const PHASE = store.gaitPhase;
+    const GA = store.gaitAnchor;
+    const GS = store.gaitStroke;
+    const ANCHOR = store.anchor;
+    const STROKE = store.stroke;
+    const rate = params.gaitRate;
+    if (!(rate > 0)) {
+      for (const agent of this.agents.values()) {
+        ANCHOR[agent.slot] = 0;
+        STROKE[agent.slot] = 0;
+      }
+      return;
+    }
+    const TAU = Math.PI * 2;
+    const step = rate * dt;
+    for (const agent of this.agents.values()) {
+      const s = agent.slot;
+      // Wrapped rather than left to grow: a body can live for minutes, and
+      // `cos` of a large float loses the precision the stroke is made of.
+      let ph = PHASE[s] + step;
+      if (ph >= TAU) ph -= TAU;
+      PHASE[s] = ph;
+      const c = Math.cos(ph);
+      ANCHOR[s] = GA[s] * c;
+      STROKE[s] = GS[s] * c;
+    }
+  }
+
+  /**
+   * The stroke: each wire shoves its two bodies apart, or pulls them
+   * together, by what the pair is asking for this frame.
+   *
+   * Equal and opposite, so it mints no momentum — the pond's centre of mass
+   * is exactly as fixed as it was. What makes it travel is `grip`: the two
+   * ends coast different distances from the same impulse, and the leftover
+   * is a step. That is the mechanism `transportRecoil` already had; this
+   * puts it on a clock the body owns instead of on whenever a packet
+   * happened to cross.
+   *
+   * A force rather than a velocity, so `dt` scales it and the stroke means
+   * the same at any frame rate; and read off the *mean* of the wire's two
+   * ends, so a wire is one muscle rather than two arguing.
+   */
+  private strokeWires(dt: number): void {
+    const store = this.agentStore;
+    const STROKE = store.stroke;
+    for (const wire of this.graph.wires.values()) {
+      const A = this.agents.get(wire.a.id);
+      const B = this.agents.get(wire.b.id);
+      if (!A || !B || poseHeld(A) || poseHeld(B)) continue;
+      const f = 0.5 * (STROKE[A.slot] + STROKE[B.slot]) * dt;
+      if (f === 0) continue;
+      const d = wrapDeltaVec(A.x, A.y, B.x, B.y, this.w, this.h);
+      const dist = Math.hypot(d.x, d.y);
+      if (!(dist > 1e-6)) continue;
+      const nx = d.x / dist;
+      const ny = d.y / dist;
+      const wA = 1 / Math.max(0.08, A.mass);
+      const wB = 1 / Math.max(0.08, B.mass);
+      A.vx -= nx * f * wA;
+      A.vy -= ny * f * wA;
+      B.vx += nx * f * wB;
+      B.vy += ny * f * wB;
+    }
+  }
 
   /**
    * One drag law for bodies; the rope is damped inside the substep loop.
    *
-   * `grip` makes the linear rate a body's own, off its tank fraction, which
-   * is what lets a net's internal pumping carry it anywhere — see the
-   * parameter, which has the argument and the arithmetic.
+   * A body's rate is `drag + grip * fullness + anchor`. `grip` makes it
+   * depend on the tank, which is what lets a net's internal pumping carry it
+   * anywhere — see the parameter, which has the argument and the arithmetic.
+   * `anchor` is this frame's point in the gait, and is what turns a standing
+   * asymmetry into a stroke; see `advanceGait`.
    *
-   * The exponential is read off a 64-step table rather than taken per body.
+   * The exponential is read off a table rather than taken per body.
    * `Math.exp` is by an order of magnitude the most expensive thing in this
-   * loop, `dt` is the same for everyone, and fullness is the only other thing
-   * that enters it, so 64 of them serve fifty thousand bodies. Interpolated
-   * rather than snapped: two bodies a hair apart in fullness should stay a
-   * hair apart in drag, and a step function there would quietly sort the pond
-   * into 64 kinds. At `grip` 0 the table is flat and the interpolation returns
-   * `linKeep` exactly, but the loop below still branches past it — a dial at
-   * its shipping value should cost nothing.
+   * loop and `dt` is the same for everyone, so 256 of them serve fifty
+   * thousand bodies. The table is over the *total rate* rather than over
+   * fullness, which it used to be: with a gait the rate is no longer a
+   * function of one bounded scalar, so there is nothing narrower to key on.
+   * 256 steps rather than 64 because the span is now several times wider and
+   * the resolution should not go backwards — at the shipping dials it is
+   * 0.057/s a step against 0.031 before.
+   *
+   * Interpolated rather than snapped: two bodies a hair apart in rate should
+   * stay a hair apart in drag, and a step function there would quietly sort
+   * the pond into 256 kinds. With `grip` and `gaitRate` both at 0 the loop
+   * below takes the flat path and never builds the table — a dial at its
+   * off value should cost nothing.
    */
   private dampVelocities(params: Params, dt: number): void {
-    const linKeep = Math.exp(-Math.max(0, params.drag) * dt);
     const angKeep = Math.exp(-Math.max(0, params.angDrag) * dt);
     const store = this.agentStore;
     const LOCKED = store.locked;
@@ -4254,8 +4356,11 @@ export class Sim {
     const VX = store.vx;
     const VY = store.vy;
     const OMEGA = store.omega;
+    const base = Math.max(0, params.drag);
     const grip = params.grip;
-    if (grip === 0) {
+    const gait = params.gaitRate > 0;
+    if (grip === 0 && !gait) {
+      const linKeep = Math.exp(-base * dt);
       for (const agent of this.agents.values()) {
         const s = agent.slot;
         if (LOCKED[s] || PINNED[s]) continue;
@@ -4267,14 +4372,21 @@ export class Sim {
     }
     const steps = Sim.GRIP_STEPS;
     const table = this.gripKeep;
-    const base = Math.max(0, params.drag);
+    // The ceiling the table spans. Both terms are bounded — `grip` by its
+    // slider and `anchor` by the head's own clamp — so this is the largest
+    // rate any body can ask for, and anything past it saturates rather than
+    // reading off the end.
+    const hi = base + Math.max(0, grip) + (gait ? GAIT_ANCHOR_MAX : 0);
+    const span = hi > 1e-9 ? hi : 1;
     for (let i = 0; i <= steps; i++) {
-      // Clamped at the rate, not at the keep: a negative rate is an energy
-      // source, and `exp` of it silently amplifies instead of failing.
-      table[i] = Math.exp(-Math.max(0, base + grip * (i / steps)) * dt);
+      // Built over a rate that is already non-negative: a negative total is
+      // clamped at the lookup instead, because `exp` of one silently
+      // amplifies rather than failing.
+      table[i] = Math.exp(-((span * i) / steps) * dt);
     }
     const EXTRA = store.extra;
     const CAP = store.energyCap;
+    const ANCHOR = store.anchor;
     for (const agent of this.agents.values()) {
       const s = agent.slot;
       if (LOCKED[s] || PINNED[s]) continue;
@@ -4283,7 +4395,9 @@ export class Sim {
       const cap = CAP[s];
       const raw = cap > 0 ? EXTRA[s] / cap : 0;
       const full = raw <= 0 ? 0 : raw >= 1 ? 1 : raw;
-      const u = full * steps;
+      const rate = base + grip * full + ANCHOR[s];
+      const r = rate <= 0 ? 0 : rate >= span ? span : rate;
+      const u = (r / span) * steps;
       const i = u < steps ? u | 0 : steps - 1;
       const keep = table[i] + (table[i + 1] - table[i]) * (u - i);
       VX[s] *= keep;
@@ -5783,6 +5897,8 @@ export class Sim {
     const FS = store.flockSep;
     const TT = store.transportThrust;
     const TR = store.transportRecoil;
+    const GA = store.gaitAnchor;
+    const GS = store.gaitStroke;
     const PLASTIC = store.plasticAll;
     const TRACE = store.traceAll;
     const CRITIC = store.criticAll;
@@ -6014,6 +6130,10 @@ export class Sim {
       FS[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 1, H, ho, S) * HEAD_SCALE.sep, -60, 120);
       TT[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 0, H, ho, S) * HEAD_SCALE.thrust, 0, 1);
       TR[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 1, H, ho, S) * HEAD_SCALE.recoil, 0, 200);
+      // Signed both ways on purpose: the relative sign of the two is what
+      // decides which way the net walks, so neither may be clamped to one.
+      GA[slot] = clamp(headAt(CHEM, g, G_OUT, G_BASE, 0, H, ho, S) * HEAD_SCALE.anchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
+      GS[slot] = clamp(headAt(CHEM, g, G_OUT, G_BASE, 1, H, ho, S) * HEAD_SCALE.stroke, -60, 60);
 
       /*
        * What this body learns from the frame it has just had.
@@ -6216,6 +6336,8 @@ export class Sim {
       store.flockSep[slot] = out[o + 15];
       store.transportThrust[slot] = out[o + 16];
       store.transportRecoil[slot] = out[o + 17];
+      store.gaitAnchor[slot] = out[o + 18];
+      store.gaitStroke[slot] = out[o + 19];
     }
   }
 

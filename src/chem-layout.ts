@@ -32,6 +32,16 @@
  * fresh body seek food when its neighbourhood is hungry and ignore it
  * otherwise. A second seeded pathway that also picked dim 0 would collide with
  * that silently.
+ *
+ * The gait's clock is deliberately *not* built here. A rotation in `Wh` is an
+ * oscillator on paper and a bad one in practice: `phi` saturates
+ * componentwise, so a slow period forces a loop gain near 1, and at a gain
+ * near 1 any constant input — `IN_FULL` is one, and is never zero for long —
+ * pushes the state into the contractive region and it collapses onto a fixed
+ * point. Measured over the map: at gain 1.3 and a 60-frame period a drive of
+ * 0.05 is already enough to kill it, and adding an adaptation dimension only
+ * widens that to about 0.2. So `gaitPhase` is a register on the body and this
+ * head supplies its amplitudes. See `G_OUT`.
  */
 export const STATE_DIMS = 4;
 
@@ -217,7 +227,62 @@ export const X_BASE = X_OUT + ROW_COUNT * STATE_DIMS;
  * stated payoff and it survives the change.
  */
 export const KS_BASE = X_BASE + ROW_COUNT;
-export const CHEM_LEN = KS_BASE + CHEM_SPECIES;
+
+/**
+ * `G`, state -> gait, and its base. Two rows: `anchor`, then `swell`.
+ *
+ * The two amplitudes of the stroke locomotion did not have. `grip` turns an
+ * impulse into travel by damping one end of a pair harder than the other,
+ * which is first order in the impulse and needs no phase at all; a *gait* is
+ * the other thing, and it needs two degrees of freedom moving out of step.
+ * Displacement over a cycle is `-∮ L̇ β dt`, where `L` is a wire's length and
+ * `β` the share of the drag its two ends split — zero unless the two move out
+ * of step. `wireTug` tried to supply that and could not, because the pull and
+ * the grip were both driven by the same packet at the same instant. See
+ * `docs/concepts.md`.
+ *
+ * So both come off one clock instead. `anchor` scales `cos(gaitPhase)` into
+ * this body's drag rate; `stroke` scales the same cosine into an equal and
+ * opposite impulse along every wire on the body. In phase, not in quadrature,
+ * and that is worth stating because the obvious answer is the other one.
+ *
+ * A length actuator would want quadrature — anchor while the wire shortens,
+ * release while it lengthens. It would also do nothing, because a wire's rest
+ * length is served by an XPBD span constraint, and a position correction
+ * split by inverse mass moves the two bodies and *not* their centre, at any
+ * phase, however hard it pulls. That is the deeper reason `wireTug` never
+ * swam; the phase was only the half of it that showed. Measured: driving the
+ * rest length off this clock, with everything else here in place, moves a
+ * wired pair 0.000 px in twenty seconds.
+ *
+ * An impulse is the one actuator this engine converts into travel, because
+ * `grip` acts on the coast afterwards and not on the correction. With an
+ * impulse `F` and rates `k_a`, `k_b`, the pair's centre keeps
+ * `∮ F (1/k_a - 1/k_b) dt / M`, which for `F ∝ cos(θ + φ)` against an anchor
+ * `∝ cos θ` goes as **`cos φ`**: largest in phase, nothing at a quarter
+ * cycle, reversed at half. So the seed sits at 0.
+ *
+ * What is heritable is the pair of amplitudes, and that is enough for
+ * selection to have something to do. Their *product* is the stroke, so it
+ * sets the speed; their relative *sign* sets the direction, so flipping
+ * either one reverses the crawl. That is the same bidirectionality soft
+ * crawlers get from the phase difference between their actuators, arriving
+ * here as a sign rather than an angle.
+ *
+ * Amplitudes rather than constants because they are heads: a body reads them
+ * off `h`, so it can stride when it is hungry and go still when it is fed
+ * without its lineage having to pick one. Two bodies both oscillating in
+ * step still crawl, which is what makes this robust — the pair's centre moves
+ * as long as the two ends respond differently to the same anchor signal, and
+ * `grip * fullness` already makes them differ whenever there is a gradient
+ * across the wire. No phase difference between bodies is required, and none
+ * is seeded.
+ *
+ * Row-major by row, like every head here: `G_OUT + row * STATE_DIMS + d`.
+ */
+export const G_OUT = KS_BASE + CHEM_SPECIES;
+export const G_BASE = G_OUT + 2 * STATE_DIMS;
+export const CHEM_LEN = G_BASE + 2;
 
 /**
  * The span of `chem` a body can change while it is alive: `Wx`, `Wh`, `Wn`
@@ -273,6 +338,16 @@ export const LEARN_STRIDE = LEARN_PREV_V + 1;
  * everywhere in the genome, and the physical ranges stay where the forces need
  * them. Roughly the magnitude each slider ships at, rounded.
  */
+/**
+ * Widest swing the gait's anchor may ask for, in drag-rate units.
+ *
+ * `updateState` clamps the head to it, `dampVelocities` spans its rate table
+ * to it, and `genome.wgsl` transcribes it — three places that must agree
+ * about how far a stroke can reach, so the number lives here with the rest of
+ * the layout rather than on `Sim`.
+ */
+export const GAIT_ANCHOR_MAX = 8;
+
 export const HEAD_SCALE = {
   align: 8,
   sep: 60,
@@ -280,6 +355,14 @@ export const HEAD_SCALE = {
   recoil: 100,
   cruise: 40,
   turn: 2,
+  /** Same natural unit as the `grip` slider: one gene is one 1/s of drag. */
+  anchor: 2,
+  /**
+   * Force along a wire per unit of gene, in px/s^2 at unit mass. A body at
+   * the pond's cruise of ~40 px/s against `drag` 0.55 is holding station at
+   * about 22 px/s^2, so one gene is a stroke of that order.
+   */
+  stroke: 20,
 } as const;
 
 /**

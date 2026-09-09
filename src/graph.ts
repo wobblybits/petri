@@ -1059,6 +1059,14 @@ export class Graph {
    * Rest length for a wire this frame: the shrink curve toward `wireMinRest`,
    * plus a slow per-wire breath so a settled net keeps moving like tissue
    * instead of freezing solid.
+   *
+   * The breath is a decoration and stays one. It was briefly wired to the
+   * gait's clock, on the theory that a wire shortening while its bodies
+   * anchor is an inchworm — it is not, in this engine. Rest length is served
+   * by an XPBD span constraint, and a position correction split by inverse
+   * mass moves the two bodies and not their centre, at any phase and however
+   * hard it pulls. Measured at 0.000 px of travel in twenty seconds. The
+   * gait strokes with an impulse instead; see `Sim.strokeWires`.
    */
   syncRest(time: number, params: Params, detailed?: (wire: Wire) => boolean): void {
     for (const wire of this.wires.values()) {

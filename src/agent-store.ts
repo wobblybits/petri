@@ -83,6 +83,22 @@ export class AgentStore {
   assort!: Float64Array;
   transportThrust!: Float64Array;
   transportRecoil!: Float64Array;
+  /**
+   * The gait. `gaitPhase` is the body's own clock, advanced once a frame by
+   * `params.gaitRate`; `gaitAnchor` and `gaitStroke` are the two amplitudes
+   * the `G` head reads off `h`; `anchor` and `stroke` are what those come to
+   * this frame — both `amplitude * cos(phase)`, one into the drag rate and
+   * one into an impulse along every wire on the body.
+   *
+   * In phase, because the actuator is an impulse rather than a length. See
+   * `chem-layout.ts`'s `G_OUT`, which has the arithmetic and the measurement
+   * that ruled the length out.
+   */
+  gaitPhase!: Float64Array;
+  gaitAnchor!: Float64Array;
+  gaitStroke!: Float64Array;
+  anchor!: Float64Array;
+  stroke!: Float64Array;
   /** Whole units this body sends in one transfer. See `params.transportQuantum`. */
   transportQuantum!: Float64Array;
   /**
@@ -445,6 +461,11 @@ export class AgentStore {
     this.assort[slot] = 0;
     this.transportThrust[slot] = 0;
     this.transportRecoil[slot] = 0;
+    this.gaitPhase[slot] = 0;
+    this.gaitAnchor[slot] = 0;
+    this.gaitStroke[slot] = 0;
+    this.anchor[slot] = 0;
+    this.stroke[slot] = 0;
     this.transportQuantum[slot] = 0;
     this.csHeading[slot] = 0;
     this.csCos[slot] = 0;
@@ -525,6 +546,11 @@ export class AgentStore {
     this.assort = growF64(this.assort);
     this.transportThrust = growF64(this.transportThrust);
     this.transportRecoil = growF64(this.transportRecoil);
+    this.gaitPhase = growF64(this.gaitPhase);
+    this.gaitAnchor = growF64(this.gaitAnchor);
+    this.gaitStroke = growF64(this.gaitStroke);
+    this.anchor = growF64(this.anchor);
+    this.stroke = growF64(this.stroke);
     this.transportQuantum = growF64(this.transportQuantum);
     // Three a body, and -1 rather than 0 is the free marker, so a fresh tail
     // cannot read as "port held by wire 0".

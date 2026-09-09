@@ -278,6 +278,32 @@ export interface Params {
    * known to carry a net at all.
    */
   grip: number;
+  /**
+   * Radians a second the gait's clock advances. 0 = no gait, which is the
+   * pond with `grip` alone and no stroke.
+   *
+   * Every body carries a phase. `G`'s two heads scale its cosine into the
+   * body's drag rate and into an equal and opposite impulse along each of its
+   * wires — in phase, not in quadrature, because the pair's centre keeps
+   * `∮ F (1/k_a - 1/k_b) dt / M` and that goes as the cosine of the angle
+   * between the two. `chem-layout.ts`'s `G_OUT` has the arithmetic, including
+   * why the length actuator this replaces could never have worked whatever
+   * its phase.
+   *
+   * The period wants to sit near the drag time constant, `1/drag`: much
+   * faster and the body cannot travel within a stroke, so the two halves of
+   * the cycle cancel and the amplitude is wasted. At `drag` 0.55 that
+   * constant is 1.8 s and 2 rad/s is a period of 3.1 s, a little over it.
+   *
+   * There was briefly a second ceiling here, from the rope. Driving a wire's
+   * *rest length* off this clock pumped the slack ropes hanging off a
+   * rewrite — a leftover bowed to 5.3x its chord at 4 rad/s against 2.7x with
+   * the gait off — because rest length is a position target and XPBD reads
+   * node velocity as a position delta over `h`. An impulse does not touch it:
+   * re-measured at 4 rad/s with the stroke as a force, `rewrite.test.ts` is
+   * clean. The ceiling is the drag law again, which is where it belongs.
+   */
+  gaitRate: number;
   /** Shoaling. See `declutter` for what this costs reproduction, and why the
    *  two only matter together. */
   flockAlign: number;
@@ -881,6 +907,7 @@ export function defaultParams(): Params {
     drag: 0.55,
     angDrag: 2.4,
     grip: 2,
+    gaitRate: 2,
     flockAlign: 5.5,
     flockSep: 48,
     maxAgents: 100000,
@@ -953,6 +980,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'drag', label: 'Fluid drag', min: 0, max: 4, step: 0.01 },
   { key: 'angDrag', label: 'Spin damp', min: 0, max: 8, step: 0.05 },
   { key: 'grip', label: 'Grip (tank)', min: -4, max: 12, step: 0.05 },
+  { key: 'gaitRate', label: 'Gait rate (rad/s)', min: 0, max: 16, step: 0.1 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
   { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },
   { key: 'snapRadius', label: 'Snap reach', min: 4, max: 48, step: 1 },

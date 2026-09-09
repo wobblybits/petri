@@ -685,6 +685,11 @@ describe('steering: WASM against the JS reference', () => {
     params.upkeep = 0;
     params.uncross = 0;
     params.swimNoise = 0;
+    // These two compare a JS and a WASM copy run forward independently, and a
+    // foraging soup separates them on its own — see the drift budget below.
+    // The gait is a second source of motion and not one of the ports under
+    // test, so it comes off with the swim noise.
+    params.gaitRate = 0;
     params.wireShrink = 0.9;
     params.sense = 220;
     params.stepSpeed = 30;
