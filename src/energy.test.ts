@@ -715,6 +715,11 @@ describe('sim energy', () => {
     // for the rest of the run.
     const sim = new Sim(1200, 600);
     const params = fixedParams();
+    // Continuous transport: this is about a corridor relaying a shortfall to
+    // the body that has it, and it asserts the delivery lands *on* the rescue
+    // target. A packet crosses whole whatever the gradient asked for, so it
+    // overshoots to the cap on purpose — which `quantised transport` covers.
+    params.transportQuantum = 0;
     params.spawnInterval = 0;
     params.ambientEnergy = 0;
     params.upkeep = 0;

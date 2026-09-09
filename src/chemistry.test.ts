@@ -594,6 +594,25 @@ describe('catabolism', () => {
     });
     const before = matter(sim, p.bodyValue);
     for (let i = 0; i < 120; i++) sim.step(1 / 60, p);
-    expect(matter(sim, p.bodyValue)).toBeCloseTo(before, 5);
+    /*
+     * Relative, and bounded well above what the ground can represent.
+     *
+     * This asked for `toBeCloseTo(before, 5)` — half of 1e-5 absolute on a
+     * total near 50,000, which is 1e-10 relative. `Fields.data` is a
+     * `Float32Array`, so a cell holding ~12 units resolves to about 1e-6, and
+     * a total spread over thousands of cells cannot be pinned tighter than
+     * the square root of that count times a cell's quantum. The old bound
+     * held only because the bodies kept landing on the same cells: turning on
+     * `grip` moved them, the distribution changed, and the total shifted by
+     * 3e-5 without a unit going anywhere.
+     *
+     * 1e-7 relative is a hundred and fifty times the drift this run actually
+     * shows and still far tighter than any leak would be. A real one grows
+     * with the run; this does not — see the packet path's own conservation in
+     * `energy.test.ts`, held to 1e-4 over nine hundred frames of a pond that
+     * latches, commutes and annihilates.
+     */
+    const after = matter(sim, p.bodyValue);
+    expect(Math.abs(after - before) / before, `drifted ${after - before}`).toBeLessThan(1e-7);
   });
 });

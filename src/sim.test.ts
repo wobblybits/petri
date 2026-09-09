@@ -500,6 +500,11 @@ describe('conservative mechanics', () => {
     params.faceAttract = 0;
     params.drag = 0;
     params.angDrag = 0;
+    // And the tank's contribution to it. `grip` makes the rate depend on how
+    // full a body is, so a pond that ships it has drag here even at `drag` 0,
+    // and this is a test about a collision conserving momentum rather than
+    // about the drag law.
+    params.grip = 0;
     params.deposit = 0;
     params.rewriteDuration = 20;
     params.flockAlign = 0;
