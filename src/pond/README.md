@@ -12,8 +12,16 @@ npm run pond -- run --seconds 600 --gpu off               # CPU field
 
 npm run pond -- sweep --name uptake --axis uptakeVmax=0,0.75,2 --seeds 1,2,3
 npm run pond -- analyze --name uptake
+npm run pond -- protocols                                # experiments written down
+npm run pond -- protocol forage-engages --smoke          # plumbing check
+npm run pond -- protocol forage-engages                  # the real thing
 npm run pond -- --help
 ```
+
+**Read `docs/experiments.md` before designing a sweep**, and `docs/concepts.md`
+before proposing a mechanism. The first is the list of ways the first sweeps
+through this harness went wrong and the rule each became; the second is which
+idea lives in which abstraction.
 
 The database lands at `ponds/pond.db` unless `--db` says otherwise, and
 `ponds/` is gitignored — these files are megabytes of evolved genome and
@@ -243,6 +251,26 @@ did nothing you could see over three seeds, 0.9 means it is most of what
 happened. It **ranks; it does not test.** Over a small grid with everything
 else held, this describes the sweep in front of you and estimates nothing.
 
+The `read` column says how to take each row: `resolved` at eta-squared 0.3
+or more with at least three seeds a level; `thin` with fewer than three seeds
+a level whatever eta-squared says (a 25-second smoke run once reported 0.91 for
+a dial whose three-seed version read 0.21); otherwise `unresolved`, with the
+seeds a level the observed spread and gap would need.
+
+### Every metric is folded, and the fold is part of the answer
+
+A run is a timeline and a trial is one number, so each metric has a default
+fold and any fold can be asked for by name: `forage_ratio` is its **peak**
+(foraging is a transient that is back at parity by the close — the last sample
+said "no foraging" from runs that plainly foraged); `commutes`, `latches`,
+`died` and the other counters are a **window** rate over the last interval
+(cumulative counts are dragged down by the opening latch storm); most standing
+measures are **last**. `--metric net_fst@slope,bodies@trough,commutes@last`
+asks for others; `mean` and `slope` skip the first `--warmup` seconds
+(default 60). Measures added to `measureDiversity` are readable without a
+migration through the `json` column — `demand_mean`, `full_mean`,
+`signal_p90`, `sense_read_p90` and the three named loci arrive that way.
+
 ### How many seeds, and how long
 
 **Three seeds is not enough for this pond, and the first sweep run through
@@ -295,9 +323,10 @@ per cent.
 ### Before sweeping, ask what the constants mean at each end
 
 The harness assumes every grid point is comparable at a fixed `--set`. That is
-false whenever one dial changes what another *means*, and it cannot detect it —
-the assumption is about the model, not the grid. Two instances found the hard
-way in one afternoon:
+false whenever one dial changes what another *means*, and it cannot detect it
+from the grid — so the model's own couplings are a table, `couplings.ts`, and
+`sweep` warns when an axis is crossed with a coupled constant that is held.
+Two instances found the hard way in one afternoon, both now rows in it:
 
 - **`senseScale` against `excreteRate`.** Conserved excretion drops signal
   amplitude by three orders, so one sense scale cannot serve both regimes. A
@@ -309,6 +338,25 @@ way in one afternoon:
   something has grazed; patches drag their edges through the productive band
   and manufacture ground as they spread. Layouts seeded at equal mass ended 50%
   apart. The clean control for a layout question is `energyRegrow = 0`.
+
+## Protocols
+
+A sweep does not know what question it is asking. A **protocol**
+(`protocol.ts`) is the sweep plus the decisions a sweep leaves to the person
+running it — the question, a directional prediction, what a null would mean
+(written before the run), the *arms* whose constants cannot be shared
+(`senseScale` across the excretion switch), the engagement gauges that say the
+mechanism was on at all (`demand_mean` for anything about foraging), the
+outcome measures with their folds, and the seed budget. `preflight` checks
+names, minima and couplings; each arm runs as its own sweep, `<protocol>/<arm>`;
+`analyze --protocol` reads the arms together with the arm as an axis and reads
+each outcome against its prediction as resolved, unresolved or thin, printing
+the null reading whenever it is not resolved.
+
+`npm run pond -- protocols` lists what is written down; `--smoke` runs one
+seed for twenty seconds under a name that never mixes with findings. Adding
+one is an entry in `PROTOCOLS`; `protocol.test.ts` runs every entry through
+its own preflight. `docs/experiments.md` §2 is the field-by-field account.
 
 ## Diversity and divergence
 

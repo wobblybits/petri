@@ -6,8 +6,12 @@ import { nativeSolver } from '../native/solver.ts';
 import { PondDb, type NetRow } from './db.ts';
 import { NET_FORMAT, layoutComplaint, readHeader } from './net-blob.ts';
 import { parseGround } from './ground.ts';
+import { latinHypercube, parseAxis } from './sample.ts';
+import { exploreLibrary, renderExplore } from './explore-report.ts';
 import { paramsWith, runPond, type SeedNet } from './run.ts';
-import { effectTable, effects, pointTable, sweepTrials } from './analyze.ts';
+import { DEFAULT_WARMUP, effectTable, effects, pointTable, sweepTrials } from './analyze.ts';
+import { checkCouplings, formatCouplings } from './couplings.ts';
+import { PROTOCOLS, describeProtocol, findProtocol, planProtocol, preflight, protocolReport } from './protocol.ts';
 import { gridPoints, runSweep } from './sweep.ts';
 import { closeWebGpu } from './webgpu-node.ts';
 
@@ -33,6 +37,10 @@ petri pond — a headless pond, and the library it writes to
   npm run pond -- export <net-id> [f]   write one net's blob to a file
   npm run pond -- sweep  --name n ...   run a parameter grid into the library
   npm run pond -- analyze --name n      what the sweep says, and which dial did it
+  npm run pond -- explore [--name n]    what varies together across the library
+  npm run pond -- protocols             the experiments written down (docs/experiments.md)
+  npm run pond -- protocol <name>       run one: preflight, every arm, then the report
+  npm run pond -- analyze --protocol n  read a protocol's runs back against its prediction
 
 run options
   --db <path>          database file           (default ponds/pond.db)
@@ -63,7 +71,11 @@ nets options
 
 sweep options
   --name <text>        sweep name; runs are tagged with it        (required)
-  --axis <key>=<a,b,c> one parameter axis; repeatable
+  --axis <key>=<a,b,c> one parameter axis; repeatable, crossed as a grid
+  --random <n>         n sampled points instead of a grid; use with --sample
+  --sample <specs>     comma list of 'key' or 'key=lo..hi' to sample over.
+                       Ranges come from the sliders; spans of 10x or more are
+                       sampled log-uniform
   --seeds <a,b,c>      seeds per grid point                       (default 1,2,3)
   --seconds <n>        simulated seconds per trial                (default 120)
   --bodies <n>         founders per trial                         (default 400)
@@ -74,10 +86,29 @@ sweep options
   --gpu auto|on|off    as for run
   --dry-run            print the grid and the cost, run nothing
 
+explore options
+  --name <text>        one sweep only; omit to read the whole library
+  --metric <a,b,c>     outcomes to explore, with folds as for analyze
+  --clusters <n>       regimes to look for                        (default 3)
+  --components <n>     PCA and PLS components to print            (default 3)
+  --min-swing <x>      conditional effects weaker than this are hidden (0.3)
+  --warmup <n>         simulated seconds mean and slope skip     (default ${DEFAULT_WARMUP})
+
 analyze options
   --name <text>        sweep to read; omit to list what is in the library
-  --metric <a,b,c>     restrict to these metrics
+  --protocol <text>    read a protocol instead (add --smoke for its smoke runs)
+  --metric <a,b,c>     restrict to these metrics; each may carry a fold, e.g.
+                       forage_ratio@last, net_fst@slope, commutes@window
+                       (folds: last peak trough mean slope window)
+  --warmup <n>         simulated seconds mean and slope skip     (default ${DEFAULT_WARMUP})
   --limit <n>          rows of the effect table                   (default 25)
+
+protocol options
+  --seeds <n>          seeds per point per arm; at least the protocol's minimum
+  --seconds <n>        simulated seconds per trial; at least the protocol's minimum
+  --smoke              one seed, twenty seconds, tagged apart: plumbing only
+  --dry-run            preflight and the plan, run nothing
+  --db --gpu --field --world --keep-nets   as for sweep
 `.trim();
 
 interface Args {
@@ -104,7 +135,7 @@ function parseArgs(argv: string[]): Args {
       continue;
     }
     const key = a.slice(2);
-    if (key === 'help' || key === 'keep-nets' || key === 'dry-run') {
+    if (key === 'help' || key === 'keep-nets' || key === 'dry-run' || key === 'smoke') {
       flags.set(key, '1');
       continue;
     }
@@ -431,6 +462,14 @@ function cmdExport(args: Args): void {
 function cmdAnalyze(args: Args): void {
   const db = new PondDb(args.flags.get('db') ?? 'ponds/pond.db');
   try {
+    const warmup = num(args.flags, 'warmup', DEFAULT_WARMUP);
+    const protoName = args.flags.get('protocol');
+    if (protoName) {
+      const p = findProtocol(protoName);
+      if (!p) throw new Error(`pond: no protocol ${JSON.stringify(protoName)}; see \`npm run pond -- protocols\``);
+      process.stdout.write(`${protocolReport(db, p, { smoke: args.flags.has('smoke'), warmup })}\n`);
+      return;
+    }
     const name = args.flags.get('name');
     if (!name) {
       const rows = db.db
@@ -452,10 +491,10 @@ function cmdAnalyze(args: Args): void {
       );
       return;
     }
-    const trials = sweepTrials(db, name);
-    if (trials.length === 0) throw new Error(`pond: no runs tagged ${JSON.stringify(name)}`);
     const only = args.flags.get('metric');
     const metrics = only ? only.split(',').map((m) => m.trim()) : undefined;
+    const trials = sweepTrials(db, name, { metrics, warmup });
+    if (trials.length === 0) throw new Error(`pond: no runs tagged ${JSON.stringify(name)}`);
     process.stdout.write(`sweep ${name}: ${trials.length} trial(s)\n\n`);
     process.stdout.write(`${pointTable(trials, metrics)}\n\n`);
     /*
@@ -465,6 +504,24 @@ function cmdAnalyze(args: Args): void {
      */
     process.stdout.write('effect of each axis, by share of variance explained\n');
     process.stdout.write(`${effectTable(effects(trials, metrics), num(args.flags, 'limit', 25))}\n`);
+  } finally {
+    db.close();
+  }
+}
+
+function cmdExplore(args: Args): void {
+  const db = new PondDb(args.flags.get('db') ?? 'ponds/pond.db');
+  try {
+    const metrics = args.flags.get('metric')?.split(',').map((m) => m.trim()).filter(Boolean);
+    const report = exploreLibrary(db, {
+      sweep: args.flags.get('name') ?? null,
+      clusters: num(args.flags, 'clusters', 3),
+      components: num(args.flags, 'components', 3),
+      minSwing: num(args.flags, 'min-swing', 0.3),
+      warmup: num(args.flags, 'warmup', DEFAULT_WARMUP),
+      metrics: metrics && metrics.length > 0 ? metrics : undefined,
+    });
+    process.stdout.write(renderExplore(report));
   } finally {
     db.close();
   }
@@ -490,7 +547,24 @@ async function cmdSweep(args: Args): Promise<void> {
     if (values.length === 0) throw new Error(`pond: --axis ${spec} has no values`);
     grid[key] = values;
   }
-  if (Object.keys(grid).length === 0) throw new Error('pond: sweep needs at least one --axis');
+  const sampleSpec = flags.get('sample');
+  const nRandom = flags.has('random') ? num(flags, 'random', 0) : 0;
+  let points: Record<string, number>[] | undefined;
+  if (nRandom > 0) {
+    if (!sampleSpec) throw new Error('pond: --random needs --sample to say which parameters');
+    const axes = sampleSpec.split(',').map((a) => parseAxis(a.trim()));
+    // Seeded off the sweep's name, so re-running the same sweep re-draws the
+    // same points and a resumed sweep lines up with the rows already stored.
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < name.length; i++) {
+      h ^= name.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    points = latinHypercube(axes, nRandom, h);
+    for (const a of axes) paramsWith(new Map([[a.key as string, a.min]]));
+  } else if (Object.keys(grid).length === 0) {
+    throw new Error('pond: sweep needs --axis, or --random with --sample');
+  }
   /*
    * Validated here rather than inside the loop. A typo in an axis name should
    * fail before the first trial, not after the twentieth — `paramsWith` throws
@@ -499,6 +573,14 @@ async function cmdSweep(args: Args): Promise<void> {
   const probe = new Map<string, number>(Object.entries(Object.fromEntries(sets)));
   for (const [k, v] of Object.entries(grid)) probe.set(k, v[0]);
   paramsWith(probe);
+  /*
+   * What the sweep holds that does not mean the same thing at every point.
+   * A warning, not a refusal: the grid may be exactly what was meant, but
+   * it has been exactly what was not meant twice, and both times the confound
+   * was invisible in the numbers. See `couplings.ts`.
+   */
+  const couplings = checkCouplings(Object.keys(grid), [], paramsWith(sets) as unknown as Record<string, number>);
+  if (couplings.length > 0) process.stderr.write(`${formatCouplings(couplings)}\n`);
 
   const seeds = (flags.get('seeds') ?? '1,2,3').split(',').map((v) => Number(v.trim()));
   if (seeds.some((v) => !Number.isFinite(v))) throw new Error('pond: --seeds wants numbers');
@@ -528,15 +610,16 @@ async function cmdSweep(args: Args): Promise<void> {
     gpu: gpuFlag as 'auto' | 'on' | 'off',
     keepNets: flags.has('keep-nets'),
     note: flags.get('note') ?? null,
+    points,
   };
-  const points = gridPoints(grid);
-  const total = points.length * seeds.length;
+  const gridOrSampled = points ?? gridPoints(grid);
+  const total = gridOrSampled.length * seeds.length;
   process.stderr.write(
-    `sweep ${name}: ${points.length} point(s) x ${seeds.length} seed(s) = ${total} trial(s), ` +
+    `sweep ${name}: ${gridOrSampled.length} point(s) x ${seeds.length} seed(s) = ${total} trial(s), ` +
       `${spec.seconds}s each\n`,
   );
   if (flags.has('dry-run')) {
-    for (const p of points) process.stdout.write(`${JSON.stringify(p)}\n`);
+    for (const p of gridOrSampled) process.stdout.write(`${JSON.stringify(p)}\n`);
     return;
   }
 
@@ -557,10 +640,113 @@ async function cmdSweep(args: Args): Promise<void> {
         );
       },
     });
-    const trials = sweepTrials(db, name);
-    process.stdout.write(`\nsweep ${name}: ${trials.length} trial(s)\n\n${pointTable(trials)}\n\n`);
-    process.stdout.write('effect of each axis, by share of variance explained\n');
-    process.stdout.write(`${effectTable(effects(trials))}\n`);
+    if (points) {
+      /*
+       * A sampled sweep has no levels — every point is its own — so the eta
+       * table would read "1 level, thin" for every row and say nothing. The
+       * exploration report is the analyser that fits a sample.
+       */
+      process.stdout.write(`\nsweep ${name}: ${points.length} sampled point(s)\n\n`);
+      process.stdout.write(renderExplore(exploreLibrary(db, { sweep: name })));
+      process.stdout.write(`\npond analyze --name ${name}, or explore over the whole library with pond explore\n`);
+    } else {
+      const trials = sweepTrials(db, name);
+      process.stdout.write(`\nsweep ${name}: ${trials.length} trial(s)\n\n${pointTable(trials)}\n\n`);
+      process.stdout.write('effect of each axis, by share of variance explained\n');
+      process.stdout.write(`${effectTable(effects(trials))}\n`);
+    }
+  } finally {
+    db.close();
+  }
+}
+
+function cmdProtocols(): void {
+  process.stdout.write(
+    `${PROTOCOLS.map((p) => describeProtocol(p)).join('\n\n')}\n\n` +
+      'docs/experiments.md says what these fields are for; src/pond/protocol.ts is where one is added.\n',
+  );
+}
+
+/**
+ * Run a protocol: preflight, then every arm as its own sweep, then the report.
+ *
+ * The arms run in order and each is a sweep the library already knows how to
+ * hold, so a protocol interrupted after its first arm has lost nothing: run it
+ * again and the second arm lands beside the first. (The first arm runs again
+ * too; resuming is not built.)
+ */
+async function cmdProtocol(args: Args): Promise<void> {
+  const { flags } = args;
+  const name = args.rest[0] ?? flags.get('name');
+  if (!name) throw new Error('pond: protocol wants a name; see `npm run pond -- protocols`');
+  const p = findProtocol(name);
+  if (!p) throw new Error(`pond: no protocol ${JSON.stringify(name)}; see \`npm run pond -- protocols\``);
+  const opts = {
+    seeds: flags.has('seeds') ? num(flags, 'seeds', p.seeds) : undefined,
+    seconds: flags.has('seconds') ? num(flags, 'seconds', p.seconds) : undefined,
+    smoke: flags.has('smoke'),
+  };
+  const pf = preflight(p, opts);
+  const plan = planProtocol(p, opts);
+  process.stderr.write(`${describeProtocol(p)}\n`);
+  for (const a of pf.accepted) process.stderr.write(`  accepted coupling ${a}\n`);
+  for (const w of pf.warnings) process.stderr.write(`  warning: ${w}\n`);
+  for (const e of pf.errors) process.stderr.write(`  ERROR: ${e}\n`);
+  if (pf.errors.length > 0) throw new Error(`pond: protocol ${name} failed preflight`);
+  process.stderr.write(
+    `  plan: ${plan.arms.length} arm(s) x ${plan.points} point(s) x ${plan.arms[0].seeds.length} seed(s) = ` +
+      `${plan.trials} trial(s), ${plan.arms[0].seconds}s each${plan.smoke ? '  [SMOKE: plumbing only]' : ''}\n`,
+  );
+  for (const a of plan.arms) process.stderr.write(`    ${a.sweep}: ${JSON.stringify(a.base)}\n`);
+  if (flags.has('dry-run')) return;
+
+  const gpuFlag = flags.get('gpu') ?? 'auto';
+  if (gpuFlag !== 'auto' && gpuFlag !== 'on' && gpuFlag !== 'off') throw new Error('pond: --gpu wants auto, on or off');
+  const worldFlag = flags.get('world') ?? '1600x1200';
+  const [ww, wh] = worldFlag.split('x').map(Number);
+  if (!Number.isFinite(ww) || !Number.isFinite(wh)) throw new Error(`pond: --world wants <w>x<h>, got ${JSON.stringify(worldFlag)}`);
+
+  const wasm = await nativeSolver.init();
+  if (!wasm) process.stderr.write(`pond: wasm solver unavailable (${nativeSolver.lastError})\n`);
+  const db = new PondDb(flags.get('db') ?? 'ponds/pond.db');
+  try {
+    const t0 = Date.now();
+    let done = 0;
+    for (const a of plan.arms) {
+      process.stderr.write(`arm ${a.arm.name} -> sweep ${a.sweep}\n`);
+      await runSweep(
+        db,
+        {
+          name: a.sweep,
+          grid: a.grid,
+          seeds: a.seeds,
+          base: a.base,
+          seconds: a.seconds,
+          dt: num(flags, 'dt', 1 / 60),
+          soupCount: num(flags, 'bodies', a.soupCount),
+          fieldCells: num(flags, 'field', 512),
+          world: { w: ww, h: wh },
+          sampleEvery: a.sampleEvery,
+          gpu: gpuFlag,
+          keepNets: a.keepNets || flags.has('keep-nets'),
+          note: a.note,
+        },
+        {
+          onTrial: (row) => {
+            done++;
+            const per = (Date.now() - t0) / done;
+            const left = ((plan.trials - done) * per) / 1000;
+            process.stderr.write(
+              `  [${String(done).padStart(3)}/${plan.trials}] run ${row.runId} ${JSON.stringify(row.point)} ` +
+                `seed=${row.seed} ${(row.wallMs / 1000).toFixed(1)}s` +
+                (done < plan.trials ? `  ~${left < 90 ? `${left.toFixed(0)}s` : `${(left / 60).toFixed(1)}m`} left` : '') +
+                '\n',
+            );
+          },
+        },
+      );
+    }
+    process.stdout.write(`\n${protocolReport(db, p, { smoke: plan.smoke })}\n`);
   } finally {
     db.close();
   }
@@ -579,6 +765,9 @@ async function main(): Promise<void> {
   else if (args.command === 'export') cmdExport(args);
   else if (args.command === 'sweep') await cmdSweep(args);
   else if (args.command === 'analyze' || args.command === 'analyse') cmdAnalyze(args);
+  else if (args.command === 'explore') cmdExplore(args);
+  else if (args.command === 'protocols') cmdProtocols();
+  else if (args.command === 'protocol') await cmdProtocol(args);
   else if (args.command === 'format') {
     process.stdout.write(
       `net format ${NET_FORMAT}: genome ${CHEM_LEN} floats, learned ${PLASTIC_LEN}\n`,

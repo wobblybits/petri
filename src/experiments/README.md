@@ -1,6 +1,10 @@
 # Experiments
 
-Sweeps that study the pond instead of asserting about it. A trial is a
+Sweeps that study the pond instead of asserting about it. **Read
+`docs/experiments.md` first** — the discipline, the measure catalogue and the
+couplings — and prefer `npm run pond -- protocol` for anything meant to be a
+finding: it records the question with the runs and checks the mistakes this
+harness cannot. A trial is a
 seeded soup run for a fixed number of simulated seconds and sampled on a
 schedule; a sweep is a parameter grid crossed with seeds. Nothing here passes
 or fails — the output is a table on stdout and a JSON file under

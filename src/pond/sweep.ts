@@ -26,6 +26,14 @@ export interface SweepSpec {
   name: string;
   /** Parameter axes. Every combination of every axis is run, once per seed. */
   grid: Record<string, number[]>;
+  /**
+   * Points sampled from continuous ranges instead of crossed as a grid.
+   *
+   * When present this replaces `grid`. See `sample.ts` for why: a grid point
+   * informs its own grid and nothing else, while a sampled point joins every
+   * regression ever run over the library.
+   */
+  points?: Record<string, number>[];
   seeds: number[];
   /** Applied to every point, before the grid overrides it. */
   base: Record<string, number>;
@@ -84,7 +92,7 @@ export async function runSweep(
   spec: SweepSpec,
   hooks: SweepHooks = {},
 ): Promise<SweepPoint[]> {
-  const points = gridPoints(spec.grid);
+  const points = spec.points ?? gridPoints(spec.grid);
   const total = points.length * spec.seeds.length;
   const rows: SweepPoint[] = [];
   const commit = gitCommit();

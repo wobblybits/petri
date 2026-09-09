@@ -1,4 +1,4 @@
-import { CHEM_LEN, EMIT, TASTE } from '../chem-layout.ts';
+import { CHEM_LEN, EMIT, IN_DEMAND, STATE_DIMS, TASTE, T_OUT, W_IN, W_SELF } from '../chem-layout.ts';
 import { CH, CHANNELS } from '../fields.ts';
 import type { Sim } from '../sim.ts';
 
@@ -132,6 +132,43 @@ export interface Diversity {
    * stand on, or nobody to stand on it.
    */
   forageRatio: number | null;
+  /**
+   * Engagement gauges: was the mechanism a question is about switched on at
+   * all in this pond? See `docs/experiments.md` §1.B.
+   *
+   * Four structure sweeps once returned a null because every body sat at 1.20
+   * of a 1.25 tank — demand read 0.000, the seeded foraging pathway that is
+   * gated on it never engaged, and the ponds were indifferent to where the
+   * food was for a reason that had nothing to do with foraging. Nothing in
+   * the timeline could have said so. These are the numbers that say so.
+   *
+   * `demandMean` is the mean of `DEMAND` as the genome reads it, clamped to
+   * [0, 1]; `fullMean` is the mean tank fraction the same way. Both are
+   * host-side arrays on every path.
+   */
+  demandMean: number;
+  fullMean: number;
+  /**
+   * The p90 of the three signalling species summed at a body's own position,
+   * raw — before `senseScale`. Multiplied by the run's `senseScale` it is
+   * what a strong local signal reads as on the way into `x`, and that
+   * product is what has to sit near one: it is how `SENSE_SCALE` was set,
+   * and a sweep once ran an excreting arm at the minted scale, three orders
+   * out, and called the bodies indifferent to structure when they were blind.
+   */
+  signalP90: number | null;
+  /**
+   * Population means of three named genes.
+   *
+   * The seeded foraging pathway is two weights — `Wx[0][IN_DEMAND]` carries
+   * demand into `h[0]` and `T[energy][0]` reads it as a taste for ground —
+   * and the hunger memory a lineage might acquire is `Wh[0][0]`, the
+   * self-recurrence on that dimension. A claim that a lineage has learned to
+   * act on hunger is a claim about these three numbers, not about an
+   * aggregate drift; `matrixDrift` rises whether the walk is selected or
+   * random. Read off `chem`, which is the host's to write on every path.
+   */
+  loci: { wDemandH0: number; wSelf00: number; tFoodH0: number };
 }
 
 /** Grouped variance decomposition over a set of loci. Returns F_ST, or null. */
@@ -272,9 +309,35 @@ export function measureDiversity(sim: Sim): Diversity {
    */
   let atBodies = 0;
   const probe = new Float64Array(CHANNELS);
+  const signalAt: number[] = [];
+  let demandSum = 0;
+  let fullSum = 0;
+  let wDemandH0 = 0;
+  let wSelf00 = 0;
+  let tFoodH0 = 0;
+  const REQUEST = store.request;
+  const EXTRA = store.extra;
+  const CAP = store.energyCap;
   for (const a of sim.agents.values()) {
     sim.fields.sampleAll(a.x, a.y, probe, 0);
     atBodies += probe[CH.energy];
+    signalAt.push(probe[CH.conP] + probe[CH.dupP] + probe[CH.aux]);
+    // The same clamps `updateState` applies when it builds `x`, so these
+    // are the inputs the genome saw and not the raw store.
+    const r = REQUEST[a.slot];
+    demandSum += r <= 0 ? 0 : r >= 1 ? 1 : r;
+    const cap = CAP[a.slot];
+    const full = cap > 0 ? EXTRA[a.slot] / cap : 0;
+    fullSum += full <= 0 ? 0 : full >= 1 ? 1 : full;
+    const g = a.slot * CHEM_LEN;
+    wDemandH0 += chem[g + W_IN + IN_DEMAND];
+    wSelf00 += chem[g + W_SELF];
+    tFoodH0 += chem[g + T_OUT + CH.energy * STATE_DIMS];
+  }
+  let signalP90: number | null = null;
+  if (signalAt.length > 0) {
+    signalAt.sort((p, q) => p - q);
+    signalP90 = signalAt[Math.min(signalAt.length - 1, Math.floor(0.9 * (signalAt.length - 1)))];
   }
   const f = sim.fields;
   const cell = f.worldW / f.cols;
@@ -309,5 +372,13 @@ export function measureDiversity(sim: Sim): Diversity {
     commutesPerLatch: sim.census().commutesPerLatch,
     signalTotal,
     forageRatio,
+    demandMean: n > 0 ? demandSum / n : 0,
+    fullMean: n > 0 ? fullSum / n : 0,
+    signalP90,
+    loci: {
+      wDemandH0: n > 0 ? wDemandH0 / n : 0,
+      wSelf00: n > 0 ? wSelf00 / n : 0,
+      tFoodH0: n > 0 ? tFoodH0 / n : 0,
+    },
   };
 }
