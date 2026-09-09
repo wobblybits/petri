@@ -86,12 +86,15 @@ describe('grip', () => {
     );
     expect(h.full.vx).toBeCloseTo(100 * Math.exp(-(heavy.drag + 2)), 6);
 
+    // Chosen against this pond's own `drag` rather than a fixed -0.4, which
+    // silently drove the rate negative once `drag` came down and the clamp,
+    // not the arithmetic, decided the answer.
     const slick = stillParams();
-    slick.grip = -0.4;
+    slick.grip = -0.5 * slick.drag;
     const s = pair(slick);
     run(s.sim, slick, 1);
     expect(s.full.vx, 'a full tank slides').toBeGreaterThan(s.empty.vx);
-    expect(s.full.vx).toBeCloseTo(100 * Math.exp(-(slick.drag - 0.4)), 6);
+    expect(s.full.vx).toBeCloseTo(100 * Math.exp(-(slick.drag + slick.grip)), 6);
   });
 
   it('cancels drag but never inverts it', () => {

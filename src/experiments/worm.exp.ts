@@ -711,6 +711,107 @@ describe('experiment: one worm on a bench', () => {
     }
   });
 
+
+  it('separates thrust, recoil and the tug', () => {
+    /*
+     * Four things now push a pair along its own wire, and they are not
+     * independent. Within a frame the order is drag, then wires, then
+     * transport — so the drag law always reads the fullness a transfer has
+     * *already* produced: the sender is the empty one and slides, the
+     * receiver is the full one and holds.
+     *
+     * `transportRecoil` is the impulse, and it shoves the pair apart along
+     * the wire. `transportThrust` withholds the receiver's half of it, which
+     * is the reactionless part and the only one that mints momentum.
+     * `wireTug` shortens the same wire the same transfer crossed, pulling
+     * that pair together. Apart and together, on the same pair, in the same
+     * frame — so which of them survives is a question about magnitudes and
+     * about which end `grip` has anchored, and not one to reason out.
+     *
+     * Signed dx, because the direction is the point: the worm lies along x
+     * with its source at low x, so energy flows +x and a negative dx is the
+     * worm walking back toward its supply.
+     */
+    console.log('\n  grip 2, gradient quanta, source at low x so energy flows +x');
+    console.log('  metered to 3 units/s, which is this worm at its whole upkeep on the');
+    console.log('  pond default — the unmetered bench supplies ~1180, and thrust');
+    console.log('  scales with the amount moved, so it flatters itself there.');
+    console.log('\n  recoil thrust  tug       dx      dy   px/s     moved');
+    console.log('  ------ ------ ---- -------- ------- ------ ---------');
+    const rows: [number, number, number][] = [
+      [0, 0, 0],
+      [100, 0, 0],
+      [100, 1, 0],
+      [0, 0, 0.3],
+      [100, 0, 0.3],
+      [100, 1, 0.3],
+    ];
+    for (const [transportRecoil, transportThrust, wireTug] of rows) {
+      const r = runFree({
+        quanta: 'gradient',
+        income: 3,
+        params: { grip: 2, transportRecoil, transportThrust, wireTug, wireTugTau: 0.3 },
+      });
+      const px = Math.hypot(r.dx, r.dy) / 30;
+      console.log(
+        `  ${String(transportRecoil).padStart(6)} ${transportThrust.toFixed(1).padStart(6)} ${wireTug.toFixed(2).padStart(4)} ` +
+          `${r.dx.toFixed(2).padStart(8)} ${r.dy.toFixed(2).padStart(7)} ${px.toFixed(3).padStart(6)} ${r.moved.toFixed(0).padStart(9)}`,
+      );
+      expect(Number.isFinite(r.dx)).toBe(true);
+    }
+  });
+
+
+  it('asks what would make grip and the tug an order of magnitude larger', () => {
+    /*
+     * With thrust and recoil off, the whole stroke is: the wire contracts by
+     * `wireTug * rest * (share of a tank that crossed)`, and the pair keeps
+     * whatever fraction of that the two ends fail to share equally. So the
+     * step is set by the *ratio* of the anchored end's drag rate to the
+     * sliding end's, not by the level of either.
+     *
+     * `drag` is the floor under that ratio. At the shipped 0.55 against grip
+     * 2 a full body damps at 2.55 and an empty one at 0.55, which is only
+     * 4.6 to 1, and the sliding end is being held back nearly as hard as the
+     * anchored one. Lowering `drag` while keeping `grip` widens the ratio and
+     * lets the free end actually travel — which is a different move from
+     * turning `grip` up, and the reason turning `grip` up alone reads as
+     * paralysis.
+     */
+    console.log('\n  thrust 0, recoil 0, income 3: what widens the stroke');
+    console.log('\n   drag  grip  tug   ratio       dx   px/s     moved');
+    console.log('  ----- ----- ---- ------- -------- ------ ---------');
+    const rows: [number, number, number][] = [
+      [0.55, 2, 0.3],
+      [0.55, 8, 0.3],
+      [0.15, 2, 0.3],
+      [0.15, 8, 0.3],
+      [0.05, 4, 0.3],
+      [0.05, 4, 0.6],
+      [0.05, 12, 0.6],
+      // Past the slider's 0.6, to find where `syncRest`'s floor bites. It
+      // clamps the contraction at a quarter of rest length, so at full pull
+      // anything above 0.75 should be doing nothing at all.
+      [0.05, 4, 0.75],
+      [0.05, 4, 0.9],
+      [0.05, 4, 1.2],
+    ];
+    for (const [drag, grip, wireTug] of rows) {
+      const r = runFree({
+        quanta: 'gradient',
+        income: 3,
+        params: { drag, grip, wireTug, wireTugTau: 0.3, transportRecoil: 0, transportThrust: 0 },
+      });
+      const px = Math.hypot(r.dx, r.dy) / 30;
+      const ratio = (drag + grip) / drag;
+      console.log(
+        `  ${drag.toFixed(2).padStart(5)} ${grip.toFixed(0).padStart(5)} ${wireTug.toFixed(2).padStart(4)} ` +
+          `${ratio.toFixed(1).padStart(7)} ${r.dx.toFixed(2).padStart(8)} ${px.toFixed(3).padStart(6)} ${r.moved.toFixed(0).padStart(9)}`,
+      );
+      expect(Number.isFinite(r.dx)).toBe(true);
+    }
+  });
+
   it('runs the hypotheses', () => {
     const CASES: { name: string; spec: RunSpec }[] = [
       { name: 'flat     no grip   ', spec: { drive: 'flat', params: {} } },
