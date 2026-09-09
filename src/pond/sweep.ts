@@ -1,6 +1,6 @@
-import { execFileSync } from 'node:child_process';
 import type { Params } from '../params.ts';
 import { PondDb } from './db.ts';
+import { gitCommit } from './provenance.ts';
 import { paramsWith, runPond, type PondRunSpec } from './run.ts';
 
 /*
@@ -72,14 +72,6 @@ export function gridPoints(grid: Record<string, number[]>): Record<string, numbe
     out = next;
   }
   return out;
-}
-
-function gitCommit(): string | null {
-  try {
-    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
-  } catch {
-    return null;
-  }
 }
 
 export interface SweepHooks {
