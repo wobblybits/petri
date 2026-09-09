@@ -12,6 +12,7 @@ npm run experiment -- economy           # the dials that ship at zero, one at a 
 npm run experiment -- worm              # one hand-built organism, not a pond
 npm run experiment -- beam              # where a body plan's bending stiffness comes from
 npm run experiment -- ports             # how many free ports a net has, against its size
+npm run experiment -- labour            # whether division of labour can pay at all
 EXP_SECONDS=180 EXP_BODIES=600 npm run experiment -- breeding
 ```
 
