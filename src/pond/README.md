@@ -265,6 +265,51 @@ same axis gave eta-squared **0.91** for `uptakeVmax` on `netFst`; the
 the same thing — a young pond is still resolving its preset, and its
 differentiation is founder mixing rather than anything a dial did.
 
+### Which measure to put on the outcome
+
+Not all of them cost the same number of seeds. Measured over thirty trials at
+five seeds, the seed-to-seed coefficient of variation (standard deviation over
+mean, at the last sample):
+
+| measure | CV |
+| --- | --- |
+| `ground` | 0.151 |
+| `netFst` | 0.257 |
+| `bodies` | 0.313 |
+| `netsEffective` | 0.381 |
+| `linesEffective` | 0.451 |
+| `commutes` | 0.504 |
+| **`bornMean` (depth)** | **0.728** |
+
+**Depth is the noisiest thing here**, because it is a mean over a distribution
+with a long tail — a handful of deep lineages carry it, and whether a pond
+grows one is close to a coin flip. Resolving a 30% difference in depth wants
+about **25 seeds**; `netFst` wants about five for the same relative effect.
+
+So: put `netFst` or `ground` on the outcome where the question allows it, and
+budget seeds properly when it has to be depth. This is why the `excreteRate`
+sweeps resolved at five seeds and the ground-structure ones did not — excretion
+moved depth ninefold, far past the noise, while structure moves it by tens of
+per cent.
+
+### Before sweeping, ask what the constants mean at each end
+
+The harness assumes every grid point is comparable at a fixed `--set`. That is
+false whenever one dial changes what another *means*, and it cannot detect it —
+the assumption is about the model, not the grid. Two instances found the hard
+way in one afternoon:
+
+- **`senseScale` against `excreteRate`.** Conserved excretion drops signal
+  amplitude by three orders, so one sense scale cannot serve both regimes. A
+  crossed sweep left the excreting arm effectively blind, in a sweep about
+  whether bodies navigate to structure. Run them as two sweeps.
+- **`energyRegrow` against `groundPatches`.** Logistic growth is zero at both
+  ends and `Fields.grow` skips a cell at `e <= 0` and at `e >= cap`. A uniform
+  dish is seeded at exactly `cellCap`, so it produces *nothing* except where
+  something has grazed; patches drag their edges through the productive band
+  and manufacture ground as they spread. Layouts seeded at equal mass ended 50%
+  apart. The clean control for a layout question is `energyRegrow = 0`.
+
 ## Diversity and divergence
 
 `measure.ts`. The pond could always say how *much* there was — bodies, wires,
