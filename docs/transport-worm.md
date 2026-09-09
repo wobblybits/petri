@@ -4,6 +4,33 @@ Measured 2026-09-08 on `claude/evolutionary-sim-experiments-yfvs9l`, with
 `src/experiments/worm.exp.ts` at `EXP_SECONDS=30`, eight Con segments, five
 seeds a condition.
 
+> ## Status, added 2026-09-09 after acting on it
+>
+> **Most of the machinery this document measures no longer exists.** The
+> findings below were accurate and are left as written, because the route
+> matters and two of the wrong turns were instructive — but read this first.
+>
+> | | |
+> |---|---|
+> | The 36 px/s worm | **An artifact.** It swam on `transportThrust = 1`, which is a momentum pump; the `thrust 0` control that reads as a clean falsification is the physically correct configuration going nowhere. See "the momentum question this forces". |
+> | `transportRecoil`, `transportThrust`, `pushRate`, the `PUSH` head, the `P` head, `recoilLever` | **Deleted.** Three half-actuators trying to change a net's shape by moving matter about. Replaced by one `ANGLE` head: a rest angle per port, held by `jointStiff`, solved as an XPBD constraint. The genome shrank 193 → 183 floats and four parameters became two. |
+> | `applyTransportRecoil` | **Deleted.** Transport is mechanically inert now: moving matter between two bodies of one net cannot move their centre of mass. |
+> | "phase does nothing" (three times) | **All three were measurement or wiring faults, not physics.** A max-relaxation that could not carry a phase; a JS pass writing into a store the native block was about to overwrite; and a torque applied outside the substep loop, which `finishIntegrate` then discarded. |
+> | `dragAniso` | **Vindicated.** With the actuator finally working, an isotropic medium gives *exactly* 0.00 px/s in every phase condition and an anisotropic one does not. |
+>
+> What survives unchanged and is worth keeping: **port saturation** (a grown net
+> has no free ports at all), the Laman counting that forces the restoring force
+> to be angular, "coherence comes from the scarcity of transfers rather than
+> their abundance", and the finding that a body standing on ambient ground is
+> self-sufficient and so cannot be a metabolic sink.
+>
+> Where it stands: the joint tracks its command at a correlation of **1.00**,
+> the passive backbone holds (0.034 rad of flap against 0.704 without it), and
+> the wave travels with a sign set by the phase (+0.87 s at +pi/2, -0.60 s at
+> -pi/2). It does not yet swim — 0.2 to 1.2 px/s with `gap` stretching from 28
+> to 34-52, which says the stroke is being spent deforming the body rather than
+> pushing on the medium.
+
 The question: can `applyTransportRecoil` be a worm's only motor? Its own
 comment says the effect has only ever been seen on events — a latch, a rescue,
 a refill — because a topped-up soup moves ~4e-4 a frame, and names the untested
