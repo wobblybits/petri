@@ -248,6 +248,25 @@ describe('exploring a library', () => {
     }
   });
 
+  it('gives each regime as a configuration, not only as z-scores', () => {
+    const db = library(plan(60));
+    try {
+      const r = exploreLibrary(db, { clusters: 2 });
+      for (const g of r.regimes) {
+        const patches = g.recipe.find((e) => e.name === 'groundPatches');
+        expect(patches).toBeDefined();
+        // The two dishes were planted at 0 and 6, and the recipe is in those
+        // units -- a number to put behind `--set`, not a distance from a mean.
+        expect([0, 6]).toContain(patches!.value);
+      }
+      const values = r.regimes.map((g) => g.recipe.find((e) => e.name === 'groundPatches')!.value);
+      expect(new Set(values).size).toBe(2);
+      expect(renderExplore(r)).toMatch(/--set groundPatches=/);
+    } finally {
+      db.close();
+    }
+  });
+
   it('warns when two parameters never moved apart', () => {
     const rows = plan(40);
     // Tie the condition to the driver — the shape a sweep makes when a script

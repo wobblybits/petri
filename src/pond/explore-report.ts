@@ -40,7 +40,14 @@ export interface ExploreReport {
   outcomeNames: string[];
   components: { explained: number; top: Loading[] }[];
   cross: { correlation: number; params: Loading[]; outcomes: Loading[] }[];
-  regimes: { size: number; outcomes: Loading[]; params: Loading[]; runs: number[] }[];
+  regimes: {
+    size: number;
+    outcomes: Loading[];
+    params: Loading[];
+    runs: number[];
+    /** The regime's centre in the units you would type, for the dials that define it. */
+    recipe: { name: string; value: number }[];
+  }[];
   conditionals: Conditional[];
   notes: string[];
 }
@@ -195,11 +202,27 @@ export function exploreLibrary(db: PondDb, opts: ExploreOptions = {}): ExploreRe
   for (let c = 0; c < k; c++) {
     const rows = label.map((l, i) => (l === c ? i : -1)).filter((i) => i >= 0);
     if (rows.length === 0) continue;
+    /*
+     * A regime described only in standard deviations is a description. The
+     * median of each defining dial, in its own units, is a configuration --
+     * something to put behind `--set` and run at several seeds, which is the
+     * only way any of this becomes a finding rather than a picture.
+     *
+     * Median rather than mean: these are the parameters of a cluster found in
+     * outcome space, so their distribution has no reason to be symmetric, and
+     * one extreme draw should not move the recipe.
+     */
+    const params = top(X.names, X.names.map((_, j) => columnMean(X, rows, j)), 6, REGIME_FLOOR);
+    const recipe = params.map((e) => {
+      const vs = rows.map((i) => keep[i].params?.[e.name] ?? 0).sort((a, b) => a - b);
+      return { name: e.name, value: vs[vs.length >> 1] };
+    });
     regimes.push({
       size: rows.length,
       outcomes: top(Y.names, Y.names.map((_, j) => columnMean(Y, rows, j)), 6, REGIME_FLOOR),
-      params: top(X.names, X.names.map((_, j) => columnMean(X, rows, j)), 6, REGIME_FLOOR),
+      params,
       runs: rows.map((i) => keep[i].runId),
+      recipe,
     });
   }
   regimes.sort((a, b) => b.size - a.size);
@@ -299,6 +322,13 @@ export function groupConfounds(P: Matrix): { matrix: Matrix; groups: string[][] 
   };
 }
 
+/** Enough digits to matter and no more: these are dial settings, not data. */
+const round = (v: number): string => {
+  if (v === 0) return '0';
+  const d = Math.max(0, 3 - Math.floor(Math.log10(Math.abs(v))) - 1);
+  return Number(v.toFixed(Math.min(d, 6))).toString();
+};
+
 const sig = (v: number): string => (v >= 0 ? '+' : '-') + Math.abs(v).toFixed(2);
 const list = (l: Loading[], none: string): string =>
   l.length === 0 ? none : l.map((e) => `${e.name}${sig(e.value)}`).join('  ');
@@ -328,6 +358,9 @@ export function renderExplore(r: ExploreReport): string {
     out.push(`  regime ${i + 1}  ${g.size} runs   e.g. ${g.runs.slice(0, 6).join(' ')}`);
     out.push(`        is:   ${list(g.outcomes, '(the ordinary pond)')}`);
     out.push(`        from: ${list(g.params, '(no parameter distinguishes it — it is seed noise)')}`);
+    if (g.recipe.length > 0) {
+      out.push(`        run:  ${g.recipe.map((e) => `--set ${e.name}=${round(e.value)}`).join(' ')}`);
+    }
   });
 
   out.push('\nconditional effects — where one dial changes what another means');
