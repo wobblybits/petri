@@ -245,6 +245,8 @@ export interface TrialRow {
   values: Record<string, number | null>;
   /** The run's whole `Params`, for saying what was held. Absent on a row built by hand. */
   params?: Record<string, number>;
+  /** The sweep the run belonged to, where it belonged to one. */
+  sweep?: string | null;
 }
 
 export interface TrialOptions {
@@ -273,7 +275,7 @@ function jsonPath(obj: unknown, path: string): unknown {
  */
 export function sweepTrials(db: PondDb, sweep: string, opts: TrialOptions = {}): TrialRow[] {
   const runs = db.db
-    .prepare('SELECT id, seed, point, params FROM run WHERE sweep = ? ORDER BY id')
+    .prepare('SELECT id, seed, point, params, sweep FROM run WHERE sweep = ? ORDER BY id')
     .all(sweep) as unknown as RunRow[];
   return foldRuns(db, runs, opts);
 }
@@ -285,12 +287,24 @@ export function sweepTrials(db: PondDb, sweep: string, opts: TrialOptions = {}):
  * asked today can be answered with machine time spent last week, so this does
  * not care which sweep a run belonged to — or whether it belonged to one.
  */
-export function libraryTrials(db: PondDb, opts: TrialOptions & { sweep?: string | null } = {}): TrialRow[] {
-  const where = opts.sweep ? 'sweep = ? AND ' : '';
+export function libraryTrials(
+  db: PondDb,
+  opts: TrialOptions & { sweep?: string | string[] | null } = {},
+): TrialRow[] {
+  /*
+   * More than one name because two sweeps of the same design are one sample.
+   * `survey1` and `survey2` drew 120 points each over the same nineteen axes;
+   * pooled they are 240 runs against nineteen parameters, which is where the
+   * noise floor stops being most of what the report prints.
+   */
+  const names = opts.sweep === null || opts.sweep === undefined
+    ? []
+    : Array.isArray(opts.sweep) ? opts.sweep : [opts.sweep];
+  const where = names.length > 0 ? `sweep IN (${names.map(() => '?').join(',')}) AND ` : '';
   const runs = db.db
-    .prepare(`SELECT id, seed, point, params, seconds, soup_count, field_cells FROM run
+    .prepare(`SELECT id, seed, point, params, sweep, seconds, soup_count, field_cells FROM run
               WHERE ${where}finished_at IS NOT NULL ORDER BY id`)
-    .all(...(opts.sweep ? [opts.sweep] : [])) as unknown as RunRow[];
+    .all(...names) as unknown as RunRow[];
   return foldRuns(db, runs, opts);
 }
 
@@ -299,6 +313,7 @@ interface RunRow {
   seed: number;
   point: string | null;
   params: string;
+  sweep: string | null;
   /*
    * Present only from `libraryTrials`. They are the *setup*, not parameters,
    * and leaving them out is the confound the exploration pipeline exists to
@@ -386,6 +401,7 @@ function foldRuns(db: PondDb, runs: RunRow[], opts: TrialOptions): TrialRow[] {
       point: r.point ? (JSON.parse(r.point) as Record<string, number>) : {},
       values,
       params,
+      sweep: r.sweep,
     });
   }
   return out;

@@ -46,13 +46,15 @@ export interface ExploreReport {
 }
 
 export interface ExploreOptions {
-  sweep?: string | null;
+  sweep?: string | string[] | null;
   clusters?: number;
   components?: number;
   minSwing?: number;
   /** Metric keys, each optionally `@summary`, as `analyze` takes them. */
   metrics?: string[];
   warmup?: number;
+  /** Parameter names to leave out of the matrix entirely. */
+  drop?: string[];
 }
 
 /*
@@ -143,7 +145,8 @@ export function exploreLibrary(db: PondDb, opts: ExploreOptions = {}): ExploreRe
     return empty;
   }
 
-  const paramKeys = [...Object.keys(defaultParams()), 'runSeconds', 'runBodies', 'runFieldCells'];
+  const paramKeys = [...Object.keys(defaultParams()), 'runSeconds', 'runBodies', 'runFieldCells']
+    .filter((k) => !(opts.drop ?? []).includes(k));
   const P = standardise(matrix(keep.map((t) => paramKeys.map((k) => t.params?.[k] ?? 0)), paramKeys));
   const Y = standardise(matrix(keep.map((t) => live.map((k) => t.values[k] as number)), live.map(metricLabel)));
   if (P.cols === 0) {
@@ -215,6 +218,36 @@ export function exploreLibrary(db: PondDb, opts: ExploreOptions = {}): ExploreRe
   }
   if (X.cols > keep.length / 4) {
     notes.push(`${X.cols} parameters varying across ${keep.length} runs — too few runs to separate them; expect confounded loadings`);
+  }
+  /*
+   * A parameter that never varied *within* a sweep, only between sweeps, is
+   * not a parameter here — it is a label for which sweep a run came from, and
+   * every other thing that differed between those runs loads onto it. It
+   * happened immediately: `survey2` capped `maxAgents` at 8000 as a fuse
+   * against a runaway config, the fuse never blew (peak population 3788), and
+   * pooled with `survey1` the constant showed up carrying interactions.
+   */
+  const bySweep = new Map<string, TrialRow[]>();
+  for (const t of keep) {
+    const k = t.sweep ?? '';
+    const list = bySweep.get(k);
+    if (list) list.push(t);
+    else bySweep.set(k, [t]);
+  }
+  if (bySweep.size > 1) {
+    const labels = P.names.filter((n) => {
+      if (n.startsWith('run')) return false;
+      for (const rows of bySweep.values()) {
+        const first = rows[0].params?.[n];
+        if (rows.some((t) => t.params?.[n] !== first)) return false;
+      }
+      return true;
+    });
+    if (labels.length > 0) {
+      notes.push(
+        `constant within every sweep and different between them, so these are labels for which sweep a run came from, not parameters — anything else that differed between those runs loads onto them: ${labels.join(', ')} (drop with --drop)`,
+      );
+    }
   }
   const noRange = P.names.filter((n) => !n.startsWith('run') && !SLIDERS.some((s) => s.key === n));
   if (noRange.length > 0) notes.push(`varied but has no declared slider range, so sampling cannot reach them: ${noRange.join(', ')}`);

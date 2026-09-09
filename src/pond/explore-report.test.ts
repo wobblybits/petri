@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { defaultParams } from '../params.ts';
+import { defaultParams, type Params } from '../params.ts';
 import { PondDb } from './db.ts';
 import { exploreLibrary, groupConfounds, renderExplore } from './explore-report.ts';
 import { matrix, standardise } from './explore.ts';
@@ -33,13 +33,14 @@ interface Planted {
  * On a uniform dish it does nothing. That is the interaction, and only
  * `conditionalEffects` can see it.
  */
-function library(rows: Planted[]): PondDb {
+function library(rows: Planted[], tweak?: (p: Params, i: number) => void): PondDb {
   const db = new PondDb(':memory:');
   const r = lcg(7);
   rows.forEach((p, i) => {
     const params = defaultParams();
     params.excreteRate = p.excrete;
     params.groundPatches = p.patches;
+    tweak?.(params, i);
     const id = db.startRun({
       seed: 1 + (i % 3),
       seconds: 120,
@@ -210,6 +211,41 @@ describe('exploring a library', () => {
     ));
     expect(groupConfounds(m).matrix).toBe(m);
     expect(groupConfounds(m).groups).toEqual([]);
+  });
+
+  it('names a parameter that only ever changed between sweeps', () => {
+    const rows = plan(40);
+    rows.forEach((p, i) => {
+      p.sweep = i < 20 ? 'a' : 'b';
+    });
+    // A fuse set on the second sweep and never reached. It is a label for
+    // which sweep a run came from, and everything else that differed between
+    // them -- the seed stream, the code, the machine -- loads onto it.
+    const db = library(rows, (p, i) => {
+      p.maxAgents = i < 20 ? 100000 : 8000;
+    });
+    try {
+      const r = exploreLibrary(db);
+      expect(r.notes.join(' ')).toMatch(/labels for which sweep .* maxAgents/);
+      // And --drop takes it out entirely.
+      expect(exploreLibrary(db, { drop: ['maxAgents'] }).paramNames).not.toContain('maxAgents');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('says nothing about sweep labels when there is only one sweep', () => {
+    const rows = plan(40);
+    for (const p of rows) p.sweep = 'only';
+    const db = library(rows, (p, i) => {
+      p.maxAgents = i < 20 ? 100000 : 8000;
+    });
+    try {
+      // It varies *within* the sweep here, so it is a parameter like any other.
+      expect(exploreLibrary(db).notes.join(' ')).not.toMatch(/labels for which sweep/);
+    } finally {
+      db.close();
+    }
   });
 
   it('warns when two parameters never moved apart', () => {

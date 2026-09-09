@@ -94,11 +94,13 @@ import options
                        the same file twice does nothing.
 
 explore options
-  --name <text>        one sweep only; omit to read the whole library
+  --name <a,b>         these sweeps only; omit to read the whole library
   --metric <a,b,c>     outcomes to explore, with folds as for analyze
   --clusters <n>       regimes to look for                        (default 3)
   --components <n>     PCA and PLS components to print            (default 3)
   --min-swing <x>      conditional effects weaker than this are hidden (0.3)
+  --drop <a,b>         parameters to leave out; use on anything the report
+                       flags as a label for which sweep a run came from
   --warmup <n>         simulated seconds mean and slope skip     (default ${DEFAULT_WARMUP})
 
 analyze options
@@ -544,11 +546,12 @@ function cmdExplore(args: Args): void {
   try {
     const metrics = args.flags.get('metric')?.split(',').map((m) => m.trim()).filter(Boolean);
     const report = exploreLibrary(db, {
-      sweep: args.flags.get('name') ?? null,
+      sweep: args.flags.get('name')?.split(',').map((n) => n.trim()).filter(Boolean) ?? null,
       clusters: num(args.flags, 'clusters', 3),
       components: num(args.flags, 'components', 3),
       minSwing: num(args.flags, 'min-swing', 0.3),
       warmup: num(args.flags, 'warmup', DEFAULT_WARMUP),
+      drop: args.flags.get('drop')?.split(',').map((n) => n.trim()).filter(Boolean),
       metrics: metrics && metrics.length > 0 ? metrics : undefined,
     });
     process.stdout.write(renderExplore(report));
