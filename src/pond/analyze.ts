@@ -445,7 +445,17 @@ export function effects(trials: TrialRow[], metrics?: string[]): Effect[] {
       if (byLevel.size < 2) continue;
       const all = usable.map((t) => t.values[metric] as number);
       const grand = stats(all);
-      if (!(grand.sd > 0)) continue;
+      /*
+       * Relative, not `sd > 0`. A metric that is the same number in every
+       * trial can still carry a spread of one ulp — nine identical doubles
+       * summed and divided by nine need not give back the double — and
+       * `ssBetween / ssTotal` over that noise is a ratio of two rounding
+       * errors, which came out as **1.0 at the top of the effect table** for
+       * `tank_life`, a metric defined as a constant over a held `upkeep`.
+       * Nothing about it is wrong except that it is not an answer.
+       */
+      const scale = Math.max(Math.abs(grand.mean), 1e-12);
+      if (!(grand.sd > scale * 1e-9)) continue;
       let ssBetween = 0;
       let noise = 0;
       let low = { level: 0, mean: Infinity };

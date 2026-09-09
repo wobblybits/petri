@@ -227,3 +227,27 @@ describe('reading an effect', () => {
     expect(text).toContain('conserved: 2');
   });
 });
+describe('a metric that never moved', () => {
+  it('is dropped rather than ranked, even when float noise gives it a spread', () => {
+    /*
+     * `tank_life` is `EXTRA_CAP / upkeep` over a held `upkeep`: the same
+     * double in every trial. Summing nine of them and dividing by nine need
+     * not give that double back, so the old `sd > 0` guard let through a
+     * ratio of two rounding errors -- and it ranked 1.0, at the top of the
+     * table, above every real effect in the sweep.
+     */
+    const k = 1.25 / 0.015;
+    const trials = [1, 1, 1, 2, 2, 2, 3, 3, 3].map((level, i) => ({
+      runId: i, seed: 1, point: { x: level }, values: { tank_life: k, bodies: 100 + level },
+    }));
+    const got = effects(trials, ['tank_life', 'bodies']);
+    expect(got.map((e) => e.metric)).toEqual(['bodies']);
+  });
+
+  it('still ranks a metric whose spread is small but real', () => {
+    const trials = [1, 1, 2, 2].map((level, i) => ({
+      runId: i, seed: 1, point: { x: level }, values: { tiny: 1 + level * 1e-6 },
+    }));
+    expect(effects(trials, ['tiny'])[0].eta2).toBeCloseTo(1, 6);
+  });
+});
