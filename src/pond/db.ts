@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { CHEM_LEN } from '../chem-layout.ts';
 import type { Params } from '../params.ts';
-import { NET_FORMAT, decodeNet, readHeader, type NetData, type NetHeader } from './net-blob.ts';
+import { NET_FORMAT, compatibility, decodeNet, readHeader, type Compatibility, type NetData, type NetHeader } from './net-blob.ts';
 import type { CapturedNet, NetStats } from './capture.ts';
 
 /*
@@ -543,10 +543,19 @@ export class PondDb {
     return b ? readHeader(b) : null;
   }
 
-  /** A net ready to plant. Throws if this build's genome layout has moved. */
+  /**
+   * A net at the layout it was stored at; `plantNet` brings it across. Throws
+   * when this build cannot read it at all, with the reason.
+   */
   net(netId: number): NetData | null {
     const b = this.blob(netId);
     return b ? decodeNet(b) : null;
+  }
+
+  /** Whether this build can plant net `id` as is, after migration, or not at all. */
+  compatibility(netId: number): Compatibility | null {
+    const h = this.header(netId);
+    return h ? compatibility(h) : null;
   }
 
   samples(runId: number): Record<string, unknown>[] {

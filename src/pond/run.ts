@@ -37,8 +37,11 @@ import type { PondDb } from './db.ts';
 export type PondSample = Sample & { diversity: Diversity };
 
 export interface SeedNet {
-  netId: number;
+  /** The library row this came from, or null for a net planted from a file. */
+  netId: number | null;
   data: NetData;
+  /** How to name it in a message: `net 12`, or the file's path. */
+  label: string;
 }
 
 export interface PondRunSpec {
@@ -63,6 +66,8 @@ export interface PondRunSpec {
   minBodies: number;
   /** Store only the largest this-many components per harvest. */
   limit: number | null;
+  /** The working tree this runs from, written into every stored net's header. */
+  commit?: string | null;
   /**
    * How the ground is arranged at the start, at the same total mass.
    *
@@ -181,10 +186,13 @@ export async function runPond(
         });
         if (ids.length === 0) {
           throw new Error(
-            `pond: net ${spec.seeds[i].netId} would not fit (${spec.seeds[i].data.bodies.length} bodies; maxAgents ${params.maxAgents})`,
+            `pond: ${spec.seeds[i].label} would not fit (${spec.seeds[i].data.bodies.length} bodies; maxAgents ${params.maxAgents})`,
           );
         }
-        db.addPlant(runId, lineage, spec.seeds[i].netId, ids.length);
+        // A file has no row to point at, so its lineage is recorded on the
+        // bodies alone; `parent_net` on anything it grows stays null.
+        const netId = spec.seeds[i].netId;
+        if (netId !== null) db.addPlant(runId, lineage, netId, ids.length);
       }
     }
 
@@ -209,7 +217,7 @@ export async function runPond(
       let bytes = 0;
       db.transaction(() => {
         for (const net of nets) {
-          const blob = encodeNet(net.data);
+          const blob = encodeNet(net.data, { commit: spec.commit ?? null, source: { run: runId, t } });
           bytes += blob.byteLength;
           db.addNet(runId, t, frame, net, blob);
         }

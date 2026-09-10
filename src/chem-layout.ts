@@ -288,6 +288,51 @@ export const G_BASE = G_OUT + STATE_DIMS;
 export const CHEM_LEN = G_BASE + 1;
 
 /**
+ * The genome as a list of named segments, in memory order.
+ *
+ * This is what lets a stored net outlive a layout change. A blob written by
+ * an older build carries its own copy of this list, and `pond/net-blob.ts`
+ * lines the two up by *name*: a segment that kept its length is carried
+ * across wherever it moved to, one the old build never had is seeded for the
+ * body's kind, one this build no longer has is dropped, and one that changed
+ * length refuses the whole net — its numbers no longer mean what they meant,
+ * and the header exists so that never happens silently.
+ *
+ * The list has to tile `[0, CHEM_LEN)` exactly and the learned block has to
+ * be a run of whole segments; `layoutSelfCheck` in `net-blob.ts` says so, the
+ * suite asserts it, and the pond CLI refuses to start without it. A head
+ * added above without an entry here therefore fails before a run rather than
+ * writing blobs the next layout change cannot read.
+ */
+export interface ChemSegment {
+  name: string;
+  at: number;
+  len: number;
+}
+
+export const CHEM_SEGMENTS: readonly ChemSegment[] = [
+  { name: 'emit', at: EMIT, len: 4 },
+  { name: 'taste', at: TASTE, len: 4 },
+  { name: 'E', at: E_OUT, len: 4 * STATE_DIMS },
+  { name: 'T', at: T_OUT, len: 4 * STATE_DIMS },
+  { name: 'Wx', at: W_IN, len: STATE_DIMS * IN_DIMS },
+  { name: 'Wh', at: W_SELF, len: STATE_DIMS * STATE_DIMS },
+  { name: 'Wn', at: W_NET, len: STATE_DIMS * STATE_DIMS },
+  { name: 'b', at: B_STATE, len: STATE_DIMS },
+  { name: 'F', at: F_OUT, len: 2 * STATE_DIMS },
+  { name: 'f0', at: F_BASE, len: 2 },
+  { name: 'P', at: P_OUT, len: 2 * STATE_DIMS },
+  { name: 'p0', at: P_BASE, len: 2 },
+  { name: 'L', at: L_OUT, len: 2 * STATE_DIMS },
+  { name: 'l0', at: L_BASE, len: 2 },
+  { name: 'X', at: X_OUT, len: ROW_COUNT * STATE_DIMS },
+  { name: 'x0', at: X_BASE, len: ROW_COUNT },
+  { name: 'ks', at: KS_BASE, len: CHEM_SPECIES },
+  { name: 'G', at: G_OUT, len: 2 * STATE_DIMS },
+  { name: 'g0', at: G_BASE, len: 2 },
+];
+
+/**
  * The span of `chem` a body can change while it is alive: `Wx`, `Wh`, `Wn`
  * and `b`, which the layout above happens to put next to each other.
  *

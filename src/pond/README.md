@@ -8,6 +8,7 @@ npm run pond -- runs
 npm run pond -- nets --run 1 --order depth
 npm run pond -- show 41
 npm run pond -- run --from-run 1 --top 8 --seconds 600     # keep going
+npm run pond -- export 41 nets/deep.petrinet --here        # a net as a file, for tests and pages
 npm run pond -- run --seconds 600 --gpu off               # CPU field
 
 npm run pond -- sweep --name uptake --axis uptakeVmax=0,0.75,2 --seeds 1,2,3
@@ -194,10 +195,76 @@ Wires address bodies by **index into this blob**, not by agent id. Slots are
 session and the second time shipped. A blob written before such a drift and
 read after it would not crash — it would cut every body's genome at the wrong
 offsets and hand a lineage's evolved behaviour back as garbage that still
-runs. So `decodeNet` compares the header's dimensions against the ones the
-running build compiled with and refuses the blob, naming both. `run.chem_len`
-records the same thing at the run level, so a database written across a layout
-change says where the boundary is.
+runs. So the header says what layout it was written at, and nothing reads a
+payload against a layout it was not written for. `run.chem_len` records the
+same thing at the run level, so a database written across a layout change
+says where the boundary is.
+
+### Versioning: what survives a layout change, and what does not
+
+Format 1 refused anything but an exact match on the four dimensions, and
+that was the wrong grain: the layout changed twice in one week, each time by
+a head appended to the end, and every stored net became unreadable for a
+change that had touched none of its numbers.
+
+Format 2 writes the genome's **segment map** into the header — `CHEM_SEGMENTS`
+in `chem-layout.ts`, every head and base by name, offset and length — plus
+where the learned block starts. `compatibility(header)` lines that up with
+this build's map by *name*:
+
+| the blob's segment … | is |
+| --- | --- |
+| same name, same length, same or different offset | carried, wherever it moved to |
+| missing from the blob | seeded — `seedChem` for the body's kind under the run's params, i.e. what a body born here would carry |
+| gone from this build | dropped |
+| same name, different length | **refused**, naming it |
+| moved into or out of the learned block | **refused**: its learned delta has nowhere to go |
+
+The recurrent state's width, the critic and the learned block's width are not
+migratable — change any of them and nothing a net learned means the same
+thing — so those refuse outright. A format 1 blob has no map and reads only at
+an exact match, as before.
+
+In code: `decodeNet` hands the net back at the layout it was stored at, with
+`layout`, `segments` and `plasticAt` on the `NetData` saying so;
+`migrateNet(net, seed)` brings it to this build's; `prepareNet(net, params)`
+is that with the right seeder; and `plantNet` calls it, so a caller that only
+plants never sees any of this. The CLI prints what a migration changed, and
+`pond nets` has a `here` column — `ok`, `migrate`, `NO`. `pond format` prints
+this build's map.
+
+`CHEM_SEGMENTS` has to tile the genome exactly and the CLI refuses to start
+if it does not (`layoutSelfCheck`), so a head added to `chem-layout.ts`
+without a map entry fails before a run rather than writing blobs the next
+change strands. The suite asserts the same.
+
+The header also carries provenance — `commit`, `written`, and `source` (which
+run and net, at what simulated time) — for reading back. Nothing gates on it.
+
+## Nets as files
+
+The database is gitignored. A `.petrinet` file is the same blob outside it:
+something a test can read from the repository, a page can fetch, and a
+person can hand over.
+
+```bash
+npm run pond -- export 12                    # nets/net-12.petrinet, the stored bytes
+npm run pond -- export 12 nets/walker.petrinet --here   # at this build's layout, with provenance
+npm run pond -- run --from-file nets/walker.petrinet --seconds 300
+```
+
+`nets/` at the repository root holds the checked-in ones. From a test:
+
+```ts
+import { loadFixture } from './pond/net-file.ts';
+const { net, notes } = loadFixture('walker', params);   // at this build's layout
+plantNet(sim, params, net, sim.w / 2, sim.h / 2);
+```
+
+`net-version.test.ts` plants every file in `nets/` on every run of the suite,
+so a layout change that strands one is caught the day it happens, and the fix
+is `export --here` from a library that still has it, or a migration. Keep
+each under a megabyte; a net costs about 1.4 KB a body.
 
 ### What is deliberately not stored
 

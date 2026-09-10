@@ -108,6 +108,7 @@ export async function runSweep(
         // the timeline is the deliverable and the genomes are a by-product.
         limit: spec.keepNets ? 8 : 0,
         gpu: spec.gpu,
+        commit,
       };
       const runId = db.startRun({
         seed,

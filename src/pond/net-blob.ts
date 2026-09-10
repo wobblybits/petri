@@ -1,5 +1,13 @@
 import { CODE_KIND, KIND_CODE } from '../agent-store.ts';
-import { CHEM_LEN, CRITIC_LEN, PLASTIC_LEN, STATE_DIMS } from '../chem-layout.ts';
+import {
+  CHEM_LEN,
+  CHEM_SEGMENTS,
+  CRITIC_LEN,
+  PLASTIC_BASE,
+  PLASTIC_LEN,
+  STATE_DIMS,
+  type ChemSegment,
+} from '../chem-layout.ts';
 import type { AgentKind, PortSlot } from '../agents.ts';
 
 /*
@@ -7,7 +15,7 @@ import type { AgentKind, PortSlot } from '../agents.ts';
  * that is not recomputable from those two things.
  *
  * The shape of the problem is that a net is mostly typed arrays — a genome is
- * 134 floats and a learned delta is 64 more, times however many bodies — and
+ * 188 floats and a learned delta is 64 more, times however many bodies — and
  * mostly *not* JSON. So this is a JSON header describing a binary payload,
  * which gives both halves what they want: the header is readable with `.dump`
  * in `sqlite3` and tells you what you are looking at, and the payload is the
@@ -21,21 +29,50 @@ import type { AgentKind, PortSlot } from '../agents.ts';
  * second time shipped; a blob written before such a drift and read after it
  * would not crash, it would silently hand every body a genome cut at the
  * wrong offsets — a lineage's evolved behaviour quietly replaced by garbage
- * that still runs. `decodeNet` compares the header's dimensions against the
- * ones this build was compiled with and refuses the blob if they differ,
- * naming both. A stored pond is a long-lived artifact and the layout is not.
+ * that still runs. A stored pond is a long-lived artifact and the layout is
+ * not.
  *
  * It also means a reader does not have to be this module. The lab page can
  * walk `sections` with a `DataView` and render `energyCap` by name without
  * importing anything from the simulation.
+ *
+ * ## Versioning
+ *
+ * Format 1 refused any blob whose four dimensions differed from the build's,
+ * and that turned out to be the wrong grain: the layout changed twice in a
+ * week, each time by a head appended to the end, and every stored net became
+ * unreadable for a change that had touched none of its numbers.
+ *
+ * Format 2 writes the genome's **segment map** (`CHEM_SEGMENTS`) into the
+ * header, and `compatibility` lines it up with this build's by name:
+ *
+ *   - a segment with the same name and length is carried, wherever it moved;
+ *   - one this build has and the blob does not is seeded for the body's kind;
+ *   - one the blob has and this build does not is dropped;
+ *   - one whose length changed refuses the net, naming it;
+ *   - and the learned block (`plastic`, `trace`) follows its segments, so a
+ *     weight that was learnable and no longer is refuses too.
+ *
+ * The recurrent state's width, the critic and the learned block's width are
+ * not migratable: change any of them and nothing a net learned means the same
+ * thing, so those refuse outright. A format 1 blob carries no map and is
+ * therefore readable only at an exact match, as before.
+ *
+ * `decodeNet` hands back the blob at *its own* layout, with `layout`,
+ * `segments` and `plasticAt` on the `NetData` saying so; `migrateNet` turns
+ * that into this build's, given a seeder for the missing segments; and
+ * `plantNet` calls it, so a caller that only ever plants never sees any of
+ * this. The header also carries provenance — commit, time, and which run and
+ * net a blob came from — for reading back, not for gating.
  *
  * ## What is not in here
  *
  * Agent ids: they are handed out per pond and mean nothing in another one, so
  * wires address bodies by their index in this blob. Mass, scale and alpha:
  * derived from kind and params at birth. Velocity, drive, stun, trail, the
- * rope node positions: a planted net is a net dropped into different water,
- * and none of that survives the move in any meaningful sense.
+ * rope node positions and the gait phase: a planted net is a net dropped into
+ * different water, and none of that survives the move in any meaningful
+ * sense.
  *
  * `trace` and `h` *are* in here, though neither is inherited and both are
  * gone within a second of simulated time. They cost 68 floats a body and
@@ -107,13 +144,35 @@ export interface NetLayout {
   state: number;
 }
 
-export interface NetHeader {
+/** Where a blob came from, when the writer knew. */
+export interface NetSource {
+  run?: number;
+  net?: number;
+  /** Simulated seconds into that run. */
+  t?: number;
+  file?: string;
+}
+
+/** Provenance a writer can attach. Read back, never gated on. */
+export interface NetMeta {
+  /** `9a3f21c`, or `9a3f21c+dirty`; null when there was no repository. */
+  commit?: string | null;
+  /** ISO 8601. Left out by default so the same net encodes to the same bytes. */
+  written?: string;
+  source?: NetSource;
+  note?: string;
+}
+
+export interface NetHeader extends NetMeta {
   magic: string;
   format: number;
   layout: NetLayout;
   bodies: number;
   wires: number;
   sections: Section[];
+  /** Format 2 and up: the genome's segment map, and where the learned block starts in it. */
+  segments?: ChemSegment[];
+  plasticAt?: number;
 }
 
 /** What this build's `chem-layout.ts` says. Written into every blob. */
@@ -137,16 +196,16 @@ export interface NetBody {
   adenylate: number;
   born: number;
   lineage: number;
-  /** `CHEM_LEN` floats. Copied, never a live view into a store. */
+  /** `layout.chem` floats. Copied, never a live view into a store. */
   chem: Float32Array;
-  /** `PLASTIC_LEN` floats: the delta on the state matrices this body learned. */
+  /** `layout.plastic` floats: the delta on the state matrices this body learned. */
   plastic: Float32Array;
-  /** `PLASTIC_LEN` floats: the eligibility trace. */
+  /** `layout.plastic` floats: the eligibility trace. */
   trace: Float32Array;
-  /** `CRITIC_LEN` floats: weights on `h`, then the bias. */
+  /** `layout.critic` floats: weights on `h`, then the bias. */
   critic: Float64Array;
   prevValue: number;
-  /** `STATE_DIMS` floats: the recurrent state. */
+  /** `layout.state` floats: the recurrent state. */
   h: Float64Array;
 }
 
@@ -161,6 +220,14 @@ export interface NetWire {
 export interface NetData {
   bodies: NetBody[];
   wires: NetWire[];
+  /**
+   * What the bodies' arrays are laid out as. Absent means this build's own,
+   * which is what `captureNets` produces; `decodeNet` always fills it in from
+   * the header, and `migrateNet` is how a foreign one becomes current.
+   */
+  layout?: NetLayout;
+  segments?: ChemSegment[];
+  plasticAt?: number;
 }
 
 const BYTES: Record<SectionType, number> = { u8: 1, i32: 4, f32: 4, f64: 8 };
@@ -170,16 +237,240 @@ function align8(n: number): number {
 }
 
 /**
- * Pack a net into one buffer.
+ * Whether a segment map describes a genome of `chemLen` floats with a learned
+ * block of `plasticLen` at `plasticAt`: sorted, contiguous, no gaps, no
+ * overlaps, no duplicate names, and the learned block a run of whole segments.
+ * Returns the complaint, or null.
+ */
+export function segmentsComplaint(
+  segments: readonly ChemSegment[],
+  chemLen: number,
+  plasticAt: number,
+  plasticLen: number,
+): string | null {
+  const seen = new Set<string>();
+  let at = 0;
+  for (const s of segments) {
+    if (seen.has(s.name)) return `segment ${s.name} is listed twice`;
+    seen.add(s.name);
+    if (!Number.isInteger(s.at) || !Number.isInteger(s.len) || s.len <= 0) {
+      return `segment ${s.name} has a bad extent (${s.at}, ${s.len})`;
+    }
+    if (s.at !== at) return `segment ${s.name} starts at ${s.at}, expected ${at}`;
+    at += s.len;
+  }
+  if (at !== chemLen) return `segments cover ${at} floats of a ${chemLen}-float genome`;
+  const end = plasticAt + plasticLen;
+  if (!segments.some((s) => s.at === plasticAt)) return `the learned block starts inside a segment (at ${plasticAt})`;
+  if (!segments.some((s) => s.at + s.len === end)) return `the learned block ends inside a segment (at ${end})`;
+  return null;
+}
+
+/**
+ * Whether this build's own layout is describable, which is what makes it
+ * storable. Null when it is; the CLI refuses to start otherwise, and the
+ * encoder refuses to write.
+ */
+export function layoutSelfCheck(): string | null {
+  const c = segmentsComplaint(CHEM_SEGMENTS, CHEM_LEN, PLASTIC_BASE, PLASTIC_LEN);
+  return c ? `this build's genome layout is not storable: ${c} (add the head to CHEM_SEGMENTS in chem-layout.ts)` : null;
+}
+
+function sameSegments(a: readonly ChemSegment[], b: readonly ChemSegment[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].name !== b[i].name || a[i].at !== b[i].at || a[i].len !== b[i].len) return false;
+  }
+  return true;
+}
+
+function within(s: ChemSegment, at: number, len: number): boolean {
+  return s.at >= at && s.at + s.len <= at + len;
+}
+
+export type Compatibility =
+  | { kind: 'exact' }
+  | { kind: 'migratable'; notes: string[] }
+  | { kind: 'refused'; reason: string };
+
+/** The shape `compatibility` reads; a header is one, and so is a decoded net. */
+export interface LayoutLike {
+  format?: number;
+  layout: NetLayout;
+  segments?: readonly ChemSegment[];
+  plasticAt?: number;
+}
+
+/**
+ * Whether this build can plant what a header describes, and at what cost.
+ *
+ * `exact` is byte-for-byte this build's layout. `migratable` carries a note
+ * per segment that will move, be seeded or be dropped, in the words
+ * `migrateNet` will act on. `refused` names the reason, and the reason
+ * always begins with the same phrase so a caller can grep for the class.
+ */
+export function compatibility(h: LayoutLike): Compatibility {
+  if ((h.format ?? NET_FORMAT) > NET_FORMAT) {
+    return { kind: 'refused', reason: `net format ${h.format} is newer than this build's ${NET_FORMAT}` };
+  }
+  const now = currentLayout();
+  const L = h.layout;
+  const keys = Object.keys(now) as (keyof NetLayout)[];
+  const off = keys.filter((k) => L[k] !== now[k]);
+  const segs = h.segments;
+  const sameMap = segs === undefined || (sameSegments(segs, CHEM_SEGMENTS) && (h.plasticAt ?? PLASTIC_BASE) === PLASTIC_BASE);
+  if (off.length === 0 && sameMap) return { kind: 'exact' };
+
+  const changed = 'genome layout has changed since this net was stored: ' + off.map((k) => `${k} ${L[k]} -> ${now[k]}`).join(', ');
+  if (L.state !== now.state || L.critic !== now.critic || L.plastic !== now.plastic) {
+    return {
+      kind: 'refused',
+      reason: `${changed}; the recurrent state or its learned block changed width, so nothing this net learned means the same thing`,
+    };
+  }
+  if (!segs) {
+    return {
+      kind: 'refused',
+      reason: `${changed}; written before the genome carried a segment map (format ${h.format ?? 1}), so only an exact layout can be read`,
+    };
+  }
+  if (h.plasticAt === undefined) {
+    return { kind: 'refused', reason: 'net blob header carries a segment map but not where its learned block starts' };
+  }
+  const bad = segmentsComplaint(segs, L.chem, h.plasticAt, L.plastic);
+  if (bad) return { kind: 'refused', reason: `net blob header is inconsistent: ${bad}` };
+
+  const notes: string[] = [];
+  const byName = new Map(segs.map((s) => [s.name, s]));
+  for (const cur of CHEM_SEGMENTS) {
+    const old = byName.get(cur.name);
+    if (!old) {
+      notes.push(`${cur.name} seeded (new in this build)`);
+      continue;
+    }
+    if (old.len !== cur.len) {
+      return {
+        kind: 'refused',
+        reason: `genome layout has changed since this net was stored: segment ${cur.name} was ${old.len} floats and is ${cur.len}`,
+      };
+    }
+    const wasLearned = within(old, h.plasticAt, L.plastic);
+    const isLearned = within(cur, PLASTIC_BASE, PLASTIC_LEN);
+    if (wasLearned !== isLearned) {
+      return {
+        kind: 'refused',
+        reason:
+          `genome layout has changed since this net was stored: segment ${cur.name} ` +
+          (wasLearned ? 'was learned and is not' : 'is learned and was not') +
+          ', so its learned delta has nowhere to go',
+      };
+    }
+    if (old.at !== cur.at) notes.push(`${cur.name} moved ${old.at} -> ${cur.at}`);
+  }
+  for (const old of segs) {
+    if (!CHEM_SEGMENTS.some((s) => s.name === old.name)) notes.push(`${old.name} dropped (gone from this build)`);
+  }
+  return { kind: 'migratable', notes };
+}
+
+/** Whether a `NetData` is at this build's layout, so it can be encoded or planted as is. */
+export function isCurrent(net: NetData): boolean {
+  if (!net.layout) return true;
+  return compatibility({ layout: net.layout, segments: net.segments, plasticAt: net.plasticAt }).kind === 'exact';
+}
+
+/**
+ * A net at another build's layout, brought to this one.
+ *
+ * `seed` supplies a fresh genome for a kind — `seedChem` with the run's
+ * params, which is exactly what a body born in this pond would carry — and
+ * every carried segment is written over it. The learned delta and its trace
+ * follow their segments; everything else on a body is untouched. The notes
+ * are `compatibility`'s, so a caller can print what changed.
+ *
+ * Identity on a net that is already current, and throws on one that cannot
+ * be brought across, with the reason.
+ */
+export function migrateNet(net: NetData, seed: (kind: AgentKind) => Float32Array): { net: NetData; notes: string[] } {
+  if (isCurrent(net)) return { net, notes: [] };
+  const c = compatibility({ layout: net.layout!, segments: net.segments, plasticAt: net.plasticAt });
+  if (c.kind === 'refused') throw new Error(`pond: ${c.reason}`);
+  if (c.kind === 'exact') return { net, notes: [] };
+  const oldSegs = net.segments!;
+  const oldPlasticAt = net.plasticAt!;
+  const byName = new Map(oldSegs.map((s) => [s.name, s]));
+  const moves: { from: number; to: number; len: number; learned: boolean }[] = [];
+  for (const cur of CHEM_SEGMENTS) {
+    const old = byName.get(cur.name);
+    if (!old) continue;
+    moves.push({ from: old.at, to: cur.at, len: cur.len, learned: within(cur, PLASTIC_BASE, PLASTIC_LEN) });
+  }
+  const bodies: NetBody[] = net.bodies.map((b) => {
+    const chem = seed(b.kind);
+    if (chem.length !== CHEM_LEN) {
+      throw new Error(`pond: migrateNet's seeder returned ${chem.length} floats, not ${CHEM_LEN}`);
+    }
+    const plastic = new Float32Array(PLASTIC_LEN);
+    const trace = new Float32Array(PLASTIC_LEN);
+    for (const m of moves) {
+      chem.set(b.chem.subarray(m.from, m.from + m.len), m.to);
+      if (m.learned) {
+        const src = m.from - oldPlasticAt;
+        const dst = m.to - PLASTIC_BASE;
+        plastic.set(b.plastic.subarray(src, src + m.len), dst);
+        trace.set(b.trace.subarray(src, src + m.len), dst);
+      }
+    }
+    return { ...b, chem, plastic, trace };
+  });
+  return {
+    net: {
+      bodies,
+      wires: net.wires,
+      layout: currentLayout(),
+      segments: CHEM_SEGMENTS.map((s) => ({ ...s })),
+      plasticAt: PLASTIC_BASE,
+    },
+    notes: c.notes,
+  };
+}
+
+/**
+ * Pack a net into one buffer, at this build's layout.
  *
  * Sections are laid out largest-alignment-first so every one lands on its own
  * natural boundary without padding between them, which is what lets `decodeNet`
  * hand back typed-array views straight onto the blob instead of copying it.
+ *
+ * Refuses a net that is at another layout — `migrateNet` first — and refuses
+ * to write at all if this build's own layout is not describable, since a
+ * blob without a true segment map is one the next layout change strands.
  */
-export function encodeNet(net: NetData): Uint8Array {
+export function encodeNet(net: NetData, meta: NetMeta = {}): Uint8Array {
+  const self = layoutSelfCheck();
+  if (self) throw new Error(`pond: ${self}`);
+  if (!isCurrent(net)) {
+    throw new Error("pond: encodeNet was handed a net at another build's layout; migrateNet it first");
+  }
+  return encodeNetAs(net, currentLayout(), CHEM_SEGMENTS, PLASTIC_BASE, meta);
+}
+
+/**
+ * Pack a net as a build with the given layout would have.
+ *
+ * For tests of the migration and for nothing else: the bodies' arrays must
+ * already be the widths `layout` says, and nothing here checks that they
+ * mean anything. `encodeNet` is the one to call.
+ */
+export function encodeNetAs(
+  net: NetData,
+  L: NetLayout,
+  segments: readonly ChemSegment[],
+  plasticAt: number,
+  meta: NetMeta = {},
+): Uint8Array {
   const n = net.bodies.length;
   const w = net.wires.length;
-  const L = currentLayout();
   const plan: Omit<Section, 'offset'>[] = [
     { name: 'pose', type: 'f64', count: n * POSE_FIELDS.length, stride: POSE_FIELDS.length, fields: POSE_FIELDS },
     { name: 'scalar', type: 'f64', count: n * SCALAR_FIELDS.length, stride: SCALAR_FIELDS.length, fields: SCALAR_FIELDS },
@@ -205,11 +496,20 @@ export function encodeNet(net: NetData): Uint8Array {
   const header: NetHeader = {
     magic: MAGIC,
     format: NET_FORMAT,
-    layout: L,
+    layout: { ...L },
     bodies: n,
     wires: w,
     sections,
+    segments: segments.map((s) => ({ name: s.name, at: s.at, len: s.len })),
+    plasticAt,
   };
+  // Only what the writer actually knew: an absent key stays absent, so a net
+  // encoded with no meta is the same bytes every time.
+  if (meta.commit !== undefined) header.commit = meta.commit;
+  if (meta.written !== undefined) header.written = meta.written;
+  if (meta.source !== undefined) header.source = { ...meta.source };
+  if (meta.note !== undefined) header.note = meta.note;
+
   const json = new TextEncoder().encode(JSON.stringify(header));
   const payloadAt = align8(4 + json.length);
   const buf = new Uint8Array(payloadAt + payloadBytes);
@@ -238,6 +538,9 @@ export function encodeNet(net: NetData): Uint8Array {
 
   for (let i = 0; i < n; i++) {
     const b = net.bodies[i];
+    if (b.chem.length !== L.chem || b.plastic.length !== L.plastic || b.trace.length !== L.plastic) {
+      throw new Error(`pond: body ${i} is not at the layout being written (chem ${b.chem.length} for ${L.chem})`);
+    }
     kind[i] = KIND_CODE[b.kind];
     pose[i * 3] = b.x;
     pose[i * 3 + 1] = b.y;
@@ -285,26 +588,23 @@ export function readHeader(blob: Uint8Array): NetHeader {
  *
  * Returns the complaint rather than throwing, so a caller listing a database
  * written by an older build can show which rows it cannot open instead of
- * dying on the first one.
+ * dying on the first one. Null for anything `decodeNet` will accept, which
+ * since format 2 includes blobs that need `migrateNet`; `compatibility` is
+ * the finer reading.
  */
 export function layoutComplaint(header: NetHeader): string | null {
-  if (header.format > NET_FORMAT) {
-    return `net format ${header.format} is newer than this build's ${NET_FORMAT}`;
-  }
-  const now = currentLayout();
-  const keys = Object.keys(now) as (keyof NetLayout)[];
-  const off = keys.filter((k) => header.layout[k] !== now[k]);
-  if (off.length === 0) return null;
-  return (
-    'genome layout has changed since this net was stored: ' +
-    off.map((k) => `${k} ${header.layout[k]} -> ${now[k]}`).join(', ')
-  );
+  const c = compatibility(header);
+  return c.kind === 'refused' ? c.reason : null;
 }
 
 /**
- * Unpack a blob. The returned genome and matrix views alias it, so a caller
- * that plants a net and then keeps the arrays is looking at the blob, not at
- * the pond.
+ * Unpack a blob, at the layout it was written in.
+ *
+ * The returned genome and matrix views alias it, so a caller that plants a
+ * net and then keeps the arrays is looking at the blob, not at the pond. The
+ * result says what layout it is at; `isCurrent` tells whether it can be used
+ * as is, and `migrateNet` (which `plantNet` calls) brings it across when it
+ * cannot. Throws only on what cannot be brought across, with the reason.
  *
  * A blob whose start is not eight-byte aligned is copied first: `sqlite3`
  * hands back a view into a shared read buffer at whatever offset the row
@@ -313,8 +613,8 @@ export function layoutComplaint(header: NetHeader): string | null {
 export function decodeNet(input: Uint8Array): NetData {
   const blob = input.byteOffset % 8 === 0 ? input : new Uint8Array(input);
   const header = readHeader(blob);
-  const complaint = layoutComplaint(header);
-  if (complaint) throw new Error(`pond: ${complaint}`);
+  const c = compatibility(header);
+  if (c.kind === 'refused') throw new Error(`pond: ${c.reason}`);
 
   const len = new DataView(blob.buffer, blob.byteOffset, blob.byteLength).getUint32(0, true);
   const payloadAt = blob.byteOffset + align8(4 + len);
@@ -386,5 +686,11 @@ export function decodeNet(input: Uint8Array): NetData {
       bSlot: CODE_SLOT[wire[i * 4 + 3]],
     });
   }
-  return { bodies, wires };
+  return {
+    bodies,
+    wires,
+    layout: { ...L },
+    segments: header.segments?.map((s) => ({ ...s })),
+    plasticAt: header.plasticAt,
+  };
 }

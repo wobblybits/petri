@@ -105,8 +105,13 @@ describe('net blob', () => {
     const len = new DataView(blob.buffer, blob.byteOffset, blob.byteLength).getUint32(0, true);
     const header = JSON.parse(new TextDecoder().decode(blob.subarray(4, 4 + len)));
     header.layout.chem = CHEM_LEN + 10;
-    // Re-encode in place; JSON.stringify of the same object is the same
-    // length here because only a digit count changed, so pad to be sure.
+    // A format 1 header: no segment map, so nothing can be lined up by name
+    // and only an exact match reads. (Format 2 blobs at another width are
+    // `net-version.test.ts`'s business.)
+    header.format = 1;
+    delete header.segments;
+    delete header.plasticAt;
+    // Re-encode in place, padded to the length the blob was written with.
     const json = new TextEncoder().encode(JSON.stringify(header).padEnd(len, ' '));
     expect(json.length).toBe(len);
     blob.set(json, 4);

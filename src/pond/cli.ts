@@ -1,9 +1,10 @@
-import { writeFileSync } from 'node:fs';
-import { CHEM_LEN, PLASTIC_LEN } from '../chem-layout.ts';
+import { CHEM_LEN, CHEM_SEGMENTS, PLASTIC_BASE, PLASTIC_LEN } from '../chem-layout.ts';
 import { fieldGpu } from '../gpu/field-gpu.ts';
 import { nativeSolver } from '../native/solver.ts';
 import { PondDb, type NetRow } from './db.ts';
-import { NET_FORMAT, layoutComplaint, readHeader } from './net-blob.ts';
+import { NET_FORMAT, compatibility, layoutSelfCheck, readHeader, type Compatibility } from './net-blob.ts';
+import { NET_FILE_EXT, loadNet, saveNet, writeNetFile } from './net-file.ts';
+import { prepareNet } from './capture.ts';
 import { parseGround } from './ground.ts';
 import { latinHypercube, parseAxis } from './sample.ts';
 import { exploreLibrary, renderExplore } from './explore-report.ts';
@@ -35,7 +36,8 @@ petri pond — a headless pond, and the library it writes to
   npm run pond -- runs   [--limit n]    list runs, newest first
   npm run pond -- nets   [options]      list stored nets
   npm run pond -- show   <net-id>       one net: stats, and its HVM2 topology
-  npm run pond -- export <net-id> [f]   write one net's blob to a file
+  npm run pond -- export <net-id> [f]   write one net to a file (default nets/net-<id>.petrinet)
+  npm run pond -- format                this build's net format and genome segment map
   npm run pond -- sweep  --name n ...   run a parameter grid into the library
   npm run pond -- analyze --name n      what the sweep says, and which dial did it
   npm run pond -- explore [--name n]    what varies together across the library
@@ -66,10 +68,18 @@ run options
 seeding from the library
   --from-run <id>      plant the nets that run stored (with --top)
   --from-net <ids>     plant these nets, comma separated
+  --from-file <paths>  plant nets from .petrinet files, comma separated
   --top <n>            with --from-run: the n largest             (default 8)
+  A net stored at an older genome layout is brought to this build's on the
+  way in (segments carried by name, new ones seeded); what changed is printed.
+
+export options
+  --here               re-encode at this build's layout, with provenance,
+                       instead of writing the stored bytes as they are
 
 nets options
   --db <path>   --run <id>   --limit <n>   --order bodies|depth|recent
+  the 'here' column: ok = plants as is, migrate = after a layout migration, NO = unreadable
 
 sweep options
   --name <text>        sweep name; runs are tagged with it        (required)
@@ -144,7 +154,7 @@ function parseArgs(argv: string[]): Args {
       continue;
     }
     const key = a.slice(2);
-    if (key === 'help' || key === 'keep-nets' || key === 'dry-run' || key === 'smoke') {
+    if (key === 'help' || key === 'keep-nets' || key === 'dry-run' || key === 'smoke' || key === 'here') {
       flags.set(key, '1');
       continue;
     }
@@ -195,9 +205,15 @@ function bytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function netRows(rows: NetRow[]): string {
+/** One word on whether this build can plant a stored net. */
+function hereWord(c: Compatibility | null): string {
+  if (!c) return '?';
+  return c.kind === 'exact' ? 'ok' : c.kind === 'migratable' ? 'migrate' : 'NO';
+}
+
+function netRows(rows: NetRow[], here?: Map<number, Compatibility | null>): string {
   return table(
-    ['id', 'run', 't', 'bodies', 'wires', 'era/dup/con', 'depth', 'lines', 'drift', 'learned', 'from'],
+    ['id', 'run', 't', 'bodies', 'wires', 'era/dup/con', 'depth', 'lines', 'drift', 'learned', 'from', ...(here ? ['here'] : [])],
     rows.map((r) => [
       r.id,
       r.run_id,
@@ -210,6 +226,7 @@ function netRows(rows: NetRow[]): string {
       r.matrixDrift,
       r.learned,
       r.parent_net,
+      ...(here ? [hereWord(here.get(r.id) ?? null)] : []),
     ]),
   );
 }
@@ -268,13 +285,6 @@ async function cmdRun(args: Args): Promise<void> {
       ).map((r) => Number(r.id));
       if (ids.length === 0) throw new Error(`pond: run ${parentRun} stored no nets`);
     }
-    for (const id of ids) {
-      const blob = db.blob(id);
-      if (!blob) throw new Error(`pond: no net ${id}`);
-      const complaint = layoutComplaint(readHeader(blob));
-      if (complaint) throw new Error(`pond: net ${id}: ${complaint}`);
-      seedNets.push({ netId: id, data: db.net(id)! });
-    }
 
     const gpuFlag = flags.get('gpu') ?? 'auto';
     if (gpuFlag !== 'auto' && gpuFlag !== 'on' && gpuFlag !== 'off') {
@@ -285,6 +295,26 @@ async function cmdRun(args: Args): Promise<void> {
     // Sugar over `groundPatches`, so a one-off run reads well and a sweep can
     // still put the same thing on an axis.
     if (flags.has('ground')) params.groundPatches = parseGround(flags.get('ground')!);
+
+    // Seeds are read after the params exist, because a net stored at an older
+    // layout is brought across by seeding its missing segments the way a body
+    // born under *these* params would be. `db.net` throws, with the reason,
+    // on anything that cannot be brought across at all.
+    const migrated = (label: string, notes: string[]): void => {
+      if (notes.length > 0) process.stderr.write(`pond: ${label} migrated to this build: ${notes.join('; ')}\n`);
+    };
+    for (const id of ids) {
+      const stored = db.net(id);
+      if (!stored) throw new Error(`pond: no net ${id}`);
+      const { net, notes } = prepareNet(stored, params);
+      migrated(`net ${id}`, notes);
+      seedNets.push({ netId: id, data: net, label: `net ${id}` });
+    }
+    for (const path of (flags.get('from-file') ?? '').split(',').map((f) => f.trim()).filter(Boolean)) {
+      const loaded = loadNet(path, params);
+      migrated(path, loaded.notes);
+      seedNets.push({ netId: null, data: loaded.net, label: path });
+    }
     const worldFlag = flags.get('world') ?? '1600x1200';
     const [ww, wh] = worldFlag.split('x').map(Number);
     if (!Number.isFinite(ww) || !Number.isFinite(wh)) {
@@ -304,6 +334,7 @@ async function cmdRun(args: Args): Promise<void> {
       minBodies: num(flags, 'min-bodies', 2),
       limit: flags.has('limit') ? num(flags, 'limit', 0) : null,
       gpu,
+      commit: gitCommit(),
     };
 
     const runId = db.startRun({
@@ -319,7 +350,7 @@ async function cmdRun(args: Args): Promise<void> {
       soupCount: spec.soupCount,
       parentRun,
       params,
-      commit: gitCommit(),
+      commit: spec.commit ?? null,
       note: flags.get('note') ?? null,
     });
 
@@ -410,7 +441,8 @@ function cmdNets(args: Args): void {
       limit: num(args.flags, 'limit', 25),
       order,
     });
-    process.stdout.write(rows.length === 0 ? 'no nets\n' : `${netRows(rows)}\n`);
+    const here = new Map(rows.map((r) => [r.id, db.compatibility(r.id)]));
+    process.stdout.write(rows.length === 0 ? 'no nets\n' : `${netRows(rows, here)}\n`);
   } finally {
     db.close();
   }
@@ -425,7 +457,23 @@ function cmdShow(args: Args): void {
     if (!row) throw new Error(`pond: no net ${id}`);
     const blob = db.blob(id)!;
     const header = readHeader(blob);
-    const complaint = layoutComplaint(header);
+    const c = compatibility(header);
+    const here =
+      c.kind === 'exact'
+        ? '  plants here as is\n'
+        : c.kind === 'migratable'
+          ? `  plants here after migration: ${c.notes.join('; ')}\n`
+          : `  UNREADABLE HERE: ${c.reason}\n`;
+    const from = header.source
+      ? [
+          header.source.run !== undefined ? `run ${header.source.run}` : null,
+          header.source.net !== undefined ? `net ${header.source.net}` : null,
+          header.source.t !== undefined ? `t=${header.source.t}s` : null,
+          header.source.file ?? null,
+        ]
+          .filter(Boolean)
+          .join(', ')
+      : null;
     process.stdout.write(
       `net ${row.id}  run ${row.run_id}  t=${row.t.toFixed(1)}s  ${row.at}\n` +
         `  ${row.bodies} bodies (${row.era} era, ${row.dup} dup, ${row.con} con), ${row.wires} wires\n` +
@@ -436,8 +484,14 @@ function cmdShow(args: Args): void {
         `learned ${(row.learned * 100).toFixed(0)}% of bodies (mean |delta| ${row.plasticMean.toFixed(5)})\n` +
         `  descends from net ${row.parent_net ?? '-'}\n` +
         `  blob ${bytes(blob.byteLength)}, format ${header.format}, ` +
-        `genome ${header.layout.chem} + ${header.layout.plastic} learned\n` +
-        (complaint ? `  UNREADABLE HERE: ${complaint}\n` : '') +
+        `genome ${header.layout.chem} + ${header.layout.plastic} learned` +
+        (header.segments ? ` in ${header.segments.length} segments` : ', no segment map') +
+        '\n' +
+        (header.commit !== undefined || header.written || from
+          ? `  written${header.commit !== undefined ? ` at ${header.commit ?? 'no commit'}` : ''}` +
+            `${header.written ? ` on ${header.written}` : ''}${from ? ` from ${from}` : ''}\n`
+          : '') +
+        here +
         `\n${row.text}\n`,
     );
   } finally {
@@ -450,11 +504,22 @@ function cmdExport(args: Args): void {
   if (!Number.isInteger(id)) throw new Error('pond: export wants a net id');
   const db = new PondDb(args.flags.get('db') ?? 'ponds/pond.db');
   try {
-    const blob = db.blob(id);
-    if (!blob) throw new Error(`pond: no net ${id}`);
-    const path = args.rest[1] ?? `net-${id}.petrinet`;
-    writeFileSync(path, blob);
-    process.stdout.write(`${path}  ${bytes(blob.byteLength)}\n`);
+    const stored = db.blob(id);
+    if (!stored) throw new Error(`pond: no net ${id}`);
+    const path = args.rest[1] ?? `nets/net-${id}${NET_FILE_EXT}`;
+    let blob = stored;
+    if (args.flags.has('here')) {
+      // Brought to this build's layout under the default params, and stamped
+      // with where it came from. The stored bytes are left as they are.
+      const row = db.netRow(id)!;
+      const { net, notes } = prepareNet(db.net(id)!, paramsWith(new Map()));
+      if (notes.length > 0) process.stderr.write(`pond: net ${id} migrated to this build: ${notes.join('; ')}\n`);
+      blob = saveNet(path, net, { commit: gitCommit(), source: { run: row.run_id, net: id, t: row.t } });
+    } else {
+      writeNetFile(path, blob);
+    }
+    const c = compatibility(readHeader(blob));
+    process.stdout.write(`${path}  ${bytes(blob.byteLength)}  ${hereWord(c)}\n`);
   } finally {
     db.close();
   }
@@ -784,6 +849,11 @@ async function main(): Promise<void> {
     process.stdout.write(`${USAGE}\n`);
     return;
   }
+  // A build whose genome the segment map does not describe would write nets
+  // the next layout change strands. Refuse to run at all rather than find out
+  // at the first harvest.
+  const self = layoutSelfCheck();
+  if (self) throw new Error(`pond: ${self}`);
   if (args.command === 'run') await cmdRun(args);
   else if (args.command === 'runs') cmdRuns(args);
   else if (args.command === 'nets') cmdNets(args);
@@ -797,7 +867,9 @@ async function main(): Promise<void> {
   else if (args.command === 'protocol') await cmdProtocol(args);
   else if (args.command === 'format') {
     process.stdout.write(
-      `net format ${NET_FORMAT}: genome ${CHEM_LEN} floats, learned ${PLASTIC_LEN}\n`,
+      `net format ${NET_FORMAT}: genome ${CHEM_LEN} floats, learned ${PLASTIC_LEN} at ${PLASTIC_BASE}\n` +
+        CHEM_SEGMENTS.map((seg) => `  ${seg.name.padEnd(6)} ${String(seg.at).padStart(4)} +${seg.len}`).join('\n') +
+        '\n',
     );
   } else {
     process.stderr.write(`${USAGE}\n`);

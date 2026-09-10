@@ -1,11 +1,11 @@
 import { CHEM_LEN, CRITIC_LEN, PLASTIC_LEN, STATE_DIMS, TASTE } from '../chem-layout.ts';
-import { refreshReadsField } from '../agents.ts';
+import { refreshReadsField, seedChem } from '../agents.ts';
 import { formatNet } from '../net-text.ts';
 import type { Params } from '../params.ts';
 import { TRAIT_KEYS } from '../rewrite.ts';
 import type { Sim } from '../sim.ts';
 import type { PortSlot } from '../agents.ts';
-import type { NetBody, NetData, NetWire } from './net-blob.ts';
+import { migrateNet, type NetBody, type NetData, type NetWire } from './net-blob.ts';
 
 /*
  * A net, out of a live pond and back into one.
@@ -226,6 +226,18 @@ function captureComponent(sim: Sim, ids: number[], wires: GraphWire[]): Captured
   };
 }
 
+/**
+ * A stored net at this build's layout, whatever layout it was stored at.
+ *
+ * `seedChem` with the run's params is exactly the genome a body born in this
+ * pond would carry, so a segment the storing build never had arrives as if
+ * the body had been born with it. The notes say what moved, was seeded or
+ * was dropped; empty for a net that was already current.
+ */
+export function prepareNet(net: NetData, params: Params): { net: NetData; notes: string[] } {
+  return migrateNet(net, (kind) => seedChem(kind, params));
+}
+
 export interface PlantOptions {
   /**
    * Overwrite every body's founder line with this.
@@ -257,11 +269,16 @@ export interface PlantOptions {
 export function plantNet(
   sim: Sim,
   params: Params,
-  net: NetData,
+  stored: NetData,
   x: number,
   y: number,
   opts: PlantOptions = {},
 ): number[] {
+  // A net from another build's layout is brought to this one first, seeded
+  // with what a body born under these params would carry. Identity on a
+  // current net, and the one place a caller who only ever plants needs no
+  // knowledge of the versioning.
+  const { net } = prepareNet(stored, params);
   const n = net.bodies.length;
   if (n === 0) return [];
   if (!sim.canSpawn(params, n)) return [];
