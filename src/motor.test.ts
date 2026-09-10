@@ -185,9 +185,10 @@ describe('farming', () => {
    * It was a pass of its own, `farmRate` times the emit head's ground slot,
    * until §3's table finally claimed it: `seedProduction` puts an Era's whole
    * production half on `excrete_2`, so a farmer is simply a body whose
-   * metabolism makes ground. Mass action rather than a flat rate, which is why
-   * "will not farm itself into debt" is now true by construction rather than
-   * by a clamp.
+   * metabolism makes ground. Mass action rather than a flat rate: a frame's
+   * excretion is under the stock at any `excreteRate * dt * ROW_COUNT` below
+   * one, and `runExcretion`'s scale `k` is the clamp for a long frame or a
+   * rate above that.
    */
   /** A lone body on ground it has already stripped, so growth has nothing to work on. */
   function scarred(params: ReturnType<typeof defaultParams>) {
@@ -299,10 +300,14 @@ describe('farming', () => {
     expect(farmer.extra, 'the farmer should have paid for it').toBeLessThan(farmer.energyCap);
   });
 
-  it('costs a body its voice, which is what keeps it honest', () => {
-    // The ground is in the same unit-sum budget as the three things a body can
-    // say, so feeding the dish and being heard are the same budget. That
-    // trade-off is the honesty mechanism — no separate cost term.
+  it('still seeds an Era\'s voice onto a slot nothing reads', () => {
+    // A pin on a seed value with no consumer. The emit head's ground slot
+    // stopped being farming when farming became the ground's excretion row;
+    // it stays a quarter of the simplex because dropping it would renormalise
+    // every genome in the library (see `effEmit`), and `seedChem` still writes
+    // an Era's unit there because a seed says what a kind is for. The honesty
+    // mechanism this test used to name lives on `X` now — production trades
+    // against uptake — and is pinned in `chemistry.test.ts`.
     const params = defaultParams();
     const era = seedChem('era', params);
     let sum = 0;

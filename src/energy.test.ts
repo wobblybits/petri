@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fixedParams } from './test-params.ts';
+import { channelTotal, fixedParams, pondMatter } from './test-params.ts';
 import {
   agentValue,
   atCap,
@@ -38,15 +38,7 @@ import {
 import { Sim } from './sim.ts';
 import { type Params } from './params.ts';
 import { loadPreset } from './presets.ts';
-import { CH, CHANNELS } from './fields.ts';
-
-/** Sum of one channel over the whole field — the harness's own helper. */
-function channelTotal(sim: Sim, ch: number): number {
-  const d = sim.fields.data;
-  let s = 0;
-  for (let k = ch; k < d.length; k += CHANNELS) s += d[k];
-  return s;
-}
+import { CH } from './fields.ts';
 
 /** Defaults to `con`: Era has its own upkeep rate, so kind matters here. */
 function body(
@@ -1044,47 +1036,6 @@ describe('conservation', () => {
     return p;
   }
 
-  /**
-   * Everything the pond is made of, counting a body's debt against it.
-   *
-   * `totalFree` deliberately floors at zero — it answers "how much can be
-   * spent" — and that is the wrong question here. A body one unit into debt
-   * holds `bodyValue - 1` of real matter, and `deathYield` releases exactly
-   * that when it dies. Counting its stock as zero instead would make every
-   * starvation look like matter vanishing, when what vanished was a debt.
-   */
-  const pondTotal = (sim: Sim, bodyValue: number): number => {
-    let inBodies = 0;
-    for (const a of sim.agents.values()) inBodies += bodyValue + a.extra;
-    /*
-     * Plus what is in flight. A rewrite charges its pair `rewriteCost` when it
-     * *begins* and pays the pool out when it *commits*, and in between the
-     * shares are held by the `Rewrite` itself — not by a body, not by the
-     * escrow map, and so not by any of the three totals above. Two seconds of
-     * rewrite duration at two shares apiece is a swing of a few units that
-     * closes itself every time.
-     */
-    let inFlight = 0;
-    // Per rule: only a commute costs shares up front. An erase or an
-    // annihilation is free to start and pays out on commit.
-    for (const rw of sim.rewrites) inFlight += rewriteCost(rw.rule);
-    /*
-     * The whole field, not `energy.storedTotal()`.
-     *
-     * That counted `CH.energy` alone, which was right while the ground was the
-     * only channel a body could put anything on. It is not any more: rent
-     * leaves through the excretion rows, so a Con pays it in `conP` and `aux`,
-     * and counting only the ground reads that as matter going missing. Matter
-     * is matter whatever molecule it is in — `chemistry.test.ts`'s `matter`
-     * has summed the whole field for this reason since the species dimension
-     * existed.
-     */
-    let field = 0;
-    const d = sim.fields.data;
-    for (let k = 0; k < d.length; k++) field += d[k];
-    return inBodies + inFlight + sim.escrowTotal() + sim.totalGut() + field;
-  };
-
   it('diffusion moves the substance without destroying it', () => {
     /*
      * The dish wall absorbs a signal and reflects the substance.
@@ -1129,11 +1080,11 @@ describe('conservation', () => {
     const p = conservativeParams();
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', p);
-    const before = pondTotal(sim, p.bodyValue);
+    const before = pondMatter(sim, p.bodyValue);
     let worst = 0;
     for (let i = 0; i < 900; i++) {
       sim.step(1 / 60, p);
-      worst = Math.max(worst, Math.abs(pondTotal(sim, p.bodyValue) - before));
+      worst = Math.max(worst, Math.abs(pondMatter(sim, p.bodyValue) - before));
     }
     // Something has to have happened, or this asserts about a still pond.
     expect(sim.tally.annihilations + sim.tally.commutes, 'no rewrites ran').toBeGreaterThan(4);
@@ -1144,16 +1095,17 @@ describe('conservation', () => {
      * balances to a part in a hundred thousand, over nine hundred frames of a
      * pond that latched, commuted, erased and annihilated throughout.
      *
-     * 1e-3 relative, and it was 1e-4 while rent could only land on one
+     * 3e-4 relative, and it was 1e-4 while rent could only land on one
      * channel. Rent now leaves through the excretion rows, so what was one
      * small `Float32` add a body a frame is four, and the quantisation is
-     * four times coarser for it. Measured on this pond: 0.0246% over 900
-     * frames, 0.0172% over 300 — sub-linear in the run, which is
-     * accumulation and not a leak, and at `upkeep = 0` it is exactly zero.
-     * A real leak grows with the run; see `chemistry.test.ts`'s twin, which
-     * carries the same argument for the same reason.
+     * coarser for it. Measured on this pond when the bound moved: 2.46e-4
+     * over 900 frames against 1.72e-4 over 300 — sub-linear in the run, which
+     * is accumulation and not a leak, and at `upkeep = 0` exactly zero. The
+     * bound sits just above that measurement rather than an order past it,
+     * so a real leak, which grows with the run, still trips it. The
+     * chemistry suite's 'still conserves' carries the same argument.
      */
-    expect(worst / before, `drifted ${worst} of ${before}`).toBeLessThan(1e-3);
+    expect(worst / before, `drifted ${worst} of ${before}`).toBeLessThan(3e-4);
   });
 
   it('conserves across a whole pond on the shipping path', () => {
@@ -1168,14 +1120,14 @@ describe('conservation', () => {
     p.transportQuantum = 0.5;
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', p);
-    const before = pondTotal(sim, p.bodyValue);
+    const before = pondMatter(sim, p.bodyValue);
     let worst = 0;
     for (let i = 0; i < 900; i++) {
       sim.step(1 / 60, p);
-      worst = Math.max(worst, Math.abs(pondTotal(sim, p.bodyValue) - before));
+      worst = Math.max(worst, Math.abs(pondMatter(sim, p.bodyValue) - before));
     }
     expect(sim.tally.annihilations + sim.tally.commutes, 'no rewrites ran').toBeGreaterThan(4);
-    expect(worst / before, `drifted ${worst} of ${before}`).toBeLessThan(1e-3);
+    expect(worst / before, `drifted ${worst} of ${before}`).toBeLessThan(3e-4);
   });
 
   it('destroys the rent when upkeepExcrete is off, which is today', () => {
@@ -1185,9 +1137,9 @@ describe('conservation', () => {
     p.upkeepExcrete = 0;
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', p);
-    const before = pondTotal(sim, p.bodyValue);
+    const before = pondMatter(sim, p.bodyValue);
     for (let i = 0; i < 900; i++) sim.step(1 / 60, p);
-    expect(pondTotal(sim, p.bodyValue)).toBeLessThan(before * 0.999);
+    expect(pondMatter(sim, p.bodyValue)).toBeLessThan(before * 0.999);
   });
 });
 

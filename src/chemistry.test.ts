@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { bareBody, expressVector, seedChem, uptakeKsOf } from './agents.ts';
 import { CHEM_LEN, CHEM_SPECIES, ERA_GROUND_SHARE, KS_BASE, ROW_COUNT, ROW_EXCRETE, ROW_UPTAKE, STATE_DIMS, X_BASE, X_OUT } from './chem-layout.ts';
-import { HarvestPlan, REWRITE_SHARE, harvestSlotsFast, rewriteCost } from './energy.ts';
+import { HarvestPlan, REWRITE_SHARE, harvestSlotsFast, uptakeRate, type UptakeKinetics } from './energy.ts';
 import { CH, CHANNELS } from './fields.ts';
 import { defaultParams, type Params } from './params.ts';
 import { loadPreset } from './presets.ts';
 import { Sim } from './sim.ts';
+import { channelTotal, pondMatter } from './test-params.ts';
 
 /*
  * The body reaction table. `docs/energy-chemistry-plan.md` §3.
@@ -19,6 +20,8 @@ import { Sim } from './sim.ts';
 
 /**
  * A pond with the dish switched off, so only body reactions move anything.
+ * Not the conservation control `energy.test.ts` builds — the mint stays on,
+ * because half of what is tested here is what the mint does.
  *
  * `ambientEnergy = 0` matters more than it looks: with ground in the dish the
  * bodies harvest between steps, and a test that means to watch a tank empty
@@ -51,27 +54,54 @@ function chemistryParams(): Params {
 }
 
 /**
- * Everything in the pond: what bodies are made of and hold, what is in
- * escrow or in flight, and every species in the field.
+ * One body in a pond with the dish off, standing on a block this test paints.
  *
- * A body's *existence* has to be in here, not just its stock. Deaths and
- * rewrites move `bodyValue` between the two, and a total that counted only
- * `extra` would read every commute as matter appearing — which is exactly what
- * it read, at four per cent over three simulated seconds, before this counted
- * bodies. Pair it with `bodyValue = REWRITE_SHARE`, which is what makes those
- * transfers conservative in the first place.
+ * One frame is stepped before anything is read, for two reasons. The grid
+ * moves onto `fields` when the world is pinned and until then answers out of
+ * a sparse map nothing here writes to; and `refreshExpression` is what fills
+ * the uptake rows, so before a frame has run every row is zero and a body
+ * cannot digest anything it swallows. `paint` lays `per[c]` of every species
+ * flat across the body's own block, so `densityOf` reads exactly `per`.
  */
-function matter(sim: Sim, bodyValue: number): number {
-  let held = 0;
-  for (const a of sim.agents.values()) held += bodyValue + a.extra;
-  let inFlight = 0;
-  for (const rw of sim.rewrites) inFlight += rewriteCost(rw.rule);
-  let field = 0;
-  const d = sim.fields.data;
-  for (let k = 0; k < d.length; k++) field += d[k];
-  // The gut is a fourth place matter can be: swallowed, not yet digested, and
-  // in neither the ground nor a tank. See `Sim.totalGut`.
-  return held + inFlight + sim.escrowTotal() + sim.totalGut() + field;
+function oneBody(tweak: (p: Params) => void) {
+  const p = chemistryParams();
+  p.soupCount = 1;
+  p.uptakeVmax = 6;
+  tweak(p);
+  const sim = new Sim(1600, 1200, 128);
+  loadPreset(sim, 'soup', p);
+  sim.step(1 / 60, p);
+  const a = [...sim.agents.values()][0];
+  const cell = sim.energy.index(a.x, a.y);
+  const rect = sim.energy.blockRect(cell.i, cell.j)!;
+  const paint = (per: number[]): void => {
+    const d = sim.fields.data;
+    d.fill(0);
+    for (let y = 0; y < rect.wj; y++) {
+      for (let x = 0; x < rect.wi; x++) {
+        const k = ((rect.fj + y) * sim.fields.cols + (rect.fi + x)) * CHANNELS;
+        for (let c = 0; c < CHANNELS; c++) d[k + c] = per[c];
+      }
+    }
+  };
+  const gut = (c: number, of = a): number => sim.agentStore.gut[of.slot * CHEM_SPECIES + c];
+  const held = (of = a): number => sim.agentStore.gutTotal(of.slot);
+  const emptyGut = (of = a): void => {
+    sim.agentStore.gut.fill(0, of.slot * CHEM_SPECIES, of.slot * CHEM_SPECIES + CHEM_SPECIES);
+  };
+  return { sim, p, a, paint, gut, held, emptyGut };
+}
+
+/** `v` of one species and nothing else. */
+function alone(c: number, v: number): number[] {
+  const per = new Array(CHANNELS).fill(0);
+  per[c] = v;
+  return per;
+}
+
+/** The harvest's kinetics for one frame of `p`, the way `Sim` builds them. */
+function kineticsOf(p: Params, dt = 1 / 60): UptakeKinetics {
+  return { cap: p.uptakeVmax * dt, ks: p.uptakeKs, yDirect: p.yDirect, yEra: p.yEra, hillN: p.hillN, gutSize: p.gutSize };
 }
 
 describe('expression', () => {
@@ -171,11 +201,11 @@ describe('excretion', () => {
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', p);
     for (const a of sim.agents.values()) a.extra = 1;
-    const before = matter(sim, p.bodyValue);
+    const before = pondMatter(sim, p.bodyValue);
     for (let i = 0; i < 120; i++) sim.step(1 / 60, p);
     // The scent path multiplies by `params.deposit`, which is five, and takes
     // nothing out of any tank. Matter grows, and that is today's pond.
-    expect(matter(sim, p.bodyValue)).toBeGreaterThan(before);
+    expect(pondMatter(sim, p.bodyValue)).toBeGreaterThan(before);
   });
 
   it('conserves what it moves, and stops the mint', () => {
@@ -185,9 +215,9 @@ describe('excretion', () => {
     loadPreset(sim, 'soup', p);
     // Bodies need something to excrete, and a barren pond gives them none.
     for (const a of sim.agents.values()) a.extra = 1;
-    const before = matter(sim, p.bodyValue);
+    const before = pondMatter(sim, p.bodyValue);
     for (let i = 0; i < 120; i++) sim.step(1 / 60, p);
-    const after = matter(sim, p.bodyValue);
+    const after = pondMatter(sim, p.bodyValue);
     // Exactly, not nearly: with the dish off there is nothing but the bodies'
     // own reactions moving anything, and they are conservative by construction.
     expect(after / before, `matter went ${before} -> ${after}`).toBeCloseTo(1, 6);
@@ -245,14 +275,6 @@ describe('excretion', () => {
 });
 
 describe('uptake', () => {
-  /** Standing stock of one species across the whole field. */
-  const total = (sim: Sim, ch: number): number => {
-    const d = sim.fields.data;
-    let s = 0;
-    for (let k = ch; k < d.length; k += CHANNELS) s += d[k];
-    return s;
-  };
-
   it('eats the mixture it is standing in, ground or not', () => {
     /*
      * What replaced the switch this used to test.
@@ -279,7 +301,7 @@ describe('uptake', () => {
     for (const a of sim.agents.values()) a.extra = 0;
     for (let i = 0; i < 120; i++) sim.step(1 / 60, p);
     // Scent was minted, and with no ground in the dish it is all there is.
-    expect(total(sim, CH.conP)).toBeGreaterThan(0);
+    expect(channelTotal(sim, CH.conP)).toBeGreaterThan(0);
     // And it was eaten, which is what a body with no ports to spare and no
     // ground under it can still do.
     expect(sim.totalFree()).toBeGreaterThan(0);
@@ -296,61 +318,82 @@ describe('uptake', () => {
      * ground is — the rest of the mouthful is spent on three species that need
      * catabolic machinery before they are worth anything. Same stock, four
      * times the work for the ground in it.
+     *
+     * Read where the mouthful lands, in the gut. That is Float64, but the
+     * draw came out of Float32 cells and carries their quantum, so the bound
+     * is a little above 1e-9 rather than the 1e-12 a pure Float64 number
+     * would earn.
      */
-    const p = chemistryParams();
-    p.soupCount = 1;
-    p.uptakeVmax = 0.6;
-    const sim = new Sim(1600, 1200, 128);
-    loadPreset(sim, 'soup', p);
-    /*
-     * One frame first, for two reasons. The grid moves onto `fields` when the
-     * world is pinned and until then answers out of a sparse map nothing here
-     * writes to; and `refreshExpression` is what fills the uptake rows, so
-     * before a frame has run every row is zero and a body cannot eat at all.
-     */
-    sim.step(1 / 60, p);
-    const a = [...sim.agents.values()][0];
-    const cell = sim.energy.index(a.x, a.y);
-    const rect = sim.energy.blockRect(cell.i, cell.j)!;
-
-    /** Lay `per[c]` of every species flat across the body's own block. */
-    const paint = (per: number[]): void => {
-      const d = sim.fields.data;
-      d.fill(0);
-      for (let y = 0; y < rect.wj; y++) {
-        for (let x = 0; x < rect.wi; x++) {
-          const k = ((rect.fj + y) * sim.fields.cols + (rect.fi + x)) * CHANNELS;
-          for (let c = 0; c < CHANNELS; c++) d[k + c] = per[c];
-        }
-      }
-    };
-    const cap = p.uptakeVmax / 60;
-    const kinetics = { cap, ks: p.uptakeKs, yDirect: 1, yEra: 1, hillN: 1, gutSize: p.gutSize };
-    /** Ground drawn out of the block in one frame. */
+    const { sim, p, a, paint, gut, emptyGut } = oneBody((q) => {
+      q.uptakeVmax = 0.6;
+    });
+    const kinetics = kineticsOf(p);
     const ground = (per: number[]): number => {
       paint(per);
-      a.extra = 0;
-      // An empty gut as well as an empty tank: room in the gut is what bounds
-      // a mouthful now, so a second run on a full gut would measure nothing.
-      sim.agentStore.gut.fill(0, a.slot * CHEM_SPECIES, a.slot * CHEM_SPECIES + CHEM_SPECIES);
-      const before = sim.energy.storedTotal();
+      // Room in the gut is what bounds a mouthful, so it is emptied between
+      // runs; the tank does not enter into it.
+      emptyGut();
       harvestSlotsFast([a], sim.agentStore, sim.energy, new HarvestPlan(), kinetics);
-      return before - sim.energy.storedTotal();
-    };
-
-    const alone = (c: number, v: number): number[] => {
-      const per = new Array(CHANNELS).fill(0);
-      per[c] = v;
-      return per;
+      return gut(CH.energy);
     };
     const clean = ground(alone(CH.energy, 0.4));
     const filthy = ground(new Array(CHANNELS).fill(0.4 / CHANNELS));
     // The ceiling is the share, exactly: one part in four of the cell is
     // ground, so at most a quarter of one budget can be drawn as ground.
-    expect(filthy).toBeLessThanOrEqual(cap / CHANNELS + 1e-12);
+    expect(filthy).toBeLessThanOrEqual(kinetics.cap / CHANNELS + 1e-8);
     // And it binds — the clean cell is not up against it, so this is the
-    // mixture doing the work and not the tank or the Monod rate.
-    expect(clean).toBeGreaterThan(cap / CHANNELS);
+    // mixture doing the work and not the gut or the Monod rate.
+    expect(clean).toBeGreaterThan(kinetics.cap / CHANNELS);
+  });
+
+  it('caps a rich cell at the rate and a poor one below it', () => {
+    /*
+     * The Monod half, on the path that ships. On rich ground the draw sits
+     * just under the budget; below half-saturation it is well under — and
+     * this is the half of Monod that makes a low-Ks scavenger a viable
+     * different strategy rather than a strictly worse grazer.
+     */
+    const { sim, p, a, paint, gut, emptyGut } = oneBody((q) => {
+      q.uptakeVmax = 12;
+    });
+    const kinetics = kineticsOf(p);
+    const ks = p.uptakeKs; // the seed's affinity gene is 1
+    const draw = (density: number): number => {
+      paint(alone(CH.energy, density));
+      emptyGut();
+      harvestSlotsFast([a], sim.agentStore, sim.energy, new HarvestPlan(), kinetics);
+      return gut(CH.energy);
+    };
+    // Eight places: the draw came out of Float32 cells. See the note above.
+    const rich = draw(4);
+    expect(rich).toBeCloseTo(uptakeRate(4, kinetics.cap, ks), 8);
+    expect(rich).toBeLessThan(kinetics.cap);
+    const poor = draw(0.05);
+    expect(poor).toBeCloseTo(uptakeRate(0.05, kinetics.cap, ks), 8);
+    expect(poor).toBeLessThan(rich);
+  });
+
+  it('shares a contested cell instead of handing it to the lowest id', () => {
+    /*
+     * The id-order artifact §4 exists to remove: densities are read once for
+     * the block before anybody eats, so two bodies on one cell draw the same
+     * mouthful, and order only matters at exhaustion.
+     */
+    const { sim, p, a, paint, gut, emptyGut } = oneBody((q) => {
+      q.uptakeVmax = 12;
+    });
+    // On the same spot, and no frame in between: the block was painted around
+    // where `a` stood at the fixture's one step, and a body that is not pinned
+    // walks off it.
+    const b = sim.spawn('con', a.x, a.y, 0, p, true)!;
+    paint(alone(CH.energy, 1));
+    emptyGut(a);
+    emptyGut(b);
+    const before = sim.energy.storedTotal();
+    harvestSlotsFast([a, b], sim.agentStore, sim.energy, new HarvestPlan(), kineticsOf(p));
+    expect(gut(CH.energy, a)).toBeGreaterThan(0);
+    expect(gut(CH.energy, b)).toBeCloseTo(gut(CH.energy, a), 9);
+    expect(gut(CH.energy, a) + gut(CH.energy, b)).toBeLessThanOrEqual(before + 1e-9);
   });
 
   it('closes the loop once the table is on', () => {
@@ -364,7 +407,7 @@ describe('uptake', () => {
     for (const a of sim.agents.values()) a.extra = 1;
     for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
     // Something was excreted onto a signal species and something took it back.
-    expect(total(sim, CH.conP)).toBeGreaterThan(0);
+    expect(channelTotal(sim, CH.conP)).toBeGreaterThan(0);
     const store = sim.agentStore;
     let excreted = 0;
     for (const a of sim.agents.values()) {
@@ -383,9 +426,9 @@ describe('uptake', () => {
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', p);
     for (const a of sim.agents.values()) a.extra = 1;
-    const before = matter(sim, p.bodyValue);
+    const before = pondMatter(sim, p.bodyValue);
     for (let i = 0; i < 180; i++) sim.step(1 / 60, p);
-    const after = matter(sim, p.bodyValue);
+    const after = pondMatter(sim, p.bodyValue);
     expect(after / before, `matter went ${before} -> ${after}`).toBeCloseTo(1, 6);
   });
 
@@ -407,8 +450,9 @@ describe('uptake', () => {
       loadPreset(sim, 'soup', q);
       const a = [...sim.agents.values()][0];
       a.extra = 0;
-      // `KS_BASE + CH.energy`, not `+ 0`: off the reaction table only the
-      // ground's row is metered, so the affinity that matters is the ground's.
+      // The gene is per species. `ambientEnergy` is what the two arms vary and
+      // the ground is the only species that converts raw, so the ground's
+      // affinity is the one this question is about.
       a.chem[KS_BASE + CH.energy] = ksGene;
       for (let i = 0; i < 30; i++) sim.step(1 / 60, q);
       return a.extra;
@@ -554,12 +598,12 @@ describe('superadditivity', () => {
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', p);
     for (const a of sim.agents.values()) a.extra = 1;
-    const before = matter(sim, p.bodyValue);
+    const before = pondMatter(sim, p.bodyValue);
     for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
     // Five places, not six: `Fields.data` is Float32 and `matter` sums a
     // million cells of it, so the rounding floor is around a part in ten
     // million of the total and not something the reactions can do better than.
-    expect(matter(sim, p.bodyValue)).toBeCloseTo(before, 5);
+    expect(pondMatter(sim, p.bodyValue)).toBeCloseTo(before, 5);
 
     /*
      * And with the cost on, what leaves a tank arrives on the ground.
@@ -570,16 +614,16 @@ describe('superadditivity', () => {
      * show a shortfall here that is an artifact of the question rather than a
      * leak. `energy.test.ts` documents the same hole from the other side.
      */
-    const q = { ...p, rowCost: 0.01, excreteRate: 0.1, upkeepExcrete: 1 };
+    const q = { ...p, rowCost: 0.01, excreteRate: 0.1 };
     const sim2 = new Sim(1600, 1200, 128);
     loadPreset(sim2, 'soup', q);
     for (const a of sim2.agents.values()) a.extra = 1;
-    const before2 = matter(sim2, q.bodyValue);
+    const before2 = pondMatter(sim2, q.bodyValue);
     for (let i = 0; i < 60; i++) sim2.step(1 / 60, q);
     const poorest = Math.min(...[...sim2.agents.values()].map((a) => a.extra));
     expect(poorest, 'somebody ran a debt; the total below is not the test').toBeGreaterThan(0);
     expect(sim2.totalFree()).toBeLessThan(60);
-    expect(matter(sim2, q.bodyValue)).toBeCloseTo(before2, 5);
+    expect(pondMatter(sim2, q.bodyValue)).toBeCloseTo(before2, 5);
   });
 
   it('makes uptake convex at low density above n = 1', () => {
@@ -616,6 +660,17 @@ describe('what a kind makes', () => {
    * of" is a difference and not a row — `metabolismOf` is that difference, and
    * these are the three kinds' answers to it.
    */
+  /*
+   * Every number below is a two-line derivation from the layout, written down
+   * once so the test says why they are the numbers and moves with the seed.
+   * `u` is what one row of the flat fallback holds and what every seeded
+   * uptake row still holds; `P` is the production half that is left, which
+   * is the coincidence `ERA_GROUND_SHARE` depends on.
+   */
+  const u = 1 / ROW_COUNT;
+  const P = 1 - CHEM_SPECIES * u;
+  expect(P).toBeCloseTo(ERA_GROUND_SHARE, 12);
+
   const met = (kind: 'con' | 'dup' | 'era'): number[] => {
     const chem = seedChem(kind, defaultParams());
     const h = new Float64Array(STATE_DIMS);
@@ -626,17 +681,18 @@ describe('what a kind makes', () => {
 
   it('makes a Con a source of conP and aux, and a Dup of dupP and aux', () => {
     const con = met('con');
-    // A quarter of the budget on each of its two rows, against an eighth on
-    // every uptake row: +1/8 net on what it makes, -1/8 on what it only eats.
-    expect(con[CH.conP]).toBeCloseTo(0.125, 12);
-    expect(con[CH.aux]).toBeCloseTo(0.125, 12);
-    expect(con[CH.dupP]).toBeCloseTo(-0.125, 12);
-    expect(con[CH.energy]).toBeCloseTo(-0.125, 12);
+    // Half the production half on each of its two rows, against an eighth on
+    // every uptake row: net positive on what it makes, `-u` on what it only
+    // eats.
+    expect(con[CH.conP]).toBeCloseTo(P / 2 - u, 12);
+    expect(con[CH.aux]).toBeCloseTo(P / 2 - u, 12);
+    expect(con[CH.dupP]).toBeCloseTo(-u, 12);
+    expect(con[CH.energy]).toBeCloseTo(-u, 12);
 
     const dup = met('dup');
-    expect(dup[CH.dupP]).toBeCloseTo(0.125, 12);
-    expect(dup[CH.aux]).toBeCloseTo(0.125, 12);
-    expect(dup[CH.conP]).toBeCloseTo(-0.125, 12);
+    expect(dup[CH.dupP]).toBeCloseTo(P / 2 - u, 12);
+    expect(dup[CH.aux]).toBeCloseTo(P / 2 - u, 12);
+    expect(dup[CH.conP]).toBeCloseTo(-u, 12);
 
     // Each kind is a source of what the other listens for: a Con emits `conP`
     // and tastes `dupP`, and now makes it as well as shouting it.
@@ -657,12 +713,12 @@ describe('what a kind makes', () => {
     expect(express[ROW_EXCRETE + CH.energy]).toBeCloseTo(ERA_GROUND_SHARE, 12);
 
     const era = met('era');
-    // Its whole production half on one row, which is what `farmRate` and the
-    // emit head have said about an Era all along.
-    expect(era[CH.energy]).toBeCloseTo(0.375, 12);
-    expect(era[CH.conP]).toBeCloseTo(-0.125, 12);
-    expect(era[CH.dupP]).toBeCloseTo(-0.125, 12);
-    expect(era[CH.aux]).toBeCloseTo(-0.125, 12);
+    // Its whole production half on one row, which is what `seedProduction`
+    // writes and `upkeepRateOf` reads back as the producer's discount.
+    expect(era[CH.energy]).toBeCloseTo(ERA_GROUND_SHARE - u, 12);
+    expect(era[CH.conP]).toBeCloseTo(-u, 12);
+    expect(era[CH.dupP]).toBeCloseTo(-u, 12);
+    expect(era[CH.aux]).toBeCloseTo(-u, 12);
   });
 
   it('leaves every kind able to eat everything', () => {
@@ -707,13 +763,7 @@ describe('what a kind makes', () => {
       loadPreset(sim, 'soup', p);
       for (const a of sim.agents.values()) a.extra = 1;
       for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
-      const d = sim.fields.data;
-      const tot = (ch: number): number => {
-        let s = 0;
-        for (let k = ch; k < d.length; k += CHANNELS) s += d[k];
-        return s;
-      };
-      return { conP: tot(CH.conP), dupP: tot(CH.dupP), aux: tot(CH.aux) };
+      return { conP: channelTotal(sim, CH.conP), dupP: channelTotal(sim, CH.dupP), aux: channelTotal(sim, CH.aux) };
     };
     // Rent destroyed, and with nothing minting there is nothing anywhere.
     const off = run(0);
@@ -735,40 +785,6 @@ describe('the gut', () => {
    * halves of there being one: a body holds what it cannot convert, and what
    * it is holding is what stops it eating more.
    */
-  const oneBody = (tweak: (p: Params) => void) => {
-    const p = chemistryParams();
-    p.soupCount = 1;
-    p.uptakeVmax = 6;
-    tweak(p);
-    const sim = new Sim(1600, 1200, 128);
-    loadPreset(sim, 'soup', p);
-    // A frame to pin the world and fill the expression rows; see the note in
-    // 'caps each species at its share of one budget'.
-    sim.step(1 / 60, p);
-    const a = [...sim.agents.values()][0];
-    const cell = sim.energy.index(a.x, a.y);
-    const rect = sim.energy.blockRect(cell.i, cell.j)!;
-    const paint = (per: number[]): void => {
-      const d = sim.fields.data;
-      d.fill(0);
-      for (let y = 0; y < rect.wj; y++) {
-        for (let x = 0; x < rect.wi; x++) {
-          const k = ((rect.fj + y) * sim.fields.cols + (rect.fi + x)) * CHANNELS;
-          for (let c = 0; c < CHANNELS; c++) d[k + c] = per[c];
-        }
-      }
-    };
-    const gut = (c: number): number => sim.agentStore.gut[a.slot * CHEM_SPECIES + c];
-    const held = (): number => sim.agentStore.gutTotal(a.slot);
-    return { sim, p, a, paint, gut, held };
-  };
-
-  const alone = (c: number, v: number): number[] => {
-    const per = new Array(CHANNELS).fill(0);
-    per[c] = v;
-    return per;
-  };
-
   it('holds what it swallowed and could not convert', () => {
     /*
      * A body standing on nothing but scent, with the ground as the
@@ -780,6 +796,10 @@ describe('the gut', () => {
     const { sim, p, a, paint, gut } = oneBody((q) => {
       q.catCoSubstrate = 1;
       q.excreteRate = 0;
+      // The gait's pathway buys substrate out of the tank every frame, which
+      // would drain it on its own and make "worth nothing" true for the wrong
+      // reason.
+      q.metabolicRate = 0;
     });
     paint(alone(CH.conP, 0.6));
     a.extra = 0.5;
@@ -787,8 +807,10 @@ describe('the gut', () => {
     for (let i = 0; i < 20; i++) sim.step(1 / 60, p);
     // Swallowed: it is inside the body, not on the ground.
     expect(gut(CH.conP)).toBeGreaterThan(0);
-    // And worth nothing to it, because it had no ground to convert it with.
-    expect(a.extra).toBeLessThanOrEqual(before);
+    // And worth nothing to it: not a unit of ground to pair it with, so the
+    // tank is exactly where it started.
+    expect(gut(CH.energy)).toBe(0);
+    expect(a.extra).toBeCloseTo(before, 12);
   });
 
   it('cannot eat past a full gut', () => {
@@ -806,14 +828,7 @@ describe('the gut', () => {
     store.gut[go + CH.conP] = store.energyCap[a.slot] * p.gutSize;
     expect(held()).toBeGreaterThan(0);
     const before = sim.energy.storedTotal();
-    harvestSlotsFast([a], store, sim.energy, new HarvestPlan(), {
-      cap: p.uptakeVmax / 60,
-      ks: p.uptakeKs,
-      yDirect: 1,
-      yEra: 1,
-      hillN: 1,
-      gutSize: p.gutSize,
-    });
+    harvestSlotsFast([a], store, sim.energy, new HarvestPlan(), kineticsOf(p));
     // Ground under it, an empty tank, and not a unit taken: there is nowhere
     // to put a mouthful.
     expect(sim.energy.storedTotal()).toBeCloseTo(before, 12);
@@ -823,11 +838,11 @@ describe('the gut', () => {
 describe('catabolism', () => {
   /*
    * §6b. Eating a signalling species raw is what phase 3 shipped and what the
-   * sweeps liked least; `catCoSubstrate` makes the ground the co-substrate the
-   * others are converted *with*. It buys access, never amplification —
-   * conservation is unchanged — and the gradient runs continuously from zero
-   * so that a body with a little capability is a little better off than one
-   * with none.
+   * sweeps liked least; `catCoSubstrate` makes the ground the reagent the
+   * others are converted *with*, spent out of the gut `co` for one. It buys
+   * access, never amplification — the ground spent lands in the tank beside
+   * what it unlocked — and the gradient runs continuously from zero, because
+   * every unit of ground a body swallows unlocks a proportional unit of scent.
    */
   const seeded = (tweak: (p: Params) => void) => {
     const p = chemistryParams();
@@ -848,7 +863,7 @@ describe('catabolism', () => {
     return { sim, p, a };
   };
 
-  it('lets a body eat a signalling species raw when the gate is off', () => {
+  it('lets a body eat a signalling species raw when nothing is spent', () => {
     const { sim, p, a } = seeded(() => {});
     const before = a.extra;
     for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
@@ -877,19 +892,9 @@ describe('catabolism', () => {
       q.catCoSubstrate = 1;
       q.ambientEnergy = 0.3;
     });
-    const beforeScent = (() => {
-      const d = sim.fields.data;
-      let s = 0;
-      for (let k = CH.conP; k < d.length; k += CHANNELS) s += d[k];
-      return s;
-    })();
+    const beforeScent = channelTotal(sim, CH.conP);
     for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
-    const afterScent = (() => {
-      const d = sim.fields.data;
-      let s = 0;
-      for (let k = CH.conP; k < d.length; k += CHANNELS) s += d[k];
-      return s;
-    })();
+    const afterScent = channelTotal(sim, CH.conP);
     // The species was consumed, which it could not be without the ground.
     expect(afterScent).toBeLessThan(beforeScent);
   });
@@ -898,8 +903,8 @@ describe('catabolism', () => {
     /*
      * The property the whole design turns on. A hard requirement would make
      * machinery worthless until complete and leave selection nothing to
-     * ascend; blending means every increment of ground availability is worth
-     * something, monotonically.
+     * ascend; a reagent drawn from the gut means every extra unit of ground a
+     * body swallows unlocks a proportional unit of scent, monotonically.
      */
     const fed = (co: number, ambient: number): number => {
       const { sim, p, a } = seeded((q) => {
@@ -911,12 +916,12 @@ describe('catabolism', () => {
       return a.extra - before;
     };
     /*
-     * Levels against the scent the dish is seeded with, which is 4. The gate
-     * reads the *sample*, and a body standing in a cell that is 99 parts scent
-     * to one part ground swallows 99 parts scent — so what matters here is the
-     * ratio, and levels far under the scent all sit at the same floor rather
-     * than on the slope. That is the mechanism, not a threshold: it is
-     * continuous in the ratio the whole way.
+     * Levels against the scent the dish is seeded with, which is 4. The
+     * reagent is what the body swallowed, and a body standing in a cell that
+     * is 99 parts scent to one part ground swallows 99 parts scent — so what
+     * matters here is the ratio, and levels far under the scent all sit at
+     * the same floor rather than on the slope. That is the mechanism, not a
+     * threshold: income is bounded by how much ground the sample brought in.
      */
     const none = fed(1, 0);
     const some = fed(1, 1);
@@ -930,7 +935,7 @@ describe('catabolism', () => {
       q.catCoSubstrate = 1;
       q.ambientEnergy = 0.3;
     });
-    const before = matter(sim, p.bodyValue);
+    const before = pondMatter(sim, p.bodyValue);
     for (let i = 0; i < 120; i++) sim.step(1 / 60, p);
     /*
      * Relative, and bounded well above what the ground can represent.
@@ -946,11 +951,11 @@ describe('catabolism', () => {
      *
      * 1e-7 relative is a hundred and fifty times the drift this run actually
      * shows and still far tighter than any leak would be. A real one grows
-     * with the run; this does not — see the packet path's own conservation in
-     * `energy.test.ts`, held to 1e-4 over nine hundred frames of a pond that
-     * latches, commutes and annihilates.
+     * with the run; this does not — see the whole-pond conservation tests in
+     * `energy.test.ts`, which carry the same argument over nine hundred frames
+     * of a pond that latches, commutes and annihilates.
      */
-    const after = matter(sim, p.bodyValue);
+    const after = pondMatter(sim, p.bodyValue);
     expect(Math.abs(after - before) / before, `drifted ${after - before}`).toBeLessThan(1e-7);
   });
 });

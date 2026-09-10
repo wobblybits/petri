@@ -164,11 +164,13 @@ describe('field.wgsl on a device', () => {
     expect(gpu.energy.storedTotal()).toBeCloseTo(cpu.energy.storedTotal(), 0);
   });
 
-  it('gates catabolism on the ground the way the host does', async ({ skip }) => {
+  it('lands a sampled mouthful in the gut the way the host does', async ({ skip }) => {
     if (!device) skip();
-    // §6b's co-substrate rule, which is one blended factor on the rate and so
-    // exactly the kind of thing that reads as plausible on both sides while
-    // being multiplied in the wrong place on one of them.
+    // Catabolism is host-side on both paths now, so what the shader can still
+    // get wrong is the mouthful: the plan's gut room and budget as packed, the
+    // share ceiling, and `creditHarvest` landing the draw in the gut a frame
+    // late. Digestion then runs on the host from the same gut either way, so
+    // agreement on the totals is agreement on the crossing.
     const params = pondParams();
     params.energyRegrow = 0;
     params.ambientEnergy = 0.3;

@@ -1325,9 +1325,11 @@ export const HARVEST_STRIDE = HARVEST_KS + CHANNELS;
  * The shader's `harvest` is a line-for-line port of this loop; keep them in
  * step. `field-kernel.test.ts` holds the mirror that checks they are.
  *
- * `uptake` rate-limits every body in a block by the block's own mean density,
- * which is what makes uptake a phenotype rather than a race. Omitted, or at
- * `cap` 0, the loop is what it was.
+ * Which path runs is the plan's own verdict, `metered`, decided when it was
+ * built; `uptake` only supplies the Hill coefficient here. Metered, every
+ * body in a block is bounded by the block's own composition, read once before
+ * anybody eats, which is what makes uptake a phenotype rather than a race.
+ * Unmetered, the loop is what it always was.
  */
 export function runHarvestPlan(
   plan: HarvestPlan,
@@ -1477,16 +1479,13 @@ export function gutRoomOf(store: AgentStore, slot: number, gutSize: number): num
 const SPECIES_DENSITY = new Float64Array(CHANNELS);
 
 /**
- * Store-based twin of `harvestSlots`, for sim.ts's per-frame hot path.
- * Identical behavior, reading and writing `AgentStore`'s arrays directly by
- * slot instead of through `Agent`'s accessors.
+ * The harvest the pond runs: bin, then drain, on the store's arrays.
  *
- * Not just `harvestSlots` sped up in place: `energy.test.ts` builds
- * `SlotBody`-shaped plain object literals directly (not real `Agent`
- * instances) to exercise this logic in isolation, so `harvestSlots` keeps
- * its `Iterable<SlotBody>` signature for that and any other caller that
- * doesn't have a store to hand. `sim.ts` does, every frame, for every
- * agent, which is what makes the accessor overhead worth cutting here.
+ * At `cap` 0 it is `harvestSlots` on a store — take what fits, ground alone,
+ * straight into the tank, bit for bit. Above it, it is the sampled mouthful
+ * into the gut that `harvestSlots` does not have; the two are twins only on
+ * the unmetered path, and `harvestSlots` exists so that `energy.test.ts` can
+ * pin that path on plain literals with no store to hand.
  */
 export function harvestSlotsFast(
   agents: Iterable<Agent>,
@@ -1602,7 +1601,15 @@ export function tickUpkeep(
   return dead;
 }
 
-/** Store-based twin of `tickUpkeep` — see `harvestSlotsFast`'s note. */
+/**
+ * The upkeep the pond runs, on the store's arrays.
+ *
+ * `tickUpkeep` on a store when nothing is expressed, which is the shipped
+ * default. When the vectors are live (`opts.expressed`) it bills by
+ * `upkeepRateOf` — the producer's discount for what a body makes rather than
+ * what glyph it wears — and pays `rentBack` out through `payOut` as the
+ * body's own excretion mix.
+ */
 export function tickUpkeepFast(
   agents: Iterable<Agent>,
   store: AgentStore,

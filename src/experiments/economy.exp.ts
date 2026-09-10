@@ -4,8 +4,11 @@ import { runSweep, summarize, writeSweep } from './harness.ts';
 /*
  * The dials that ship at zero, one at a time.
  *
- * `swimCost`, `excreteRate`, `forageAsk` and `fertilise` all change what energy
- * is spent on and none of them has been run. Each is swept alone against the
+ * `swimCost`, `forageAsk` and `fertilise` all change what energy is spent on
+ * and none of them has been run. `excreteRate` is not here: its two regimes
+ * are the arms in `pond/protocol.ts`, and swept alone against the defaults it
+ * would hold `senseScale` at the minted value across the switch, which is the
+ * coupling that table exists to catch. Each dial here is swept alone against the
  * defaults so its effect is its own: population, deaths, how much of the
  * pond can afford to breed, and how far the genome has drifted — which is the
  * first thing that would show a dial creating selection where there was none.
@@ -14,7 +17,6 @@ import { runSweep, summarize, writeSweep } from './harness.ts';
  */
 const AXES: Record<string, number[]> = {
   swimCost: [0, 0.0002, 0.0004, 0.0008],
-  excreteRate: [0, 0.002, 0.005],
   forageAsk: [0, 0.02, 0.05],
   fertilise: [0, 2, 4],
 };
