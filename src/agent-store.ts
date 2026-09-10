@@ -251,9 +251,10 @@ export class AgentStore {
    * Waste is therefore *defined* rather than declared — it is the gap between
    * the sample and the recipe — and no gene has to nominate it.
    *
-   * Not on the genome shader and not in the net blob: it is frame state like
-   * `h`, and a net taken out of the pond and put back starts hungry rather
-   * than half-digested.
+   * Not on the genome shader, and not in the net blob — unlike `h`, which
+   * `capture` carries. A net taken out of the pond and put back starts hungry
+   * rather than half-digested, because what it was holding was a property of
+   * the water it stood in and not of the net.
    */
   gut!: Float64Array;
   /**

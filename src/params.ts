@@ -778,14 +778,18 @@ export interface Params {
    */
 
   /**
-   * Maximum uptake rate, energy per second, at saturating ground.
+   * The whole mouthful a body may swallow per second, at saturation: one
+   * budget shared across all four species in proportion to what is standing
+   * in the cell (see `UptakeKinetics`), landing in the gut, where
+   * `digestRate` and the uptake rows decide what any of it is worth.
    *
    * **Zero is the old path**, and that is not the same as "no uptake": at
    * zero, `runHarvestPlan` takes what fits in the tank instantaneously, as it
-   * always has. Anything above zero makes uptake a *rate*, which is what
-   * gives it a phenotype for selection to grip and what dissolves the
-   * id-order artifact — older bodies systematically eating first in a
-   * contested cell, a fitness gradient on age that nobody chose.
+   * always has, ground alone and straight into the tank. Anything above zero
+   * makes uptake a *rate* and a *sample*, which is what gives it a phenotype
+   * for selection to grip and what dissolves the id-order artifact — older
+   * bodies systematically eating first in a contested cell, a fitness
+   * gradient on age that nobody chose.
    */
   uptakeVmax: number;
   /**
@@ -837,14 +841,17 @@ export interface Params {
    */
   yEra: number;
   /**
-   * How much of ordinary upkeep is excreted onto the ground rather than
-   * destroyed, 0 to 1.
+   * How much of ordinary upkeep is put back into the field rather than
+   * destroyed, 0 to 1 — as the body's own excretion mix, through `payOut`,
+   * so a Con pays its rent in `conP` and `aux` and only an Era pays in ground.
+   * The gait's pathway and the row cost leave by the same road.
    *
    * 0 is today: rent vanishes. 1 makes bodies conservative — no reaction a
    * body runs creates or destroys matter — which is the invariant that makes
    * selection honest. It is a dial rather than a constant because turning it
    * on changes the pond's standing stock, and the plan's discipline is that
-   * nothing changes behaviour until somebody has looked.
+   * nothing changes behaviour until somebody has looked. Above zero it also
+   * turns `refreshExpression` on, because the mix is read off the rows.
    */
   upkeepExcrete: number;
   /**
@@ -886,15 +893,19 @@ export interface Params {
    */
   eraUpkeepRatio: number;
   /**
-   * Rate at which a body excretes its own stock into the field, per second
-   * per unit held, at even expression across the reaction table.
+   * Rate at which a body puts out its excretion rows, per second per unit it
+   * holds in gut and tank together, for a row at an eighth. What the gut holds
+   * of a species leaves first and is free; the shortfall is synthesised from
+   * the tank. This is also the farming dial: an Era's whole production half
+   * is the ground row, so at this rate it lays ground, which is what
+   * `farmRate` used to be.
    *
    * **Zero is today, and turning it on is a switch rather than a slider.**
    * Today a body's voice is *minted*: `effEmit` is multiplied by
    * `params.deposit`, which is five, and nothing is taken out of the tank —
    * with `CH.energy` firewalled out of that path precisely because five units
    * of food a frame out of nothing would be absurd. Above zero, all four
-   * species leave the tank conserved and the minted deposit stops: the
+   * species leave the body conserved and the minted deposit stops: the
    * firewall becomes a stoichiometry rather than a special case, and a poor
    * body physically cannot shout.
    *
@@ -930,37 +941,45 @@ export interface Params {
    */
   senseScale: number;
   /**
-   * How much the three signalling species need `CH.energy` present to be
-   * metabolised at all, 0 to 1. See `docs/energy-chemistry-plan.md` §6b.
+   * How many units of ground one unit of a signalling species is converted
+   * *with*, spent out of the body's own gut. See `docs/energy-chemistry-plan.md`
+   * §6b and `Sim.runDigestion`.
    *
    * 0 is what phase 3 shipped: an uptake row eats its species raw, which is
-   * "eating scent" and is the thing §6b calls wrong. At 1 a body can only
-   * convert species 0, 1 and 3 into energy where there is ground to convert
-   * them *with* — energy is the co-substrate everyone can already use, and the
-   * others are mass nobody can touch without it.
+   * "eating scent" and is the thing §6b calls wrong. Above it the ground is a
+   * reagent, not a catalyst — a body converts species 0, 1 and 3 into energy
+   * only by pairing them with ground it has swallowed, one budget across the
+   * three, so a body with a little ground must choose what to spend it on and
+   * one unit cannot unlock everything. Energy is the co-substrate everyone
+   * can already use, and the others are mass nobody can touch without it.
    *
-   * A dial rather than a switch, and continuous, because that is what keeps
-   * the gradient: at any value above zero a body with a little capability for
-   * a species does a little better than one with none, so selection has a
-   * slope to climb. Forcing a hard requirement is what makes machinery
-   * worthless until complete, which is the trap §6b is written around.
+   * A dial and continuous, because that is what keeps the gradient: every
+   * unit of ground a body swallows unlocks a proportional unit of something
+   * else, so a body with a little capability for a species does a little
+   * better than one with none and selection has a slope to climb. Forcing a
+   * hard requirement is what makes machinery worthless until complete, which
+   * is the trap §6b is written around.
    *
-   * It buys access, never amplification — conservation still holds, a unit
-   * consumed is a unit banked. What a catabolist gains is a pool its
-   * competitors cannot reach, and the pool is largest exactly where other
-   * bodies are dense and the ground is grazed out.
+   * It buys access, never amplification — conservation still holds, the
+   * ground spent lands in the tank alongside what it unlocked. What a
+   * catabolist gains is a pool its competitors cannot reach, and the pool is
+   * largest exactly where other bodies are dense and the ground is grazed out.
+   * The slider stops at 1, which is a choice about how expensive scent should
+   * be and not a bound in the mechanism.
    */
   catCoSubstrate: number;
   /**
    * How fast the gut turns into the tank, per second, per species.
    *
    * Mass action on what a body is holding, so a gut empties on an exponential
-   * and never overshoots. The ground converts at this rate flat — it is the
-   * thing everyone can use raw, which is what makes it the ground — and the
-   * other three convert at this rate scaled by the body's uptake row for that
-   * species and by `catCoSubstrate`. A body whose recipe cannot touch a
-   * species converts none of it, and it stays in the gut occupying the room
-   * that bounds the next mouthful until excretion clears it.
+   * and never overshoots; the last crumb snaps to zero so that it does empty.
+   * The ground converts at this rate flat — it is the thing everyone can use
+   * raw, which is what makes it the ground — and the other three convert at
+   * this rate scaled by the body's uptake row for that species, and only as
+   * far as the ground in its gut will pair with them (`catCoSubstrate`). A
+   * body whose recipe cannot touch a species converts none of it, and it
+   * stays in the gut occupying the room that bounds the next mouthful until
+   * excretion clears it.
    *
    * Bounded by room in the tank, because a full body has nowhere to put what
    * it digests, and matter that had nowhere to go would have to be destroyed.

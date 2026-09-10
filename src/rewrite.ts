@@ -1135,12 +1135,12 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, chance: number, kappa
   /*
    * One unit of voice across all four channels, the ground included.
    *
-   * The ground is in the budget even though nothing says it, because farming
-   * is a thing a body spends itself on and the budget is what makes that a
-   * choice. A lineage that feeds the ground has given up being heard for it,
-   * which is exactly the condition-dependent trade-off that keeps signalling
-   * honest without any separate cost term — and it means an Era's production
-   * competes with an Era's voice rather than being free on top of it.
+   * The ground is still in the budget although nothing reads its slot:
+   * farming moved to the expression head (`seedProduction`, `runExcretion`),
+   * where production trades against uptake on a simplex of its own. Dropping
+   * the slot here would renormalise every genome in the library, so it stays
+   * — see `effEmit` — and a child's voice is divided four ways as its
+   * parents' were.
    */
   let sum = 0;
   for (let k0 = 0; k0 < 4; k0++) {

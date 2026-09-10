@@ -6828,7 +6828,8 @@ export class Sim {
    *   that species and holds it until excretion takes it away.
    * - **Catabolism spends ground.** `catCoSubstrate` is how many units of
    *   `CH.energy` one unit of another species is converted *with*, drawn from
-   *   the gut and gone. A reagent, not a catalyst: it is a budget shared
+   *   the gut and banked with what it unlocked — spent as a licence, not
+   *   destroyed. A reagent, not a catalyst: it is a budget shared
    *   across the three rows rather than a factor on their rate, so a body with
    *   a little ground has to choose what to spend it on and one unit cannot
    *   unlock everything. Continuous from zero, so a body with a little
@@ -6873,7 +6874,7 @@ export class Sim {
        * catalyst — one unit of ground in the gut licensed unlimited scent, and
        * converting scent is how a body keeps a unit of ground. So the ground
        * is spent here: `co` units of it per unit of species converted, drawn
-       * from what this body is holding, and gone.
+       * from what this body is holding and unable to license a second thing.
        *
        * `pair` is that budget and it is shared across the three rows, which is
        * the constraint the ratio could not express: a body with a little

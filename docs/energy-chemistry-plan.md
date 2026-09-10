@@ -6,7 +6,7 @@ Agreed 2026-09-08 with the author, after reading `energy.ts`, `fields.ts`,
 watch.
 
 Nothing here adds a fitness term. Everything here ships at zero and reduces
-to today's behaviour, which is the discipline `farmRate`, `fertilise` and
+to today's behaviour, which is the discipline `fertilise` and
 `reactFeed` already follow.
 
 ---
@@ -270,9 +270,9 @@ The id-order artifact dissolves: everyone in a block draws concurrently and
 order stops mattering except at exhaustion.
 
 **Migration is a dial, not a seed.** At `uptakeVmax = 0` the old
-take-what-fits path runs unchanged; seeding the expression rows to zero is
-not sufficient, because zero expression would mean zero uptake, which is not
-today's behaviour.
+take-what-fits path runs unchanged. The expression rows cannot be the switch:
+a body always samples the water, and since §6c the rows only decide what it
+can digest of what it swallowed.
 
 ### One mouthful, sampled
 
@@ -308,8 +308,8 @@ needed. Three things fall out of that, and they are the reason to prefer it:
   is standing in. What varies between bodies is the rate, the affinity, and
   what each can do with what it has swallowed — not whether it may eat.
 
-`uptakeVmax = 0` is still the take-what-fits path, unchanged, and `got` is
-still credited to one tank: what a body cannot use it does not draw.
+`uptakeVmax = 0` is still the take-what-fits path, unchanged. Above it `got`
+lands in the gut as itself, and §6c says what happens next.
 
 ---
 
@@ -374,6 +374,13 @@ kills the soup rather than structuring it. `economy.exp.ts` can answer this
 before anything is committed.
 
 ---
+
+*2026-09-10.* Taken a different way than prescribed above. `upkeepRateOf`
+keys the ratio on how much of a body's chemical budget is the ground's
+excretion row, against `ERA_GROUND_SHARE`, so the discount is earned by
+making ground rather than by wearing the glyph — and a Con breeding toward
+ground earns it. `yEra` stays a dial at 1 and is the other half of this
+section still to be taken.
 
 ## 6. The ground: the reaction is already written
 
@@ -558,12 +565,17 @@ and nothing has to nominate it.
 - **Satiety is three mechanisms deep.** Digestion is bounded by room in the
   tank, so a full body cannot digest, so its gut fills, so it cannot eat. No
   clamp anywhere.
-- **The co-substrate is asked of the body, not the cell.** `catCoSubstrate`
-  now blends against how much of the *gut* is ground. It has to be something
-  that runs out: a gate on the tank would let a body with a little banked
-  convert scent for ever, and converting scent is how it keeps a little
-  banked. A body standing on nothing but scent swallows nothing but scent and
-  starves on top of a feast, which is §6b's point stated where it belongs.
+- **The co-substrate is spent, not stood near.** `catCoSubstrate` is how many
+  units of gut ground one unit of another species is converted *with*, drawn
+  and unable to license a second thing; the three rows share that budget, so
+  a body with a little ground must choose. A factor on the rate — the first
+  form this took — says "in the presence of", which is a catalyst, and one
+  unit of ground then licensed unlimited scent, and converting scent is how a
+  body keeps a unit of ground. It has to be something that runs out, and it
+  has to be asked of the body: a body standing on nothing but scent swallows
+  nothing but scent and starves on top of a feast, which is §6b's point
+  stated where it belongs. The paired ground lands in the tank beside what it
+  unlocked, so nothing is destroyed.
 - **Bodies mix the chemistry.** Swallow here, dump there. Diffusion cannot do
   that, and it is the first time anything but the field moves a species across
   the dish.
@@ -689,6 +701,12 @@ times its voice into three channels out of nothing and eats it back. Measured,
 that ran at twice the rate cap and filled every tank. So the species rows
 follow `excreteRate` and not `uptakeVmax`.
 
+*Retired 2026-09-10.* Uptake is one sampled budget (§4, "One mouthful,
+sampled"): the shares sum to the budget however rich the cell is, so the
+mint buys the minter nothing, the switch is gone and `uptakeVmax` means one
+mechanism at every level. The coupling row in `docs/experiments.md` §4 is
+marked retired with the reason.
+
 **Phase 4. Trophic dependency.** *Done as dials, 2026-09-08.* `yDirect` and
 `yEra` scale the uptake *rate*, which makes obligate dependency conservative
 without a second grid write per body per species: at `yDirect` 0 a body draws
@@ -740,6 +758,37 @@ because a hard requirement is the cliff; at any value above zero a body with a
 little capability does a little better than one with none.
 
 Conservation is untouched, so it buys access and not amplification.
+
+*Revised 2026-09-10 (§6c).* The ground is spent, not blended: `catCoSubstrate`
+units of gut ground per unit converted, one shared budget across the three
+rows, in `Sim.runDigestion` on the host for both field paths — the shader no
+longer carries a co-substrate term at all. Still continuous from zero, still
+access and not amplification.
+
+**The sample, the gut, and what a kind makes.** *Done, 2026-09-10, in seven
+commits, none of them in the order above.*
+
+- *Sample* (dc2afe1). Uptake is one budget a frame, `HARVEST_TOTAL`, shared
+  across the four species by what is standing in the cell (§4, "One
+  mouthful, sampled"). The switch coupling the species rows to `excreteRate`
+  is deleted; its coupling row is retired.
+- *Gut* (ad9681a). `store.gut`, `Sim.runDigestion`, gut-first excretion,
+  `digestRate` and `gutSize` (§6c). Corpses spill their gut; so, since the
+  review, do rewrites.
+- *Production* (f28e503). `seedProduction` writes what a kind makes onto the
+  excretion bases; rent leaves as that mix through `payOut`; `upkeepExcrete`
+  turns expression on (§3, "What a kind is a source of").
+- *The right dial* (713b04d). The gait's pathway had charged its spend to
+  `excreteRate`; it charges `upkeepExcrete`, and the conservation suite is
+  green again.
+- *Reagent* (e362f67). The co-substrate is spent, not blended (§6c).
+- *Producer's discount* (c8a50e0). `upkeepRateOf` keys `eraUpkeepRatio` on
+  the expressed ground row against `ERA_GROUND_SHARE` (§5 note).
+- *Farming folded* (8d1c127). `farmRate` is gone; `runExcretion` is the
+  farming pass.
+- *Coherence* (the commit after these). One road out for every tank-to-dish
+  spender, one digestion order, the drain reading the fill's verdict, one
+  floor on both sides of the mirror, the dead uniform a pad again.
 
 **Phase 7b. Whether it pays.** *Not started, and it is the real question.*
 
@@ -816,8 +865,11 @@ going to evolve in one.
   construction. It is also migration load: unevolved immigrants dilute any
   evolved lineage. The same dial does both.
 
-- **F5 dissolves.** The ground emit slot being genetic load at `farmRate = 0`
-  stops being true the moment `excrete_2` is a row that does something.
+- **F5 moves.** The ground emit slot is read by nothing at all now — farming
+  is `excrete_2` on the expression head — so it is load at every setting.
+  What is left of F5 is whether `emitVector`'s simplex should be three wide,
+  which is a library-renormalising change and is deferred for that reason;
+  see `effEmit`.
 
 - **Interaction with plasticity.** The learned span is `[W_IN, F_OUT)` and the
   new head sits outside it, so `PLASTIC_LEN` is unchanged and the expression
@@ -831,9 +883,12 @@ going to evolve in one.
 
 - No new fitness term. Every teacher and every cost is a quantity the
   simulation already computes for its own reasons.
-- No rule keyed on kind. Eras are seeded toward uptake; whether they stay
-  there is selection's business. The codebase has already learned this lesson
-  twice, explicitly.
+- No rule keyed on kind. Eras are seeded toward making ground
+  (`seedProduction`) and every kind eats alike; whether they stay there is
+  selection's business. The codebase has already learned this lesson twice,
+  explicitly. Three glyph reads remain, all dials at the old value: `yEra`,
+  `eraCapRatio`, and the glyph fallback `upkeepRateOf` takes when nothing is
+  expressed, which is the shipped default.
 - No guarded channels. Locality comes from `diffuseRate`, not from exempting
   anyone.
 - No fully-emergent regeneration. A pond whose only producers are biotic
