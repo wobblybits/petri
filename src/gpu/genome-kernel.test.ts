@@ -264,7 +264,6 @@ describe('the genome shader computes what updateState computes', () => {
     params.decay = 0;
     params.energyRegrow = 0;
     params.energyDiffuse = 0;
-    params.farmRate = 0;
     params.swimCost = 0;
     params.forageAsk = 0;
     params.fertilise = 0;

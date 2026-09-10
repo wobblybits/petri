@@ -466,7 +466,8 @@ export interface Params {
    * How much the fertiliser channel accelerates regrowth, per unit of it.
    *
    * Growth becomes `r * (1 + fertilise * C) * E * (1 - E/K)`, where `C` is
-   * `FERTILISE_CH`. What this buys that `farmRate` does not is a *reason for
+   * `FERTILISE_CH`. What this buys that the ground's excretion row does not
+   * is a *reason for
    * two lineages to need each other*.
    *
    * Farming moves stock from a tank onto the dish: one body's investment, and
@@ -514,30 +515,6 @@ export interface Params {
    * what a moving body pays to exist.
    */
   swimCost: number;
-  /**
-   * Extra per second a body converts into ground, per unit of voice it spends
-   * on `CH.energy`. 0 = off.
-   *
-   * Farming. One for one at the point of transfer — nothing is created here,
-   * stock simply moves from a tank onto the dish. What makes it worth doing is
-   * what happens next: `grow` is logistic, so growth is proportional to what is
-   * already in a cell and **zero is a fixed point**. A cell grazed to the floor
-   * can never recover on its own; seeding it with anything at all restarts the
-   * growth, and the ground carries it back toward capacity. Investing a little
-   * in a scar returns much more than it cost, bounded by the dish's own
-   * capacity so it is production rather than a mint.
-   *
-   * That is what an Era is for under this economy — one port, cannot commute,
-   * pays no rent — and why `seedChem` puts an Era's whole unit of voice here.
-   * It also means production is now a *phenotype* competing for the same
-   * budget as being heard, rather than a rule keyed on kind.
-   *
-   * Off by default, like every other dial that changes what energy is spent
-   * on, and this one wants care: an Era's income from `ERA_UPKEEP_RATIO` is
-   * about 0.003/s at the default upkeep, so a rate much above that makes a
-   * seeded Era spend faster than it earns and starve.
-   */
-  farmRate: number;
   /**
    * How loudly a body asks for energy on account of liking where it is.
    *
@@ -797,7 +774,7 @@ export interface Params {
   /*
    * Chemistry. See `docs/energy-chemistry-plan.md`; every one of these ships
    * at the value that reduces to the behaviour before it existed, which is
-   * the same discipline `farmRate`, `fertilise` and `reactFeed` follow.
+   * the same discipline `fertilise` and `reactFeed` follow.
    */
 
   /**
@@ -1099,7 +1076,6 @@ export function defaultParams(): Params {
     fertilise: 0,
     upkeep: 0.015,
     swimCost: 0,
-    farmRate: 0,
     forageAsk: 0,
     rescueTo: 0.9,
     assortBias: 0.5,
@@ -1204,7 +1180,6 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'fertilise', label: 'Fertilise', min: -2, max: 8, step: 0.1 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
   { key: 'swimCost', label: 'Swim cost', min: 0, max: 0.002, step: 0.00005 },
-  { key: 'farmRate', label: 'Farm rate', min: 0, max: 0.02, step: 0.0005 },
   { key: 'forageAsk', label: 'Forage ask', min: 0, max: 0.5, step: 0.01 },
   { key: 'rescueTo', label: 'Rescue fill', min: 0, max: 1, step: 0.05 },
   { key: 'assortBias', label: 'Assortment (seed)', min: 0, max: 1, step: 0.05 },

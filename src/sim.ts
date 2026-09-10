@@ -1138,20 +1138,15 @@ export class Sim {
     this.runDigestion(params, t);
     this.runExcretion(params, t);
     Sim.phase('excrete');
-    if (params.farmRate > 0) {
-      const rate = params.farmRate * t;
-      for (const a of this.agents.values()) {
-        if (a.locked) continue;
-        const w = this.agentStore.emitAll[a.slot * 4 + CH.energy];
-        if (w <= 0) continue;
-        const want = rate * w;
-        const have = a.extra > 0 ? a.extra : 0;
-        const give = want < have ? want : have;
-        if (give <= 0) continue;
-        a.extra -= give;
-        this.energy.addAt(a.x, a.y, give);
-      }
-    }
+    /*
+     * Farming used to be a pass of its own here: `farmRate` times the emit
+     * head's ground slot, tank to ground, for any body expressing one. §3's
+     * table has always held that the four excretion rows subsume it, and since
+     * `seedProduction` an Era's whole production half *is* the ground row — so
+     * `runExcretion` above is that pass, at `excreteRate`, for every kind at
+     * once and with mass action in place of a flat rate. One production path
+     * rather than three.
+     */
     for (const id of this.contactDamage(params, t)) this.kill(id);
     for (const id of tickUpkeepFast(this.agents.values(), this.agentStore, t, params.upkeep, this.energy, {
       excrete: params.upkeepExcrete,

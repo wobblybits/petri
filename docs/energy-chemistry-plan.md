@@ -180,10 +180,13 @@ A net saved before this keeps its stored genome, zeros included, so it stays
 the old generalist until it breeds — the seeding reaches the pond through
 fresh immigrants, which is how every other seeded trait arrives.
 
-`farmRate` and the emit head are the half of the table still not folded in.
-They are a second path to the same place and should eventually be the
-excretion rows at their own rate; that is a change to the Era economy and not
-to this one.
+`farmRate` is gone. It was `farmRate` times the emit head's ground slot, tank
+to ground, in a pass of its own — a second path to the same place — and
+`runExcretion` is now that pass, at `excreteRate`, for every kind at once and
+with mass action in place of a flat rate. "Will not farm itself into debt"
+stopped needing a clamp. What is left of F5 is that nothing reads the emit
+head's ground slot any more, which is a question about `emitVector`'s width
+rather than about farming.
 
 **Inherited and mutated, not learned.** `X` is outside the plastic span on
 purpose (§8). What moves within a life is regulation — the rows read `h`, so a

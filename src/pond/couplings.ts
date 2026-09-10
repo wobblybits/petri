@@ -128,10 +128,12 @@ export const COUPLINGS: readonly Coupling[] = [
   },
   {
     axis: 'eraUpkeepRatio',
-    constant: 'farmRate',
-    why: 'a seeded Era earns ~0.003/s from the mint at -0.2; a farm rate above that starves it, and at ratio 1 there is no mint at all',
-    fix: 'choose farmRate against the Era income each arm actually has',
-    unless: { key: 'farmRate', is: 0 },
+    constant: 'excreteRate',
+    why:
+      'a seeded Era earns ~0.003/s from the producer discount at -0.2 and nothing at all at 1, ' +
+      'and excreteRate is what it spends making ground; above its income it starves',
+    fix: 'choose excreteRate against the producer income each arm actually has',
+    unless: { key: 'excreteRate', is: 0 },
   },
   {
     axis: 'grip',

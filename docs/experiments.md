@@ -240,7 +240,7 @@ truth (`src/pond/couplings.ts`); this is the reading of it.
 | `ambientEnergy` | `uptakeKs` | a half-saturation constant only means something relative to the density it is measured against |
 | `soupCount` | `declutter`, `flockAlign` | the spacing forces gate the opening scramble, whose severity is density; the 18× was measured at 250 bodies |
 | `energyRegrow` | `fertilise` | scales a rate; scaling zero is zero |
-| `eraUpkeepRatio` | `farmRate` | a seeded Era earns ~0.003/s from the mint; a farm rate above that starves it |
+| `eraUpkeepRatio` | `excreteRate` | a seeded Era earns ~0.003/s from the producer discount; making ground faster than that starves it |
 
 Retired, and worth knowing why: `excreteRate` x `uptakeVmax`. The species
 uptake rows used to follow `excreteRate`, so the dial metered one species in

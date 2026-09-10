@@ -1060,6 +1060,14 @@ export function effEmit(a: Agent, c: number): number {
 /**
  * What this body is putting into the ground: its emit weight on `CH.energy`.
  *
+ * Nothing in the sim reads this any more. Farming was the reader, and §3's
+ * table has now claimed it: ground production is `excrete_2` on the expression
+ * head, at `excreteRate`, like every other species. The slot stays because it
+ * is a quarter of `emitVector`'s simplex and removing it would renormalise
+ * every genome in the library — and because a body spending voice on a channel
+ * nothing hears is exactly the genetic load §8's F5 is about, which is now a
+ * question about `emitVector`'s width rather than about farming.
+ *
  * Separate from `effEmit` because it is not a signal and does not travel the
  * same road. The weight comes out of the same unit-sum budget as the three
  * things a body can say, which is the whole reason this is safe to allow:
@@ -1235,7 +1243,11 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
      * multiply it — seeding a scarred cell restarts growth that a depleted
      * cell can never restart on its own.
      *
-     * Inert until `farmRate` is turned on, like every other economy dial.
+     * The *emit* slot, which nothing reads any more: farming is `excrete_2` on
+     * the expression head now, and `seedProduction` is where an Era is told to
+     * be a ground-maker. Left here because it is a quarter of a simplex and
+     * because it still says what an Era is for, which is what a seed is; see
+     * `emitEnergy` for why the slot itself has not gone.
      */
     c[EMIT + CH.energy] = 1;
     c[TASTE] = S;

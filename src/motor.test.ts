@@ -179,6 +179,16 @@ describe('port occupancy', () => {
 });
 
 describe('farming', () => {
+  /*
+   * Farming is the ground's excretion row, at `excreteRate`.
+   *
+   * It was a pass of its own, `farmRate` times the emit head's ground slot,
+   * until §3's table finally claimed it: `seedProduction` puts an Era's whole
+   * production half on `excrete_2`, so a farmer is simply a body whose
+   * metabolism makes ground. Mass action rather than a flat rate, which is why
+   * "will not farm itself into debt" is now true by construction rather than
+   * by a clamp.
+   */
   /** A lone body on ground it has already stripped, so growth has nothing to work on. */
   function scarred(params: ReturnType<typeof defaultParams>) {
     const sim = new Sim(10000, 10000);
@@ -207,7 +217,14 @@ describe('farming', () => {
     params.rewriteDuration = 0;
     params.energyRegrow = 0;
     params.energyDiffuse = 0;
-    params.farmRate = 0.05;
+    params.excreteRate = 0.05;
+    /*
+     * The gait's pathway buys substrate out of the same tank, and this asks
+     * whether what leaves it arrives. `upkeepExcrete` is what routes that
+     * spend onto the dish rather than destroying it, so with it on both
+     * spenders are conservative and the total is the claim being made.
+     */
+    params.upkeepExcrete = 1;
     const { sim, a } = scarred(params);
     a.extra = 1;
     const before = a.extra + sim.energy.storedTotal();
@@ -226,7 +243,7 @@ describe('farming', () => {
     params.rewriteDuration = 0;
     params.energyRegrow = 0;
     params.energyDiffuse = 0;
-    params.farmRate = 5;
+    params.excreteRate = 5;
     const { sim, a } = scarred(params);
     a.extra = 0.2;
     for (let f = 0; f < 60; f++) sim.step(1 / 60, params);
@@ -245,7 +262,7 @@ describe('farming', () => {
     params.energyRegrow = 0.3;
 
     const run = (farm: number): number => {
-      params.farmRate = farm;
+      params.excreteRate = farm;
       const { sim, a } = scarred(params);
       a.extra = 1;
       for (let f = 0; f < 60 * 20; f++) sim.step(1 / 60, params);
@@ -268,7 +285,7 @@ describe('farming', () => {
     params.rewriteDuration = 0;
     params.energyRegrow = 0;
     params.energyDiffuse = 0.4;
-    params.farmRate = 0.05;
+    params.excreteRate = 0.05;
     const sim = new Sim(10000, 10000);
     const farmer = sim.spawn('era', 5000, 5000, 0, params, true)!;
     const eater = sim.spawn('con', 5000 + 60, 5000, 0, params, true)!;

@@ -78,7 +78,6 @@ export function rigParams(over: Partial<Params> = {}): Params {
   p.energyRegrow = 0;
   p.energyDiffuse = 0;
   p.upkeep = 0;
-  p.farmRate = 0;
   p.forageAsk = 0;
   p.fertilise = 0;
   p.uptakeVmax = 0;
