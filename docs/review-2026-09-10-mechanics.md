@@ -1,159 +1,183 @@
 # Review: metabolism, locomotion, learning
 
-2026-09-10. A reading of three mechanics against `concepts.md`, the plans,
-and the code as it ships at HEAD (`aaae4ed`). Each finding names the concept
-heading it is about and the mechanic that heading already has, and every
-proposal here is a tuning, a measurement, a bug fix or a documentation fix.
-Nothing adds a fitness term, a decay, or a mechanic.
+2026-09-10, revised the same day after vetting. A reading of three mechanics
+at HEAD (`aaae4ed`) against `concepts.md` and the code. Each finding names
+the concept heading it is about and the mechanic that heading already has.
+Nothing here adds a fitness term, a decay, or a mechanic.
 
-Where a number is quoted it was either taken from the docs (cited) or from
-integrating `advanceGait`'s reaction loop on its own, outside a pond, which
-is the same thing the pathway's own commits did. None of it is a pond
-measurement; the protocols in §5 are the pond measurements this review asks
-for.
+**How each claim was checked.** Every claim below is tagged:
+
+- **[code]** derived from reading the source, not comments, tests or docs.
+- **[sim]** measured by driving the real `Sim` headlessly (CPU field, wasm
+  solver where the run says so), with the scripts' assumptions stated.
+- **[unresolved]** measured and inconclusive at the seeds run.
+
+Three claims in the first draft of this review were wrong and are retracted
+in §6. Nothing in this document rests on a number quoted from
+`experiments.md`, the test suite, or a comment.
 
 ---
 
-## 0. The finding the rest sits under
+## 0. What ships, and what is engaged
 
-At the shipped defaults, none of the three mechanics is doing the job its
-heading names, in the pipeline that ships:
+[code] At `defaultParams()`:
 
-| mechanic | heading | shipped state | why it is not engaged |
+| mechanic | heading | shipped | consequence |
 |---|---|---|---|
-| the pathway (`advanceGait`) | Net: Locomotion, its clock; Agent: Metabolism | `metabolicRate 0` | switched off, pending a sweep (`b6f6b80`) |
-| metered uptake, the gut | Agent: Metabolism, eating | `uptakeVmax 0` | the take-what-fits path, instantaneous, in id order |
-| grip and the packet | Net: Locomotion | `grip 2`, `transportQuantum 0.5` | on; but a stroke needs a fullness difference and `full_mean` sits near 1 |
-| three-factor learning | Agent: Learning | `learnRate 0.02` | on; the teacher is `FULL - 1`, which is 0 for a full body |
+| the pathway, `advanceGait` | Net: Locomotion (clock); Agent: Metabolism | `metabolicRate 0` | returns before the loop; wave and anchor 0; `strokeOf` is exactly 1 |
+| metered uptake and the gut | Agent: Metabolism (eating) | `uptakeVmax 0` | the take-what-fits path |
+| `grip` and the packet | Net: Locomotion | `grip 2`, `transportQuantum 0.5` | on |
+| three-factor learning | Agent: Learning | `learnRate 0.02` | on |
 
-So locomotion ships as grip plus packets with the gait off, and learning
-ships on with a teacher that reads zero wherever the economy is not in play.
-`experiments.md` §1.B found exactly this shape once already (demand read
-0.000 under `uptakeVmax 6`). The improvement is not a mechanism. It is one
-protocol that engages all three at once (§5) and reads them against their
-gauges, before any of the tunings below are shipped.
+[sim] Whether the learning teacher and the grip stroke have anything to
+work on depends on the pond's own population, which varies more between
+seeds than between arms. Eight 120-second ponds, 400 to 500 founders, no
+patches, both packet settings:
+
+| run | bodies at 120 s | `full_mean` | `demand_mean` |
+|---|---:|---:|---:|
+| seed 1, 2400², quantum 0 | 514 | 0.64 | 0.44 |
+| seed 1, 2400², quantum 0.5 | 861 | 0.27 | 0.65 |
+| seed 2, 2400², quantum 0 | 281 | 0.88 | 0.11 |
+| seed 2, 2400², quantum 0.5 | 315 | 0.95 | 0.003 |
+| seed 3, 2400², quantum 0 | 487 | 0.94 | 0.07 |
+| seed 3, 2400², quantum 0.5 | 996 | 0.18 | 0.64 |
+| seed 1, 1600×1200, quantum 0 | 615 | 0.86 | 0.07 |
+| seed 1, 1600×1200, quantum 0.5 | 893 | 0.58 | 0.007 |
+
+The same arm runs from pinned full (0.95, demand 0.003) to hungry (0.18,
+demand 0.64) depending on the seed, because the pond decides its own
+density. So "is the economy in play" is not a property of the defaults; it
+is a per-trial gauge, and any claim about learning or the stroke has to be
+read against it. The protocol machinery's `preconditions` is the right
+tool; `full_mean` and `demand_mean` are the gauges.
 
 ---
 
 ## 1. Metabolism: the pathway
 
 Heading: Agent, Metabolism (upkeep) and Net, Locomotion (the clock).
-Mechanic: the three-reaction pathway over a conserved adenylate pool in
+Mechanic: three reactions over a conserved adenylate pool in
 `Sim.advanceGait`, spending through `payOut`.
 
-### 1a. The oscillation band is pool-relative, and the pool is the one heritable thing
+### 1a. The oscillation band is pool-relative, and the pool is the one heritable gene
 
-`metabolicRegen`'s note derives the balance `u* (regen - supply/pool) =
-work(u*)` and says the band is per body because `adenylate` is heritable.
-That is understated. Integrating the loop as written, one fed body, sixty
-seconds, everything else at the shipped values:
+[code] The influx is `supply * (1 - charge)` with `charge = atp / pool`,
+while every other rate is per unit of pool. Summing the two rows leaves a
+steady-state balance `u* (regen - supply / pool) = work(u*)`, so whether a
+steady state exists at all depends on `pool`, and `pool` is `adenylate`,
+heritable with range 0.2 to 6 and a mutation step of 0.15.
 
-| `adenylate` | swing of the wave | spend, tank units/s |
+[sim] One fed Con, no wires, no rent, no ground, `metabolicRate 6`,
+sixty seconds, swing of `gaitWave` over the second half and tank spend per
+second (the tank is refilled every frame and the shortfall counted):
+
+| `adenylate` | swing | spend/s |
 |---:|---:|---:|
 | 0.8 | 0.00 | 0.171 |
-| 1.0 | 0.00 | 0.168 |
-| 1.3 | 0.00 | 0.163 |
+| 1.0 | 0.00 | 0.169 |
+| 1.3 | 0.00 | 0.164 |
 | **1.5 (seed)** | **1.86** | **0.031** |
 | 2.0 | 0.00 | 0.016 |
-| 3.0 | 0.00 | 0.007 |
+| 3.0 | 0.00 | 0.008 |
 
-Only the seeded value oscillates. One mutation step is 0.15 and the range
-is 0.2 to 6, so a child lands outside the band more often than in it. Below
-the band the body sits at the discharged clamp and pulls substrate at full
-rate: eleven times its rent (`upkeep` 0.015), for a clock that never ticks.
-Above it the body sits charged and still. The gene the concept doc calls
-"the first thing about a lineage's metabolism that selection can reach" is
-a trap on both sides of its seed.
+Only the seeded pool oscillates. Below it the body sits at the discharged
+clamp buying substrate at eleven times its rent for a clock that never
+ticks; above it the body sits charged and still. One mutation step in
+either direction leaves the band.
 
-The cause is that `supply` is in absolute reaction units while `1 - charge`
-is a fraction of the pool, so the influx per unit of discharge does not
-scale with the pool. Make it scale:
-
-```
-want = supply * pool * (1 - charge) * hs      // supply per unit of pool
-```
-
-and ship `metabolicSupply` at 2 (today's 3 over the seeded 1.5, and `2 *
-1.5` is exactly 3 in floating point, so the seeded body is bit-identical).
-The balance becomes `u* (regen - supply) = work(u*)`, independent of the
-pool. Same integration:
+Scale the influx with the pool, `supply * pool * (1 - charge)`, and ship
+`metabolicSupply` at 2 (`2 * 1.5` is exactly 3 in floating point, so the
+seeded body is bit-identical). [sim] Emulated through the global by setting
+`supply = 2 * pool` for each pool:
 
 | `adenylate` | swing | spend/s |
 |---:|---:|---:|
 | 0.8 | 1.75 | 0.027 |
 | 1.0 | 1.80 | 0.028 |
 | 1.5 | 1.86 | 0.031 |
-| 2.0 | 1.90 | 0.032 |
+| 2.0 | 1.90 | 0.033 |
 | 3.0 | 1.93 | 0.040 |
-| 4.0 | 1.95 | 0.051 |
 
-Every pool oscillates, and the pool now does what its gene comment says it
-does: sets the depth and period of the stroke, not whether there is one.
-The narrow band the concept doc calls "a real property of a two-pool
-network" is still narrow in `regen`; it is just no longer a function of a
-gene. One line, a default change, and `gait.test.ts`'s oscillation criterion
-run at three pool sizes rather than one.
+Every pool oscillates. The pool then sets depth and period rather than
+whether there is a clock. The band in `regen` stays narrow; it stops being
+a function of a gene.
 
 ### 1b. Work is charged on holding, not on moving, and on bodies with nothing to move
 
-The comment says the stroke "discharges the pool in proportion to how far it
-is actually swinging a wire". The code charges `workRate * |atp - adp| /
-pool`, which is `|wave|`: the distance from mid-charge, not the rate of
-change. A body holding its wires at full extension pays the most; one
-swinging through the midpoint pays nothing. And it is charged per body
-whether or not the body has a wire, so a loner runs the clock at the full
-load.
+[code] The load term is `workRate * |atp - adp| / pool`, which is `|wave|`,
+the distance from mid-charge and not its rate of change. It is charged per
+body with no reference to wires.
 
-At the shipped band a fed loner spends 0.031/s, twice its rent, on a clock
-nothing reads. Gate the work term on wired degree (the store already has
-`bound`), and a loner's balance forces `u* = 0`: its pathway sits charged,
-buys almost nothing (0.0009/s in the same integration), and starts ticking
-when it latches. That is the right behaviour and it costs one multiply. It
-is also most of the "sixth of a tank inside a couple of seconds" that
-`b6f6b80` cites as the reason the pathway ships off; the rest is `gaitSwell`
-"sized to be seen rather than to be safe".
+[sim] Same rig as §1a at the seeded pool: a loner spends 0.031/s with
+`metabolicWork` at its shipped 0.6, and 0.0012/s with it at 0, where the
+pathway parks charged. Rent is 0.015/s. So a loner pays twice its rent to
+run a clock nothing reads. Gating the work term on wired degree
+(`store.bound` is there) gives a loner the second row and a wired body the
+first, for one multiply.
 
-Whether the load should be isometric (`|wave|`, as now) or isotonic
-(`|dwave/dt|`) is a smaller question and either is defensible; the comment
-should say which.
+Whether the load should be isometric (`|wave|`) or isotonic (`|dwave/dt|`)
+is a smaller question; either is defensible, and the code should say which
+it is.
 
-### 1c. "Nothing is destroyed" is conditional on a dial that ships at 0
+### 1c. The spend is destroyed at the shipped defaults
 
-`concepts.md` and `advanceGait`'s comment both say the pathway's spend lands
-on the ground through the rent path. It does so only when `upkeepExcrete >
-0`, and it ships at 0, where the spend is destroyed exactly as rent is.
-That is consistent with rent and fine as a regime; the docs should say
-"when `upkeepExcrete` is on" rather than stating conservation as a property
-of the mechanism.
+[code] The pathway's spend reaches the ground only through `payOut`, and
+only when `upkeepExcrete > 0`. It ships at 0. That matches rent and is a
+regime, not a bug; `concepts.md` states conservation as a property of the
+mechanism and should state the condition.
 
-### 1d. Diffusive coupling of identical clocks is synchrony, and synchrony does not walk
+### 1d. Diffusive coupling gives synchrony, and synchrony does not walk
 
-`82c954f` removed `gaitLag` on the argument that "a reaction that diffuses
-carries a front". A front is what you get from one excited cell in a
-resting medium. A chain of identical limit-cycle oscillators coupled
-diffusively (`metabolicDiffuse` on `sub`) tends to in-phase synchrony, and
-in synchrony every wire's two ends are at the same point of the same
-cosine, which the concept doc's own bench numbers put at 0.000 px for two
-Cons. What is left is the kind difference (Era 0.02 against node 0.25),
-which is a ratchet on each Con-Era pair and not a wave along the body.
+[sim] Twelve Cons in a chain wired principal to left aux, pitch 72,
+`wireMinRest 72`, fed every frame, `metabolicRate 6`, `gaitSwell 0.3`,
+`grip 2`, no rent, no ground, no steering, no rewriting. The spread is the
+range of `gaitWave` across the twelve at an instant, averaged over a window;
+a full swing is 1.86. Three starts: the birth hash as coded, the birth hash
+as intended (see §1e), and ATP and substrate drawn uniformly.
 
-The packet bench already learned the lesson that applies: "uniform quanta
-swim at the noise floor; quanta varying along the body swim". A travelling
-wave in a chain of relaxation oscillators comes from a frequency gradient.
-The frequency here is set by the pool, and after §1a a graded pool is a
-graded period without leaving the band. So the measurement is on the worm
-bench, which has no pathway rig today (`worm.exp.ts` never sets
-`metabolicRate`): pathway on, `adenylate` uniform against `adenylate`
-graded head to tail, centre-of-mass speed. If graded swims and uniform does
-not, the concept doc gets its "phase something can set" from a gene that
-already exists, and the Era-as-oar question in §1e has a control.
+| start | `metabolicDiffuse` | spread 5–15 s | spread last 10 s | centre travel, 35 s |
+|---|---:|---:|---:|---:|
+| as coded | 0 | 0.27 | 0.31 | 0.2 px |
+| as coded | 2 | 0.04 | 0.01 | 0.5 px |
+| as intended | 0 | 0.22 | 0.34 | −2.5 px |
+| as intended | 2 | 0.01 | 0.00 | 0.1 px |
+| uniform | 0 | 0.72 | 0.59 | −4.4 px |
+| uniform | 2 | 0.07 | 0.01 | 0.1 px |
 
-### 1e. Known and not repeated
+With the substrate diffusing along wires the chain is in phase inside ten
+seconds from every start, and an in-phase chain of one kind does not move.
+An unsynchronised chain twitches a few pixels in half a minute, which is
+the sqrt(n)-of-uncorrelated-strokes case; a loner's `stepSpeed` is 38 px/s.
+Adding an Era leaf at every Con (seeded anchor 0.02 against 0.25) moved the
+centre about 1 px in the same time. Nothing here is travel.
 
-The Era being both the oar (seeded anchor) and the fullest body on its wire
-(larger store, producer discount) is in `concepts.md` already, as a pond
-question. It stays one. §1d's bench is the cheapest way to ask it: run the
-graded worm with and without Eras.
+A travelling wave along a chain of relaxation oscillators comes from a
+frequency gradient, not from diffusion. After §1a a graded `adenylate`
+along a body is a graded period that stays in the band. That is the
+measurement to make, and it wants no new mechanic. `worm.exp.ts` has no
+pathway rig today [code: it never sets `metabolicRate`].
+
+### 1e. The birth-phase hash is signed, and the intended scatter is not applied
+
+[code] `createAgent` ends its hash with `mix ^= mix >>> 16`. Every earlier
+step is forced unsigned with `>>> 0`; this one is not, and `^=` in
+JavaScript yields a signed 32-bit integer. `mix / 4294967296` therefore lies
+in [−0.5, 0.5) rather than [0, 1), and `atp = pool * (0.25 + u * 0.5)` lands
+in [0, 0.5) of the pool rather than the intended [0.25, 0.75).
+
+[sim] Read straight off `store.atp` after twelve spawns at pool 1.5: 0.007,
+0.097, 0.144, 0.19 … 0.744. Ids 2, 3 and 4 of the first five hash negative.
+The fix is `>>> 0` on the last line. It moves `state-hash` for any pond
+with the pathway on and nothing else.
+
+Its consequence is smaller than it looks. [sim] Forty unwired bodies born
+on the same frame settle within a tenth of a period of each other whether
+the scatter is as coded or as intended, because the relaxation oscillator
+collapses initial conditions onto its slow branch. In a pond, birth *time*
+scatters phase far more than the hash does. What the hash does decide is
+that a commute's four children, born on one frame with consecutive ids,
+start in phase with each other.
 
 ---
 
@@ -162,49 +186,44 @@ graded worm with and without Eras.
 Heading: Net, Locomotion. Mechanic: `dampVelocities`, rate `drag + grip *
 fullness + anchor`.
 
-### 2a. The shipped stroke is paid for in starvation
+### 2a. The packet did not cost population in two minutes; what it costs is unresolved
 
-With the pathway off, the shipped locomotion is `grip 2` and the packet.
-`experiments.md` §8 records what the packet costs on its own: 183 bodies
-against 481 at 60 simulated seconds with grip at zero, because a chain of
-bodies each holding less than a packet cannot feed each other. That is the
-"mechanic asked to do two things" the concept doc admits, and it is the
-expensive half.
+[sim] The table in §0. At 120 s the packet arm had more bodies than the
+trickle arm in all four seed-matched pairs (861 vs 514, 315 vs 281, 996 vs
+487, 893 vs 615), and `died` was 0 to 3 in every run. Nobody starved. In
+the two pairs where the packet pond grew large it also ran hungry
+(`full_mean` 0.18 to 0.27), which is density, not the packet.
 
-The pathway was built so the clock need not be the packet. If the sweep in
-§5 finds the pathway carries a net, `transportQuantum` can return to 0, the
-trickle, and transport stops paying for locomotion. If it does not, the
-packet's cost should at least be put against its travel in one table:
-`net_drift` against a `transportRecoil 0` control, with `died` and
-`can_pay` beside it.
+[unresolved] Four pairs with a consistent direction supports "the packet
+does not reduce population inside two minutes" and nothing finer; the
+seed-to-seed spread within an arm (281 to 514) is larger than the arm
+difference in two of the four. What the packet buys in travel was not
+measured here: `net_drift` against a `transportRecoil 0` control is the
+protocol (§5), and it is the same sweep that decides whether the pathway
+can be the clock instead.
 
 ### 2b. A global constant cannot have its sign settled by the pond
 
-`grip`'s note says "the sign is left open, because the pond should settle it
-rather than this file". `grip` is a global. Nothing in the pond can move it.
-The doc then says making it heritable "costs a genome head", but the cheap
-path is already taken by `adenylate`, `requestDecay` and `transportQuantum`:
-a scalar trait in `TRAIT_KEYS`, seeded from the slider, with the slider's
-range as its clamp (`-4` to `12`). No head, no change to `CHEM_LEN`, so
-`matrix_drift` stays comparable across the library, and the sign becomes
-the pond's to settle in the way the note asks for. The drag table already
-spans the slider's maximum, so `dampVelocities` needs no change.
+[code] `grip` is read only from `params`; no store array, gene, or trait
+carries it. The drag table in `dampVelocities` spans `drag + max(0, grip) +
+GAIT_ANCHOR_MAX` off the same global. Making it a scalar trait in
+`TRAIT_KEYS`, seeded from the slider with the slider's range as its clamp,
+is the path `adenylate`, `requestDecay` and `transportQuantum` already take:
+no head and no change to `CHEM_LEN`. The table's span then has to be built
+over the trait's maximum rather than the global.
 
-This also makes the two drag modulations under this heading, `grip *
-fullness` and `anchor * wave`, both heritable, so which one a lineage walks
-on is selection's business rather than a default's.
+This makes both drag modulations under this heading, `grip * fullness` and
+`anchor * wave`, heritable, so which one a lineage walks on is selection's
+business.
 
-### 2c. The concept entry describes a mechanism that no longer exists
+### 2c. Stale references
 
-`concepts.md`'s Locomotion entry introduces `gaitRate`, `gaitCouple` and
-`gaitLag` in the present tense, then says the clock is a metabolism.
-`82c954f` removed all three. A reader with no history, which is who the
-document is for, cannot tell that the cosine clock is gone and that its
-lessons (the clock cannot come out of `h`; the stroke cannot be a length)
-are what survive. The entry wants rewriting as: the actuator (rest length),
-the two things that make a difference between a wire's ends (fullness,
-anchor), the clock (the pathway), and the not-yet-true list. The history
-belongs in the commit log, which has it.
+[code] `concepts.md`'s Locomotion entry introduces `gaitRate`,
+`gaitCouple` and `gaitLag` in the present tense; none exists in `params.ts`.
+`dampVelocities`'s own comment still says "with `grip` and `gaitRate` both
+at 0". The entry wants rewriting around what exists: the actuator (rest
+length), the two sources of difference between a wire's ends (fullness,
+anchor), the clock (the pathway), and the not-yet-true list.
 
 ---
 
@@ -215,94 +234,80 @@ linear critic, in `updateState` and `genome.wgsl`, on `Wx`, `Wh`, `Wn`, `b`.
 
 ### 3a. The rule has no direction per state dimension
 
-The update is
+[code] For every weight `w_dj` feeding state dimension `d` from input `j`:
 
 ```
-e_dj  = lam * e_dj + phi'(v_d) * pre_j
-w_dj += eta * dlt * e_dj
+e_dj  = lam * e_dj + phi'(v_d) * pre_j       phi' > 0
+w_dj += eta * dlt * e_dj                     dlt one scalar per body
 ```
 
-`phi'` is positive, `pre_j` is whatever the input was, and `dlt` is one
-scalar for the body. So a positive surprise pushes every one of the four
-pre-activations up along its recent inputs, and a negative surprise pushes
-all four down. There is nothing in the rule that says whether `h_0` going
-up was what made the tank fill. The plan calls this "the RFLO / e-prop
-form", but e-prop's learning signal is per unit (`sum_k B_dk * error_k`),
-and here it is one sign broadcast to all units. What this optimises is
-`dlt * sum_d v_d`: the state is shaped to correlate with prediction error,
-and behaviour changes only through whatever sign the fixed output heads
-happen to put on each dimension.
+The sign of the update is `sign(dlt) * sign(e_dj)`, and `e_dj` is a
+positively weighted sum of the input's recent values. So for an input that
+does not change sign (`IN_FULL`, `IN_BOUND`, `IN_DEMAND`, the bias, the
+sense readings), all four state dimensions move the same way on every
+frame. Nothing in the rule relates the direction of `h_d` to the outcome.
+The GPU rule is line-for-line the same [code: `genome.wgsl` learning
+block].
 
-The plan's Phase 3 asked for "a rigged two-body net where need falls and
-the learned weights move in the direction that made it fall". That test was
-never written; `plasticity.test.ts` checks that weights move, that they
-persist, and that they are inherited, not which way they go. Write it
-first. It will fail against the rule above, and that failure is the
-measurement that licenses the change.
+[sim] Two single-body arms, the tank written each frame from the body's own
+`h_0`, learning at the shipped rate, 50 seconds. In the arm where the tank
+fills when `h_0` is *high*, the rule drove `h_0` to −0.93 and ran the
+`IN_FULL` column and the bias of all four rows to the negative clamp
+(−3.64, −2.66, identical across rows). The arm where the tank fills when
+`h_0` is low was uninformative (the tank sat full and `dlt` near zero). A
+separate run with a random-walk tank left every `IN_FULL` weight of every
+row at the same clamped value, −3.857.
 
-The change, within the mechanic: node perturbation. Add a small hashed
-perturbation `xi_d` to each `v_d` (hashed from slot and frame, so
-`state-hash` stays deterministic), and put the perturbation in the trace in
-place of the unsigned `phi'`:
+So the rule does not climb reward; in the informative arm it ran away from
+it, because a shortfall (`dlt < 0`) times a positive trace lowers every
+weight whatever would have helped. `plasticity.test.ts` checks that
+weights move, persist and inherit, not which way; the plan's own
+"direction" test was never written, and it fails.
+
+The change inside the mechanic is node perturbation: add a hashed
+perturbation `xi_d` to each `v_d` (hashed from slot and frame, so hashes
+stay deterministic) and put it in the trace in place of `phi'`:
 
 ```
 e_dj  = lam * e_dj + xi_d * pre_j
 ```
 
-With `dlt` as the modulator this is the Fiete and Seung rule, an unbiased
-estimate of the reward gradient through the heads without the heads having
-to be differentiable or to learn. It costs four hash draws a body a frame
-and no new state. The perturbation doubles as the exploration the body
-otherwise does not have: `swimNoise` is downstream of `h` and cannot serve.
+With `dlt` as the modulator this is the Fiete and Seung estimator of the
+reward gradient through the heads, which need not be differentiable or
+learn. Four hash draws a body a frame, no new state, and the perturbation
+is the exploration the body otherwise lacks (`swimNoise` is downstream of
+`h`). Write the direction test first; it is the acceptance test.
 
-The cheaper alternative, which keeps the code shape and adds no noise, is
-to use the critic's own weights as the per-dimension sign: `e_dj += c_d *
-phi'(v_d) * pre_j`. That climbs the critic's estimate rather than the
-reward and is weaker, but it at least gives each dimension a sign the body
-learned. Perturbation is the recommendation.
+### 3b. Learning is engaged, and it is large
 
-### 3b. The teacher is pinned in the shipped regime
+[sim] In every pond of §0, every body had non-zero learned weights inside
+30 s. At 120 s the mean absolute learned delta per weight was 0.2 to 0.7
+against a clamp of 4, with 1 to 3 % of weights at the clamp; the sense
+columns were as large as any other, so every body's `readsField` gate is on
+and the CPU sampling shortcut saves nothing. Given §3a, what has been
+learned is a state shaped by surprise, and consolidation (`inheritLearned`
+1) writes that into every child. Fix §3a before reading any inherited
+locus.
 
-`r = FULL - 1` is zero at a full tank, and in a pond on ambient ground with
-uptake unmetered most tanks are full most of the time (`experiments.md`
-§1.B). Learning is on and idle. `full_mean` is its engagement gauge and no
-protocol names it as one; `baldwin-hunger` should.
-
-The plan left `IN_DEMAND` as the alternative teacher, "one line away".
-Demand is nonzero for a full body whose net has a hungry member, so it
-engages far more often, and it is the organism-level signal the audit
-originally asked for. Run the two as arms of `baldwin-hunger` rather than
-deciding it here.
+The teacher question the plan left open (`IN_FULL` against `IN_DEMAND`) is
+still open and is an arm in §5, not a decision here.
 
 ### 3c. The horizon is per frame, and the frame is not fixed
 
-`learnTrace` and `learnDiscount` are per-frame decays. The runner steps at
-`spec.dt`; the browser steps at whatever the clamp (`0.05`) leaves, so a
-browser pond at 30 fps has half the headless pond's horizon at the same
-setting. `advanceGait` and every drag rate are in per-second units and take
-`dt`; the learning rule should too: `lam = exp(-dt / tau)` with `tau` in
-seconds. At `dt = 1/60`, `tau = 1.66 s` reproduces 0.99.
-
-While there: the shipped 0.99 is 1.7 s against a foraging trip of 5 to 12 s
-(`experiments.md` §7), the slider stops at 0.995, and `learnTrace`'s note
-still reads "0.95 is about twenty frames", which was true before `172dbff`
-moved the default.
-
-### 3d. Inheritance compounds whatever 3a produces
-
-`inheritLearned` at 1 writes a parent's learned delta into its children's
-genome. That is the design. Until §3a is fixed, what is consolidated is a
-state shaped to correlate with surprise, not a behaviour that reduced it,
-and `baldwin-hunger`'s loci would be reading that. Fix the rule, then run
-the protocol.
+[code] `learnTrace` and `learnDiscount` multiply per call with no `dt`.
+`main.ts` steps at `min(0.05, elapsed)`; the runner steps at a fixed
+`spec.dt`. A browser pond at 30 fps has half the headless horizon at the
+same setting, while `advanceGait` and every drag rate take `dt`. Parametrise
+in seconds: `lam = exp(-dt / tau)`; `tau = 1.66 s` reproduces 0.99 at
+1/60. Not bit-identical; pin it with the change detector.
 
 ---
 
 ## 4. Documentation fixes, all small
 
-- `concepts.md`, Locomotion: rewrite per §2c; conservation caveat per §1c.
-- `params.ts`, `learnTrace`: the stale "0.95 is about twenty frames".
-- `params.ts`, `grip`: the sign note, once §2b lands.
+- `concepts.md`, Locomotion: rewrite per §2c; conservation condition per §1c.
+- `params.ts`, `learnTrace`: the note still describes 0.95 as the default.
+- `sim.ts`, `dampVelocities`: the `gaitRate` reference.
 - `advanceGait`'s comment: say what the work term charges (§1b).
 
 ---
@@ -310,21 +315,34 @@ the protocol.
 ## 5. What to measure, in order
 
 1. **The direction test** (§3a). A test, not a pond. Cheapest and decisive.
-2. **Pool-relative supply** (§1a) and **work gated on wires** (§1b). Both
-   bit-identical to today at `metabolicRate 0`, so they ship at once; the
-   pathway still ships off.
-3. **The worm with a pathway** (§1d). `worm.exp.ts` gains a rig: pathway
-   on, `adenylate` uniform against graded, with and without Eras.
+2. **Pool-relative supply** (§1a), **work gated on wires** (§1b), **the
+   hash sign** (§1e). All bit-identical to today at `metabolicRate 0`.
+3. **The worm with a pathway** (§1d). A rig in `worm.exp.ts`: pathway on,
+   `adenylate` uniform against graded, with and without Eras.
    Centre-of-mass speed, twenty seconds, the bench's own noise floor.
 4. **A protocol, `locomotion-clock`.** Arms: `transportQuantum` 0 and 0.5.
    Axis: `metabolicRate` 0 and the bench's value from step 3. Held: `grip`
-   2. Control: `transportRecoil 0`. Gauges: `full_mean < 0.9`,
-   `demand_mean > 0`, `died`, `can_pay`. Outcome: `net_drift`, read
-   against the control, and `born_mean` for what it costs. Ten minutes,
-   five seeds, per §3 of `experiments.md`. This is the sweep `b6f6b80`
-   says has to run before the pathway can ship on, and the same run says
-   whether the packet can go back to 0.
-5. **`baldwin-hunger`, again**, after §3a, with a second arm for the
-   teacher (`FULL` against `DEMAND`) and `full_mean` as a precondition.
-6. **`grip` heritable** (§2b) after step 4 says a sign carries a net at
-   all, which is the order `grip`'s own note asks for.
+   2. Control: `transportRecoil 0`. Preconditions: `full_mean` under 0.9
+   and `demand_mean` above 0 per trial, because §0 shows both go either
+   way at the defaults. Outcomes: `net_drift` against the control,
+   `born_mean` for the cost. Ten minutes, five seeds.
+5. **`baldwin-hunger`** after §3a, with a second arm for the teacher
+   (`FULL` against `DEMAND`) and `full_mean` as a precondition.
+6. **`grip` heritable** (§2b) after step 4 says a sign carries a net.
+
+---
+
+## 6. Retracted from the first draft
+
+- **"The teacher is pinned in the shipped regime."** Wrong as stated. §0:
+  it is pinned in some seeds and fully engaged in others, at the same
+  defaults. The correct statement is that engagement is a per-trial gauge.
+- **"The packet is paid for in starvation" (183 vs 481 bodies).** Taken
+  from `experiments.md` and not reproduced. §2a: in four seed-matched pairs
+  the packet arm ended with more bodies and nobody starved.
+- **"Gating work on wires is most of the tank loss `b6f6b80` cites."**
+  Wrong attribution. That loss (a sixth of a tank in seconds) is the
+  stuck-discharged regime of §1a at the old `regen` of 1, which spends
+  0.17/s; the work term at the shipped band costs a loner 0.031/s.
+- **"The drag table needs no change for a heritable grip."** It spans the
+  global; it would have to span the trait's maximum.
