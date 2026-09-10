@@ -6,7 +6,8 @@ import { Sim } from './sim.ts';
 import { pondMatter } from './test-params.ts';
 
 /*
- * The gait: a Selkov pathway in every body, and the one actuator it drives.
+ * The gait: an ADP-activated pathway in every body, and the one actuator it
+ * drives.
  *
  * These exist because the pathway ships switched off — see `metabolicRate`,
  * which is at zero until a sweep says what it should be — and a mechanism at
@@ -73,47 +74,49 @@ describe('the gait ships off', () => {
 });
 
 describe('the pathway', () => {
-  it.skip('oscillates once it is switched on, rather than settling', () => {
+  it('oscillates once it is switched on, rather than settling', () => {
     /*
-     * What makes it a clock the body owns, and what the pathway does not yet
-     * do. A Selkov pair at a fixed substrate pull either relaxes to a steady
-     * charge or runs round a limit cycle, and only the second is a gait — so
-     * the wave has to cross zero, and cross it back. This is the acceptance
-     * criterion for that, written down and skipped rather than deleted,
-     * because a mechanism that cannot pass its own first test should say so
-     * where the next person to touch the dials will read it.
+     * What makes it a clock the body owns rather than a charge it walks to.
+     * The pathway either relaxes to a steady adenylate charge or runs round a
+     * limit cycle, and only the second is a gait — so the wave has to cross
+     * zero, and cross it back, more than the once any transient gets for free.
      *
-     * Two conditions, and only the first is fixed. `metabolicRegen` now puts
-     * the steady state inside the adenylate pool instead of at twice it — see
-     * its own note, where the arithmetic is — so there is a state to
-     * oscillate *around*, which there was not. It is still a stable enough
-     * one that the pathway walks to it and stays: at the shipped supply, base
-     * and pool the eigenvalues come out real rather than complex, so the
-     * trajectory runs out to a clamp instead of spiralling.
+     * The band that does is narrow and is `metabolicRegen`'s own note to
+     * explain; this is the assertion that says which side of it the shipped
+     * value is on. It was on the wrong side twice: at `regen` 1 the wave sat
+     * at exactly −1 from the first second and the gait had never once moved,
+     * and at 4 it sat just as still at nearly full charge.
      *
-     * The second condition is `trace² < 4·det` on the same Jacobian, which is
-     * a joint statement about `metabolicSupply`, `metabolicRegen`,
-     * `metabolicBase` and the pool, and it has to be met at a *period* a gait
-     * can use — the relaxation this settles into now turns over on the order
-     * of tens of reaction-seconds, which is a tide and not a stroke. Four
-     * dials against two conditions and a period is a sweep with a seed budget,
-     * which is `npm run pond` and not this file. Un-skip it when that has run.
+     * Long enough to catch a period. At a rate of 6 the cycle runs about 7 s,
+     * so ten seconds is one turn and a bit — enough for two crossings and not
+     * enough to be reading a transient as a cycle.
      */
     const p = gaitParams();
     const sim = new Sim(4000, 4000);
     loadPreset(sim, 'soup', p);
     const a = sim.spawn('con', 2000, 2000, 0, p, true)!;
-    a.extra = a.energyCap;
     const wave = sim.agentStore.gaitWave;
     let crossings = 0;
+    let lo = Infinity;
+    let hi = -Infinity;
     let was = wave[a.slot];
-    for (let f = 0; f < 600; f++) {
+    for (let f = 0; f < 1200; f++) {
+      // Fed, so this is the pathway's own dynamics and not a body starving:
+      // `buys its substrate out of the tank` is the test about the tank.
+      a.extra = a.energyCap;
       sim.step(1 / 60, p);
       const now = wave[a.slot];
       if ((was <= 0 && now > 0) || (was >= 0 && now < 0)) crossings++;
+      if (f > 600) {
+        lo = Math.min(lo, now);
+        hi = Math.max(hi, now);
+      }
       was = now;
     }
     expect(crossings, 'the pathway settled instead of oscillating').toBeGreaterThan(1);
+    // And swings, rather than shivering about a steady charge. The full range
+    // is 2; a body that has settled reads a few thousandths.
+    expect(hi - lo, 'the wave barely moved').toBeGreaterThan(1);
   });
 
   it('buys its substrate out of the tank and puts the price on the dish', () => {

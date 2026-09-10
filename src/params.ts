@@ -353,39 +353,42 @@ export interface Params {
    * oscillates or settles: recharge much faster than the autocatalytic burn
    * and the pool sits full and still, much slower and it sits empty.
    *
-   * How much slower is not a matter of taste, and one end of it is arithmetic.
-   * Write `u` for ADP and the pathway is Selkov's pair, `u` autocatalytic in
-   * its own production and removed at `metabolicRegen`:
+   * How much slower is not a matter of taste. Write `u` for ADP and the four
+   * reactions of `advanceGait` are:
    *
    *     sub' = supply·(1 − charge) − sub·(base + u²)
    *     u'   = sub·(base + u²) + work − regen·u
    *
-   * Adding those at the steady state kills the shared term and leaves the
-   * whole of it:
+   * and `1 − charge` is `u/pool`, because a cell pulls on its fuel when it is
+   * discharged rather than when it is holding a lot. That is the departure
+   * from Selkov that matters here: his influx is a constant `v`, and this one
+   * is proportional to `u`. Add the two rows and the shared autocatalytic term
+   * cancels, leaving a balance that is *linear* in `u`:
    *
-   *     u* = (metabolicSupply + work) / metabolicRegen
+   *     u* · (metabolicRegen − metabolicSupply/pool) = work(u*)
    *
-   * and `u` is ADP, so `u*` has to land inside the body's own `adenylate`
-   * pool or there is no steady state to oscillate around and the pathway runs
-   * to a clamp and stays. At the values this shipped with — supply 3, regen 1,
-   * a seeded pool of 1.5 — `u*` was 3.18, better than twice all the adenylate
-   * a body has, so every body pinned fully discharged with the wave at exactly
-   * −1 and the gait never moved at all.
+   * `u` is ADP, so `u*` has to land inside the body's own `adenylate` pool.
+   * Below `supply/pool` the left side is negative and the right side is not,
+   * so there is no steady state at all and every body runs to the discharged
+   * clamp and stays: at the values this shipped with — supply 3, regen 1, a
+   * seeded pool of 1.5 — the wave sat at exactly −1 forever and the gait never
+   * moved. Far above it, `u*` is driven to nearly zero and the pathway sits
+   * fully charged and just as still. 4 was that second mistake.
    *
-   * Which fixes the ratio and not the value. `u* = pool/2` is where the wave
-   * swings symmetrically about zero and where `work`, which rides on |wave|,
-   * costs nothing — so `regen = 2·supply/pool`, which at the shipped supply
-   * and the seeded pool is 4, and is what it ships at. That is the condition
-   * for a steady state to exist. Whether the steady state is *unstable*, and
-   * unstable in the spiralling way that gives a limit cycle rather than the
-   * running-away way that gives another clamp, is a second condition on the
-   * same four dials together, and finding values that meet it at a period a
-   * gait can use is a `npm run pond` job. `metabolicRate` is at zero until it
-   * has run.
+   * The oscillation lives in the narrow band just above `supply/pool`, which
+   * is 2 at the shipped supply and seeded pool. Integrating the four
+   * reactions across it, `regen` from 2.15 to 2.50 gives a limit cycle that
+   * swings 1.85 of a possible 2.0, and the period goes exactly as
+   * `1/metabolicRate` — 7.3 s at a rate of 6, so a stroke of a couple of
+   * seconds wants a rate around 15 to 20. It ships mid-band.
    *
-   * `adenylate` is heritable, so `u*` is per body: a lineage that breeds a
-   * bigger pool moves its own fixed point down the same curve, and the dial
-   * is a statement about the seed rather than about every body forever.
+   * Two things that band depends on, and both are worth knowing before moving
+   * anything near it. `work` is what makes `u*` nonzero at all — take
+   * `gaitSwell` to zero and the balance above forces `u* = 0`, so the stroke's
+   * own cost is what drives the clock that drives the stroke. And `adenylate`
+   * is heritable, so the band is per body: a lineage that breeds a bigger pool
+   * lowers its own `supply/pool` and slides out of it. Neither has been
+   * measured in a pond, which is why `metabolicRate` is still at zero.
    */
   metabolicRegen: number;
   /**
@@ -1128,7 +1131,7 @@ export function defaultParams(): Params {
     metabolicRate: 0,
     metabolicSupply: 3,
     metabolicBase: 0.02,
-    metabolicRegen: 4,
+    metabolicRegen: 2.3,
     metabolicWork: 0.6,
     metabolicCost: 0.01,
     metabolicDiffuse: 2,

@@ -234,7 +234,7 @@ type RedexEscrow = {
 /** Most either metabolite may pile up to. A pathway is not a warehouse. */
 const REACT_CAP = 12;
 /**
- * Largest reaction step taken at once. The Brusselator is stiff where its
+ * Largest reaction step taken at once. The pathway is stiff where its
  * activator spikes, and explicit Euler past about this rings at the step
  * frequency instead of oscillating — so `advanceGait` splits a frame into as
  * many of these as it needs, which makes the amplitude the same at every
