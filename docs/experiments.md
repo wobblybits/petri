@@ -233,7 +233,6 @@ truth (`src/pond/couplings.ts`); this is the reading of it.
 | when you vary | re-choose | because |
 |---|---|---|
 | `excreteRate` | `senseScale` | minted signal reads p90 ≈ 4.3, conserved ≈ 0.002; one scale leaves one arm blind |
-| `excreteRate` | `uptakeVmax` | the species uptake rows follow `excreteRate`; at 0 `uptakeVmax` meters the ground only, so it is a different mechanism in each arm |
 | `excreteRate` | `deposit` | inert above zero: the mint is off whenever excretion is on |
 | `groundPatches` | `energyRegrow` | growth is zero at cap; a uniform dish seeded at cap produces nothing, patches manufacture ground. `energyRegrow = 0` is the clean layout control |
 | `groundPatches` | `learnDiscount`, `learnTrace` | the critic's horizon has to cover the trip to the reward, and patch spacing sets the trip (5–12 s against a default 0.33 s horizon) |
@@ -241,6 +240,13 @@ truth (`src/pond/couplings.ts`); this is the reading of it.
 | `soupCount` | `declutter`, `flockAlign` | the spacing forces gate the opening scramble, whose severity is density; the 18× was measured at 250 bodies |
 | `energyRegrow` | `fertilise` | scales a rate; scaling zero is zero |
 | `eraUpkeepRatio` | `farmRate` | a seeded Era earns ~0.003/s from the mint; a farm rate above that starves it |
+
+Retired, and worth knowing why: `excreteRate` x `uptakeVmax`. The species
+uptake rows used to follow `excreteRate`, so the dial metered one species in
+one arm and four in the other. Uptake is now one budget shared across the four
+species by what is standing in the cell — the shares sum to the budget however
+rich the cell is, which is what the switch was bought for — so `uptakeVmax`
+means the same mechanism at every level of the axis.
 
 Measures with the same problem: `lines` against `spawnInterval` (immigration
 manufactures lines), `matrix_drift` against the commit (`CHEM_LEN` is its

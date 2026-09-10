@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { bareBody, expressVector, seedChem, uptakeKsOf } from './agents.ts';
 import { CHEM_LEN, CHEM_SPECIES, KS_BASE, ROW_COUNT, ROW_EXCRETE, ROW_UPTAKE, STATE_DIMS, X_BASE, X_OUT } from './chem-layout.ts';
-import { REWRITE_SHARE, rewriteCost } from './energy.ts';
+import { HarvestPlan, REWRITE_SHARE, harvestSlotsFast, rewriteCost } from './energy.ts';
 import { CH, CHANNELS } from './fields.ts';
 import { defaultParams, type Params } from './params.ts';
 import { loadPreset } from './presets.ts';
@@ -232,16 +232,22 @@ describe('uptake', () => {
     return s;
   };
 
-  it('eats only the ground until excretion stops the minting', () => {
+  it('eats the mixture it is standing in, ground or not', () => {
     /*
-     * The coupling that matters, and the reason `UptakeKinetics.table` is not
-     * simply `uptakeVmax > 0`.
+     * What replaced the switch this used to test.
      *
-     * Metering uptake on all four species while the scent path still mints is
-     * a fountain: `params.deposit` puts five times a body's voice into three
-     * channels out of nothing, and metered uptake then lets it eat that back.
-     * Measured before this was coupled, it ran the pond at twice the rate cap
-     * and filled every tank.
+     * Uptake was held to the ground alone until `excreteRate` stopped the
+     * minting, because four independent rates meant four times the cap:
+     * `params.deposit` puts five times a body's voice into three channels out
+     * of nothing, and a body could then eat its own scent back for a profit.
+     * Measured before that coupling, it ran the pond at twice the rate cap and
+     * filled every tank.
+     *
+     * One budget shared out by what is in the water closes it without the
+     * switch — the mint buys the minter nothing, it only dilutes what it is
+     * standing in. So there is no arm in which uptake means a different
+     * mechanism, and no dish so filthy that nothing in it is food. The
+     * ceiling itself is the test below.
      */
     const p = chemistryParams();
     p.ambientEnergy = 0;
@@ -251,10 +257,76 @@ describe('uptake', () => {
     loadPreset(sim, 'soup', p);
     for (const a of sim.agents.values()) a.extra = 0;
     for (let i = 0; i < 120; i++) sim.step(1 / 60, p);
-    // Scent was minted, so there is plenty to eat if anything is allowed to.
+    // Scent was minted, and with no ground in the dish it is all there is.
     expect(total(sim, CH.conP)).toBeGreaterThan(0);
-    // And nothing did: with no ground in the dish, nobody ate at all.
-    expect(sim.totalFree()).toBeCloseTo(0, 6);
+    // And it was eaten, which is what a body with no ports to spare and no
+    // ground under it can still do.
+    expect(sim.totalFree()).toBeGreaterThan(0);
+  });
+
+  it('caps each species at its share of one budget', () => {
+    /*
+     * A pure cell is tasty and a smelly one is polluted.
+     *
+     * Two cells with the same standing stock: one all ground, one a quarter
+     * ground and three quarters scent. A body may take a *sample* of the
+     * water, never the good part of it, so the ground it can draw out of the
+     * filthy cell is a quarter of its budget however good its transporter for
+     * ground is — the rest of the mouthful is spent on three species that need
+     * catabolic machinery before they are worth anything. Same stock, four
+     * times the work for the ground in it.
+     */
+    const p = chemistryParams();
+    p.soupCount = 1;
+    p.uptakeVmax = 0.6;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    /*
+     * One frame first, for two reasons. The grid moves onto `fields` when the
+     * world is pinned and until then answers out of a sparse map nothing here
+     * writes to; and `refreshExpression` is what fills the uptake rows, so
+     * before a frame has run every row is zero and a body cannot eat at all.
+     */
+    sim.step(1 / 60, p);
+    const a = [...sim.agents.values()][0];
+    const cell = sim.energy.index(a.x, a.y);
+    const rect = sim.energy.blockRect(cell.i, cell.j)!;
+
+    /** Lay `per[c]` of every species flat across the body's own block. */
+    const paint = (per: number[]): void => {
+      const d = sim.fields.data;
+      d.fill(0);
+      for (let y = 0; y < rect.wj; y++) {
+        for (let x = 0; x < rect.wi; x++) {
+          const k = ((rect.fj + y) * sim.fields.cols + (rect.fi + x)) * CHANNELS;
+          for (let c = 0; c < CHANNELS; c++) d[k + c] = per[c];
+        }
+      }
+    };
+    const cap = p.uptakeVmax / 60;
+    const kinetics = { cap, ks: p.uptakeKs, yDirect: 1, yEra: 1, hillN: 1, coSubstrate: 0 };
+    /** Ground drawn out of the block in one frame. */
+    const ground = (per: number[]): number => {
+      paint(per);
+      a.extra = 0;
+      const before = sim.energy.storedTotal();
+      harvestSlotsFast([a], sim.agentStore, sim.energy, new HarvestPlan(), kinetics);
+      return before - sim.energy.storedTotal();
+    };
+
+    const alone = (c: number, v: number): number[] => {
+      const per = new Array(CHANNELS).fill(0);
+      per[c] = v;
+      return per;
+    };
+    const clean = ground(alone(CH.energy, 0.4));
+    const filthy = ground(new Array(CHANNELS).fill(0.4 / CHANNELS));
+    // The ceiling is the share, exactly: one part in four of the cell is
+    // ground, so at most a quarter of one budget can be drawn as ground.
+    expect(filthy).toBeLessThanOrEqual(cap / CHANNELS + 1e-12);
+    // And it binds — the clean cell is not up against it, so this is the
+    // mixture doing the work and not the tank or the Monod rate.
+    expect(clean).toBeGreaterThan(cap / CHANNELS);
   });
 
   it('closes the loop once the table is on', () => {

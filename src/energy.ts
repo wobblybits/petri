@@ -1120,15 +1120,19 @@ export class HarvestPlan {
            * body is expressing on that species' uptake row — `ROW_COUNT` in
            * the factor so even expression, which is what a seeded genome has,
            * runs at exactly the global. `ks` is the body's own affinity gene.
+           * Every species gets a rate: what a body may draw is bounded by the
+           * budget and by what is in front of it, not by a switch.
            */
           const xo = sl * ROW_COUNT + ROW_UPTAKE;
           const g = sl * CHEM_LEN;
           const yield_ = KIND[sl] === KIND_ERA ? kinetics.yEra : kinetics.yDirect;
+          // One mouthful a frame, whatever it turns out to be made of. The
+          // rows below say how fast each species can be drawn *within* it, and
+          // the harvest shares it out by what is in the water; see
+          // `UptakeKinetics`.
+          rooms[ro + HARVEST_TOTAL] = kinetics.cap * yield_;
           for (let c = 0; c < CHANNELS; c++) {
-            // Off the table, only the ground has a rate; see `UptakeKinetics`.
-            const on = kinetics.table || c === CH.energy;
-            rooms[ro + HARVEST_VMAX + c] =
-              on ? kinetics.cap * ROW_COUNT * EXPRESS[xo + c] * yield_ : 0;
+            rooms[ro + HARVEST_VMAX + c] = kinetics.cap * ROW_COUNT * EXPRESS[xo + c] * yield_;
             rooms[ro + HARVEST_KS + c] = uptakeKsOf(CHEM, g, c, kinetics.ks);
           }
         }
@@ -1165,25 +1169,27 @@ export function uptakeRate(density: number, cap: number, ks: number): number {
   return (cap * density) / (ks + density);
 }
 
-/** `uptakeVmax * dt` and `uptakeKs`, as the harvest wants them. */
+/**
+ * `uptakeVmax * dt` and `uptakeKs`, as the harvest wants them.
+ *
+ * `cap` is the whole mouthful, not a per-species rate. Uptake is free to every
+ * body, needs no free port and no machinery to reach the water, and always
+ * samples all four species — what it cannot do is choose the sample. The
+ * shares of `cap` go by what is standing in the cell, so they sum to `cap`
+ * however rich or filthy the cell is.
+ *
+ * That shared ceiling is what used to be bought by switching the species rows
+ * off below `excreteRate`. Four independent rates meant four times the cap,
+ * and with `params.deposit` minting five times a body's voice into three
+ * channels out of nothing, a body could eat its own scent back for a profit:
+ * measured, that ran the pond at twice the rate cap and filled every tank.
+ * With one budget the mint buys nothing — it only dilutes what the minter is
+ * standing in — so the rows no longer follow the excretion dial, and
+ * `uptakeVmax` means the same mechanism in both regimes.
+ */
 export interface UptakeKinetics {
   cap: number;
   ks: number;
-  /**
-   * Whether the whole reaction table is live, or only the ground's row.
-   *
-   * These two are coupled and must not be set independently. Metered uptake of
-   * all four species while the scent path still *mints* is a matter fountain:
-   * a body deposits five times its voice into three channels out of nothing —
-   * that is what `params.deposit` is — and then eats it back. Measured, that
-   * ran the pond at twice the rate cap and filled every tank.
-   *
-   * So the species rows follow `excreteRate`, which is the dial that stops the
-   * minting, and not `uptakeVmax`, which only says uptake is a rate. Below
-   * that, uptake is metered on the ground alone, which is exactly what phase 1
-   * shipped.
-   */
-  table: boolean;
   /**
    * Yield on what a body takes up directly, and on what an Era does.
    *
@@ -1239,13 +1245,20 @@ export interface UptakeKinetics {
  * stride costs memory and no bindings, which is the trade this file has to
  * keep making.
  *
+ * `total` is the fifth number and the one that makes the other four a
+ * *sample* rather than four independent meals: it is the whole budget for the
+ * frame, and the rows spend it in proportion to what the water is made of. Per
+ * body rather than a uniform because the trophic yield is per kind.
+ *
  * `got` overwrites `vmax` on the way back out: the rate is consumed before
  * anything is written, the two are the same shape, and a separate output span
  * would double the buffer to carry four floats that are only read once.
+ * `room` and `total` sit below it and are both read before the first write.
  * Derived on both sides from here; `field-kernel.test.ts` pins them together.
  */
 export const HARVEST_ROOM = 0;
-export const HARVEST_VMAX = 1;
+export const HARVEST_TOTAL = 1;
+export const HARVEST_VMAX = 2;
 export const HARVEST_GOT = HARVEST_VMAX;
 export const HARVEST_KS = HARVEST_VMAX + CHANNELS;
 export const HARVEST_STRIDE = HARVEST_KS + CHANNELS;
@@ -1295,7 +1308,7 @@ export function runHarvestPlan(
       continue;
     }
     /*
-     * The reaction table's four uptake rows.
+     * The reaction table's four uptake rows, drawn as one mouthful.
      *
      * Densities are read once for the block, before anybody eats, so the order
      * bodies are visited in cannot change what any of them is allowed to draw
@@ -1303,25 +1316,42 @@ export function runHarvestPlan(
      * every draw is bounded by a rate, so a block that cannot satisfy everyone
      * shares out by exhaustion rather than by who was born first.
      *
+     * A body takes a *sample of the water*, not four separate meals: `total`
+     * is the whole budget for the frame and each species may have at most its
+     * share of it, `total * density / stock`. Nobody may decline the rest of
+     * the mixture and eat only the good part, which is what makes ground that
+     * is mostly scent poor ground: on pure ground the ground's share is the
+     * whole budget, and every part of the mixture that is not ground is a part
+     * of the budget spent on something that needs machinery — the uptake row
+     * and the co-substrate gate below — before it is worth anything. That is
+     * also what closes the fountain the species rows used to be switched off
+     * to avoid: `params.deposit` mints scent into three channels, and a body
+     * eating its own scent back now displaces its income rather than adding to
+     * it, because the shares sum to `total` however rich the cell is.
+     *
      * One tank, four species competing for it: `left` is the room remaining
      * after the species already taken, so a body that fills on the first thing
      * it finds does not also take the rest. Species are visited in index
      * order, which is arbitrary and has to be identical here and in the
      * shader.
      */
-    const lo = uptake.table ? 0 : CH.energy;
-    const hi = uptake.table ? CHANNELS : CH.energy + 1;
-    for (let c = lo; c < hi; c++) SPECIES_DENSITY[c] = grid.densityOf(key, c);
-    // Always, because the ground gates the other three whether or not it is
-    // itself being taken this frame.
-    if (lo > CH.energy || hi <= CH.energy) SPECIES_DENSITY[CH.energy] = grid.densityOf(key, CH.energy);
+    let stock = 0;
+    for (let c = 0; c < CHANNELS; c++) {
+      const d = grid.densityOf(key, c);
+      SPECIES_DENSITY[c] = d;
+      if (d > 0) stock += d;
+    }
+    // Nothing in the water at all: no shares to divide, and `stock` is about
+    // to be a denominator.
+    if (stock <= 0) continue;
     for (let e = 0; e < count; e++) {
       const s = plan.slots[first + e];
       const cap = CAP[s];
       let left = cap - EXTRA[s];
       if (left <= EXTRA_FULL_EPS) continue;
       const ro = (first + e) * HARVEST_STRIDE;
-      for (let c = lo; c < hi && left > EXTRA_FULL_EPS; c++) {
+      const total = R[ro + HARVEST_TOTAL];
+      for (let c = 0; c < CHANNELS && left > EXTRA_FULL_EPS; c++) {
         /*
          * Monod inline rather than through `uptakeRate`, because the two mean
          * opposite things by a rate of zero. There, `cap <= 0` is the sentinel
@@ -1355,7 +1385,12 @@ export function runHarvestPlan(
         const kN = hill === 1 ? ks : Math.pow(ks, hill);
         const rate = (gate * vmax * sN) / (kN + sN);
         if (!(rate > 0)) continue;
-        const want = rate < left ? rate : left;
+        // The proportional sample: this species' share of one budget, which is
+        // the ceiling however good the body's transporter for it is.
+        const share = total * (density / stock);
+        let want = rate < share ? rate : share;
+        if (want > left) want = left;
+        if (!(want > 0)) continue;
         const got = grid.takeFrom(key, c, want);
         if (got <= 0) continue;
         EXTRA[s] = Math.min(cap, EXTRA[s] + got);

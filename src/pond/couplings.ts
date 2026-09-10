@@ -39,6 +39,17 @@ export interface Coupling {
   unless?: { key: keyof Params; is: number };
 }
 
+/*
+ * Retired: `excreteRate` x `uptakeVmax`.
+ *
+ * The species uptake rows used to follow `excreteRate`, so `uptakeVmax` metered
+ * the ground alone in one arm and four species in the other — a different
+ * mechanism at each level of the axis. Uptake is now one budget shared across
+ * the four by what is standing in the cell, which is what the switch was
+ * bought for, so `uptakeVmax` means the same thing at every level and the pair
+ * is no longer coupled. Kept as a note because a coupling that quietly stops
+ * being one is as misleading as one that is missed.
+ */
 export const COUPLINGS: readonly Coupling[] = [
   {
     axis: 'excreteRate',
@@ -47,14 +58,6 @@ export const COUPLINGS: readonly Coupling[] = [
       'minted signal reads p90 ~4.3 at a body, conserved excretion ~0.002; ' +
       'one scale leaves one arm reading three orders outside what phi can resolve',
     fix: 'senseScale 4.3 when excreteRate is 0, ~0.002 when it is on; run the two regimes as arms',
-  },
-  {
-    axis: 'excreteRate',
-    constant: 'uptakeVmax',
-    why:
-      'the species uptake rows follow excreteRate, so at 0 uptakeVmax meters the ground ' +
-      'alone and above 0 it meters four species; it is a different mechanism in each arm',
-    fix: 'read uptakeVmax within an arm, never across the excretion switch',
   },
   {
     axis: 'excreteRate',

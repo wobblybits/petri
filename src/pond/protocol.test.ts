@@ -99,7 +99,10 @@ describe('preflight', () => {
     const pf = preflight(tiny);
     expect(pf.errors).toEqual([]);
     expect(pf.warnings.some((w) => w.includes('excreteRate/senseScale'))).toBe(true);
-    expect(pf.warnings.some((w) => w.includes('excreteRate/uptakeVmax'))).toBe(true);
+    // `excreteRate/uptakeVmax` used to warn here too, until uptake stopped
+    // meaning a different mechanism on each side of the excretion switch. See
+    // the retirement note above `COUPLINGS`.
+    expect(pf.warnings.some((w) => w.includes('excreteRate/uptakeVmax'))).toBe(false);
   });
 
   it('is satisfied when the arms carry their own constants, or when the hold is accepted in writing', () => {

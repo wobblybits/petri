@@ -120,8 +120,11 @@ export const ARM_AXIS = 'arm';
 /*
  * The two chemistry regimes as arms, because they are the canonical case of
  * constants that cannot be shared: `senseScale` is three orders apart between
- * them, `uptakeVmax` meters one species in one and four in the other, and
- * `deposit` exists in only one. Shared by three protocols below.
+ * them, `deposit` exists in only one, and `uptakeVmax` is the difference
+ * between take-what-fits and one metered mouthful a frame. It is no longer the
+ * difference between one species and four — uptake samples all four in both
+ * arms now — but zero and six are still two mechanisms, which is why they are
+ * arms and not levels. Shared by three protocols below.
  */
 const MINTED: Arm = { name: 'minted', set: { excreteRate: 0, senseScale: 4.3, uptakeVmax: 0, catCoSubstrate: 0 } };
 const CONSERVED: Arm = {

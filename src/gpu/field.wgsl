@@ -134,10 +134,11 @@ struct HarvestBlock {
 // way back out, which is safe because they are read before anything is
 // written and a separate output span would double the buffer.
 const HARVEST_ROOM: u32 = 0u;
-const HARVEST_VMAX: u32 = 1u;
-const HARVEST_GOT: u32 = 1u;
-const HARVEST_KS: u32 = 5u;
-const HARVEST_STRIDE: u32 = 9u;
+const HARVEST_TOTAL: u32 = 1u;
+const HARVEST_VMAX: u32 = 2u;
+const HARVEST_GOT: u32 = 2u;
+const HARVEST_KS: u32 = 6u;
+const HARVEST_STRIDE: u32 = 10u;
 
 // Matches `FLOW_EPS` in energy.ts: below this a take is not worth a cell walk.
 const FLOW_EPS: f32 = 1e-9;
@@ -508,11 +509,15 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
   }
 
   /*
-   * The reaction table's four uptake rows.
+   * The reaction table's four uptake rows, drawn as one mouthful.
    *
    * Densities are read once for the block, before anybody eats, so the order
-   * bodies are visited in cannot decide what any of them may draw. One tank,
-   * four species competing for it: `left` is the room after the species
+   * bodies are visited in cannot decide what any of them may draw. A body
+   * takes a sample of the water rather than four separate meals: `total` is
+   * the whole budget for the frame and each species may have at most its share
+   * of it, `total * density / stock`, so the shares sum to the budget however
+   * rich or filthy the cell is and nobody may eat only the good part. One
+   * tank, four species competing for it: `left` is the room after the species
    * already taken, so a body that fills on the first thing it finds does not
    * also take the rest. Species in index order, which is arbitrary and has to
    * match `runHarvestPlan` exactly.
@@ -528,9 +533,11 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
     }
     density = sum / cells;
   }
+  let stock = density.x + density.y + density.z + density.w;
   for (var e = 0u; e < blk.count; e++) {
     let ro = (blk.first + e) * HARVEST_STRIDE;
     var left = hFlow[ro + HARVEST_ROOM];
+    let total = hFlow[ro + HARVEST_TOTAL];
     // Read before the writeback overwrites them: `got` shares the rates' slots.
     let vmax = vec4f(
       hFlow[ro + HARVEST_VMAX],
@@ -561,10 +568,9 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
         if (e > 0.0) { avail = e / (ks[u32(P.harvestCh)] + e); }
         gate = 1.0 - P.coSubstrate + P.coSubstrate * avail;
       }
-      // A species the body has no rate for takes nothing. The host zeroes
-      // `vmax` off the table, so this is also what keeps uptake on the ground
-      // alone until `excreteRate` stops the minting — see `UptakeKinetics`.
-      if (left > FLOW_EPS && vmax[c] > 0.0 && density[c] > 0.0 && gate > 0.0) {
+      // A species the body has no rate for takes nothing: the row is what it
+      // is expressing on that species, and nothing there is nothing eaten.
+      if (left > FLOW_EPS && vmax[c] > 0.0 && density[c] > 0.0 && gate > 0.0 && stock > 0.0) {
         // Hill at `n`; 1 is plain Monod and does not pay for the two `pow`
         // calls. Kept in step with `runHarvestPlan` by hand.
         var sN = density[c];
@@ -574,7 +580,11 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
           kN = pow(ks[c], P.hillN);
         }
         let rate = gate * vmax[c] * sN / (kN + sN);
-        var want = rate;
+        // The proportional sample: this species' share of one budget, which
+        // is the ceiling however good the body's transporter for it is. Kept
+        // in step with `runHarvestPlan` by hand.
+        let share = total * density[c] / stock;
+        var want = min(rate, share);
         if (left < want) { want = left; }
         if (want > FLOW_EPS) {
           got = drain(blk, c, want);

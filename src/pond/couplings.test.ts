@@ -21,7 +21,8 @@ describe('couplings', () => {
   it('warns when excreteRate is swept with senseScale held', () => {
     const warnings = checkCouplings(['excreteRate']);
     expect(warnings.map((w) => w.constant)).toContain('senseScale');
-    expect(warnings.map((w) => w.constant)).toContain('uptakeVmax');
+    // `uptakeVmax` used to be here too; see the retirement note on the table.
+    expect(warnings.map((w) => w.constant)).not.toContain('uptakeVmax');
   });
 
   it('is quiet when the coupled constant moves with the axis, on the grid or per arm', () => {

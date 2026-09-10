@@ -297,9 +297,10 @@ export class FieldGpu {
       this.entryCap = Math.max(1024, nEntries * 2);
       this.hFlow?.destroy();
       this.hRead?.destroy();
-      // `HARVEST_STRIDE` floats an entry: room, then a rate and an affinity
-      // per species. Wider rather than a second buffer, because this pass
-      // binds eight storage buffers of a guaranteed eight. See `energy.ts`.
+      // `HARVEST_STRIDE` floats an entry: room, the frame's whole uptake
+      // budget, then a rate and an affinity per species. Wider rather than a
+      // second buffer, because this pass binds eight storage buffers of a
+      // guaranteed eight. See `energy.ts`.
       const floats = this.entryCap * HARVEST_STRIDE;
       this.hFlow = device.createBuffer({
         size: floats * 4,

@@ -199,6 +199,43 @@ take-what-fits path runs unchanged; seeding the expression rows to zero is
 not sufficient, because zero expression would mean zero uptake, which is not
 today's behaviour.
 
+### One mouthful, sampled
+
+Four species at four rates means four times the cap, and `params.deposit`
+mints five times a body's voice into three channels out of nothing — so a body
+could eat its own scent back for a profit. Measured, that ran the pond at twice
+the rate cap and filled every tank. The first fix was a switch: the species
+rows only ran once `excreteRate` had stopped the minting. That worked and cost
+a coupling — `uptakeVmax` meant one mechanism below the switch and another
+above it, which is the retired row in `docs/experiments.md` §4.
+
+Uptake is now **one budget a frame, sampled**:
+
+    total   = uptakeVmax * dt * yield
+    share_c = total * S_c / sum(S)
+    got_c   = min(v_c, share_c, room)
+
+`v_c` is §4's Monod rate, unchanged, and the new term is the ceiling. The
+shares sum to `total` however rich or filthy the cell is, so the mint buys the
+minter nothing — it only dilutes what it is standing in, and the switch is not
+needed. Three things fall out of that, and they are the reason to prefer it:
+
+- **A pure cell is tasty; a smelly one is polluted.** On clean ground the
+  ground's share is the whole budget. Where the ground is a quarter of what is
+  standing in the cell, a quarter of the budget is all the ground a body can
+  draw however good its transporter — the rest of the mouthful is spent on
+  species that need catabolic machinery (§6b, `catCoSubstrate`) before they are
+  worth anything. Same standing stock, four times the work for the food in it.
+- **Shouting has a cost to the shouter.** `deposit` is a body fouling the cell
+  it is standing in, which is a pressure on the signal economy that no dial had
+  to be invented for and no term added to pay for.
+- **Uptake needs no port and no permission.** Every body samples the water it
+  is standing in. What varies between bodies is the rate, the affinity, and
+  what each can do with what it has swallowed — not whether it may eat.
+
+`uptakeVmax = 0` is still the take-what-fits path, unchanged, and `got` is
+still credited to one tank: what a body cannot use it does not draw.
+
 ---
 
 ## 5. What conservation should mean

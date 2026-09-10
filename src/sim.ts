@@ -1042,14 +1042,14 @@ export class Sim {
     if (this.fieldOnGpu) this.creditHarvest();
     else {
       // `uptakeVmax` at zero is the take-what-fits path this has always run;
-      // above it, uptake is a rate against the block's own density. The GPU
-      // twin applies the same limit inside the shader — see `field.wgsl`'s
-      // `harvest` and `energy.ts:uptakeRate`.
+      // above it, it is one mouthful a frame, shared across the four species
+      // by what is standing in the cell. The GPU twin applies the same limit
+      // inside the shader — see `field.wgsl`'s `harvest`, `energy.ts`'s
+      // `uptakeRate` and the note on `UptakeKinetics`.
       harvestSlotsFast(this.agents.values(), this.agentStore, this.energy, this.harvestPlan, {
         // `t` is the frame's clamped dt — see `beginFrame`.
         cap: params.uptakeVmax * t,
         ks: params.uptakeKs,
-        table: params.excreteRate > 0,
         yDirect: params.yDirect,
         yEra: params.yEra,
         hillN: params.hillN,
@@ -3254,7 +3254,6 @@ export class Sim {
     plan.build(this.agents.values(), this.agentStore, this.energy, {
       cap: params.uptakeVmax * dt,
       ks: params.uptakeKs,
-      table: params.excreteRate > 0,
       yDirect: params.yDirect,
       yEra: params.yEra,
       hillN: params.hillN,
