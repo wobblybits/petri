@@ -2,6 +2,7 @@ import { CHEM_LEN, CRITIC_LEN, PLASTIC_LEN, STATE_DIMS, TASTE } from '../chem-la
 import { refreshReadsField } from '../agents.ts';
 import { formatNet } from '../net-text.ts';
 import type { Params } from '../params.ts';
+import { TRAIT_KEYS } from '../rewrite.ts';
 import type { Sim } from '../sim.ts';
 import type { PortSlot } from '../agents.ts';
 import type { NetBody, NetData, NetWire } from './net-blob.ts';
@@ -295,11 +296,11 @@ export function plantNet(
     a.prevHeading = a.heading;
     a.drive = 0;
     a.extra = b.extra;
-    a.requestDecay = b.requestDecay;
-    a.energyCap = b.energyCap;
-    a.debtCap = b.debtCap;
-    a.rescueTo = b.rescueTo;
-    a.assort = b.assort;
+    // The list itself, and not a copy of it written out: a trait added to
+    // `TRAIT_KEYS` and to the blob but missed here plants at its seed value,
+    // which is a body that is not the body that was captured. `adenylate`
+    // spent a while being exactly that.
+    for (const k of TRAIT_KEYS) a[k] = b[k];
     a.born = b.born;
     a.lineage = opts.lineage ?? b.lineage;
 

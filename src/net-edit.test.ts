@@ -197,7 +197,7 @@ describe('rotate and translate', () => {
     const { sim, params } = scene();
     const a = spawnDesigned(sim, 'era', 0, 0, 0, params)!;
     const b = spawnDesigned(sim, 'era', 10, 0, 0, params)!;
-    rotateAgents(sim, [a.id, b.id], Math.PI / 2, 5, 0);
+    rotateAgents(sim, [a.id, b.id], Math.PI / 2, 5, 0, params);
     expect(a.x).toBeCloseTo(5, 5);
     expect(a.y).toBeCloseTo(-5, 5);
     expect(b.x).toBeCloseTo(5, 5);
@@ -208,7 +208,7 @@ describe('rotate and translate', () => {
   it('translates every selected body by the same delta', () => {
     const { sim, params } = scene();
     const a = spawnDesigned(sim, 'con', 10, 20, 0, params)!;
-    translateAgents(sim, [a.id], 5, -3);
+    translateAgents(sim, [a.id], 5, -3, params);
     expect(a.x).toBeCloseTo(15, 5);
     expect(a.y).toBeCloseTo(17, 5);
   });

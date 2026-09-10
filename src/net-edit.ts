@@ -150,16 +150,16 @@ export function still(agent: Agent): void {
   agent.prevHeading = agent.heading;
 }
 
-export function restitchIncident(sim: Sim, ids: Iterable<number>): void {
+export function restitchIncident(sim: Sim, ids: Iterable<number>, params: Params): void {
   const set = ids instanceof Set ? ids : new Set(ids);
   for (const w of sim.graph.wires.values()) {
     if (set.has(w.a.id) || set.has(w.b.id)) {
-      sim.graph.restitchChord(w.id, sim.agents, sim.w, sim.h, sim.time);
+      sim.graph.restitchChord(w.id, sim.agents, sim.w, sim.h, params, sim.time);
     }
   }
 }
 
-export function translateAgents(sim: Sim, ids: Iterable<number>, dx: number, dy: number): void {
+export function translateAgents(sim: Sim, ids: Iterable<number>, dx: number, dy: number, params: Params): void {
   const set = ids instanceof Set ? ids : new Set(ids);
   for (const id of set) {
     const a = sim.agents.get(id);
@@ -168,10 +168,10 @@ export function translateAgents(sim: Sim, ids: Iterable<number>, dx: number, dy:
     a.y += dy;
     still(a);
   }
-  restitchIncident(sim, set);
+  restitchIncident(sim, set, params);
 }
 
-export function rotateAgents(sim: Sim, ids: Iterable<number>, da: number, cx: number, cy: number): void {
+export function rotateAgents(sim: Sim, ids: Iterable<number>, da: number, cx: number, cy: number, params: Params): void {
   const set = ids instanceof Set ? ids : new Set(ids);
   for (const id of set) {
     const a = sim.agents.get(id);
@@ -182,7 +182,7 @@ export function rotateAgents(sim: Sim, ids: Iterable<number>, da: number, cx: nu
     a.heading = wrapAngle(a.heading + da);
     still(a);
   }
-  restitchIncident(sim, set);
+  restitchIncident(sim, set, params);
 }
 
 export function agentTooClose(sim: Sim, x: number, y: number, spacing: number, ignore?: number): boolean {
@@ -463,7 +463,7 @@ export class NetEditor {
     const c = selectionCentroid(this.sim, this.selection);
     if (!c) return false;
     this.beginMutate();
-    rotateAgents(this.sim, this.selection, da, c.x, c.y);
+    rotateAgents(this.sim, this.selection, da, c.x, c.y, this.params);
     this.mark();
     this.endMutate();
     return true;
@@ -479,7 +479,7 @@ export class NetEditor {
       if (!a) continue;
       if (this.sim.graph.cycleSlots(id, a.kind, dir)) {
         any = true;
-        restitchIncident(this.sim, [id]);
+        restitchIncident(this.sim, [id], this.params);
       }
     }
     if (any) this.mark();
@@ -712,7 +712,7 @@ export class NetEditor {
       const dx = wx - g.lastX;
       const dy = wy - g.lastY;
       if (dx !== 0 || dy !== 0) {
-        translateAgents(this.sim, this.selection, dx, dy);
+        translateAgents(this.sim, this.selection, dx, dy, this.params);
         this.mark();
       }
       g.lastX = wx;
@@ -723,7 +723,7 @@ export class NetEditor {
       const ang = Math.atan2(wy - g.cy, wx - g.cx);
       const da = ang - g.lastAng;
       if (da !== 0) {
-        rotateAgents(this.sim, this.selection, da, g.cx, g.cy);
+        rotateAgents(this.sim, this.selection, da, g.cx, g.cy, this.params);
         this.mark();
       }
       g.lastAng = ang;

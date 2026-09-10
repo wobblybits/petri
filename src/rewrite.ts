@@ -1224,7 +1224,7 @@ export function commitRewrite(
     }
     agents.set(s.id, ag);
   }
-  inheritLeftoverWires(graph, result.net.wires, agents, w, h, time);
+  inheritLeftoverWires(graph, result.net.wires, agents, w, h, params, time);
   graph.detachAgent(rw.a);
   graph.detachAgent(rw.b);
   agents.delete(rw.a);
@@ -1251,6 +1251,7 @@ function inheritLeftoverWires(
   agents: Map<number, Agent>,
   w: number,
   h: number,
+  params: Params,
   time: number,
 ): void {
   const claimed = new Set<number>();
@@ -1264,7 +1265,7 @@ function inheritLeftoverWires(
     }
     if (keeper < 0) continue;
     if (!graph.rebind(keeper, spec.a, spec.b)) continue;
-    graph.restitchChord(keeper, agents, w, h, time);
+    graph.restitchChord(keeper, agents, w, h, params, time);
     claimed.add(keeper);
     for (const id of src) {
       if (id !== keeper) graph.detach(id);

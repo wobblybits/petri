@@ -43,9 +43,11 @@ function stillParams(): Params {
   params.rewriteDuration = 0;
   params.angDrag = 0;
   // The gait is the other half of the drag law and these are about `grip`.
-  // Its own tests turn it back on. Coupling too: it pulls two wired bodies to
-  // a fixed phase difference, which is a third asymmetry on top of the three
-  // the gait tests below take one at a time.
+  // Coupling too: it pulls two wired bodies to a fixed phase difference, which
+  // is a third asymmetry on top of the three these take one at a time. Off in
+  // the shipped params as well — see `metabolicRate` — but named here, because
+  // a control that leaves out a mechanism should say so itself rather than
+  // lean on a default that is one sweep away from moving.
   params.metabolicRate = 0;
   return params;
 }

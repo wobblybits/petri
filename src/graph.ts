@@ -550,6 +550,7 @@ export class Graph {
     agents: Map<number, Agent>,
     w: number,
     h: number,
+    params: Params,
     time: number,
   ): void {
     const wire = this.wires.get(id);
@@ -579,7 +580,11 @@ export class Graph {
     );
     wire.lastLen = span;
     wire.ropeLen = span;
-    wire.latchLen = span;
+    // The relaxed length, for the same reason `connect` seeds one: a rebind
+    // re-seats the ramp at the new stem chord, and `syncRest` will multiply
+    // that by the stroke. See `strokeOf`.
+    const stroke = this.strokeOf(wire.a, wire.b, agents, this.store.gaitWave, params);
+    wire.latchLen = stroke === 1 ? span : Math.min(REST_CAP, span / stroke);
     wire.rest = span;
     wire.pitchFloor = span * 0.5;
     wire.collapse = 0;
@@ -629,6 +634,12 @@ export class Graph {
       : wireCubic(A, a.slot, B, b.slot, w, h, len);
     const wire = this.attach(a, b, len, time);
     if (wire) {
+      // `len` is the span the wire is observed to have, which is the
+      // contracted length while its bodies are mid-stroke. `latchLen` starts
+      // the shrink ramp that `syncRest` then multiplies by the stroke, so the
+      // relaxed length is what belongs in it. See `strokeOf`.
+      const stroke = this.strokeOf(a, b, agents, this.store.gaitWave, params);
+      if (stroke !== 1) wire.latchLen = Math.min(REST_CAP, len / stroke);
       wire.nodes = sampleChain(c, desiredLinks(len), w, h);
       if (!opts?.silent) {
         this.onLatch?.({
@@ -705,6 +716,44 @@ export class Graph {
    * there is to reel in, so a long latch closes at roughly the same speed as a
    * short one instead of yanking its agents together.
    */
+  /**
+   * The gait's stroke on a wire: what its two ends' metabolism multiplies its
+   * rest length by, this instant.
+   *
+   * The mean of the two ends, so a wire is one muscle rather than two arguing,
+   * and so a phase difference across it shortens the stroke rather than
+   * tearing it in half.
+   *
+   * One definition, read in three places, because the three have to agree.
+   * `syncRest` applies it; `connect` and `restitchChord` divide it back out of
+   * the length they seed a wire at. A wire is seeded at the span it is
+   * observed to have, and a body mid-stroke holds its wires off their relaxed
+   * length — so the observed span is the *contracted* one. Storing it as
+   * `latchLen` and then multiplying by the stroke again asks for a length
+   * nothing is at: a step of up to `gaitSwell` in `rest` on the frame after
+   * every latch and every restitch, handed to a span constraint stiff enough
+   * to answer it as a kick. Divided out, the wire is born satisfied exactly as
+   * `connect` intends, and what moves it afterwards is the stroke *changing*,
+   * which is what a muscle is.
+   */
+  strokeOf(
+    a: PortRef,
+    b: PortRef,
+    agents: Map<number, Agent>,
+    wave: Float64Array,
+    params: Params,
+  ): number {
+    const swell = params.gaitSwell;
+    if (!(swell > 0)) return 1;
+    const A = agents.get(a.id);
+    const B = agents.get(b.id);
+    const w = ((A ? wave[A.slot] : 0) + (B ? wave[B.slot] : 0)) * 0.5;
+    const stroke = 1 + swell * w;
+    // Floored well above nothing: a wire hauling its ends into contact is a
+    // rewrite, and this is not one.
+    return stroke < 0.4 ? 0.4 : stroke;
+  }
+
   restLength(wire: Wire, time: number, params: Params): number {
     const travel = Math.abs(wire.latchLen - params.wireMinRest);
     const span = Math.max(1, params.wireMinRest);
@@ -1090,25 +1139,13 @@ export class Graph {
     wave: Float64Array,
     detailed?: (wire: Wire) => boolean,
   ): void {
-    const swell = params.gaitSwell;
     for (const wire of this.wires.values()) {
       const base = this.restLength(wire, time, params);
       const phase = wire.id * 2.399963;
       const rate = 0.55 + (wire.id % 7) * 0.11;
       const breathe = 1 + params.wireBreathe * Math.sin(time * rate + phase);
       const quiet = base * breathe;
-      let stroke = 1;
-      if (swell > 0) {
-        const A = agents.get(wire.a.id);
-        const B = agents.get(wire.b.id);
-        // The mean of the two ends, so a wire is one muscle rather than two
-        // arguing, and so a phase difference across it shortens the stroke
-        // rather than tearing it in half.
-        const w = ((A ? wave[A.slot] : 0) + (B ? wave[B.slot] : 0)) * 0.5;
-        stroke = 1 + swell * w;
-        if (stroke < 0.4) stroke = 0.4;
-      }
-      const raw = quiet * stroke;
+      const raw = quiet * this.strokeOf(wire.a, wire.b, agents, wave, params);
       wire.rest = Number.isFinite(raw) ? clamp(raw, 4, REST_CAP) : params.wireMinRest;
       wire.pitchFloor = wire.rest * 0.5;
       // Applied under the floor on purpose: a collapsing wire has to be able

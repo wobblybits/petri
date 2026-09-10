@@ -294,10 +294,29 @@ export interface Params {
   grip: number;
   /**
    * How fast the pathway runs, as a plain multiple. 0 = no metabolism, so no
-   * gait.
+   * gait, and no pathway spend either — which is what it ships at.
    *
    * Multiplying every reaction rescales time and nothing else, so this moves
    * the period without moving where the pathway oscillates.
+   *
+   * The master switch for the whole gait, and the one dial that has to be
+   * moved to see any of it: at zero `advanceGait` returns with `gaitWave` and
+   * `anchor` at zero, so the stroke is exactly 1 and `grip` reads what it read
+   * before the pathway existed. The pond is bit-for-bit yesterday's.
+   *
+   * It ships there because the pond at 6 is not yesterday's and the amount by
+   * which is not small. The suite, which is only a change detector, still says
+   * it plainly: a fresh era-era latch peaks at 239 rad/s of spin against a
+   * bound of 20, and a body standing still loses a sixth of a full tank inside
+   * a couple of seconds to substrate it buys and cannot help buying. Neither
+   * is a gait; both are a stroke amplitude and a period picked to be seen
+   * rather than measured, driving a span constraint stiff enough to answer
+   * every one of them.
+   *
+   * Finding the value it should ship at is a `npm run pond` job — minutes of
+   * pond, the seed budget its measure needs — and not a thing the suite can
+   * answer. Until that sweep has run this is the honest place for it, and the
+   * slider is right there for anyone who wants to watch it move.
    */
   metabolicRate: number;
   /**
@@ -1072,7 +1091,7 @@ export function defaultParams(): Params {
     drag: 0.55,
     angDrag: 2.4,
     grip: 2,
-    metabolicRate: 6,
+    metabolicRate: 0,
     metabolicSupply: 3,
     metabolicBase: 0.02,
     metabolicRegen: 1,
