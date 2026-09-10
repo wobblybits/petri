@@ -116,7 +116,7 @@ describe('the genome shader matches the genome layout', () => {
      *
      * The chemistry block between `X_OUT` and `G_OUT` is the part in the
      * middle the shader still steps over: added by
-     * `docs/energy-chemistry-plan.md` phase 0 and read by nothing on either
+     * `docs/history/energy-chemistry-plan.md` phase 0 and read by nothing on either
      * side until phase 3. Its own reach is checked separately.
      */
     expect(L_BASE + 2).toBe(X_OUT);

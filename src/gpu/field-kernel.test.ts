@@ -657,7 +657,7 @@ describe('field shader arithmetic', () => {
      *
      * Also the guard on the ordering claim: metered, everyone in the block
      * gets the *same* rate, so a body's share stops depending on its id — which
-     * is the artifact `docs/energy-chemistry-plan.md` §4 exists to remove.
+     * is the artifact `docs/history/energy-chemistry-plan.md` §4 exists to remove.
      */
     const params = defaultParams();
     params.ambientEnergy = 1;

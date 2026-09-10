@@ -1227,7 +1227,7 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
 
 /**
  * Expression: how a body divides one unit of chemical effort across the eight
- * rows of the reaction table. See `docs/energy-chemistry-plan.md` §3.
+ * rows of the reaction table. See `docs/history/energy-chemistry-plan.md` §3.
  *
  * Same shape as `emitVector` and for the same reason — relu, then normalised
  * to a unit sum across the whole table at once. The simplex is the trade-off

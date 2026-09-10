@@ -2,221 +2,89 @@
 
 The design bets on a few well-tuned mechanics that leave room for emergence.
 It does not add mechanics, fitness measures, rule systems or workarounds where
-an existing mechanic can be tuned or a condition changed. This document is how
-that is kept true: every research-level concept below must be tied to one
-implemented mechanic, so that "what gives us X" has a one-line answer naming a
-dial, and so that a mechanic being asked to do two things at once is visible.
+an existing mechanic can be tuned or a condition changed. This document keeps
+that true by tying every research-level concept to one implemented mechanic,
+so that "what gives us X" has a one-line answer naming a dial, and a mechanic
+asked to do two things at once is visible.
 
-A proposal names the heading it serves. If the heading already has a mechanic,
-the proposal is a tuning, a measurement or a bug fix. If the heading has no
-mechanic, the proposal says so, and says why no existing one can be tuned to
-cover it.
+A proposal names the heading it serves. If the heading has a mechanic, the
+proposal is a tuning, a measurement or a bug fix. If it has none, the proposal
+says so and says why no existing mechanic can be tuned to cover it.
 
-The list below is the headings only. Each is to be filled with one
-prescriptive statement: the mechanic it lives in and what that mechanic must
-not also be asked to do. Nothing else belongs here; measurements go in
-`experiments.md`, arguments in the plans.
+How to read the table:
+
+- **mechanic** is the function that implements the heading, in `src/`.
+- **dials** are `Params` keys. `src/concepts-dials.test.ts` checks every one
+  named here exists, so a dial that is deleted has to be deleted here too.
+- **default** is what `defaultParams()` ships. *off* means the mechanic is
+  present but inert at the default.
+- **gauge** is the `npm run pond` measure that says whether the mechanic was
+  engaged in a run. A result read without its gauge is not a result.
+- **not yet true** is the gap between the heading and the mechanic, stated
+  once and without history. History is in `git log` and `docs/history/`.
 
 ## Agent
 
-- Sensing
-- Movement and steering
-- Signalling
-- Metabolism: eating, upkeep, excretion
-- Memory
-- Learning
-- Regulation: behaviour that follows state without learning
-- Death
+| heading | mechanic | dials | default | gauge | not yet true |
+|---|---|---|---|---|---|
+| Sensing | `Sim.steer`: a body samples the four field species around its principal and steers by its taste head | `sense`, `sensorDist`, `sensorAngle`, `senseScale`; the taste seeds `attractStrong`, `attractMedium`, `attractFood` | on | `sense_read_p90` | `senseScale` is measured for the minted signal; a conserved signal reads three orders lower and needs its own value |
+| Movement and steering | cruise and turn heads on a free principal, flocking, the drag law | `stepSpeed`, `turnRate`, `swimTau`, `swimNoise`, `flockAlign`, `flockSep`, `declutter`, `drag`, `angDrag`, `eraMass`, `nodeMass` | on | `net_drift` | a wired body does not steer; only the net moves it |
+| Signalling | emit head laid into the field: minted (`deposit`) or conserved excretion rows (`excreteRate`) | `deposit`, `diffuse`, `decay`, `excreteRate` | minted | `signal_total`, `signal_p90` | the three signal species have identical physics, so no channel can mean anything different from another |
+| Metabolism: eating | harvest into the tank (take-what-fits) or, metered, into the gut and then digested | `ambientEnergy`, `uptakeVmax`, `uptakeKs`, `digestRate`, `gutSize`, `catCoSubstrate`, `yDirect`, `yEra` | take-what-fits | `full_mean`, `demand_mean` | at `uptakeVmax` 0 uptake is instantaneous and in id order, so older bodies eat first in a contested cell |
+| Metabolism: upkeep | rent per second off the tank; the pathway in `advanceMetabolism` buys substrate off the tank when discharged | `upkeep`, `upkeepExcrete`, `eraUpkeepRatio`, `rowCost`, `metabolicRate`, `metabolicSupply`, `metabolicBase`, `metabolicRegen`, `metabolicWork`, `metabolicCost`, `metabolicDiffuse`, `adenylate` | pathway off | `tank_life`, `can_pay` | the pathway oscillates only near the seeded pool size because its influx is not scaled by the pool; its load is charged on charge held, not on movement, and on bodies with no wire |
+| Metabolism: excretion | `runExcretion`: the gut first, the tank for the shortfall, as the body's expression rows | `excreteRate`, `upkeepExcrete` | off | `ground`, `free` | at the defaults rent and the pathway's spend are destroyed rather than laid down |
+| Memory | the recurrent state `h` through `Wh`, four dimensions | none | on | `locus_self_00` | |
+| Learning | three-factor rule in `updateState` and `genome.wgsl`: eligibility trace per state weight, gated by a TD error from a linear critic on the body's own tank | `learnRate`, `learnCritic`, `learnTrace`, `learnDiscount`, `inheritLearned` | on | `full_mean` (the teacher is zero at a full tank) | the eligibility carries no sign per state dimension, so the update does not climb reward; the horizons are per frame at a frame the browser varies |
+| Regulation | every output head reads `h`: emit, taste, flock, recoil, anchor, expression | none | on | | |
+| Death | `tickUpkeepFast` kills at the body's own debt floor; the corpse's worth returns to the ground | `debtCap`, `bodyValue` | on | `died`, `loneliness` | |
 
 ## Net
 
-- Identity: what counts as one organism
-- Shape. Lives in wire physics. Tension is held by energy flowing along a
-  wire, so a net that moves no energy is slack. Not yet true: stiffness is a
-  free global constant.
-- Locomotion. Lives in the drag law, whose rate is `drag + grip * fullness`.
-  A net moves itself by moving energy through itself: a transport kick is
-  equal and opposite, and under one rate for every body it cancels at the
-  centre of mass, so `grip` is the only thing that lets a stroke become
-  travel. The pair's centre keeps
-  `|p| * (1/k_sender - 1/k_receiver) / (m_sender + m_receiver)` of the kick,
-  which is first order in the impulse and needs no cycle and no phase — mass
-  cancels from the direction, so which way a net goes is decided only by which
-  end is grippier. Nothing else may create motion a net did not pay for;
-  `transportThrust`, which does, is a reactionless drive and is retired at 0.
-  Two mechanics were built beside it and withdrawn. A speed-dependent term
-  swam (1.63 px/s on the worm bench against grip's 2.31, and the two did not
-  add), but one heading gets one mechanic, and grip is the one whose stroke
-  depends on the energy pattern a net controls rather than on where its heavy
-  bodies happen to be. A contracting wire (`wireTug`, `wireTugTau`) read like
-  an inchworm and was not one: the pull and the grip were driven by the same
-  packet at the same instant and then decayed, so the loop they traced in
-  (length, grip) closed on a line, and its area was only what the difference
-  between two relaxation times left over. A gait wants two degrees of freedom
-  with a phase something can *set*; a packet clock and two exponentials are
-  one degree of freedom and a race. It also spent the wire's rest length,
-  which is what decides whether two bodies ever meet, so a tug hard enough to
-  swim held every pair too tight to rewrite. Not yet true: grip is a free
-  global constant where the stroke should be the net's own; and turned up it
-  anchors a net rather than walking it, because a crawler needs its grip to
-  travel and only `transportQuantum` makes the fullness pattern move. A real
-  gait wants a clock that is not the packet. `gaitRate` is one: every body
-  carries a phase, and `G`'s two heads scale its cosine into the body's own
-  drag rate and into an impulse along each of its wires. That is the same
-  first-order mechanism — an impulse, then two ends coasting different
-  distances from it — put on a clock the net owns rather than on whenever a
-  packet crossed, and it is heritable in the way that matters: the amplitudes
-  are heads off `h`, their product is the speed, and their relative sign is
-  the direction.
-
-  Two things were learned building it and are worth not re-learning. The
-  clock cannot come out of `h`: `phi` saturates each dimension separately, so
-  a rotation in `Wh` slow enough to be a gait has a loop gain barely above 1,
-  and there any steady input — `IN_FULL` is one — collapses it onto a fixed
-  point. And the stroke cannot be a length: a wire's rest length is served by
-  an XPBD span constraint, and a position correction split by inverse mass
-  moves the two bodies and not their centre, at any phase, which is the
-  deeper reason `wireTug` never swam. Measured, a wired pair driven that way
-  travels 0.000 px in twenty seconds and the same pair driven by an impulse
-  travels 5.2.
-
-  What a wire's two ends differ in is the whole of the stroke, and there are
-  three places that difference comes from. Fullness is the economic one, and
-  makes a net walk only while it holds a gradient. Phase is an accident:
-  `createAgent` scatters it, so two bodies sit at different points of the same
-  cosine. Kind is the structural one, and is what makes an Era a limb — it has
-  one port so it is always a leaf, one wire so its stroke is uncancelled where
-  an interior body's three partly fight, and it is light. `seedGait` gives it
-  a large stroke and almost no anchor, and gives a Con or a Dup the reverse.
-  Measured on a fed pair held at one phase, twenty seconds: 1.281 px from a
-  fullness gradient alone, 0.756 from a phase difference alone, 1.205 from an
-  Era on the end alone, and 0.000 between two Cons with none of the three.
-
-  A leaf is a limb only on an *auxiliary* port. A redex needs principals at
-  both ends and an Era has nothing but a principal, so on a Con's `l` or `r`
-  it is an appendage and on a Con's `p` it is an erase. Which one a lineage
-  gets is about where it latches, which no gene here reaches.
-
-  The stroke moves a wire's rest length, and that is the only actuator it
-  has. `rest` is what this engine already moves things with — `wireShrink`
-  reels a latch in through it, `Wire.collapse` hauls a rewrite's ends together
-  with it, `wireBreathe` makes tissue move with it — because the span
-  constraint serves it rather than fighting it. The gait is the fourth thing
-  that writes it, which is why it is `wireTug` with a better clock rather than
-  a new mechanism: the tug was driven by whichever packet last crossed, and
-  this is driven by a phase the net owns.
-
-  A correction shared by inverse mass moves both bodies and not their centre,
-  so the swing itself carries nothing. What carries is the velocity it induces
-  and `grip` then spends: a wire whose two ends damp differently keeps a step
-  out of every cycle, and one whose ends match keeps nothing. `grip *
-  fullness` is one such difference and `G`'s `anchor` is the other, riding the
-  same cosine as the swing so a body grips exactly while its wires pull.
-
-  `gaitCouple` and `gaitLag` are what make it a pattern rather than n
-  twitches. A body's share of its own stroke is divided by the whole net's
-  mass, so at unrelated phases the shares sum as sqrt(n) against a mass of n
-  and a longer net moves itself *less*. Coupled with a lag, a chain settles at
-  a fixed phase difference per wire, the shares add, and a fixed difference
-  per wire is a travelling wave — which along a body is peristalsis. At lag 0
-  it is plain synchrony, which is the pond-wide pulse this branch began by
-  removing.
-
-  The clock is a metabolism, and it is in the economy rather than beside it.
-  Every body runs three reactions over two pools: it buys substrate out of its
-  own tank in proportion to how *discharged* it is, an autocatalytic step
-  burns that substrate and spends ATP into ADP, and a recharge step puts it
-  back. `atp + adp` is the body's `adenylate` and never changes — the pool is
-  currency and can only be cycled. What is spent is `extra`, and what leaves
-  the tank lands on the ground through the same `excreteRate` path rent
-  already uses, so metabolising is fertilising and nothing is destroyed.
-
-  The regulation is the real one: a cell pulls harder on its fuel because it
-  is discharged, not because it is holding a lot. So a net that works draws
-  its tank down, a drawn-down tank is what `spreadRequests` carries, and
-  `flowCharges` answers it — two wired bodies are coupled through the economy
-  whether or not `metabolicDiffuse` is set. The stroke discharges the pool in
-  proportion to how far it swings a wire, so moving costs something, and a
-  body that cannot buy substrate goes still within about half a minute.
-
-  The oscillation is a *consequence* of that regulation rather than a clock
-  beside it, and it lives in a window: too little income and the pathway is
-  supply-limited and sits charged, too much and it runs fully discharged and
-  sits there. Both ends are still. That window is narrow, which is a real
-  property of a two-pool network and not a tuning failure — saturating the
-  burn widens nothing, it removes the oscillation entirely. More species is
-  what would widen it.
-
-  Not yet true, and this is the list. Only the pool size is heritable, as
-  `adenylate`; every rate is still a global constant, where a lineage should
-  own them — that is what `X`, the expression head, exists for and is read by
-  nothing. The pathway is also its own private chemistry: it neither eats nor
-  excretes any of the four field species, so the only thing connecting it to
-  the dish is the price it pays and the fertiliser that price becomes. And an
-  Era is both the leaf *and*, by `ERA_UPKEEP_RATIO` and its larger store, the
-  fullest body on its wire — so the seeded head makes it the oar while the
-  economy makes it the anchor, and those pull opposite ways. On the bench they
-  are separate rigs and both carry a pair; which of them wins in a net where
-  both act at once is a pond question and has not been asked.
-- Communication within a net
-- Transport of energy within a net. Lives in the demand gradient: a body gives
-  to whichever neighbour is strictly needier, and `transportQuantum` sets
-  whether that is a trickle or a packet. Demand decides whether to send;
-  above zero the quantum decides how much, a body must hold a whole packet to
-  send one, and what will not fit at the far end goes to the ground. The
-  packet is also the pond's only clock — so this mechanic is asked to do two
-  things and that is known. It ships at 0.5, the packet; at 0, the trickle,
-  the momentum it carries is three orders below the pond's own noise.
-
-  How far demand travels in a frame is `requestReach`, and it is the reason
-  nothing here can carry a wave. At its shipped 0 the need field is solved to
-  a fixpoint every frame, so a shortage anywhere is known everywhere at once
-  and there is never anything left to propagate. Above 0 it advances that
-  many hops a frame and a need has a front. The fixpoint is the same either
-  way; only the time to reach it changes.
-
-  That is a trade and not an improvement, which is why it ships off. A global
-  relaxation is global triage — every donor weighs its neighbour against the
-  worst case anywhere on the net, so a dying body outranks a merely empty one
-  however far away. One hop a frame is local equalisation, and a corridor of
-  empty bodies absorbs a reservoir on its way past instead of relaying it:
-  measured on twelve bodies with a reservoir at one end and a body in debt at
-  the other, the reservoir is empty inside twenty frames and the patient ends
-  on exactly zero, filled and then drained back into the corridor. Not yet
-  true: the field cannot tell dying from empty by enough to survive being
-  local, and until it can, locality costs the economy more than it buys
-  locomotion.
-- Growth
-- Breeding: nets connecting at free terminals
-- Freeing terminals: death and detachment within a net
-- Specialisation within a net
+| heading | mechanic | dials | default | gauge | not yet true |
+|---|---|---|---|---|---|
+| Identity | a connected component of wires | none | | `nets`, `nets_effective` | |
+| Shape | wire physics: a span constraint on the rest length, port torques, ropes | `wireMinRest`, `wireShrink`, `springK`, `springDamp`, `portStiff`, `auxSpread`, `wireBreathe`, `wireSnap`, `wireTaut`, `wireClear`; rope detail ages out by `wireShapeAge`, `wireSpanAge` | on | `pp_wires`, `con_dup_wires` | stiffness is a global constant; a net that moves no energy is not slack |
+| Locomotion | the drag law in `dampVelocities`: `drag + grip * fullness + anchor`. A transport kick is equal and opposite, so only a difference in damping between a wire's two ends turns it into travel. `anchor` rides the pathway's wave and the stroke swings the rest length by `gaitSwell` | `grip`, `gaitSwell`, `metabolicRate`, `transportRecoil`, `transportQuantum` | grip and packets on, pathway off | `net_drift` against `transportRecoil` 0, `demand_mean` | `grip` is global, so its sign cannot be settled by selection; substrate diffusion synchronises a chain, and a synchronised chain does not travel |
+| Communication within a net | `Wn`: the mean of wired neighbours' state; the demand field | `requestDecay`, `requestReach` | on | `demand_mean` | |
+| Transport of energy | `flowChargesFast`: a body gives to a strictly needier neighbour; a packet or a trickle | `transportQuantum`, `requestDecay`, `requestReach`, `rescueTo` | packet | `demand_mean`, `can_pay` | the packet is also the only clock the drag law has while the pathway ships off |
+| Growth | rewrites: a commute turns two bodies into four | `rewriteDuration` | on | `born`, `commutes` | |
+| Breeding: nets connecting | latching at free ports | `snapRadius`, `snapArc`, `snapWell`, `faceRadius`, `faceAttract` | on | `latches`, `latch_p50` | |
+| Freeing terminals | death, `wireSnap`, and the erase rules | `wireSnap` | on | `died`, `commutes_per_latch` | |
+| Specialisation | the expression simplex `X`, priced per row | `rowCost`, `hillN` | off | `net_fst` | with a linear budget and concave payoff the optimum is a generalist; `rowCost` or `hillN` above neutral is what makes a specialist pay |
 
 ## Lineage
 
-- Reproduction of agents
-- Inheritance
-- Mutation and other variation
-- Selection
-- Drift
-- Speciation: nets becoming different from each other
-- Development: from immigrant to member
-- Immigration
+| heading | mechanic | dials | default | gauge | not yet true |
+|---|---|---|---|---|---|
+| Reproduction | a commute's four children | none | | `born_mean` | |
+| Inheritance | `inheritChem`: blend or assort per gene, plus the scalar traits; learned weights consolidated by `inheritLearned` | `assortBias`, `inheritLearned` | on | `locus_*` | |
+| Mutation | one `CHEM_MUTATE` step per gene per birth, scaled to the genome length; `TRAIT_RANGE` per trait | none | on | `matrix_drift`, `var_drifted` | |
+| Selection | none: no fitness term. Whatever persists, persists | none | | `line_dominance`, `net_fst` | |
+| Drift | mutation on genes nothing reads | none | | `line_fst`, `matrix_drift` | most of the genome is inert for a body in a given position, so it walks |
+| Speciation | nets diverging | none | | `net_fst`, `nets_effective` | |
+| Development | an immigrant carries `seedChem` and nothing learned; its first latch is its metamorphosis | none | | `latch_p50` against `tank_life` | |
+| Immigration | `autoSpawn` near the pond's centre of mass | `spawnInterval`, `soupCount`, `maxAgents` | on | `spawned`, `lines` | immigrants are never spawned from the population; they are larval by design |
 
 ## Ecology
 
-- The energy economy and conservation
-- The world: ground, its structure and regeneration
-- Competition
-- Cooperation and mutualism
-- Niches and coexistence
+| heading | mechanic | dials | default | gauge | not yet true |
+|---|---|---|---|---|---|
+| The energy economy | one scalar; bodies conserve it when `upkeepExcrete` and `excreteRate` are on; the dish is driven | `bodyValue`, `upkeepExcrete`, `excreteRate`, `eraCapRatio` | bodies destroy rent | `free`, `ground`, `mean_extra` | |
+| The world | the ground: ambient, logistic regrowth, optional patches or a reaction | `energyCell`, `ambientEnergy`, `energyRegrow`, `energyDiffuse`, `groundPatches`, `reactFeed`, `reactKill`, `fertilise` | uniform, regrowing | `ground`, `forage_ratio` | growth is zero at cap, so a uniform dish at cap produces nothing |
+| Competition | none; contested cells share by rate above `uptakeVmax` 0 | | | `forage_ratio` | |
+| Cooperation and mutualism | none; a net's transport is the only sharing | | | `demand_mean` | |
+| Niches and coexistence | none; the `(uptakeVmax, uptakeKs)` pair is the intended non-dominating trade-off | | | `lines_effective` | |
 
 ## Principles
 
-- Few well-tuned mechanics; room for emergence
-- Selection is emergent; no fitness term
-- Nothing true of a kind beyond what the calculus requires
-- Persistence and difference are the point; nothing decays, averages or resets
-- Passive by default: control over anything is acquired, not given
+- Few well-tuned mechanics; room for emergence.
+- Selection is emergent; no fitness term.
+- Nothing true of a kind beyond what the calculus requires.
+- Persistence and difference are the point; nothing decays, averages or
+  resets, except the eligibility trace, which is a credit window.
+- Passive by default: control over anything is acquired, not given.
 - Maintained order is paid for: anything held against the physics is work
-  drawn from the one energy scalar
-- Every mechanic ships at the setting that reproduces the pond before it
+  drawn from the one energy scalar.
+- Every mechanic ships at the setting that reproduces the pond before it.
+- A claim about the pond is a run of minutes at the seed budget its measure
+  needs, on the pipeline that ships. See `experiments.md`.

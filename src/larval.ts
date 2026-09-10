@@ -7,7 +7,7 @@
  * generosity a body that dies. If the median time to first latch is well
  * under the tank, obligate dependency *structures* the soup; if it is not,
  * obligate dependency simply kills it, and the plan says to measure this
- * before `yDirect` moves far (`docs/energy-chemistry-plan.md` §5).
+ * before `yDirect` moves far (`docs/history/energy-chemistry-plan.md` §5).
  *
  * The measure is a histogram rather than a list because a ten-minute pond
  * makes tens of thousands of bodies and only three numbers are ever read off

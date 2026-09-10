@@ -686,7 +686,7 @@ export interface Params {
    * it makes an agent that has been through a net different from one that
    * has not, and it is how one net's experience reaches another.
    *
-   * See `docs/plasticity-plan.md`.
+   * See `docs/history/plasticity-plan.md`.
    */
   learnRate: number;
   /** How fast the critic itself learns to predict. Its own delta rule. */
@@ -713,7 +713,7 @@ export interface Params {
   inheritLearned: number;
 
   /*
-   * Chemistry. See `docs/energy-chemistry-plan.md`; every one of these ships
+   * Chemistry. See `docs/history/energy-chemistry-plan.md`; every one of these ships
    * at the value that reduces to the behaviour before it existed, which is
    * the same discipline `fertilise` and `reactFeed` follow.
    */
@@ -850,7 +850,7 @@ export interface Params {
    * firewall becomes a stoichiometry rather than a special case, and a poor
    * body physically cannot shout.
    *
-   * `docs/energy-chemistry-plan.md` §3 and §8. Expect the measured signalling
+   * `docs/history/energy-chemistry-plan.md` §3 and §8. Expect the measured signalling
    * constants to move with it — signal amplitude drops by about the deposit
    * multiplier, so `SENSE_SCALE` and the steering dead zone were measured
    * against a world that no longer exists. Remeasure rather than rescale.
@@ -883,7 +883,7 @@ export interface Params {
   senseScale: number;
   /**
    * How many units of ground one unit of a signalling species is converted
-   * *with*, spent out of the body's own gut. See `docs/energy-chemistry-plan.md`
+   * *with*, spent out of the body's own gut. See `docs/history/energy-chemistry-plan.md`
    * §6b and `Sim.runDigestion`.
    *
    * 0 is what phase 3 shipped: an uptake row eats its species raw, which is

@@ -752,7 +752,7 @@ export class EnergyGrid {
    * every channel is matter a body moves out of its tank, so the deposit that
    * carries it has to be the *conserving* one on all four — a quantity that
    * survives however the grid is cut — rather than the density the scent path
-   * lays down. See `docs/energy-chemistry-plan.md` §3 and `Fields.addAt`.
+   * lays down. See `docs/history/energy-chemistry-plan.md` §3 and `Fields.addAt`.
    */
   addSpeciesAt(x: number, y: number, w: ArrayLike<number>): void {
     let any = false;
@@ -882,45 +882,6 @@ export type SlotBody = Pick<
   | 'rescueTo'
   | 'transportQuantum'
 >;
-
-/**
- * The take-what-fits harvest, on plain `SlotBody`s: the reference for the
- * unmetered path, and only that.
- *
- * `harvestSlotsFast` is the store-based path the pond runs, and above
- * `uptakeVmax` 0 it draws a sampled mouthful into the gut — a mechanism this
- * function does not have and is not meant to: `energy.test.ts` builds
- * `SlotBody`-shaped literals to pin the unmetered behaviour in isolation, and
- * the metered path is pinned where the gut lives, in `chemistry.test.ts`,
- * against `harvestSlotsFast` with a store. It used to carry a single-species
- * Monod branch of its own; that was a third uptake mechanism nothing shipped.
- */
-export function harvestSlots(agents: Iterable<SlotBody>, grid: EnergyGrid): void {
-  const hungry = new Map<number, SlotBody[]>();
-  for (const a of agents) {
-    if (a.locked || atCap(a)) continue;
-    // Off the map is barren, not merely empty: no ambient either.
-    if (!grid.inBounds(a.x, a.y)) continue;
-    const { key } = grid.index(a.x, a.y);
-    let list = hungry.get(key);
-    if (!list) {
-      list = [];
-      hungry.set(key, list);
-    }
-    list.push(a);
-  }
-  for (const [key, list] of hungry) {
-    list.sort((a, b) => a.id - b.id);
-    for (const a of list) {
-      const cap = a.energyCap;
-      const room = cap - a.extra;
-      if (room <= EXTRA_FULL_EPS) continue;
-      const got = grid.take(key, room);
-      if (got <= 0) break;
-      a.extra = Math.min(cap, a.extra + got);
-    }
-  }
-}
 
 /**
  * Who eats from which block, and in what order.
@@ -1187,7 +1148,7 @@ export class HarvestPlan {
 /**
  * How fast a body may draw from a cell, given what is standing in it.
  *
- * Monod: `v = vmax * S / (Ks + S)`. See `docs/energy-chemistry-plan.md` §4.
+ * Monod: `v = vmax * S / (Ks + S)`. See `docs/history/energy-chemistry-plan.md` §4.
  * `cap` is `params.uptakeVmax * dt` — the most a body could take this frame on
  * saturating ground — and **zero means the old path**, which is not the same
  * as no uptake: at zero a body takes whatever fits in its tank, instantly, as
@@ -1506,7 +1467,7 @@ export interface UpkeepOptions {
    * 0 is what upkeep has always done: rent vanishes. 1 makes a body
    * conservative — nothing it runs creates or destroys matter — which is the
    * invariant that makes selection honest. See
-   * `docs/energy-chemistry-plan.md` §5. It leaves as the body's own excretion
+   * `docs/history/energy-chemistry-plan.md` §5. It leaves as the body's own excretion
    * mix through `payOut`, which is why the store path also wants `expressed`;
    * the `SlotBody` path has no genome to read and lays it down as ground.
    *
@@ -1525,80 +1486,6 @@ export interface UpkeepOptions {
    * still a pass over the roster, and in the shipped default they always are.
    */
   expressed?: boolean;
-}
-
-/**
- * Bill every body continuously, on plain `SlotBody`s.
- *
- * `rate` is energy per second, per kind via `upkeepRateFor`, so a full body
- * has `1/rate` seconds of life in hand and slides smoothly into debt after
- * that. A negative rate pays the body instead, capped at a full extra like
- * every other source. Returns the ids that reached their own `debtCap` —
- * death rather than a detachment.
- *
- * The pre-chemistry twin, kept for `energy.test.ts`: it bills by the glyph
- * and pays `rentBack` out as ground, because a `SlotBody` has no expression
- * vector to read. `tickUpkeepFast` is the path the pond runs, and above the
- * chemistry dials it bills by `upkeepRateOf` and pays out through `payOut`.
- */
-export function tickUpkeep(
-  agents: Iterable<SlotBody>,
-  dt: number,
-  rate: number,
-  grid?: EnergyGrid,
-  opts: UpkeepOptions = {},
-): number[] {
-  if (!(dt > 0)) return [];
-  const excrete = opts.rentBack ?? 0;
-  const eraRatio = opts.eraRatio ?? ERA_UPKEEP_RATIO;
-  const dead: number[] = [];
-  for (const a of agents) {
-    if (a.locked) continue;
-    const r = upkeepRateFor(a.kind, rate, eraRatio);
-    if (r === 0) continue;
-    const was = a.extra;
-    const next = a.extra - r * dt;
-    if (next > a.energyCap) {
-      /*
-       * A full producer spills onto the ground rather than into nothing.
-       *
-       * An Era's upkeep is negative — it makes energy instead of spending it —
-       * and it has a tank like anything else. Clamping at the cap quietly
-       * destroyed whatever it made past full, so a net's Eras stopped being
-       * worth anything the moment they topped up, and the conservation the
-       * rest of the economy is careful about had a hole in it.
-       *
-       * Harvest is bounded by the room the receiver actually has, and a
-       * rewrite's leftovers already go to the grid. Transport was in that
-       * list until `transportQuantum`: a whole packet crosses whether or not
-       * the far end has room, so `flowCharges` spills through `deliver` for
-       * the same reason and to the same place. If another producer ever
-       * appears it should come through one of the two.
-       */
-      if (grid) grid.addAt(a.x, a.y, next - a.energyCap);
-      a.extra = a.energyCap;
-    } else {
-      a.extra = Math.max(a.debtCap, next);
-    }
-    /*
-     * Excrete what actually left the tank, which is not the same as what was
-     * billed.
-     *
-     * A body billed past empty runs a *debt*: the balance falls but no matter
-     * moves, because it had none to move. Excreting the billed amount would
-     * mint whatever the pond's starving bodies owed, which is the opposite of
-     * the invariant this exists to establish. So the ground gets the change in
-     * the body's non-negative stock — nothing while it is in debt, and nothing
-     * for the last partial step down through zero beyond the part it could pay.
-     * The `debtCap` clamp above is included for free, for the same reason.
-     */
-    if (grid && excrete > 0) {
-      const paid = Math.max(0, was) - Math.max(0, a.extra);
-      if (paid > 0) grid.addAt(a.x, a.y, paid * excrete);
-    }
-    if (was > a.debtCap && a.extra <= a.debtCap) dead.push(a.id);
-  }
-  return dead;
 }
 
 /**
@@ -1873,69 +1760,6 @@ export function seedRequest(agent: SlotBody, amount: number): void {
 }
 
 /**
- * Carry the need field one hop along the wire graph.
- *
- * Every body ends up holding the largest need it can see, attenuated per hop
- * by whoever is relaying it — so the field is a potential whose gradient
- * points at whoever is neediest, weighted by how badly and discounted by how
- * far.
- *
- * **One hop a frame, off the previous frame's field.** This used to relax to
- * a fixpoint inside a single frame, which made demand a thing that was simply
- * *known* everywhere the instant it arose: a shortage at one end of a net set
- * the potential at the other end on the same frame, and every donor in the
- * pond moved a packet down a gradient that had no history. Nothing could
- * travel, because there was nothing left to travel — the answer was already
- * everywhere.
- *
- * The fixpoint is unchanged. `request_i = max(claim_i, max_j request_j *
- * keep_j)` is the same equation the relaxation solved, so a field left alone
- * settles exactly where it used to; what has changed is that it now takes as
- * many frames as it takes hops, and that a need which appears, moves or stops
- * has a front. Demand becomes something that *arrives*, which is the whole
- * point — a wave needs state that persists and advances, and a potential
- * recomputed from nothing every  frame has neither.
- *
- * `prev` is the caller's snapshot of the field before this frame's claims
- * were written, and it is what makes this a step rather than a sweep: reading
- * the live array instead would let a value race several hops in one pass,
- * in whatever order the list happens to be in.
- *
- * `decay`, when passed, overrides every body's own `requestDecay` trait —
- * useful for a test that wants one uniform rate. Left out, each body relays
- * at its own rate, which is what lets `requestDecay` actually be heritable:
- * a body that conducts demand efficiently ends up embedded in longer chains
- * than one that muffles it.
- *
- * Locked bodies still conduct, so a rewrite in progress does not cut the net
- * in two.
- */
-export function spreadRequests(
-  list: SlotBody[],
-  adj: WireAdjacency,
-  prev: number[] | Float64Array,
-  decay?: number,
-): void {
-  const { off, nei } = adj;
-  for (let i = 0; i < list.length; i++) {
-    let best = 0;
-    for (let k = off[i]; k < off[i + 1]; k++) {
-      const ni = nei[k];
-      const other = list[ni];
-      if (!other) continue;
-      // The *relayer's* rate, not the receiver's: a body that conducts demand
-      // well is what makes a long chain audible, which is what makes
-      // `requestDecay` worth inheriting.
-      const keep = Math.min(0.99, Math.max(0, decay ?? other.requestDecay));
-      const v = prev[ni] * keep;
-      if (v > best) best = v;
-    }
-    if (best <= REQUEST_FLOOR) continue;
-    if (best > list[i].request) list[i].request = best;
-  }
-}
-
-/**
  * Relax the need field to its fixpoint, inside this frame.
  *
  * The reach-0 path, and the pond's default. Queue-driven, so it costs one
@@ -1981,39 +1805,6 @@ export function relaxRequestsFast(
       q[tail++] = ni;
     }
   }
-}
-
-/** Object twin of `relaxRequestsFast` — see `harvestSlotsFast`'s note. */
-export function relaxRequests(list: SlotBody[], adj: WireAdjacency, decay?: number): void {
-  const { off, nei } = adj;
-  const q = adj.queue(list.length);
-  let head = 0;
-  let tail = 0;
-  for (let i = 0; i < list.length; i++) {
-    if (list[i].request > REQUEST_FLOOR) q[tail++] = i;
-  }
-  while (head < tail) {
-    const at = q[head++];
-    const body = list[at];
-    const keep = Math.min(0.99, Math.max(0, decay ?? body.requestDecay));
-    const next = body.request * keep;
-    if (next <= REQUEST_FLOOR) continue;
-    for (let k = off[at]; k < off[at + 1]; k++) {
-      const ni = nei[k];
-      const n = list[ni];
-      if (!n || n.request >= next) continue;
-      n.request = next;
-      if (tail >= q.length) return;
-      q[tail++] = ni;
-    }
-  }
-}
-
-/** Last frame's field, for `spreadRequests` to step off. */
-export function snapshotRequests(list: SlotBody[], into: number[]): number[] {
-  into.length = list.length;
-  for (let i = 0; i < list.length; i++) into[i] = list[i].request;
-  return into;
 }
 
 /** Store-based twin of `spreadRequests` — see `harvestSlotsFast`'s note. */
@@ -2125,81 +1916,6 @@ function deliver(
     grid.addAt(x, y, spill);
   }
   return room > 0 ? toCap : toExtra;
-}
-
-export function flowCharges(
-  list: SlotBody[],
-  adj: WireAdjacency,
-  onMoved?: (from: SlotBody, to: SlotBody, amount: number) => void,
-  opts: FlowOptions = {},
-): number {
-  const forced = opts.quantum;
-  const quantumOf = (a: SlotBody): number => {
-    const q = forced !== undefined ? forced : a.transportQuantum;
-    return q > 0 ? q : 0;
-  };
-  const { off, nei } = adj;
-  const donors: number[] = [];
-  for (let i = 0; i < list.length; i++) {
-    const a = list[i];
-    if (a.locked) continue;
-    // A donor must hold a whole packet before it can send one. At quantum 0
-    // that floor is FLOW_EPS, which is the continuous law exactly.
-    const spare = spareEnergy(a);
-    const q = quantumOf(a);
-    if (spare > FLOW_EPS && spare >= (q > 0 ? q : FLOW_EPS)) donors.push(i);
-  }
-  // Neediest donor first, so a body that is itself being fed passes on what it
-  // does not need in the same frame rather than sitting on it.
-  donors.sort((p, q) => list[q].request - list[p].request || list[p].id - list[q].id);
-  const taken = new Set<number>();
-  let moved = 0;
-  for (const di of donors) {
-    const d = list[di];
-    let best: SlotBody | null = null;
-    let bestSlot = -1;
-    let bestR = d.request;
-    for (let k = off[di]; k < off[di + 1]; k++) {
-      const ni = nei[k];
-      if (taken.has(ni)) continue;
-      const n = list[ni];
-      if (!n || n.locked) continue;
-      if (n.request > bestR) {
-        best = n;
-        bestSlot = ni;
-        bestR = n.request;
-      }
-    }
-    if (!best) continue;
-    // Capped by the recipient's *field* value, not its own need. The field is
-    // how much unmet need is visible from there, so a conduit that needs
-    // nothing itself still accepts the attenuated demand behind it and the
-    // relay works. Capping by local need instead would strand every shortage
-    // more than one wire from a donor; capping by nothing at all would send
-    // the whole surplus, flip which of the two is the needy one, and leave a
-    // wired pair swapping the same unit back and forth every frame.
-    //
-    // Because the field decays per hop, a distant shortage is fed in smaller
-    // increments than a near one. That is the intended shape: demand you can
-    // barely see moves less energy than demand next door.
-    let give: number;
-    const quantum = quantumOf(d);
-    if (quantum > 0) {
-      // Whole packet or nothing, and the donor list already guaranteed it has
-      // one. Neither the receiver's demand nor its room bounds this any more:
-      // demand decided *whether* to send, and the overflow has somewhere to go.
-      give = quantum;
-    } else {
-      give = Math.min(spareEnergy(d), best.request, best.energyCap - best.extra);
-      if (give <= FLOW_EPS) continue;
-    }
-    d.extra -= give;
-    best.extra = deliver(give, best.energyCap, best.extra, best.x, best.y, opts.grid);
-    taken.add(bestSlot);
-    moved += give;
-    onMoved?.(d, best, give);
-  }
-  return moved;
 }
 
 /*

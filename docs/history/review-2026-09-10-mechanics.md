@@ -1,3 +1,5 @@
+> **Not maintained.** A dated record of what was argued and measured at the time. The code and `docs/concepts.md` are the source of truth; where this disagrees with them, this is the one that is stale.
+
 # Review: metabolism, locomotion, learning
 
 2026-09-10, revised the same day after vetting. A reading of three mechanics

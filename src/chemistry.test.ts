@@ -9,7 +9,7 @@ import { Sim } from './sim.ts';
 import { channelTotal, pondMatter } from './test-params.ts';
 
 /*
- * The body reaction table. `docs/energy-chemistry-plan.md` §3.
+ * The body reaction table. `docs/history/energy-chemistry-plan.md` §3.
  *
  * Two properties carry the whole design and both are testable directly. The
  * simplex is what makes expression a *budget* — a body cannot both shout and

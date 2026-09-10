@@ -97,7 +97,7 @@ export interface Diversity {
   /** The same with founder lines as the groups, which is drift's own signature. */
   lineFst: number | null;
   /**
-   * Commutes per latch — `docs/energy-chemistry-plan.md` §8's tripwire on
+   * Commutes per latch — `docs/history/energy-chemistry-plan.md` §8's tripwire on
    * whether nets are doing internal work or merely re-acquiring structure.
    */
   commutesPerLatch: number | null;

@@ -1,3 +1,5 @@
+> **Not maintained.** A dated record of what was argued and measured at the time. The code and `docs/concepts.md` are the source of truth; where this disagrees with them, this is the one that is stale.
+
 # Plan: chemistry, and what makes energy usable
 
 Agreed 2026-09-08 with the author, after reading `energy.ts`, `fields.ts`,

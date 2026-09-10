@@ -5,7 +5,7 @@ import type { Sim } from '../sim.ts';
  * How the ground is laid out at the start of a run.
  *
  * `loadPreset` seeds it one way: `cellCap` in every cell of the disk, which is
- * uniform, stationary, and the thing `docs/energy-chemistry-plan.md` §0 calls
+ * uniform, stationary, and the thing `docs/history/energy-chemistry-plan.md` §0 calls
  * a puddle. Measured, a 500-body pond dents an *ungrowing* dish by five per
  * cent in a simulated minute and never bares a cell — so there is nothing to
  * contest and nowhere worth going, and every sweep so far has been run in that

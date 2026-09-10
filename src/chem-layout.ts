@@ -171,7 +171,7 @@ export const L_BASE = L_OUT + 2 * STATE_DIMS;
 
 /**
  * The body reaction table's rows: `excrete_c` and `uptake_c` for each of the
- * four species. See `docs/energy-chemistry-plan.md` §3.
+ * four species. See `docs/history/energy-chemistry-plan.md` §3.
  *
  * Eight, not four. The plan's own arithmetic says "4 + 4 * STATE_DIMS = 20
  * floats" while its table lists eight rows and its prose says the simplex is

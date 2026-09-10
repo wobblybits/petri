@@ -12,7 +12,7 @@ import { CHEM_LEN } from './agents.ts';
  * Weights that change while a body is alive.
  *
  * The rule is three-factor Hebbian gated by a temporal-difference error from
- * the body's own critic; see `docs/plasticity-plan.md`. What these check is
+ * the body's own critic; see `docs/history/plasticity-plan.md`. What these check is
  * not that the arithmetic is some particular arithmetic, but the four
  * properties the design actually rests on: that it is off when it is off,
  * that the teacher is the tank and nothing else, that nothing ever fades,

@@ -97,7 +97,7 @@ handful a frame is all the simulation needs. Everything else in
 which is zero. A harvest therefore calls `Sim.syncLearningToHost()` first,
 which drains the whole table through `GenomeGpu.drainLearn`. Without it every
 stored net would record a genome and no learned matrices — the database
-quietly wrong rather than loudly empty. `docs/plasticity-plan.md` phase 5
+quietly wrong rather than loudly empty. `docs/history/plasticity-plan.md` phase 5
 calls for this reader; the headless harvest is its first user.
 
 **The ground.** `fields.data` is a stale copy on the GPU path, and
@@ -424,7 +424,7 @@ direction reads exactly like a pond splitting in two.
 | `varianceDrifted`, `varianceSeeded` | standing genetic variance, split by where in the genome it sits |
 | **`netFst`** | **the divergence number.** Share of genetic variance lying *between* nets rather than within — Wright's F_ST in its quantitative form. Near zero, every net is a random draw from one pond-wide gene pool and the wire graph structures nothing. Rising, nets are becoming distinguishable. |
 | `lineFst` | the same with founder lines as the groups, which is drift's own signature |
-| `commutesPerLatch` | `docs/energy-chemistry-plan.md` §8's tripwire |
+| `commutesPerLatch` | `docs/history/energy-chemistry-plan.md` §8's tripwire |
 
 `netFst` is **null**, not zero, when there is nothing to compare — fewer than
 two nets, or no variance at all. Zero would read as a finding where there is
@@ -436,7 +436,7 @@ and one constant genome per net must saturate.
 
 ## The chemistry dials
 
-`docs/energy-chemistry-plan.md` phases 0 to 4 are in, and every one of them
+`docs/history/energy-chemistry-plan.md` phases 0 to 4 are in, and every one of them
 ships at the value that reproduces the pond before it. Turning them on is a
 sweep, not a default.
 

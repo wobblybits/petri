@@ -1,109 +1,15 @@
-import {
-  boundRadius,
-  discRadius,
-  createAgent,
-  ERA_RADIUS,
-  inSnapArc,
-  momentOfInertia,
-  momentOfInertiaAt,
-  poseHeld,
-  poseHeldAt,
-  syncHeadingCosSin,
-  ERA_SLOTS,
-  NODE_SLOTS,
-  portWorld,
-  portWorldInto,
-  stemRoot,
-  stemOffset,
-  B_STATE,
-  CHEM_LEN,
-  CHEM_SPECIES,
-  ROW_COUNT,
-  ROW_EXCRETE,
-  ROW_UPTAKE,
-  F_BASE,
-  F_OUT,
-  GAIT_ANCHOR_MAX,
-  G_BASE,
-  G_OUT,
-  HEAD_SCALE,
-  L_BASE,
-  L_OUT,
-  P_BASE,
-  P_OUT,
-  PLASTIC_LEN,
-  CRITIC_LEN,
-  LEARN_CRITIC,
-  LEARN_PREV_V,
-  LEARN_TRACE,
-  IN_BOUND,
-  IN_DEMAND,
-  IN_DIMS,
-  IN_FULL,
-  IN_SENSE,
-  STATE_DIMS,
-  W_IN,
-  W_NET,
-  W_SELF,
-  emitVector,
-  expressVector,
-  tasteVector,
-  effTaste,
-  flockGain,
-  stemOffsetInto,
-  stemWorld,
-  stemWorldInto,
-  type Agent,
-  type AgentKind,
-  type PortSlot,
-} from './agents.ts';
+import { boundRadius, discRadius, createAgent, ERA_RADIUS, inSnapArc, momentOfInertia, momentOfInertiaAt, poseHeld, poseHeldAt, syncHeadingCosSin, ERA_SLOTS, NODE_SLOTS, portWorld, portWorldInto, stemRoot, stemOffset, CHEM_LEN, CHEM_SPECIES, PLASTIC_LEN, CRITIC_LEN, LEARN_CRITIC, LEARN_PREV_V, LEARN_TRACE, STATE_DIMS, effTaste, flockGain, stemOffsetInto, stemWorld, stemWorldInto, type Agent, type AgentKind, type PortSlot } from './agents.ts';
 import { AgentStore, CODE_KIND } from './agent-store.ts';
 import { queryHit, queryDiscHit, SLOP, type Hit } from './collide.ts';
 import { closestTOnSegment, WIRE_RADIUS, wireBowBudget, bounceOffDisk } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
-import { DIGEST_ORDER, CH, CHANNELS, FERTILISE_CH, FIELD_CELL, FIELD_CELLS, Fields, worldBoundRadius } from './fields.ts';
+import { CH, CHANNELS, FERTILISE_CH, FIELD_CELL, FIELD_CELLS, Fields, worldBoundRadius } from './fields.ts';
 import { Graph, ropeIsLive, wrapPos, type Wire } from './graph.ts';
 import { LarvalWindow } from './larval.ts';
 import type { Params } from './params.ts';
-import {
-  advanceRewrite,
-  beginRewrite,
-  commitRewrite,
-  detectRule,
-  PULL_END,
-  rewriteHandoffStems,
-  CHEM_TASTE_MAX,
-  TRAIT_KEYS,
-  type Rewrite,
-} from './rewrite.ts';
-import {
-  EXTRA_FULL_EPS,
-  agentValue,
-  BODY_VALUE,
-  deathYield,
-  EnergyGrid,
-  flowChargesFast,
-  harvestSlotsFast,
-  HarvestPlan,
-  payToward,
-  rescueNeed,
-  redexNeed,
-  rewriteCost,
-  rewriteShareOf,
-  PENDING_STRIDE,
-  HARVEST_GOT,
-  HARVEST_STRIDE,
-  rewriteYield,
-  seedRequest,
-  settlePool,
-  stakeMet,
-  relaxRequestsFast,
-  spreadRequestsFast,
-  tickUpkeepFast,
-  WireAdjacency,
-  payOut,
-} from './energy.ts';
+import { advanceRewrite, beginRewrite, commitRewrite, detectRule, PULL_END, rewriteHandoffStems, CHEM_TASTE_MAX, TRAIT_KEYS, type Rewrite } from './rewrite.ts';
+import { agentValue, BODY_VALUE, deathYield, EnergyGrid, flowChargesFast, harvestSlotsFast, HarvestPlan, payToward, rescueNeed, redexNeed, rewriteCost, rewriteShareOf, PENDING_STRIDE, HARVEST_GOT, HARVEST_STRIDE, rewriteYield, seedRequest, settlePool, stakeMet, relaxRequestsFast, spreadRequestsFast, tickUpkeepFast, WireAdjacency } from './energy.ts';
 import { audio } from './audio/engine.ts';
 import type { CollisionEvent, LiveContact, PanView, RewriteEvent } from './audio/types.ts';
 import { AGENT_BAND, LOD_FAR, LodSelector, agentKey, apparentPx, onScreen, wiresDrawable } from './audio/lod.ts';
@@ -111,23 +17,11 @@ import { farGpu } from './gpu/far-gpu.ts';
 import { fieldGpu } from './gpu/field-gpu.ts';
 import { genomeGpu } from './gpu/genome-gpu.ts';
 import { FAR, FAR_STRIDE, packFarWire } from './gpu/far-kernel.ts';
-import {
-  KIND_CON,
-  KIND_DUP,
-  KIND_ERA,
-  nativeSolver,
-  ND,
-  NODE_STRIDE,
-  HIT,
-  HIT_STRIDE,
-  WF_FULL,
-  WF_HOLD,
-  WF_SHAPE,
-  WF_SKIP,
-  WIRE_NEAR_STRIDE,
-  WN,
-} from './native/solver.ts';
+import { KIND_CON, KIND_DUP, KIND_ERA, nativeSolver, ND, NODE_STRIDE, HIT, HIT_STRIDE, WF_FULL, WF_HOLD, WF_SHAPE, WF_SKIP, WIRE_NEAR_STRIDE, WN } from './native/solver.ts';
 import { angleDelta, clamp, wrapAngle, wrapDeltaVec } from './wrap.ts';
+import { updateState } from './state.ts';
+import { refreshExpression, runDigestion, runExcretion, scentMints } from './body-chemistry.ts';
+import { advanceMetabolism, dampVelocities } from './metabolism.ts';
 
 /** Attraction-only chemotaxis. Own principal trails are a different channel and are ignored. */
 /**
@@ -230,17 +124,6 @@ type RedexEscrow = {
   x: number;
   y: number;
 };
-
-/** Most either metabolite may pile up to. A pathway is not a warehouse. */
-const REACT_CAP = 12;
-/**
- * Largest reaction step taken at once. The pathway is stiff where its
- * activator spikes, and explicit Euler past about this rings at the step
- * frequency instead of oscillating — so `advanceGait` splits a frame into as
- * many of these as it needs, which makes the amplitude the same at every
- * `metabolicRate` and the period exactly proportional to it.
- */
-const REACT_H = 0.04;
 
 /**
  * The Hill coefficient as both field paths use it: plain Monod for anything
@@ -453,10 +336,6 @@ export class Sim {
    * in whatever order the roster happens to be in.
    */
   private requestPrev = new Float64Array(0);
-
-  /** Scratch for one diffusion step: the pull on each body, and its degree. */
-  private gaitPull = new Float64Array(0);
-  private gaitDegree = new Float64Array(0);
 
   /** Per-agent unmet need this frame, rebuilt by `pulseRequests`. */
   private readonly wireAdj = new WireAdjacency();
@@ -1022,8 +901,8 @@ export class Sim {
     this.syncForces();
     Sim.phase('syncForces');
     this.applyRadiationLoss();
-    this.advanceGait(params, t);
-    this.dampVelocities(params, t);
+    advanceMetabolism(this, params, t);
+    dampVelocities(this, params, t);
     Sim.phase('damp');
 
     this.graph.refreshLengths(this.agents, this.w, this.h, this.rewriteFrozen, this.wireDetailed);
@@ -1098,9 +977,9 @@ export class Sim {
      * with mass action in place of a flat rate. One production path rather
      * than three.
      */
-    this.refreshExpression(params, t);
-    this.runDigestion(params, t);
-    this.runExcretion(params, t);
+    this.expressed = refreshExpression(this, params, t);
+    this.gutLive = runDigestion(this, params, t, this.gutLive);
+    runExcretion(this, params, t);
     Sim.phase('excrete');
     for (const id of tickUpkeepFast(this.agents.values(), this.agentStore, t, params.upkeep, this.energy, {
       rentBack: params.upkeepExcrete,
@@ -1133,7 +1012,7 @@ export class Sim {
      */
     this.tuneChannels(params);
     if (!this.fieldOnGpu) {
-      if (this.scentMints(params) && !this.scentWriteNative(params)) this.deposit(params);
+      if (scentMints(params) && !this.scentWriteNative(params)) this.deposit(params);
       Sim.phase('scentWrite');
       this.fields.diffuse(params.diffuse);
       Sim.phase('field:diffuse1');
@@ -3041,7 +2920,7 @@ export class Sim {
     // The minted voice, or nothing at all: under the reaction table a body's
     // output leaves its tank through `runExcretion` and the conserving deposit
     // instead. See `scentMints`.
-    const mints = this.scentMints(params);
+    const mints = scentMints(params);
     for (let i = 0; mints && i < n; i++) {
       const a = list[i];
       if (a.locked) continue;
@@ -3497,7 +3376,7 @@ export class Sim {
    * is fresh only for rewrite parents — `syncLearn` reads back a handful a
    * frame because a handful a frame is all the simulation needs. Anything
    * that *measures* what the pond has learned has to ask for the rest, and
-   * `docs/plasticity-plan.md` phase 5 says so in as many words.
+   * `docs/history/plasticity-plan.md` phase 5 says so in as many words.
    *
    * This is that ask. The headless harvest calls it before storing a net,
    * because `plasticAll` and `criticAll` are two of the things a stored net
@@ -4000,264 +3879,6 @@ export class Sim {
       const scale = mag > speed * 0.25 ? (speed * 0.25) / Math.max(1e-9, mag) : 1;
       agent.vx += dvx * scale;
       agent.vy += dvy * scale;
-    }
-  }
-
-  /** Rate steps the drag table divides itself into. See `dampVelocities`. */
-  private static readonly GRIP_STEPS = 256;
-
-  /** Per-frame `exp(-rate * dt)` by total rate, rebuilt only when it varies. */
-  private readonly gripKeep = new Float64Array(Sim.GRIP_STEPS + 1);
-
-  /**
-   * One step of the body's metabolism, and what this frame's stroke comes to.
-   *
-   * Three reactions over two pools, and an adenylate pool that is conserved:
-   *
-   *     supply   extra   -> sub        rate  metabolicSupply * (1 - charge),
-   *                                        priced at metabolicCost a unit
-   *     burn     sub, ATP -> ADP       rate  sub * (base + adp^2)
-   *     regen    ADP     -> ATP        rate  metabolicRegen * adp
-   *     work     ATP     -> ADP        rate  metabolicWork * swell * |wave|
-   *
-   * `atp + adp` is the body's `adenylate`, and nothing here changes it — the
-   * pool is currency and can only be cycled, never minted. What *is* spent is
-   * `extra`, bought as substrate, and `supply` is where this pathway joins
-   * the economy rather than shadowing it.
-   *
-   * The regulation is the real one. A cell does not pull harder on its fuel
-   * because it is holding a lot; it pulls harder because it is *discharged*.
-   * So supply runs on `1 - charge`, which means a net that is working draws
-   * its tank down, a drawn-down tank is what `spreadRequests` carries, and
-   * `flowCharges` answers it from wherever the net has surplus. Two wired
-   * bodies are coupled through that whether or not `metabolicDiffuse` is set.
-   *
-   * `burn` is the autocatalysis, and it is the same one glycolysis uses:
-   * phosphofructokinase is activated by the ADP it produces, so a discharged
-   * body burns faster, discharges further, and burns faster still — until the
-   * substrate runs out and `regen` catches up. That is the oscillation, and
-   * it is a *consequence* of the regulation rather than a clock beside it.
-   *
-   * `base` is not decoration. Without it the burn is `sub * adp^2`, which is
-   * zero at full charge, so a body that ever tops up stops metabolising for
-   * good — zero is absorbing. That is exactly why Selkov's own equations
-   * flatlined here at every fullness. Real phosphofructokinase turns over
-   * without ADP too; the activation is a multiplier on an enzyme that is
-   * already running.
-   *
-   * What leaves the tank lands on the ground, through the same `excreteRate`
-   * path `tickUpkeepFast` already uses for rent. So a body that metabolises
-   * hard fertilises the cell it stands in, nothing is destroyed, and the
-   * conservation the economy is checked against still holds.
-   *
-   * The wave is `(atp - adp) / adenylate`, which is the adenylate energy
-   * charge mapped to [-1, 1]: +1 fully charged, -1 fully spent, 0 half. No
-   * arbitrary normalisation, and a body whose pathway has stalled sits at
-   * whatever charge it stalled at and does not stroke.
-   */
-  private advanceGait(params: Params, dt: number): void {
-    const store = this.agentStore;
-    const SUB = store.sub;
-    const ATP = store.atp;
-    const POOL = store.adenylate;
-    const WAVE = store.gaitWave;
-    const GA = store.gaitAnchor;
-    const ANCHOR = store.anchor;
-    const EXTRA = store.extra;
-    const rate = params.metabolicRate;
-    if (!(rate > 0)) {
-      for (const agent of this.agents.values()) {
-        ANCHOR[agent.slot] = 0;
-        WAVE[agent.slot] = 0;
-      }
-      return;
-    }
-
-    const supply = params.metabolicSupply;
-    const base = params.metabolicBase;
-    const regen = params.metabolicRegen;
-    const workRate = params.metabolicWork * params.gaitSwell;
-    const price = params.metabolicCost;
-    /*
-     * `upkeepExcrete`, and not `excreteRate`, which is what this read for four
-     * commits and is the whole of why `energy.test.ts`'s pond conservation
-     * broke: the spend below is rent by another name, and rent's dial is
-     * `upkeepExcrete`. `excreteRate` is the reaction table's, a rate in its
-     * own units rather than a fraction — so at its default of zero the
-     * pathway's spend was destroyed, and above one it would have minted.
-     */
-    const back = params.upkeepExcrete;
-    const grid = this.energy;
-    const h = rate * dt;
-    const sub = Math.max(1, Math.ceil(h / REACT_H));
-    const hs = h / sub;
-
-    for (const agent of this.agents.values()) {
-      const s = agent.slot;
-      const pool = POOL[s];
-      if (!(pool > 0)) {
-        WAVE[s] = 0;
-        ANCHOR[s] = 0;
-        continue;
-      }
-      let a = ATP[s];
-      let m = SUB[s];
-      let spent = 0;
-      for (let k = 0; k < sub; k++) {
-        const d = pool - a;
-        const charge = a / pool;
-        // Bought, not conjured: a body with an empty tank cannot buy
-        // substrate and its pathway winds down.
-        // Priced, not free, and bounded by what the tank can actually pay for
-        // — a body with nothing left buys nothing and its pathway winds down.
-        const want = supply * (1 - charge) * hs;
-        const have = EXTRA[s] - spent;
-        const afford = price > 0 ? have / price : want;
-        const buy = want <= 0 || afford <= 0 ? 0 : want > afford ? afford : want;
-        spent += buy * price;
-        const burn = m * (base + d * d);
-        const back = regen * d;
-        const work = workRate * (a >= d ? a - d : d - a) / pool;
-        m = m + buy - burn * hs;
-        a = a + (back - burn - work) * hs;
-        if (m < 0) m = 0;
-        else if (m > REACT_CAP) m = REACT_CAP;
-        if (a < 0) a = 0;
-        else if (a > pool) a = pool;
-      }
-      SUB[s] = m;
-      ATP[s] = a;
-      if (spent > 0) {
-        EXTRA[s] -= spent;
-        // The same road out as rent, and the same mix: what left the tank
-        // lands on the dish as whatever this body makes, so metabolising is
-        // fertilising and the pond's total is unchanged. This pass runs before
-        // `refreshExpression`, so the rows are last frame's — one frame stale,
-        // which is what the harvest plan lives with too.
-        if (back > 0) payOut(grid, store.expressAll, s, store.x[s], store.y[s], spent * back);
-      }
-      const w = (2 * a - pool) / pool;
-      WAVE[s] = w;
-      ANCHOR[s] = GA[s] * w;
-    }
-
-    const spread = params.metabolicDiffuse;
-    if (spread > 0) {
-      if (this.gaitPull.length < store.capacity) {
-        this.gaitPull = new Float64Array(store.capacity);
-        this.gaitDegree = new Float64Array(store.capacity);
-      }
-      const pull = this.gaitPull;
-      const count = this.gaitDegree;
-      for (const agent of this.agents.values()) {
-        pull[agent.slot] = 0;
-        count[agent.slot] = 0;
-      }
-      // Accumulated before it is applied, so every wire sees the same field
-      // and the answer does not depend on the order the wire map is in.
-      for (const wire of this.graph.wires.values()) {
-        const A = this.agents.get(wire.a.id);
-        const B = this.agents.get(wire.b.id);
-        if (!A || !B) continue;
-        const d = SUB[B.slot] - SUB[A.slot];
-        pull[A.slot] += d;
-        pull[B.slot] -= d;
-        count[A.slot] += 1;
-        count[B.slot] += 1;
-      }
-      // Per wire, so a hub is not driven as many times as it has wires, and
-      // capped at a half so an explicit step cannot overshoot and ring.
-      const step = Math.min(0.5, spread * dt);
-      for (const agent of this.agents.values()) {
-        const s = agent.slot;
-        const n = count[s];
-        if (n <= 0) continue;
-        const next = SUB[s] + step * (pull[s] / n);
-        SUB[s] = next <= 0 ? 0 : next >= REACT_CAP ? REACT_CAP : next;
-      }
-    }
-  }
-
-  /**
-   * One drag law for bodies; the rope is damped inside the substep loop.
-   *
-   * A body's rate is `drag + grip * fullness + anchor`. `grip` makes it
-   * depend on the tank, which is what lets a net's internal pumping carry it
-   * anywhere — see the parameter, which has the argument and the arithmetic.
-   * `anchor` is this frame's point in the gait, and is what turns a standing
-   * asymmetry into a stroke; see `advanceGait`.
-   *
-   * The exponential is read off a table rather than taken per body.
-   * `Math.exp` is by an order of magnitude the most expensive thing in this
-   * loop and `dt` is the same for everyone, so 256 of them serve fifty
-   * thousand bodies. The table is over the *total rate* rather than over
-   * fullness, which it used to be: with a gait the rate is no longer a
-   * function of one bounded scalar, so there is nothing narrower to key on.
-   * 256 steps rather than 64 because the span is now several times wider and
-   * the resolution should not go backwards — at the shipping dials it is
-   * 0.057/s a step against 0.031 before.
-   *
-   * Interpolated rather than snapped: two bodies a hair apart in rate should
-   * stay a hair apart in drag, and a step function there would quietly sort
-   * the pond into 256 kinds. With `grip` and `gaitRate` both at 0 the loop
-   * below takes the flat path and never builds the table — a dial at its
-   * off value should cost nothing.
-   */
-  private dampVelocities(params: Params, dt: number): void {
-    const angKeep = Math.exp(-Math.max(0, params.angDrag) * dt);
-    const store = this.agentStore;
-    const LOCKED = store.locked;
-    const PINNED = store.pinned;
-    const VX = store.vx;
-    const VY = store.vy;
-    const OMEGA = store.omega;
-    const base = Math.max(0, params.drag);
-    const grip = params.grip;
-    const gait = params.metabolicRate > 0;
-    if (grip === 0 && !gait) {
-      const linKeep = Math.exp(-base * dt);
-      for (const agent of this.agents.values()) {
-        const s = agent.slot;
-        if (LOCKED[s] || PINNED[s]) continue;
-        VX[s] *= linKeep;
-        VY[s] *= linKeep;
-        OMEGA[s] *= angKeep;
-      }
-      return;
-    }
-    const steps = Sim.GRIP_STEPS;
-    const table = this.gripKeep;
-    // The ceiling the table spans. Both terms are bounded — `grip` by its
-    // slider and `anchor` by the head's own clamp — so this is the largest
-    // rate any body can ask for, and anything past it saturates rather than
-    // reading off the end.
-    const hi = base + Math.max(0, grip) + (gait ? GAIT_ANCHOR_MAX : 0);
-    const span = hi > 1e-9 ? hi : 1;
-    for (let i = 0; i <= steps; i++) {
-      // Built over a rate that is already non-negative: a negative total is
-      // clamped at the lookup instead, because `exp` of one silently
-      // amplifies rather than failing.
-      table[i] = Math.exp(-((span * i) / steps) * dt);
-    }
-    const EXTRA = store.extra;
-    const CAP = store.energyCap;
-    const ANCHOR = store.anchor;
-    for (const agent of this.agents.values()) {
-      const s = agent.slot;
-      if (LOCKED[s] || PINNED[s]) continue;
-      // The same clamp the genome's `IN_FULL` gets, so grip and the body's own
-      // sense of how full it is never disagree.
-      const cap = CAP[s];
-      const raw = cap > 0 ? EXTRA[s] / cap : 0;
-      const full = raw <= 0 ? 0 : raw >= 1 ? 1 : raw;
-      const rate = base + grip * full + ANCHOR[s];
-      const r = rate <= 0 ? 0 : rate >= span ? span : rate;
-      const u = (r / span) * steps;
-      const i = u < steps ? u | 0 : steps - 1;
-      const keep = table[i] + (table[i + 1] - table[i]) * (u - i);
-      VX[s] *= keep;
-      VY[s] *= keep;
-      OMEGA[s] *= angKeep;
     }
   }
 
@@ -5432,7 +5053,7 @@ export class Sim {
      * Commutes per latch, cumulative — the tripwire on whether polluting the
      * two principal channels is cheap.
      *
-     * `docs/energy-chemistry-plan.md` §8. Latching is proximity plus an arc
+     * `docs/history/energy-chemistry-plan.md` §8. Latching is proximity plus an arc
      * test and scent never gates it, and net reduction is confluent, so a net
      * is a fixed budget of evolutionary events spent down: scent cannot touch
      * that budget, only how nets acquire new structure. Well above 1 means
@@ -5660,487 +5281,18 @@ export class Sim {
       grid: this.energy,
     });
     Sim.phase('pulse:flow');
-    this.updateState(list, adj, params);
+    if (list.length > 0) {
+      if (this.genomeOnGpu) this.unpackGenome();
+      else {
+        updateState(
+          { agentStore: this.agentStore, fields: this.fields, fieldOnGpu: this.fieldOnGpu, groundScale: this.groundScale },
+          list,
+          adj,
+          params,
+        );
+      }
+    }
     Sim.phase('state');
-  }
-
-  /**
-   * One round of message passing: every body's `h` from its inputs, its own
-   * last value, and the mean of its wired neighbours'.
-   *
-   *     h <- phi( Wx.x + Wh.h + Wn.mean(h_j) + b )
-   *
-   * One round per frame, not a relaxation to convergence. The recurrence is
-   * across frames rather than within one, which is both cheaper and more
-   * expressive than iterating: state persists, so a body can integrate over
-   * time rather than recomputing itself from scratch. Information travels one
-   * wire-hop a frame, sixty hops a second, which crosses any net worth having.
-   *
-   * *Mean* of the neighbours, not sum. A sum scales with degree, so the same
-   * genome saturates `phi` at a hub and barely moves a leaf — behaviour
-   * differing by position for a reason that is not about position. `BOUND`
-   * already carries degree, bounded and on purpose.
-   *
-   * Read *after* `spreadRequests` and `flowCharges`, so `DEMAND` and `FULL` are
-   * this frame's. `sense` and `trail` are last frame's, written by the steer
-   * pass — a frame of latency in smell that steering has always had.
-   *
-   * `hPrev` because every body has to see the same generation of its
-   * neighbours. Updating in place would make the answer depend on iteration
-   * order, and the order is the roster, which changes whenever anything is
-   * born.
-   */
-  private hPrev = new Float64Array(0);
-  private readonly stateInput = new Float64Array(IN_DIMS);
-  private readonly stateMean = new Float64Array(STATE_DIMS);
-  /** `chem + plastic` over the state matrices, for a body that has learned. */
-  private readonly effWeights = new Float32Array(PLASTIC_LEN);
-  /** `phi'` per state dim, and the inputs each learned weight multiplies. */
-  private readonly learnPost = new Float64Array(STATE_DIMS);
-  private readonly learnPre = new Float64Array(IN_DIMS + 2 * STATE_DIMS);
-
-  private updateState(list: Agent[], adj: WireAdjacency, params: Params): void {
-    const n = list.length;
-    if (n === 0) return;
-    if (this.genomeOnGpu) {
-      // The shader does all of this, learning included — `genome.wgsl` carries
-      // the learned block against its own resident row, and this only unpacks
-      // what came back. The learning row stays there: `syncLearn` fetches the
-      // handful of parents a rewrite needs, and `syncLearningToHost` fetches
-      // the rest when something means to measure it.
-      this.unpackGenome();
-      return;
-    }
-    const store = this.agentStore;
-    const H = store.hAll;
-    const SENSE = store.senseAll;
-    /*
-     * Straight into `chemAll` with a slot offset, rather than through
-     * `Agent.chem`.
-     *
-     * That accessor hands back a `subarray` view per body, and this reads
-     * eighty weights out of it per body per frame. Through the view the pass
-     * cost 16.5 ms at 20k bodies — 825 ns a body for eighty multiplies, which
-     * is an order of magnitude off what the arithmetic is worth. It is the
-     * same finding the store conversions in this file's history keep making,
-     * and the same fix.
-     */
-    const CHEM = store.chemAll;
-    const S = STATE_DIMS;
-    if (this.hPrev.length < n * S) this.hPrev = new Float64Array(n * S);
-    const prev = this.hPrev;
-    const slotOf = this.slotBuf.length >= n ? this.slotBuf : (this.slotBuf = new Int32Array(n));
-    for (let i = 0; i < n; i++) {
-      const s = list[i].slot;
-      slotOf[i] = s;
-      const po = i * S;
-      const ho = s * S;
-      for (let d = 0; d < S; d++) prev[po + d] = H[ho + d];
-    }
-
-    const { off, nei } = adj;
-    const EXTRA = store.extra;
-    const CAP = store.energyCap;
-    const REQUEST = store.request;
-    const BOUND_OF = store.bound;
-    const X = store.x;
-    const Y = store.y;
-    const gScale = this.groundScale;
-    const sScale = 1 / params.senseScale;
-    const READS = store.readsField;
-    const x = this.stateInput;
-    const mean = this.stateMean;
-    const EMITS = store.emitAll;
-    const TASTES = store.tasteAll;
-    const CRUISE = store.cruise;
-    const TURN = store.turn;
-    const FA = store.flockAlign;
-    const FS = store.flockSep;
-    const TR = store.transportRecoil;
-    const GA = store.gaitAnchor;
-    const PLASTIC = store.plasticAll;
-    const TRACE = store.traceAll;
-    const CRITIC = store.criticAll;
-    const PREV_V = store.prevValue;
-    const PLASTIC_ON = store.plasticOn;
-    const post = this.learnPost;
-    const pre = this.learnPre;
-    const learn = params.learnRate > 0;
-    const etaM = params.learnRate;
-    const etaC = params.learnCritic;
-    const lam = params.learnTrace;
-    const discount = params.learnDiscount;
-    const MAXW = CHEM_TASTE_MAX;
-    for (let i = 0; i < n; i++) {
-      const slot = slotOf[i];
-      const g = slot * CHEM_LEN;
-
-      /*
-       * Sampling is skipped entirely unless this genome reads the field. A
-       * bilinear sample is four scattered reads into a sixteen-megabyte array
-       * that will not be in cache, once a body, for a value nearly every
-       * genome multiplies by zero — `Wx`'s sense columns seed to zero, because
-       * the one seeded pathway runs through `IN_DEMAND`. The inputs are zeroed
-       * rather than left reading a stale `SENSE`, so behaviour never depends
-       * on when a body last happened to sample.
-       */
-      if (READS[slot]) {
-        const so = slot * 4;
-        /*
-         * On the GPU path `gpuFieldStep` filled these at the end of last
-         * frame, already scaled, straight out of the buffer that holds the
-         * live field; `fields.data` is a stale copy there and sampling it
-         * reads garbage. Here the sample is taken and scaled at the write,
-         * so the store holds the same thing on both paths.
-         *
-         * Both scales bring an input onto the range the other four already
-         * occupy. The ground is a quantity per cell, so a full cell reads one;
-         * the signal channels are accumulated deposits, so a strong local
-         * reading reads about one. Without the second, a sense gene had seven
-         * times the mutation leverage of every other input gene and `phi` was
-         * pinned across all but about 7% of its legal range.
-         */
-        if (!this.fieldOnGpu) {
-          this.fields.sampleAll(X[slot], Y[slot], SENSE, so);
-          SENSE[so] *= sScale;
-          SENSE[so + 1] *= sScale;
-          SENSE[so + 3] *= sScale;
-          SENSE[so + CH.energy] *= gScale;
-        }
-        x[IN_SENSE] = SENSE[so];
-        x[IN_SENSE + 1] = SENSE[so + 1];
-        x[IN_SENSE + 2] = SENSE[so + 2];
-        x[IN_SENSE + 3] = SENSE[so + 3];
-      } else {
-        x[IN_SENSE] = 0;
-        x[IN_SENSE + 1] = 0;
-        x[IN_SENSE + 2] = 0;
-        x[IN_SENSE + 3] = 0;
-      }
-      const cap = CAP[slot];
-      const full = cap > 0 ? EXTRA[slot] / cap : 0;
-      x[IN_FULL] = full <= 0 ? 0 : full >= 1 ? 1 : full;
-      x[IN_BOUND] = BOUND_OF[slot];
-      const r = REQUEST[slot];
-      x[IN_DEMAND] = r <= 0 ? 0 : r >= 1 ? 1 : r;
-
-      /*
-       * The neighbour mean is a property of the body, not of the dimension
-       * being computed, so it is gathered once rather than inside the `d`
-       * loop. The obvious way round cost four times as much, because each of
-       * the four output dimensions re-walked the whole adjacency.
-       */
-      const lo = off[i];
-      const hi = off[i + 1];
-      const deg = hi - lo;
-      if (deg > 0) {
-        for (let k = 0; k < S; k++) mean[k] = 0;
-        for (let e = lo; e < hi; e++) {
-          const base = nei[e] * S;
-          for (let k = 0; k < S; k++) mean[k] += prev[base + k];
-        }
-        for (let k = 0; k < S; k++) mean[k] /= deg;
-      }
-
-      /*
-       * Unrolled over the four state dimensions and the fifteen weights each
-       * reads. `STATE_DIMS` and `IN_DIMS` are compile-time constants, and the
-       * loop overhead around sixty multiply-adds is most of what this pass
-       * costs — the same finding, and the same fix, as the channel loop in
-       * `Fields.diffuse`.
-       *
-       * A neighbour mean of zero when there are no neighbours rather than a
-       * branch inside the arithmetic: `Wn` times nothing is nothing, and the
-       * branch was per dimension.
-       */
-      const po = i * S;
-      const ho = slot * S;
-      const p0 = prev[po];
-      const p1 = prev[po + 1];
-      const p2 = prev[po + 2];
-      const p3 = prev[po + 3];
-      const m0 = deg > 0 ? mean[0] : 0;
-      const m1 = deg > 0 ? mean[1] : 0;
-      const m2 = deg > 0 ? mean[2] : 0;
-      const m3 = deg > 0 ? mean[3] : 0;
-      const x0 = x[0];
-      const x1 = x[1];
-      const x2 = x[2];
-      const x3 = x[3];
-      const x4 = x[4];
-      const x5 = x[5];
-      const x6 = x[6];
-      /*
-       * The state matrices as this body actually has them: its genome plus
-       * whatever it has learned since it was born. `plasticOn` is monotone —
-       * learned weights never decay, so a body that has learned anything has
-       * learned it for good — which keeps the sum off the path of a pond
-       * where nothing has.
-       */
-      let W = CHEM;
-      let wo = g + W_IN;
-      if (PLASTIC_ON[slot]) {
-        const plo = slot * PLASTIC_LEN;
-        const eff = this.effWeights;
-        for (let k = 0; k < PLASTIC_LEN; k++) eff[k] = CHEM[wo + k] + PLASTIC[plo + k];
-        W = eff;
-        wo = 0;
-      }
-      const gi = wo;
-      const gs = wo + W_SELF - W_IN;
-      const gn = wo + W_NET - W_IN;
-      const gb = wo + B_STATE - W_IN;
-      let v0 = 0;
-      let v1 = 0;
-      let v2 = 0;
-      let v3 = 0;
-      {
-        const wi = gi + 0;
-        const ws = gs + 0;
-        const wn = gn + 0;
-        const v =
-          W[gb + 0] +
-          W[wi] * x0 + W[wi + 1] * x1 + W[wi + 2] * x2 + W[wi + 3] * x3 +
-          W[wi + 4] * x4 + W[wi + 5] * x5 + W[wi + 6] * x6 +
-          W[ws] * p0 + W[ws + 1] * p1 + W[ws + 2] * p2 + W[ws + 3] * p3 +
-          W[wn] * m0 + W[wn + 1] * m1 + W[wn + 2] * m2 + W[wn + 3] * m3;
-        v0 = v;
-        H[ho + 0] = v / (1 + (v < 0 ? -v : v));
-      }
-      {
-        const wi = gi + 7;
-        const ws = gs + 4;
-        const wn = gn + 4;
-        const v =
-          W[gb + 1] +
-          W[wi] * x0 + W[wi + 1] * x1 + W[wi + 2] * x2 + W[wi + 3] * x3 +
-          W[wi + 4] * x4 + W[wi + 5] * x5 + W[wi + 6] * x6 +
-          W[ws] * p0 + W[ws + 1] * p1 + W[ws + 2] * p2 + W[ws + 3] * p3 +
-          W[wn] * m0 + W[wn + 1] * m1 + W[wn + 2] * m2 + W[wn + 3] * m3;
-        v1 = v;
-        H[ho + 1] = v / (1 + (v < 0 ? -v : v));
-      }
-      {
-        const wi = gi + 14;
-        const ws = gs + 8;
-        const wn = gn + 8;
-        const v =
-          W[gb + 2] +
-          W[wi] * x0 + W[wi + 1] * x1 + W[wi + 2] * x2 + W[wi + 3] * x3 +
-          W[wi + 4] * x4 + W[wi + 5] * x5 + W[wi + 6] * x6 +
-          W[ws] * p0 + W[ws + 1] * p1 + W[ws + 2] * p2 + W[ws + 3] * p3 +
-          W[wn] * m0 + W[wn + 1] * m1 + W[wn + 2] * m2 + W[wn + 3] * m3;
-        v2 = v;
-        H[ho + 2] = v / (1 + (v < 0 ? -v : v));
-      }
-      {
-        const wi = gi + 21;
-        const ws = gs + 12;
-        const wn = gn + 12;
-        const v =
-          W[gb + 3] +
-          W[wi] * x0 + W[wi + 1] * x1 + W[wi + 2] * x2 + W[wi + 3] * x3 +
-          W[wi + 4] * x4 + W[wi + 5] * x5 + W[wi + 6] * x6 +
-          W[ws] * p0 + W[ws + 1] * p1 + W[ws + 2] * p2 + W[ws + 3] * p3 +
-          W[wn] * m0 + W[wn + 1] * m1 + W[wn + 2] * m2 + W[wn + 3] * m3;
-        v3 = v;
-        H[ho + 3] = v / (1 + (v < 0 ? -v : v));
-      }
-
-      /*
-       * The output heads, off this frame's state.
-       *
-       * Written into the same store fields the traits used to live in, so
-       * every consumer downstream — the native flock packing, the JS pair
-       * force, `recoil`, `state-hash` — reads what it always read and does not
-       * need to know these stopped being constants. What changed is that they
-       * are now a phenotype computed from `h` rather than a number a body
-       * carries for life, so a lineage can shoal while fed and scatter while
-       * starving instead of having to pick one.
-       *
-       * Clamped to the ranges the heritable versions were bred inside, because
-       * those bounds were about what the *forces* survive, not about what the
-       * genome was allowed to say. Alignment past its ceiling is negative
-       * damping; separation past its own has no equilibrium to settle at.
-       */
-      /*
-       * Emit and taste materialised here, once, instead of by each consumer.
-       *
-       * Both are pure functions of `h`, which was computed three lines up, and
-       * both were being rebuilt from the genome four times a body a frame —
-       * `effEmit` in the scent pass and `tasteOf` in steer, 13.8 ms between
-       * them at 20k. Emit is normalised on the way in, which is the only place
-       * all four channels are known at once and therefore the only place the
-       * unit budget can actually be enforced.
-       *
-       * One behaviour change worth naming: `taste` is now this frame's rather
-       * than last frame's. `updateState` runs in `endFrame`, so the scent pass
-       * already saw this frame's `h` while `steer` and `flock` ran in the next
-       * frame's `beginFrame` and saw the previous. That asymmetry between what
-       * a body says and what it listens for is gone, which is almost certainly
-       * an improvement and is definitely a change — it moves `state-hash`.
-       */
-      emitVector(CHEM, g, H, ho, EMITS, slot * 4);
-      tasteVector(CHEM, g, H, ho, TASTES, slot * 4);
-
-      CRUISE[slot] = clamp(headAt(CHEM, g, L_OUT, L_BASE, 0, H, ho, S) * HEAD_SCALE.cruise, 0, 180);
-      TURN[slot] = clamp(headAt(CHEM, g, L_OUT, L_BASE, 1, H, ho, S) * HEAD_SCALE.turn, 0, 8);
-      FA[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 0, H, ho, S) * HEAD_SCALE.align, -8, 16);
-      FS[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 1, H, ho, S) * HEAD_SCALE.sep, -60, 120);
-      TR[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 0, H, ho, S) * HEAD_SCALE.recoil, 0, 200);
-      // Signed both ways on purpose: a body that lets go where its neighbour
-      // holds walks the other way, and that is a lineage's to choose.
-      GA[slot] = clamp(headAt(CHEM, g, G_OUT, G_BASE, 0, H, ho, S) * HEAD_SCALE.anchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
-
-      /*
-       * What this body learns from the frame it has just had.
-       *
-       * Three factors, every one of them local to the body: an eligibility
-       * trace per weight saying what that weight was lately doing, `phi'`
-       * saying how much the state would have moved had the weight been
-       * different, and one scalar saying whether things went better than
-       * expected. The scalar is a temporal-difference error from the body's
-       * own critic, and it is the only part of this that is a gradient
-       * rather than a correlation — without it a Hebbian rule cannot tell a
-       * useful coincidence from any other, and everything that fires
-       * together grows together until it all saturates.
-       *
-       * The cost is the body's **own** tank: `x4` is `IN_FULL`, clamped to
-       * [0,1], so `x4 - 1` is zero when full and -1 when empty. Local, by
-       * decision. `x6` is the same shortfall relaxed over the wire graph and
-       * is the other candidate teacher — it would make the net's condition
-       * the thing a body learns about rather than its own — and swapping
-       * them is this one line, since both are already in `x`.
-       *
-       * Nothing here decays except the trace, which is a credit window and
-       * not a memory. A learned weight is the body's for life and travels
-       * with it into whatever net it latches into next; that carriage is the
-       * point of learning rather than only breeding.
-       */
-      if (learn) {
-        const plo = slot * PLASTIC_LEN;
-        const cro = slot * CRITIC_LEN;
-        const value =
-          CRITIC[cro] * H[ho] +
-          CRITIC[cro + 1] * H[ho + 1] +
-          CRITIC[cro + 2] * H[ho + 2] +
-          CRITIC[cro + 3] * H[ho + 3] +
-          CRITIC[cro + 4];
-        const dlt = x4 - 1 + discount * value - PREV_V[slot];
-        PREV_V[slot] = value;
-        /*
-         * The critic's own update is an ordinary delta rule. Its estimate a
-         * frame ago was a dot product with `h` a frame ago, so `h` a frame
-         * ago is the gradient, and `prev` still holds it.
-         */
-        const kc = etaC * dlt;
-        CRITIC[cro] += kc * p0;
-        CRITIC[cro + 1] += kc * p1;
-        CRITIC[cro + 2] += kc * p2;
-        CRITIC[cro + 3] += kc * p3;
-        CRITIC[cro + 4] += kc;
-
-        // phi'(v) = 1 / (1 + |v|)^2. A saturated dimension has almost none
-        // of it, which is what stops a pinned state dragging its inputs.
-        const q0 = 1 / (1 + (v0 < 0 ? -v0 : v0));
-        const q1 = 1 / (1 + (v1 < 0 ? -v1 : v1));
-        const q2 = 1 / (1 + (v2 < 0 ? -v2 : v2));
-        const q3 = 1 / (1 + (v3 < 0 ? -v3 : v3));
-        post[0] = q0 * q0;
-        post[1] = q1 * q1;
-        post[2] = q2 * q2;
-        post[3] = q3 * q3;
-        pre[0] = x0;
-        pre[1] = x1;
-        pre[2] = x2;
-        pre[3] = x3;
-        pre[4] = x4;
-        pre[5] = x5;
-        pre[6] = x6;
-        pre[7] = p0;
-        pre[8] = p1;
-        pre[9] = p2;
-        pre[10] = p3;
-        pre[11] = m0;
-        pre[12] = m1;
-        pre[13] = m2;
-        pre[14] = m3;
-        const step = etaM * dlt;
-        const gW = g + W_IN;
-        let touched = 0;
-        let at = 0;
-        /*
-         * `Wx`, then `Wh`, then `Wn`, then `b` — the order the genome lays
-         * them in, so one running index serves the trace, the learned delta
-         * and the gene it is added to. The clamp is against the sum, because
-         * what has to stay in range is the weight the state pass reads.
-         */
-        for (let d = 0; d < S; d++) {
-          const pd = post[d];
-          for (let k = 0; k < IN_DIMS; k++, at++) {
-            const ti = plo + at;
-            const tr = lam * TRACE[ti] + pd * pre[k];
-            TRACE[ti] = tr;
-            const base = CHEM[gW + at];
-            let w = PLASTIC[ti] + step * tr;
-            if (w < -MAXW - base) w = -MAXW - base;
-            else if (w > MAXW - base) w = MAXW - base;
-            PLASTIC[ti] = w;
-            if (w !== 0) {
-              touched = 1;
-              /*
-               * A learned sense weight turns a body that could not look at
-               * the field into one that can, and the gate saying so is
-               * otherwise settled at birth. Monotone, which is exact here
-               * precisely because nothing decays back to zero.
-               */
-              if (k < 4) READS[slot] = 1;
-            }
-          }
-        }
-        for (let d = 0; d < S; d++) {
-          const pd = post[d];
-          for (let k = 0; k < S; k++, at++) {
-            const ti = plo + at;
-            const tr = lam * TRACE[ti] + pd * pre[7 + k];
-            TRACE[ti] = tr;
-            const base = CHEM[gW + at];
-            let w = PLASTIC[ti] + step * tr;
-            if (w < -MAXW - base) w = -MAXW - base;
-            else if (w > MAXW - base) w = MAXW - base;
-            PLASTIC[ti] = w;
-            if (w !== 0) touched = 1;
-          }
-        }
-        for (let d = 0; d < S; d++) {
-          const pd = post[d];
-          for (let k = 0; k < S; k++, at++) {
-            const ti = plo + at;
-            const tr = lam * TRACE[ti] + pd * pre[11 + k];
-            TRACE[ti] = tr;
-            const base = CHEM[gW + at];
-            let w = PLASTIC[ti] + step * tr;
-            if (w < -MAXW - base) w = -MAXW - base;
-            else if (w > MAXW - base) w = MAXW - base;
-            PLASTIC[ti] = w;
-            if (w !== 0) touched = 1;
-          }
-        }
-        // The bias, whose input is one.
-        for (let d = 0; d < S; d++, at++) {
-          const ti = plo + at;
-          const tr = lam * TRACE[ti] + post[d];
-          TRACE[ti] = tr;
-          const base = CHEM[gW + at];
-          let w = PLASTIC[ti] + step * tr;
-          if (w < -MAXW - base) w = -MAXW - base;
-          else if (w > MAXW - base) w = MAXW - base;
-          PLASTIC[ti] = w;
-          if (w !== 0) touched = 1;
-        }
-        if (touched) PLASTIC_ON[slot] = 1;
-      }
-    }
   }
 
 
@@ -6392,8 +5544,6 @@ export class Sim {
     );
   }
 
-  /** Four species' worth of excretion, per body, per frame. */
-  private readonly excreteScratch = new Float64Array(CHEM_SPECIES);
   /**
    * Whether the last `refreshExpression` filled the vectors, which is the one
    * predicate for "is anything expressed". Passed to whoever reads the rows
@@ -6411,324 +5561,6 @@ export class Sim {
    * — needs it to be under-set, which nothing here does.
    */
   private gutLive = false;
-
-  /**
-   * Materialise every body's expression vector for the frame.
-   *
-   * Its own pass because four things read it and they are gated on three
-   * different dials: `runDigestion`'s uptake rows (`uptakeVmax`),
-   * `runExcretion`'s excretion rows (`excreteRate`), and rent's `payOut` and
-   * `upkeepRateOf` (`upkeepExcrete`). It was computed inside `runExcretion`
-   * at first, which meant a pond with metered uptake and no excretion read an
-   * all-zero expression and could digest nothing it swallowed.
-   *
-   * Computed on the host on both field paths — it is a pure function of `chem`
-   * and `h`, and `unpackGenome` brings `h` back every frame, so the genome
-   * shader needs no new output slot and no new binding for any of the reaction
-   * table. That pass is already at eight storage buffers of a guaranteed eight.
-   */
-  private refreshExpression(params: Params, t: number): void {
-    this.expressed = params.excreteRate > 0 || params.uptakeVmax > 0 || params.upkeepExcrete > 0;
-    if (!this.expressed) return;
-    const store = this.agentStore;
-    const CHEM = store.chemAll;
-    const H = store.hAll;
-    const EX = store.expressAll;
-    const perRow = params.rowCost * t;
-    const back = params.upkeepExcrete;
-    for (const a of this.agents.values()) {
-      const s = a.slot;
-      const o = s * ROW_COUNT;
-      expressVector(CHEM, s * CHEM_LEN, H, s * STATE_DIMS, EX, o);
-      if (!(perRow > 0) || a.locked) continue;
-      /*
-       * The fixed cost of running a reaction at all — §3's first way to buy
-       * the superadditivity division of labour needs, and which a linear
-       * budget cannot supply. Running two rows costs `2c` and running one
-       * costs `c`, so a specialist keeps what a generalist spends on breadth.
-       *
-       * Counted on rows that are *expressed*, which relu makes an exact
-       * question: a pre-activation at or below zero is a row switched off, and
-       * driving one there is how a lineage specialises. A body whose `X` is
-       * all zero takes `expressVector`'s flat fallback and pays for all eight
-       * — it is expressing evenly, not expressing nothing, and charging it
-       * nothing would make "say nothing, act as a generalist" free and
-       * strictly best at any cost. The seed is not that body: `seedProduction`
-       * gives it the rows it makes and the four it eats with, so a seeded Con
-       * or Dup pays for six of eight and a seeded Era for five, which is the
-       * breadth each of them actually runs.
-       *
-       * Excreted on the same terms as upkeep, and for the same reason: what
-       * left a tank has to arrive somewhere or a dial nobody turned on is
-       * quietly destroying matter.
-       */
-      let rows = 0;
-      for (let r = 0; r < ROW_COUNT; r++) if (EX[o + r] > 0) rows++;
-      if (rows === 0) continue;
-      const was = a.extra;
-      a.extra = Math.max(a.debtCap, was - perRow * rows);
-      if (back > 0) {
-        const paid = Math.max(0, was) - Math.max(0, a.extra);
-        if (paid > 0) payOut(this.energy, EX, s, a.x, a.y, paid * back);
-      }
-    }
-  }
-
-  /**
-   * The gut: what a body swallowed becomes what a body has, or does not.
-   *
-   * The harvest is a *sample of the water* — a body cannot decline the part of
-   * the mixture it has no use for — so a body is necessarily holding species
-   * it may not be able to touch. This is where that is settled, and it is the
-   * whole reason the gut exists: waste is the gap between the sample and the
-   * recipe, and nothing has to nominate it.
-   *
-   * Three rules, and each is one line:
-   *
-   * - **The ground converts raw.** `CH.energy` needs no machinery and no
-   *   permission, which is what makes it the ground rather than a signal.
-   * - **The other three need the row.** A body's uptake row for a species is
-   *   its recipe for that species — `ROW_COUNT` in the factor so a row at an
-   *   eighth, which is what every seeded uptake row is, converts at exactly
-   *   the global rate, and clamped at one because a recipe is a capability and
-   *   not an amplifier. A body expressing nothing on a row converts none of
-   *   that species and holds it until excretion takes it away.
-   * - **Catabolism spends ground.** `catCoSubstrate` is how many units of
-   *   `CH.energy` one unit of another species is converted *with*, drawn from
-   *   the gut and banked with what it unlocked — spent as a licence, not
-   *   destroyed. A reagent, not a catalyst: it is a budget shared
-   *   across the three rows rather than a factor on their rate, so a body with
-   *   a little ground has to choose what to spend it on and one unit cannot
-   *   unlock everything. Continuous from zero, so a body with a little
-   *   capability still does better than one with none and selection has a
-   *   slope to climb rather than a cliff. Nothing is destroyed — the paired
-   *   ground lands in the tank alongside what it unlocked — so it still buys
-   *   access and never amplification.
-   *
-   * Bounded by room in the tank, which is what makes satiety three mechanisms
-   * deep rather than a clamp: a full body cannot digest, so its gut fills, so
-   * it cannot eat. And bounded that way rather than by discarding, because
-   * matter that had nowhere to go would have to be destroyed to fit.
-   */
-  private runDigestion(params: Params, t: number): void {
-    const rate = params.digestRate;
-    // Nothing has ever been swallowed, which is every frame of a pond running
-    // at `uptakeVmax` 0 — the whole of the shipped default. Guarded rather
-    // than walked, for the reason `HarvestPlan.build` guards on `meter`: a
-    // per-body pass that always finds zero is still a per-body pass.
-    if (!(rate > 0) || !this.gutLive) return;
-    const store = this.agentStore;
-    const GUT = store.gut;
-    const EX = store.expressAll;
-    const EXTRA = store.extra;
-    const CAP = store.energyCap;
-    const co = params.catCoSubstrate;
-    const full = 1 - Math.exp(-rate * t);
-    let live = false;
-    for (const a of this.agents.values()) {
-      const s = a.slot;
-      const go = s * CHEM_SPECIES;
-      if (store.gutTotal(s) <= 0) continue;
-      live = true;
-      let room = CAP[s] - EXTRA[s];
-      if (room <= 0) continue;
-      const xo = s * ROW_COUNT + ROW_UPTAKE;
-      /*
-       * The ground is a *reagent*, not a catalyst.
-       *
-       * §6b says the other three are converted *with* `CH.energy`, and a
-       * factor that only scales a rate says "in the presence of", which is a
-       * catalyst — one unit of ground in the gut licensed unlimited scent, and
-       * converting scent is how a body keeps a unit of ground. So the ground
-       * is spent here: `co` units of it per unit of species converted, drawn
-       * from what this body is holding and unable to license a second thing.
-       *
-       * `pair` is that budget and it is shared across the three rows, which is
-       * the constraint the ratio could not express: a body with a little
-       * ground must choose what to spend it on. At `co` 0 it is unbounded and
-       * the ground is not drawn at all, which is what phase 3 shipped.
-       *
-       * Nothing is destroyed — the paired ground lands in the tank alongside
-       * what it unlocked, exactly as it would have on its own row. What it
-       * cannot do is unlock a second thing. Conservation is untouched and it
-       * still buys access rather than amplification.
-       */
-      let pair = co > 0 ? GUT[go + CH.energy] : Infinity;
-      let moved = 0;
-      // The three signalling species, then the ground: see `DIGEST_ORDER` for
-      // why the co-substrate has to be paired off before it is digested.
-      for (let k = 0; k < DIGEST_ORDER.length && room > 0; k++) {
-        const c = DIGEST_ORDER[k];
-        const have = GUT[go + c];
-        if (have <= 0) continue;
-        const ground = c === CH.energy;
-        let use = 1;
-        if (!ground) {
-          const row = ROW_COUNT * EX[xo + c];
-          use = row > 1 ? 1 : row;
-        }
-        if (!(use > 0)) continue;
-        /*
-         * Mass action, as an exponential rather than a product, so a rate
-         * above one frame's worth cannot take more than the body is holding.
-         * `full` is the ground's factor and every row at or above the flat
-         * seed's, hoisted; only a row with a partial recipe pays for an `exp`.
-         *
-         * Snapped to empty below `EXTRA_FULL_EPS`, because mass action never
-         * reaches zero on its own and `gutLive` would then never clear: a gut
-         * holding a crumb forever is a roster walk forever. The crumb lands in
-         * the tank like the rest of it; nothing is destroyed.
-         */
-        let take = use >= 1 ? have * full : have * (1 - Math.exp(-rate * use * t));
-        if (have - take < EXTRA_FULL_EPS) take = have;
-        // What it costs in ground, and what is left to pay with.
-        let spend = 0;
-        if (!ground && co > 0) {
-          if (take * co > pair) take = pair / co;
-          spend = take * co;
-        }
-        if (take + spend > room) {
-          const k2 = room / (take + spend);
-          take *= k2;
-          spend *= k2;
-        }
-        if (!(take > 0)) continue;
-        GUT[go + c] = have - take;
-        if (spend > 0) {
-          GUT[go + CH.energy] -= spend;
-          pair -= spend;
-        }
-        room -= take + spend;
-        moved += take + spend;
-      }
-      if (moved > 0) EXTRA[s] += moved;
-    }
-    /*
-     * Read before this pass moved anything, so a pond that has just finished
-     * digesting the last of it runs one more empty pass and then stops. The
-     * error is one frame in the safe direction; the other direction would
-     * leave a gut that nothing ever drained. The snap above is what makes
-     * "finished" a state a gut can actually reach.
-     */
-    this.gutLive = live;
-  }
-
-  /**
-   * The reaction table's excretion rows: gut and tank -> field, conserved.
-   *
-   * Mass action on everything the body holds, gut and tank together, split by
-   * the excretion rows — which is where "absolute honesty" comes from. A body
-   * near empty excretes near nothing however loudly its genome would like to:
-   * the simplex bounds what you can say relative to what else you say, and
-   * conservation bounds it outright. Neither implies the other and they
-   * compound.
-   *
-   * Two sources, one operation. A body wanting to put out species `c` takes it
-   * from the gut if it is holding any — it is already that species, and it is
-   * in the way — and synthesises the shortfall out of the tank, which is what
-   * this has always done and is where the three signal species come from at
-   * all. Mass is conserved either way; what the gut buys is that clearing
-   * waste is *free*, where saying the same thing out of stock costs.
-   *
-   * That the tank half survives is not a compromise. Per-species conservation
-   * is a stronger property than §5 asks for and it is one the pond cannot
-   * afford: nothing in a conserved dish creates `conP`, so a pond whose only
-   * input is ground would be permanently silent. Bodies conserve *matter*.
-   * Turning matter into a different molecule is what a metabolism is.
-   *
-   * What the gut half adds is the necessity. What a body cannot convert
-   * occupies the room that bounds its next mouthful, and the only way out of
-   * the gut is here — so a body must express the excretion row for whatever it
-   * cannot digest, or clog and starve holding food it cannot use. The rows
-   * stop being purely a preference about what to broadcast and become, for
-   * that species, a clearance rate. Nothing declares what a body's waste is;
-   * the shape of what it is stuck with does.
-   *
-   * `ROW_COUNT` in the rate so that a row at an eighth — the flat fallback,
-   * and what every seeded *uptake* row still is — runs at exactly
-   * `excreteRate`; a seeded Era's ground row at `ERA_GROUND_SHARE` runs at
-   * four times it. Every dial in this file reduces to a number you can say out
-   * loud at the seed.
-   *
-   * Through `addSpeciesAt` and therefore through the *conserving* deposit, not
-   * the scent path's density scatter. That is the whole difference: a signal
-   * is a density that may be clipped at the rim, and this is matter that
-   * cannot be. `scentMints` is what stops the two running at once.
-   */
-  private runExcretion(params: Params, t: number): void {
-    if (!(params.excreteRate > 0)) return;
-    const store = this.agentStore;
-    const EX = store.expressAll;
-    const OUT = store.excreteAll;
-    const GUT = store.gut;
-    const EXTRA = store.extra;
-    const LOCKED = store.locked;
-    const X = store.x;
-    const Y = store.y;
-    const w = this.excreteScratch;
-    const rate = params.excreteRate * t * ROW_COUNT;
-    for (const a of this.agents.values()) {
-      const s = a.slot;
-      const eo = s * ROW_COUNT + ROW_EXCRETE;
-      const oo = s * CHEM_SPECIES;
-      const go = s * CHEM_SPECIES;
-      // Mass action on everything the body is holding, digested or not: a body
-      // with more to give gives more, and one with nothing gives nothing.
-      const banked = EXTRA[s] > 0 ? EXTRA[s] : 0;
-      const have = banked + store.gutTotal(s);
-      if (LOCKED[s] || have <= 0) {
-        OUT.fill(0, oo, oo + CHEM_SPECIES);
-        continue;
-      }
-      let owed = 0;
-      for (let c = 0; c < CHEM_SPECIES; c++) {
-        const amt = rate * EX[eo + c] * have;
-        w[c] = amt;
-        // What the gut cannot cover has to be built out of stock.
-        const gut = GUT[go + c];
-        owed += amt > gut ? amt - gut : 0;
-      }
-      /*
-       * A long frame, or a rate above one, can ask for more stock than the
-       * body has. The synthesised part scales down and the gut part does not:
-       * clearing what is already in the way is not something poverty should be
-       * able to prevent, and it is the half a clogged body most needs.
-       */
-      const k = owed > banked ? (owed > 0 ? banked / owed : 0) : 1;
-      let total = 0;
-      let spent = 0;
-      for (let c = 0; c < CHEM_SPECIES; c++) {
-        const gut = GUT[go + c];
-        const amt = w[c];
-        const fromGut = amt > gut ? gut : amt;
-        const made = (amt - fromGut) * k;
-        const out = fromGut + made;
-        w[c] = out;
-        if (fromGut > 0) GUT[go + c] = gut - fromGut;
-        spent += made;
-        total += out;
-      }
-      if (spent > 0) EXTRA[s] -= spent;
-      if (total <= 0) {
-        OUT.fill(0, oo, oo + CHEM_SPECIES);
-        continue;
-      }
-      for (let c = 0; c < CHEM_SPECIES; c++) OUT[oo + c] = w[c];
-      this.energy.addSpeciesAt(X[s], Y[s], w);
-    }
-  }
-
-  /**
-   * Whether the scent path still mints.
-   *
-   * The two ways matter reaches the field are mutually exclusive by
-   * construction: either a body's voice is minted at `params.deposit` and its
-   * tank is untouched, or it is excreted from the tank and conserved. Running
-   * both would deposit the same expression twice and mint half of it.
-   */
-  private scentMints(params: Params): boolean {
-    return !(params.excreteRate > 0);
-  }
 
   private tickRewrites(params: Params, dt: number): void {
     const done: Rewrite[] = [];
@@ -6920,31 +5752,4 @@ function rewriteAudio(
     wireId,
     leftovers,
   };
-}
-
-/**
- * One row of an output head, read straight out of the store arrays.
- *
- * The twin of `agents.ts`'s `head`, which goes through `Agent.chem` and
- * `Agent.h`. This one exists for `updateState`'s inner loop, where those two
- * accessors are the whole cost — see the note on reading `chemAll` directly.
- */
-function headAt(
-  chem: Float32Array,
-  g: number,
-  matrix: number,
-  base: number,
-  row: number,
-  h: Float64Array,
-  ho: number,
-  dims: number,
-): number {
-  const o = g + matrix + row * dims;
-  return (
-    chem[g + base + row] +
-    chem[o] * h[ho] +
-    chem[o + 1] * h[ho + 1] +
-    chem[o + 2] * h[ho + 2] +
-    chem[o + 3] * h[ho + 3]
-  );
 }

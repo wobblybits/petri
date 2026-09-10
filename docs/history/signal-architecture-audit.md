@@ -1,3 +1,5 @@
+> **Not maintained.** A dated record of what was argued and measured at the time. The code and `docs/concepts.md` are the source of truth; where this disagrees with them, this is the one that is stale.
+
 # Audit: evolution, internal state, and signalling
 
 Audited 2026-09-06 at `e0d2dd0` on `alife-energy`, covering the architecture

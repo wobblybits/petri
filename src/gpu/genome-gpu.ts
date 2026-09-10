@@ -426,7 +426,7 @@ export class GenomeGpu {
    * moved to the device — usually zero.
    *
    * That is fine for the simulation and wrong for anything that *measures*
-   * it. `docs/plasticity-plan.md` phase 5 says as much: an instrument either
+   * it. `docs/history/plasticity-plan.md` phase 5 says as much: an instrument either
    * reads this back deliberately or is quietly sampling rewrite parents. This
    * is the deliberate read — the headless harvest uses it before storing a
    * net, since a stored genome without what its bodies learned is a record of

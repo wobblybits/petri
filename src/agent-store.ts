@@ -216,7 +216,7 @@ export class AgentStore {
   /**
    * This frame's expression vector: how the body divides one unit of chemical
    * effort across the reaction table's `ROW_COUNT` rows. See `expressVector`
-   * and `docs/energy-chemistry-plan.md` §3.
+   * and `docs/history/energy-chemistry-plan.md` §3.
    *
    * Materialised here for the same reason `emitAll` is — two passes want it in
    * the same frame, excretion and uptake, and recomputing thirty-two
