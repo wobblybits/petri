@@ -1697,15 +1697,33 @@ export function seedRequest(agent: SlotBody, amount: number): void {
 }
 
 /**
- * Relax the need field over the wire graph until it stops improving.
+ * Carry the need field one hop along the wire graph.
  *
  * Every body ends up holding the largest need it can see, attenuated per hop
  * by whoever is relaying it — so the field is a potential whose gradient
  * points at whoever is neediest, weighted by how badly and discounted by how
- * far. A body can be improved more than once (a bigger need further away can
- * beat a small one next door), so this is a relaxation rather than one BFS
- * sweep; the decay bounds it, since a value below `REQUEST_FLOOR` stops
- * travelling.
+ * far.
+ *
+ * **One hop a frame, off the previous frame's field.** This used to relax to
+ * a fixpoint inside a single frame, which made demand a thing that was simply
+ * *known* everywhere the instant it arose: a shortage at one end of a net set
+ * the potential at the other end on the same frame, and every donor in the
+ * pond moved a packet down a gradient that had no history. Nothing could
+ * travel, because there was nothing left to travel — the answer was already
+ * everywhere.
+ *
+ * The fixpoint is unchanged. `request_i = max(claim_i, max_j request_j *
+ * keep_j)` is the same equation the relaxation solved, so a field left alone
+ * settles exactly where it used to; what has changed is that it now takes as
+ * many frames as it takes hops, and that a need which appears, moves or stops
+ * has a front. Demand becomes something that *arrives*, which is the whole
+ * point — a wave needs state that persists and advances, and a potential
+ * recomputed from nothing every  frame has neither.
+ *
+ * `prev` is the caller's snapshot of the field before this frame's claims
+ * were written, and it is what makes this a step rather than a sweep: reading
+ * the live array instead would let a value race several hops in one pass,
+ * in whatever order the list happens to be in.
  *
  * `decay`, when passed, overrides every body's own `requestDecay` trait —
  * useful for a test that wants one uniform rate. Left out, each body relays
@@ -1716,34 +1734,36 @@ export function seedRequest(agent: SlotBody, amount: number): void {
  * Locked bodies still conduct, so a rewrite in progress does not cut the net
  * in two.
  */
-export function spreadRequests(list: SlotBody[], adj: WireAdjacency, decay?: number): void {
+export function spreadRequests(
+  list: SlotBody[],
+  adj: WireAdjacency,
+  prev: number[] | Float64Array,
+  decay?: number,
+): void {
   const { off, nei } = adj;
-  // Indices throughout. Queueing the bodies themselves would need a lookup
-  // back to their slot, and a Map keyed on the objects is the allocation this
-  // whole structure exists to avoid.
-  const q = adj.queue(list.length);
-  let head = 0;
-  let tail = 0;
   for (let i = 0; i < list.length; i++) {
-    if (list[i].request > REQUEST_FLOOR) q[tail++] = i;
-  }
-  while (head < tail) {
-    const at = q[head++];
-    const body = list[at];
-    // Clamped below 1 for the reason on REQUEST_DECAY: an undecayed field is
-    // flat, and a flat field moves nothing.
-    const keep = Math.min(0.99, Math.max(0, decay ?? body.requestDecay));
-    const next = body.request * keep;
-    if (next <= REQUEST_FLOOR) continue;
-    for (let k = off[at]; k < off[at + 1]; k++) {
+    let best = 0;
+    for (let k = off[i]; k < off[i + 1]; k++) {
       const ni = nei[k];
-      const n = list[ni];
-      if (!n || n.request >= next) continue;
-      n.request = next;
-      if (tail >= q.length) return;
-      q[tail++] = ni;
+      const other = list[ni];
+      if (!other) continue;
+      // The *relayer's* rate, not the receiver's: a body that conducts demand
+      // well is what makes a long chain audible, which is what makes
+      // `requestDecay` worth inheriting.
+      const keep = Math.min(0.99, Math.max(0, decay ?? other.requestDecay));
+      const v = prev[ni] * keep;
+      if (v > best) best = v;
     }
+    if (best <= REQUEST_FLOOR) continue;
+    if (best > list[i].request) list[i].request = best;
   }
+}
+
+/** Last frame's field, for `spreadRequests` to step off. */
+export function snapshotRequests(list: SlotBody[], into: number[]): number[] {
+  into.length = list.length;
+  for (let i = 0; i < list.length; i++) into[i] = list[i].request;
+  return into;
 }
 
 /** Store-based twin of `spreadRequests` — see `harvestSlotsFast`'s note. */
@@ -1751,33 +1771,25 @@ export function spreadRequestsFast(
   list: Agent[],
   store: AgentStore,
   adj: WireAdjacency,
+  prev: Float64Array,
   decay?: number,
 ): void {
   const { off, nei } = adj;
-  const q = adj.queue(list.length);
   const REQUEST = store.request;
   const REQUEST_DECAY = store.requestDecay;
-  let head = 0;
-  let tail = 0;
   for (let i = 0; i < list.length; i++) {
-    if (REQUEST[list[i].slot] > REQUEST_FLOOR) q[tail++] = i;
-  }
-  while (head < tail) {
-    const at = q[head++];
-    const sAt = list[at].slot;
-    const keep = Math.min(0.99, Math.max(0, decay ?? REQUEST_DECAY[sAt]));
-    const next = REQUEST[sAt] * keep;
-    if (next <= REQUEST_FLOOR) continue;
-    for (let k = off[at]; k < off[at + 1]; k++) {
+    let best = 0;
+    for (let k = off[i]; k < off[i + 1]; k++) {
       const ni = nei[k];
       const other = list[ni];
       if (!other) continue;
-      const sNi = other.slot;
-      if (REQUEST[sNi] >= next) continue;
-      REQUEST[sNi] = next;
-      if (tail >= q.length) return;
-      q[tail++] = ni;
+      const keep = Math.min(0.99, Math.max(0, decay ?? REQUEST_DECAY[other.slot]));
+      const v = prev[ni] * keep;
+      if (v > best) best = v;
     }
+    if (best <= REQUEST_FLOOR) continue;
+    const s = list[i].slot;
+    if (best > REQUEST[s]) REQUEST[s] = best;
   }
 }
 

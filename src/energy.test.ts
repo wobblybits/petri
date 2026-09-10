@@ -31,6 +31,7 @@ import {
   type SlotBody,
   spareEnergy,
   spendExtra,
+  snapshotRequests,
   spreadRequests,
   tickUpkeep,
   WireAdjacency,
@@ -80,6 +81,22 @@ function net(agents: Map<number, SlotBody>, wires: { a: { id: number }; b: { id:
   const adj = new WireAdjacency();
   adj.build(list.length, index, () => wires);
   return { list, adj };
+}
+
+/**
+ * Run the need field to its fixpoint.
+ *
+ * `spreadRequests` carries demand one hop a frame now, so a test that wants
+ * the settled potential has to let it settle. The fixpoint is the same one
+ * the old in-frame relaxation solved, and a path can be no longer than the
+ * roster, so this many steps always reaches it.
+ */
+function settle(list: Parameters<typeof spreadRequests>[0], adj: Parameters<typeof spreadRequests>[1], decay?: number): void {
+  const prev: number[] = [];
+  for (let i = 0; i <= list.length; i++) {
+    snapshotRequests(list, prev);
+    spreadRequests(list, adj, prev, decay);
+  }
 }
 
 describe('wire adjacency', () => {
@@ -384,7 +401,7 @@ describe('request gradient', () => {
       { a: { id: 2 }, b: { id: 3 } },
     ]);
     seedRequest(agents.get(1)!, 1);
-    spreadRequests(list, adj);
+    settle(list, adj);
     expect(agents.get(1)!.request).toBe(1);
     expect(agents.get(2)!.request).toBeCloseTo(REQUEST_DECAY, 6);
     expect(agents.get(3)!.request).toBeCloseTo(REQUEST_DECAY ** 2, 6);
@@ -406,7 +423,7 @@ describe('request gradient', () => {
     ]);
     seedRequest(agents.get(1)!, 1);
     seedRequest(agents.get(4)!, 0.2);
-    spreadRequests(list, adj);
+    settle(list, adj);
     // 1 reaches 3 at 0.8^2 = 0.64; 4 only offers 0.2 there.
     expect(agents.get(3)!.request).toBeCloseTo(REQUEST_DECAY ** 2, 6);
     expect(agents.get(3)!.request).toBeGreaterThan(agents.get(4)!.request);
@@ -474,7 +491,7 @@ describe('request gradient', () => {
     ]);
     seedRequest(agents.get(1)!, 1);
     seedRequest(agents.get(3)!, 1);
-    spreadRequests(list, adj);
+    settle(list, adj);
     expect(agents.get(1)!.request).toBeCloseTo(agents.get(3)!.request, 6);
     // The middle body is the one holding energy, and both neighbours pull on
     // it equally hard, so it gives to exactly one of them rather than tearing.
@@ -526,7 +543,7 @@ describe('request gradient', () => {
     for (let i = 0; i < 2; i++) {
       resetRequests(agents.values());
       for (const a of agents.values()) seedRequest(a, hungerNeed(a));
-      spreadRequests(list, adj);
+      settle(list, adj);
       flowCharges(list, adj);
     }
     expect(agents.get(2)!.extra, 'out of debt first').toBeGreaterThanOrEqual(0);
@@ -545,7 +562,7 @@ describe('request gradient', () => {
         b: { id: i + 2 },
       }));
       const { list, adj } = net(agents, wires);
-      spreadRequests(list, adj, decay);
+      settle(list, adj, decay);
       return agents.get(6)!.request;
     };
     expect(chain(0.8), 'five hops at 0.8').toBeCloseTo(0.8 ** 5, 6);
@@ -565,7 +582,7 @@ describe('request gradient', () => {
       b: { id: i + 2 },
     }));
     const { list, adj } = net(agents, wires);
-    spreadRequests(list, adj); // no override: each body's own field governs
+    settle(list, adj); // no override: each body's own field governs
     expect(agents.get(2)!.request, 'upstream of the lossy relay is unaffected').toBeCloseTo(
       0.9,
       6,
@@ -585,7 +602,7 @@ describe('request gradient', () => {
       [2, body(2, 10, 0, 1)],
     ]);
     const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
-    spreadRequests(list, adj, 1);
+    settle(list, adj, 1);
     expect(agents.get(2)!.request).toBeLessThan(agents.get(1)!.request);
     expect(flowCharges(list, adj), 'so the surplus still crosses').toBeGreaterThan(0);
   });
@@ -705,6 +722,46 @@ describe('sim energy', () => {
     for (let f = 0; f < 240; f++) sim.step(1 / 60, params);
     expect(sim.agents.size).toBe(2);
     expect(sim.rewrites.length).toBe(0);
+  });
+
+  it('carries demand a hop a frame when the reach is set, and everywhere when it is not', () => {
+    /*
+     * What `requestReach` actually changes. The field is the same potential
+     * either way and settles in the same place; the difference is whether
+     * getting there takes time. At 0 a shortage is known across the whole net
+     * on the frame it appears, which is why nothing in the pond can carry a
+     * wave — there is never anything left to travel.
+     *
+     * Every body but the last is full, so nobody else is making a claim and
+     * the only thing in the field is the one at the far end.
+     */
+    const build = (reach: number) => {
+      const sim = new Sim(1200, 600);
+      const params = fixedParams();
+      params.requestReach = reach;
+      params.spawnInterval = 0;
+      params.ambientEnergy = 0;
+      params.upkeep = 0;
+      params.rewriteDuration = 0;
+      params.snapRadius = 0;
+      params.transportRecoil = 0;
+      sim.energy.configure(params.energyCell, 0);
+      const n = 8;
+      const ids: number[] = [];
+      for (let i = 0; i < n; i++) ids.push(sim.spawn('con', 100 + i * 45, 300, 0, params, true)!.id);
+      for (let i = 0; i + 1 < n; i++) sim.wire(ids[i], 'r', ids[i + 1], 'l', params);
+      for (const id of ids) sim.agents.get(id)!.extra = EXTRA_CAP;
+      sim.agents.get(ids[n - 1])!.extra = -0.5;
+      return { sim, params, ids };
+    };
+    const heardAt = (o: ReturnType<typeof build>, frames: number): number => {
+      for (let f = 0; f < frames; f++) o.sim.step(1 / 60, o.params);
+      return o.sim.agents.get(o.ids[0])!.request;
+    };
+    expect(heardAt(build(0), 1), 'no reach: seven wires away on the first frame').toBeGreaterThan(0);
+    expect(heardAt(build(1), 1), 'reach 1: still silent after one').toBe(0);
+    expect(heardAt(build(1), 3), 'and after three').toBe(0);
+    expect(heardAt(build(1), 12), 'audible once it has had the frames to travel').toBeGreaterThan(0);
   });
 
   it('drains a reservoir across an empty corridor to a dying end', () => {
@@ -930,7 +987,7 @@ describe('sim energy', () => {
     ]);
     const { list, adj } = net(agents, [{ a: { id: 2 }, b: { id: 3 } }]);
     seedRequest(drained, 1);
-    spreadRequests(list, adj);
+    settle(list, adj);
     flowCharges(list, adj);
     expect(drained.extra, 'and a pump can push it past a Con-sized full').toBeGreaterThan(
       EXTRA_CAP,

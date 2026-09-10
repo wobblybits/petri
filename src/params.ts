@@ -528,6 +528,43 @@ export interface Params {
    */
   requestDecay: number;
   /**
+   * Hops the need field carries in one frame. 0 = as far as it goes, which is
+   * the pond as it was.
+   *
+   * The field is a potential: every body holds the largest need it can see,
+   * attenuated per hop by whoever relays it. At 0 that potential is solved to
+   * a fixpoint every frame, so a shortage anywhere is *known* everywhere on
+   * the frame it arises — demand has no front, nothing propagates, and the
+   * whole net answers at once. That is most of why a net pulses rather than
+   * walks, and it is why nothing in here can carry a wave.
+   *
+   * Above 0 the field advances that many hops a frame off the previous
+   * frame's values, so a need takes a frame per wire to travel and drains
+   * behind itself when it stops. The fixpoint is unchanged — `request_i =
+   * max(claim_i, max_j request_j * keep_j)` is the same equation either way —
+   * so a settled field settles where it always did. What changes is that
+   * getting there takes time, and that time is what a travelling wave is made
+   * of.
+   *
+   * It also changes what the economy *is*, which is why it ships off. A
+   * global relaxation is global triage: every donor compares its neighbour
+   * against the worst case anywhere on the net, so the dying body outranks
+   * the merely empty one however far away it is. One hop a frame is local
+   * equalisation: a body can only weigh what it can see, and a corridor of
+   * empty bodies absorbs a reservoir on its way past rather than relaying it.
+   * Measured on `energy.test.ts`'s corridor — twelve bodies, a reservoir at
+   * one end and a body in debt at the other — at 1 the reservoir is empty
+   * inside twenty frames and the patient ends on exactly zero, having been
+   * filled and then drained back into the corridor. At 0 it is fed to its
+   * rescue target and stays there.
+   *
+   * So this is not a free improvement, it is a trade, and the thing that
+   * would pay for it is a need field that tells dying from empty by more than
+   * the difference between `rescueNeed`'s two branches. That is the next
+   * question and it is not settled here.
+   */
+  requestReach: number;
+  /**
    * Momentum a body recoils with per unit of energy it pumps to a neighbour.
    * 0 = off.
    *
@@ -928,6 +965,7 @@ export function defaultParams(): Params {
     assortBias: 0.5,
     debtCap: -1,
     requestDecay: 0.95,
+    requestReach: 0,
     transportRecoil: 100,
     transportQuantum: 0.5,
     transportThrust: 0,
@@ -1022,6 +1060,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'assortBias', label: 'Assortment (seed)', min: 0, max: 1, step: 0.05 },
   { key: 'debtCap', label: 'Debt cap', min: -2.5, max: -0.05, step: 0.05 },
   { key: 'requestDecay', label: 'Demand decay', min: 0.5, max: 0.98, step: 0.01 },
+  { key: 'requestReach', label: 'Demand hops/frame', min: 0, max: 12, step: 1 },
   { key: 'transportRecoil', label: 'Pump recoil (seed)', min: 0, max: 200, step: 5 },
   { key: 'transportThrust', label: 'Pump thrust (seed)', min: 0, max: 1, step: 0.05 },
   { key: 'transportQuantum', label: 'Transport quantum', min: 0, max: 1, step: 0.05 },

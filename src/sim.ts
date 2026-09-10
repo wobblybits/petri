@@ -420,6 +420,14 @@ export class Sim {
    * this off so Play rewrites the net without breeding a new chemistry.
    */
   breed = true;
+  /**
+   * Last frame's need field, in `forceList` order, for `spreadRequests` to
+   * step off. The field is state now, so a step has to read where it *was*
+   * — reading it live would let one body's need race several hops in a pass,
+   * in whatever order the roster happens to be in.
+   */
+  private requestPrev = new Float64Array(0);
+
   /** Per-agent unmet need this frame, rebuilt by `pulseRequests`. */
   private readonly wireAdj = new WireAdjacency();
   /**
@@ -5730,6 +5738,13 @@ export class Sim {
     const list = this.forceList();
     const REQUEST = this.agentStore.request;
     const LOCKED = this.agentStore.locked;
+    // Before the claims overwrite it: this frame's relay is off last frame's
+    // field, which is what makes demand travel a hop at a time.
+    if (this.requestPrev.length < list.length) {
+      this.requestPrev = new Float64Array(Math.max(64, list.length * 2));
+    }
+    const prev = this.requestPrev;
+    for (let i = 0; i < list.length; i++) prev[i] = REQUEST[list[i].slot];
     for (let i = 0; i < list.length; i++) {
       const a = list[i];
       const slot = a.slot;
@@ -5790,7 +5805,38 @@ export class Sim {
     }
     const adj = this.wireAdjacency();
     Sim.phase('pulse:seed');
-    spreadRequestsFast(list, this.agentStore, adj);
+    /*
+     * How far demand gets this frame. `requestReach` 0 means as far as it
+     * goes: iterating the one-hop step past the longest possible path is the
+     * fixpoint the old in-frame relaxation solved, so the field settles
+     * exactly where it used to. Above 0 it advances that many hops and stops,
+     * and the rest of the journey happens on later frames — which is what
+     * gives demand a front to travel on. The parameter has the trade.
+     *
+     * Re-snapshotting between hops is what keeps each one a *step*: without
+     * it a value would race down the list in whatever order the roster
+     * happens to be in, and the reach would depend on the sort.
+     */
+    const reach = params.requestReach;
+    const resnap = () => {
+      for (let i = 0; i < list.length; i++) prev[i] = REQUEST[list[i].slot];
+    };
+    // Whether the field has a memory, which is the actual difference between
+    // the two settings and not merely how far it gets.
+    //
+    // At 0 it has none: the claims are all there is, and iterating the step
+    // past the longest possible path relaxes them to the fixpoint inside this
+    // frame — the old algorithm exactly, discarding whatever stood here last
+    // frame. Above 0 the first hop reads the *pre-claim* snapshot instead, so
+    // what a body was told last frame is still there to be relayed on, and a
+    // need that has stopped drains away over the following frames rather than
+    // vanishing on the one it stopped.
+    if (reach <= 0) resnap();
+    const hops = reach > 0 ? reach : list.length;
+    for (let h = 0; h < hops; h++) {
+      if (h > 0) resnap();
+      spreadRequestsFast(list, this.agentStore, adj, prev);
+    }
     Sim.phase('pulse:spread');
     // No `quantum` here: each sender uses its own, seeded from the parameter
     // at birth exactly as `transportRecoil` is, so a net's rhythm can be a

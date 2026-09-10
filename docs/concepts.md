@@ -114,10 +114,28 @@ not also be asked to do. Nothing else belongs here; measurements go in
   whether that is a trickle or a packet. Demand decides whether to send;
   above zero the quantum decides how much, a body must hold a whole packet to
   send one, and what will not fit at the far end goes to the ground. The
-  packet is also the pond's only clock, which is the whole reason locomotion
-  cannot yet have a gait — so this mechanic is asked to do two things and that
-  is known. It ships at 0.5, the packet; at 0, the trickle, the momentum it
-  carries is three orders below the pond's own noise.
+  packet is also the pond's only clock — so this mechanic is asked to do two
+  things and that is known. It ships at 0.5, the packet; at 0, the trickle,
+  the momentum it carries is three orders below the pond's own noise.
+
+  How far demand travels in a frame is `requestReach`, and it is the reason
+  nothing here can carry a wave. At its shipped 0 the need field is solved to
+  a fixpoint every frame, so a shortage anywhere is known everywhere at once
+  and there is never anything left to propagate. Above 0 it advances that
+  many hops a frame and a need has a front. The fixpoint is the same either
+  way; only the time to reach it changes.
+
+  That is a trade and not an improvement, which is why it ships off. A global
+  relaxation is global triage — every donor weighs its neighbour against the
+  worst case anywhere on the net, so a dying body outranks a merely empty one
+  however far away. One hop a frame is local equalisation, and a corridor of
+  empty bodies absorbs a reservoir on its way past instead of relaying it:
+  measured on twelve bodies with a reservoir at one end and a body in debt at
+  the other, the reservoir is empty inside twenty frames and the patient ends
+  on exactly zero, filled and then drained back into the corridor. Not yet
+  true: the field cannot tell dying from empty by enough to survive being
+  local, and until it can, locality costs the economy more than it buys
+  locomotion.
 - Growth
 - Breeding: nets connecting at free terminals
 - Freeing terminals: death and detachment within a net
