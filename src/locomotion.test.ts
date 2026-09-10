@@ -46,8 +46,7 @@ function stillParams(): Params {
   // Its own tests turn it back on. Coupling too: it pulls two wired bodies to
   // a fixed phase difference, which is a third asymmetry on top of the three
   // the gait tests below take one at a time.
-  params.gaitRate = 0;
-  params.gaitCouple = 0;
+  params.metabolicRate = 0;
   return params;
 }
 

@@ -228,16 +228,16 @@ type RedexEscrow = {
   y: number;
 };
 
+/** Most either metabolite may pile up to. A pathway is not a warehouse. */
+const REACT_CAP = 12;
 /**
- * Which end of a wire is upstream, for the gait's phase lag.
- *
- * A principal leads, then right, then left — so a chain wired `r` to `l`
- * runs head to tail in the order it was built, rather than against it.
- * Any consistent order would do; what must not happen is taking the order
- * off `wire.a` and `wire.b`, which is whichever way the latch happened to be
- * made. Ties (two ends on the same slot) fall back to the agent id.
+ * Largest reaction step taken at once. The Brusselator is stiff where its
+ * activator spikes, and explicit Euler past about this rings at the step
+ * frequency instead of oscillating — so `advanceGait` splits a frame into as
+ * many of these as it needs, which makes the amplitude the same at every
+ * `metabolicRate` and the period exactly proportional to it.
  */
-const SLOT_ORDER: Record<'p' | 'l' | 'r', number> = { p: 0, r: 1, l: 2 };
+const REACT_H = 0.04;
 
 /**
  * One body's four taste weights, laid out for a consumer of the field.
@@ -440,7 +440,7 @@ export class Sim {
    */
   private requestPrev = new Float64Array(0);
 
-  /** Scratch for one Kuramoto step: the pull on each body, and its degree. */
+  /** Scratch for one diffusion step: the pull on each body, and its degree. */
   private gaitPull = new Float64Array(0);
   private gaitDegree = new Float64Array(0);
 
@@ -4257,117 +4257,154 @@ export class Sim {
   private readonly gripKeep = new Float64Array(Sim.GRIP_STEPS + 1);
 
   /**
-   * Turn every body's clock, and work out what this frame's stroke comes to.
+   * One step of the body's metabolism, and what this frame's stroke comes to.
    *
-   * `anchor` is `gaitAnchor * cos(phase)` and goes into the drag rate below;
-   * `gaitWave` is the bare cosine, and `Graph.syncRest` swings every wire on
-   * the body by it. One clock, so a body grips while its wires pull.
+   * A two-species autocatalytic pathway — the Brusselator, which is the
+   * standard minimal model of a chemical oscillator and the usual toy for
+   * Belousov-Zhabotinsky:
    *
-   * The phase is a register rather than a readout of `h`, and that is the
-   * second attempt. A rotation seeded into `Wh` is an oscillator on paper:
-   * `phi` saturates each dimension separately, so holding a period near the
-   * drag time constant forces a loop gain barely above 1, and there any
-   * steady input collapses the state onto a fixed point within a few
-   * hundred frames. `IN_FULL` is a steady input. Measured over the map, at
-   * gain 1.3 and a 60-frame period a drive of 0.05 already kills it, and
-   * spending a third dimension on adaptation only widens that to about 0.2.
+   *     d(adp)/dt = base - (feed + 1) * adp + adp^2 * atp
+   *     d(atp)/dt = feed * adp       - adp^2 * atp
    *
-   * What stayed heritable is what matters. The amplitudes are heads off `h`,
-   * so a body strides on its own account and by how hungry it is, and their
-   * relative sign is which way it walks.
+   * `adp` is the activator, made by a reaction it catalyses itself, and `atp`
+   * the store that reaction eats. The autocatalysis is the whole trick, and
+   * it is the same one glycolysis uses: phosphofructokinase is activated by
+   * the ADP it produces, so the pathway runs away, exhausts its store, stalls
+   * while the store refills, and runs away again. These are a pathway's
+   * state, not pond stock — nothing here creates or destroys anything the
+   * economy counts.
+   *
+   * Selkov's own equations came first and would not do. `d(adp)/dt = atp *
+   * adp^2 - k * adp` factors to `adp * (atp * adp - k)`, so zero is a fixed
+   * point *and* a stable one: the moment the product dips the pathway
+   * collapses and never restarts. Integrated at the constants this ships, it
+   * flatlined at every fullness. Its oscillating window is also
+   * `v < k^(3/2)`, which is the wrong shape — a well-fed body would fall out
+   * of the top of it and go still. The Brusselator's condition is
+   *
+   *     feed > 1 + base^2
+   *
+   * which is monotone: the more a body has, the harder it runs. At the
+   * shipped `base` 0.5 the threshold is a feed of 1.25, so with
+   * `metabolicInflux` 2.5 a body oscillates above half a tank and sits
+   * perfectly still below it. That is the property this whole change is for.
+   * The clock it replaces was a constant, so a body undulated whether it was
+   * fed, starving, or attached to anything — a metronome bolted to the pond.
+   *
+   * Substepped to a ceiling of `REACT_H`. Explicit Euler on this is stiff
+   * where the activator spikes, and at `metabolicRate` 6 an unsubstepped step
+   * pinned a fed body at the cap and rang at the frame rate. Substepped, the
+   * amplitude is identical at every rate and the period is exactly `1/rate` —
+   * which is what makes `metabolicRate` the clean speed dial the parameter
+   * claims, and what keeps the whole slider safe rather than the part below
+   * a cliff.
+   *
+   * `metabolicDiffuse` lets the activator cross a wire, which is what makes
+   * this a medium rather than a bag of separate oscillators: a reaction that
+   * diffuses carries a front, and a front running down a chain is
+   * peristalsis. So the coupling that used to be a Kuramoto pull toward a
+   * hand-set lag is the activator spreading, and the wavelength is whatever
+   * the reaction and the diffusion agree on.
    */
   private advanceGait(params: Params, dt: number): void {
     const store = this.agentStore;
-    const PHASE = store.gaitPhase;
+    const ATP = store.atp;
+    const ADP = store.adp;
+    const WAVE = store.gaitWave;
     const GA = store.gaitAnchor;
     const ANCHOR = store.anchor;
-    const rate = params.gaitRate;
+    const EXTRA = store.extra;
+    const CAP = store.energyCap;
+    const rate = params.metabolicRate;
     if (!(rate > 0)) {
       for (const agent of this.agents.values()) {
         ANCHOR[agent.slot] = 0;
-        store.gaitWave[agent.slot] = 0;
+        WAVE[agent.slot] = 0;
       }
       return;
     }
-    const couple = params.gaitCouple;
-    const pull = this.gaitPull;
-    if (couple > 0) {
-      /*
-       * One Kuramoto step over the wire graph.
-       *
-       * Each wire wants its downstream end to sit `gaitLag` behind its
-       * upstream one, and pushes both halfway there. A fixed phase difference
-       * per wire is a travelling wave, and a travelling wave along a body is
-       * peristalsis — which is the whole reason to couple rather than to let
-       * every body run alone.
-       *
-       * Accumulated first and applied after, so a wire's correction is
-       * against the phases every other wire also saw. Applying in place would
-       * make the answer depend on the order the wire map happens to be in.
-       *
-       * Which end is upstream comes off the port slots, not off `wire.a` and
-       * `wire.b` — those are in whatever order the latch was made, so a chain
-       * would have no consistent direction and the lag would fight itself
-       * from one wire to the next.
-       */
-      if (pull.length < store.capacity) {
+
+    const influx = params.metabolicInflux;
+    const base = params.metabolicBase;
+    const h = rate * dt;
+    const sub = Math.max(1, Math.ceil(h / REACT_H));
+    const hs = h / sub;
+    for (const agent of this.agents.values()) {
+      const s = agent.slot;
+      const cap = CAP[s];
+      const raw = cap > 0 ? EXTRA[s] / cap : 0;
+      const full = raw <= 0 ? 0 : raw >= 1 ? 1 : raw;
+      // What the body is holding is what drives the pathway, so the rhythm
+      // comes from what the pond did with its energy.
+      const feed = influx * full;
+      let x = ADP[s];
+      let y = ATP[s];
+      for (let k = 0; k < sub; k++) {
+        const burn = x * x * y;
+        const nx = x + (base - (feed + 1) * x + burn) * hs;
+        const ny = y + (feed * x - burn) * hs;
+        x = nx <= 0 ? 0 : nx >= REACT_CAP ? REACT_CAP : nx;
+        y = ny <= 0 ? 0 : ny >= REACT_CAP ? REACT_CAP : ny;
+      }
+      ADP[s] = x;
+      ATP[s] = y;
+    }
+
+    const spread = params.metabolicDiffuse;
+    if (spread > 0) {
+      if (this.gaitPull.length < store.capacity) {
         this.gaitPull = new Float64Array(store.capacity);
         this.gaitDegree = new Float64Array(store.capacity);
       }
-      const acc = this.gaitPull;
-      const deg = this.gaitDegree;
+      const pull = this.gaitPull;
+      const count = this.gaitDegree;
       for (const agent of this.agents.values()) {
-        acc[agent.slot] = 0;
-        deg[agent.slot] = 0;
+        pull[agent.slot] = 0;
+        count[agent.slot] = 0;
       }
-      const lag = params.gaitLag;
+      // Accumulated before it is applied, so every wire sees the same field
+      // and the answer does not depend on the order the wire map is in.
       for (const wire of this.graph.wires.values()) {
         const A = this.agents.get(wire.a.id);
         const B = this.agents.get(wire.b.id);
         if (!A || !B) continue;
-        const aFirst =
-          SLOT_ORDER[wire.a.slot] !== SLOT_ORDER[wire.b.slot]
-            ? SLOT_ORDER[wire.a.slot] < SLOT_ORDER[wire.b.slot]
-            : A.id < B.id;
-        const up = aFirst ? A : B;
-        const down = aFirst ? B : A;
-        const err = Math.sin(PHASE[down.slot] - PHASE[up.slot] - lag);
-        acc[up.slot] += err;
-        acc[down.slot] -= err;
-        deg[up.slot] += 1;
-        deg[down.slot] += 1;
+        const d = ADP[B.slot] - ADP[A.slot];
+        pull[A.slot] += d;
+        pull[B.slot] -= d;
+        count[A.slot] += 1;
+        count[B.slot] += 1;
       }
-      const TAU2 = Math.PI * 2;
+      // Per wire, so a hub is not driven as many times as it has wires, and
+      // capped at a half so an explicit step cannot overshoot its neighbours
+      // and ring.
+      const step = Math.min(0.5, spread * dt);
       for (const agent of this.agents.values()) {
         const s = agent.slot;
-        const d = deg[s];
-        // Per wire rather than summed: a body with three wires should be as
-        // easy to entrain as one with a single wire, not three times as hard
-        // to move and three times as loud.
-        const k = d > 0 ? (couple * acc[s]) / d : 0;
-        let ph = PHASE[s] + (rate + k) * dt;
-        if (ph >= TAU2) ph -= TAU2;
-        else if (ph < 0) ph += TAU2;
-        PHASE[s] = ph;
-      }
-    } else {
-      const TAU = Math.PI * 2;
-      const step = rate * dt;
-      for (const agent of this.agents.values()) {
-        const s = agent.slot;
-        // Wrapped rather than left to grow: a body can live for minutes, and
-        // `cos` of a large float loses the precision the stroke is made of.
-        let ph = PHASE[s] + step;
-        if (ph >= TAU) ph -= TAU;
-        PHASE[s] = ph;
+        const n = count[s];
+        if (n <= 0) continue;
+        const nb = ADP[s] + step * (pull[s] / n);
+        ADP[s] = nb <= 0 ? 0 : nb >= REACT_CAP ? REACT_CAP : nb;
       }
     }
-    const WAVE = store.gaitWave;
+
+    /*
+     * The wave is where the activator sits against the pathway's own resting
+     * level, which is `base` — the fixed point of the equations above. So a
+     * body strokes about its own middle rather than sitting permanently
+     * contracted, and a body whose pathway is not running reads exactly zero
+     * and does not stroke at all.
+     *
+     * `(x - base) / (x + base)` rather than a clamp: it is zero at rest, runs
+     * to -1 as the activator empties and to +1 as it spikes, and is smooth
+     * throughout. A plain ratio clipped at 1 spends most of a relaxation
+     * cycle pinned at the ceiling, which throws away the shape of the spike.
+     */
     for (const agent of this.agents.values()) {
       const s = agent.slot;
-      const c = Math.cos(PHASE[s]);
-      WAVE[s] = c;
-      ANCHOR[s] = GA[s] * c;
+      const x = ADP[s];
+      const w = x + base > 1e-9 ? (x - base) / (x + base) : 0;
+      WAVE[s] = w;
+      ANCHOR[s] = GA[s] * w;
     }
   }
 
@@ -4406,7 +4443,7 @@ export class Sim {
     const OMEGA = store.omega;
     const base = Math.max(0, params.drag);
     const grip = params.grip;
-    const gait = params.gaitRate > 0;
+    const gait = params.metabolicRate > 0;
     if (grip === 0 && !gait) {
       const linKeep = Math.exp(-base * dt);
       for (const agent of this.agents.values()) {

@@ -689,7 +689,7 @@ describe('steering: WASM against the JS reference', () => {
     // foraging soup separates them on its own — see the drift budget below.
     // The gait is a second source of motion and not one of the ports under
     // test, so it comes off with the swim noise.
-    params.gaitRate = 0;
+    params.metabolicRate = 0;
     params.wireShrink = 0.9;
     params.sense = 220;
     params.stepSpeed = 30;

@@ -293,82 +293,53 @@ export interface Params {
    */
   grip: number;
   /**
-   * Radians a second the gait's clock advances. 0 = no gait, which is the
-   * pond with `grip` alone and no stroke.
+   * How fast the body's metabolism runs, as a plain multiple. 0 = no
+   * pathway, so no gait at all.
    *
-   * Every body carries a phase. `G`'s two heads scale its cosine into the
-   * body's drag rate and into an equal and opposite impulse along each of its
-   * wires — in phase, not in quadrature, because the pair's centre keeps
-   * `∮ F (1/k_a - 1/k_b) dt / M` and that goes as the cosine of the angle
-   * between the two. `chem-layout.ts`'s `G_OUT` has the arithmetic, including
-   * why the length actuator this replaces could never have worked whatever
-   * its phase.
-   *
-   * The period wants to sit near the drag time constant, `1/drag`: much
-   * faster and the body cannot travel within a stroke, so the two halves of
-   * the cycle cancel and the amplitude is wasted. At `drag` 0.55 that
-   * constant is 1.8 s and 2 rad/s is a period of 3.1 s, a little over it.
-   *
-   * There was briefly a second ceiling here, from the rope. Driving a wire's
-   * *rest length* off this clock pumped the slack ropes hanging off a
-   * rewrite — a leftover bowed to 5.3x its chord at 4 rad/s against 2.7x with
-   * the gait off — because rest length is a position target and XPBD reads
-   * node velocity as a position delta over `h`. An impulse does not touch it:
-   * re-measured at 4 rad/s with the stroke as a force, `rewrite.test.ts` is
-   * clean. The ceiling is the drag law again, which is where it belongs.
+   * `Sim.advanceGait` steps Selkov's glycolytic oscillator per body, and
+   * multiplying both of its equations is a rescaling of time — so this moves
+   * the period without moving the window the pathway oscillates in. It is
+   * the frequency dial, and the only one.
    */
-  gaitRate: number;
+  metabolicRate: number;
   /**
-   * How hard a wire pulls its two ends toward a fixed phase offset, in
-   * radians a second. 0 = every body oscillates alone, which is the pond
-   * before this existed.
+   * Substrate fed into the pathway, per unit of the body's own fullness.
    *
-   * The half of a central pattern generator that makes it a *pattern*. Left
-   * uncoupled, every body runs its own clock from wherever `createAgent` put
-   * it, and a net of `n` bodies is `n` strokes at unrelated phases: they sum
-   * as `sqrt(n)` against a mass that grows as `n`, so the effect a whole net
-   * has actually *shrinks* as the net grows. Coupled, they sum as `n` and it
-   * holds up.
+   * This is what ties the gait to the pond. The feed rate is `influx *
+   * fullness`, so a body's rhythm comes from what it is holding, and what it
+   * is holding is what the ground gave it and what its net sent it. An empty
+   * body has no pathway running and does not undulate.
    *
-   * Kuramoto, over the wire graph: each end is pulled toward
-   * `sin(other - self ± gaitLag)`, normalised by degree so a hub is not
-   * dragged about by having many wires. At `gaitLag` 0 that is plain
-   * synchronisation and every wire strokes together, which is the pulse this
-   * branch started by removing. Non-zero, a chain settles at a fixed phase
-   * difference per wire, and a fixed phase difference per wire *is* a
-   * travelling wave — which along a body is peristalsis, and is how an
-   * earthworm gets along.
-   *
-   * On a graph with a cycle the lag is frustrated: it cannot hold all the way
-   * round unless the loop happens to sum to a multiple of a turn, so a ring
-   * settles somewhere between. That is left alone rather than special-cased —
-   * a net is mostly a tree, and what a loop does under a wave is a question
-   * worth being able to see.
+   * Read it against `metabolicBase`: the pathway runs exactly when
+   * `influx * fullness > 1 + base^2`. At the shipped 2.5 against a base of
+   * 0.5 that is half a tank, so a body over half full undulates and one
+   * under it is perfectly still. Monotone, which is the point — the more a
+   * body has, the harder it runs, with no window to fall out of the top of.
    */
-  gaitCouple: number;
+  metabolicInflux: number;
   /**
-   * Radians of phase a wire holds between its two ends. 0 = synchrony.
+   * The pathway's basal feed, and so its resting level: the activator sits
+   * here when nothing is driving it, and the stroke is measured against it.
    *
-   * The wavelength, in wires: a lag of `L` puts a whole cycle across
-   * `2 * pi / L` of them, so pi/2 is a wave four bodies long. Sign is
-   * direction — which end of a wire counts as upstream is fixed by the port
-   * slots, so a chain wired `r` to `l` has a consistent head and tail, and
-   * flipping this sends the wave the other way.
-   *
-   * pi/2 because that is where the stroke is largest, and the argument is
-   * short enough to keep. `Graph.syncRest` swings a wire by the *mean* of its
-   * two ends, so the swell it gets is `cos(L/2)` of full — at `L = pi` the
-   * two ends cancel and the wire does not move at all. The travel comes from
-   * the *difference* between those ends' grip, which goes as `sin(L/2)`.
-   * Their product, which is what a step is made of, is `sin(L)/2`: zero at
-   * both extremes and largest at a quarter turn. No lag is no asymmetry; a
-   * half turn is no stroke.
-   *
-   * Nothing heritable yet, and that is the obvious next move: the lag sets
-   * both the gait's wavelength and which way the animal walks, which is
-   * exactly the kind of thing a lineage should own.
+   * With `metabolicInflux` it sets where the pathway starts running, since
+   * the Brusselator's fixed point goes unstable exactly at
+   * `feed > 1 + base^2`. At 0.5 that threshold is a feed of 1.25, which
+   * against an influx of 2.5 is half a tank. Raising it raises the bar a
+   * body has to clear to have a gait at all.
    */
-  gaitLag: number;
+  metabolicBase: number;
+  /**
+   * How fast the activator crosses a wire, per second. 0 = every body is its
+   * own oscillator and a net is a bag of them.
+   *
+   * What makes this a medium rather than a collection. A reaction that
+   * diffuses carries a front, and a front running down a chain is
+   * peristalsis — so this is the coupling, and unlike the Kuramoto pull it
+   * replaces there is no lag to set: the wavelength is whatever the reaction
+   * and the diffusion agree on, which is the point of getting it from
+   * chemistry instead of from a slider.
+   */
+  metabolicDiffuse: number;
   /**
    * How far the gait swings a wire's rest length, as a fraction of it.
    * 0 = the wire ignores the clock, which is the pond before this.
@@ -1031,9 +1002,10 @@ export function defaultParams(): Params {
     drag: 0.55,
     angDrag: 2.4,
     grip: 2,
-    gaitRate: 2,
-    gaitCouple: 3,
-    gaitLag: Math.PI / 2,
+    metabolicRate: 6,
+    metabolicInflux: 2.5,
+    metabolicBase: 0.5,
+    metabolicDiffuse: 2,
     gaitSwell: 0.3,
     flockAlign: 5.5,
     flockSep: 48,
@@ -1108,9 +1080,10 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'drag', label: 'Fluid drag', min: 0, max: 4, step: 0.01 },
   { key: 'angDrag', label: 'Spin damp', min: 0, max: 8, step: 0.05 },
   { key: 'grip', label: 'Grip (tank)', min: -4, max: 12, step: 0.05 },
-  { key: 'gaitRate', label: 'Gait rate (rad/s)', min: 0, max: 16, step: 0.1 },
-  { key: 'gaitCouple', label: 'Gait coupling', min: 0, max: 20, step: 0.1 },
-  { key: 'gaitLag', label: 'Gait lag (rad/wire)', min: -3.2, max: 3.2, step: 0.05 },
+  { key: 'metabolicRate', label: 'Metabolic rate', min: 0, max: 20, step: 0.1 },
+  { key: 'metabolicInflux', label: 'Substrate feed', min: 0, max: 8, step: 0.05 },
+  { key: 'metabolicBase', label: 'Basal feed', min: 0.05, max: 2, step: 0.05 },
+  { key: 'metabolicDiffuse', label: 'Activator spread', min: 0, max: 20, step: 0.1 },
   { key: 'gaitSwell', label: 'Gait swell', min: 0, max: 0.8, step: 0.01 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
   { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },

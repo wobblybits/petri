@@ -122,19 +122,27 @@ not also be asked to do. Nothing else belongs here; measurements go in
   it is plain synchrony, which is the pond-wide pulse this branch began by
   removing.
 
-  `gaitLag` sits at a quarter turn because that is where a step is largest.
-  `syncRest` swings a wire by the mean of its two ends, so the swell is
-  `cos(L/2)` of full and vanishes at half a turn; the travel comes from the
-  difference in those ends' grip, which goes as `sin(L/2)`. The product is
-  `sin(L)/2` — no lag is no asymmetry, half a turn is no stroke.
+  The clock is a metabolism. Every body runs a two-species autocatalytic
+  pathway — the Brusselator, the standard minimal chemical oscillator and the
+  usual toy for Belousov-Zhabotinsky — fed at a rate set by its own fullness,
+  and the activator is the wave. It runs exactly when
+  `influx * fullness > 1 + base^2`, which at the shipped constants is half a
+  tank: a body over half full undulates and one under it is perfectly still.
+  So the gait is something the pond produces out of what it did with its
+  energy, rather than a metronome bolted beside it, and the coupling is the
+  activator diffusing along wires — a reaction that diffuses carries a front,
+  and a front running down a chain is peristalsis.
 
-  Not yet true, and this is the list. The lag is a global constant where it
-  should be a gene: it sets both the gait's wavelength and which way the
-  animal walks, which is exactly what a lineage should own. The clock is
-  free-running, so a net undulates whether it is fed, starving, or attached
-  to anything — the gait is a metronome bolted to the pond rather than
-  something the pond produces, and gating it on metabolism is the open
-  question the Selkov entry under Transport is for. And an
+  Selkov's own equations came first and could not do it: `adp * (atp * adp -
+  k)` makes zero a stable fixed point, so the pathway collapses the moment
+  its product dips and never restarts, and its window `v < k^(3/2)` is the
+  wrong shape — a well-fed body falls out of the top of it and goes still.
+
+  Not yet true, and this is the list. Nothing about the pathway is heritable:
+  `metabolicInflux` and `metabolicBase` are global constants, where which
+  side of `1 + base^2` a lineage chooses to live on is exactly the sort of
+  thing it should own — that wants two more rows on `G`, or a head off `X`,
+  which is what the expression head is for. And an
   Era is both the leaf *and*, by `ERA_UPKEEP_RATIO` and its larger store, the
   fullest body on its wire — so the seeded head makes it the oar while the
   economy makes it the anchor, and those pull opposite ways. On the bench they

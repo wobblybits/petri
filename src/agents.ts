@@ -454,12 +454,12 @@ export class Agent {
     this.store.transportThrust[this.slot] = v;
   }
 
-  /** Where this body is on the gait's clock. See `Sim.advanceGait`. */
-  get gaitPhase(): number {
-    return this.store.gaitPhase[this.slot];
+  /** Selkov's product, this body's metabolic clock. See `Sim.advanceGait`. */
+  get adp(): number {
+    return this.store.adp[this.slot];
   }
-  set gaitPhase(v: number) {
-    this.store.gaitPhase[this.slot] = v;
+  set adp(v: number) {
+    this.store.adp[this.slot] = v;
   }
 
   /** How hard this body recoils, per unit of energy it pumps to a neighbour. */
@@ -1273,28 +1273,15 @@ export function createAgent(
   agent.locked = false;
   agent.pinned = false;
   /*
-   * Somewhere of its own on the gait's clock.
+   * A nudge off the metabolic steady state, so a fresh body's pathway starts
+   * somewhere rather than sitting exactly on its own fixed point.
    *
-   * `reset` leaves this at 0 and every body advances at one global rate, so
-   * without it the whole founder soup shares a phase exactly and for life —
-   * every wire in the pond strokes on the same frame, which reads as one
-   * body-wide pulse rather than anything walking.
-   *
-   * A *hash* of the id and not a multiple of it. `id * goldenAngle` was the
+   * A hash of the id and not a multiple of it. `id * goldenAngle` was the
    * first try and it is not a scatter at all: consecutive ids land a constant
-   * angle apart, so a chain latched in id order is already a travelling wave,
-   * of a wavelength nothing chose and nothing can select on. That made
-   * `gaitCouple` invisible — coupling did not create a wave, it only changed
-   * the wavelength of one that was already there, and two waves of different
-   * wavelength look much alike.
-   *
-   * Mixed rather than drawn from `Math.random`, so a body's starting phase is
-   * a property of the body and not of how many bodies happened to be made
-   * before it. Two runs of the same seed put the same body at the same phase
-   * however the roster was built.
-   *
-   * Still only an initial condition. What holds a *useful* relative phase is
-   * `gaitCouple`, and until a lineage can own the lag this is a decoration.
+   * angle apart, so a chain latched in id order was already a wave of a
+   * wavelength nothing chose. Mixed rather than drawn from `Math.random`, so
+   * where a body starts is a property of the body and not of how many bodies
+   * happened to be made before it.
    */
   let mix = Math.imul(id, 2654435761) >>> 0;
   mix ^= mix >>> 15;
@@ -1302,7 +1289,7 @@ export function createAgent(
   mix ^= mix >>> 13;
   mix = Math.imul(mix, 3266489917) >>> 0;
   mix ^= mix >>> 16;
-  agent.gaitPhase = (mix / 4294967296) * Math.PI * 2;
+  store.adp[slot] = 0.2 + (mix / 4294967296) * 0.8;
   // A body made outside a rewrite is a founder: generation zero of its own
   // line. `autoSpawn` makes a great many of these, which is the point of
   // being able to count them.

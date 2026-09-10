@@ -506,7 +506,7 @@ describe('conservative mechanics', () => {
     // this is a test about a collision conserving momentum rather than about
     // the drag law. Turning that law off takes all three.
     params.grip = 0;
-    params.gaitRate = 0;
+    params.metabolicRate = 0;
     params.deposit = 0;
     params.rewriteDuration = 20;
     params.flockAlign = 0;
