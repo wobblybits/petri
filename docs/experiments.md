@@ -234,6 +234,7 @@ truth (`src/pond/couplings.ts`); this is the reading of it.
 |---|---|---|
 | `excreteRate` | `senseScale` | minted signal reads p90 ≈ 4.3, conserved ≈ 0.002; one scale leaves one arm blind |
 | `excreteRate` | `deposit` | inert above zero: the mint is off whenever excretion is on |
+| `uptakeVmax` | `digestRate`, `gutSize` | nothing fills a gut at 0, so the gut dials are inert there and decide how much of a mouthful is worth anything above it |
 | `groundPatches` | `energyRegrow` | growth is zero at cap; a uniform dish seeded at cap produces nothing, patches manufacture ground. `energyRegrow = 0` is the clean layout control |
 | `groundPatches` | `learnDiscount`, `learnTrace` | the critic's horizon has to cover the trip to the reward, and patch spacing sets the trip (5–12 s against a default 0.33 s horizon) |
 | `ambientEnergy` | `uptakeKs` | a half-saturation constant only means something relative to the density it is measured against |

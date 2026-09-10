@@ -20,6 +20,7 @@ import {
   CHEM_SPECIES,
   ROW_COUNT,
   ROW_EXCRETE,
+  ROW_UPTAKE,
   F_BASE,
   F_OUT,
   GAIT_ANCHOR_MAX,
@@ -827,6 +828,11 @@ export class Sim {
     const slot = this.agentStore.slotFor(id);
     if (slot !== undefined && this.agentStore.arrivedAt[slot] >= 0) this.larval.diedAlone();
     this.energy.addAt(agent.x, agent.y, deathYield(agent, this.bodyValue));
+    // And whatever it had swallowed and not yet turned into anything, as
+    // itself. A corpse that kept its gut would be a leak the size of the
+    // pond's whole appetite, and a body dying with a gut full of what it could
+    // not digest is exactly the death this mechanism makes possible.
+    if (slot !== undefined) this.spillGut(slot, agent.x, agent.y);
     this.graph.detachAgent(id);
     this.agents.delete(id);
     this.agentStore.release(id);
@@ -834,6 +840,25 @@ export class Sim {
     this.tally.died++;
     if (this.grabbed?.id === id) this.grabbed = null;
   }
+
+  /** Put one body's undigested holdings back on the ground it is standing on. */
+  private spillGut(slot: number, x: number, y: number): void {
+    const GUT = this.agentStore.gut;
+    const go = slot * CHEM_SPECIES;
+    const w = this.deathScratch;
+    let held = 0;
+    for (let c = 0; c < CHEM_SPECIES; c++) {
+      const v = GUT[go + c];
+      w[c] = v > 0 ? v : 0;
+      held += w[c];
+    }
+    if (held <= 0) return;
+    GUT.fill(0, go, go + CHEM_SPECIES);
+    this.energy.addSpeciesAt(x, y, w);
+  }
+
+  /** Its own, not `excreteScratch`: a death can land inside any pass. */
+  private readonly deathScratch = new Float64Array(CHEM_SPECIES);
 
   wire(aId: number, aSlot: 'p' | 'l' | 'r', bId: number, bSlot: 'p' | 'l' | 'r', params: Params): void {
     this.graph.connect(
@@ -1053,8 +1078,12 @@ export class Sim {
         yDirect: params.yDirect,
         yEra: params.yEra,
         hillN: params.hillN,
-        coSubstrate: params.catCoSubstrate,
+        gutSize: params.gutSize,
       });
+      // A metered mouthful lands in a gut, so something now has to digest it.
+      // Set from the plan rather than from the draw, because the draw is in
+      // `energy.ts` and this flag is the Sim's; over-setting costs one pass.
+      if (this.harvestPlan.metered && this.harvestPlan.nEntries > 0) this.gutLive = true;
     }
     Sim.phase('harvestSlots');
     this.latchPass(params);
@@ -1106,6 +1135,7 @@ export class Sim {
      * economy into a way to die.
      */
     this.refreshExpression(params, t);
+    this.runDigestion(params, t);
     this.runExcretion(params, t);
     Sim.phase('excrete');
     if (params.farmRate > 0) {
@@ -3257,7 +3287,7 @@ export class Sim {
       yDirect: params.yDirect,
       yEra: params.yEra,
       hillN: params.hillN,
-      coSubstrate: params.catCoSubstrate,
+      gutSize: params.gutSize,
     });
     Sim.phase('gpu:plan');
     // Three ports a body, plus whatever died, farmed, spilled or was refunded
@@ -5420,6 +5450,20 @@ export class Sim {
     return n;
   }
 
+  /**
+   * Everything swallowed and not yet digested, across the pond.
+   *
+   * Anything totalling the pond has to add this or it will read a mouthful in
+   * transit as matter that went missing — the same reason `escrowTotal` is
+   * here. It is in neither the ground nor a tank, and it is not nothing.
+   */
+  totalGut(): number {
+    const store = this.agentStore;
+    let total = 0;
+    for (const a of this.agents.values()) total += store.gutTotal(a.slot);
+    return total;
+  }
+
   totalBound(): number {
     let n = 0;
     for (const a of this.agents.values()) n += agentValue(a.kind);
@@ -5589,14 +5633,29 @@ export class Sim {
     const got = fieldGpu.gotData;
     const store = this.agentStore;
     const EXTRA = store.extra;
+    const GUT = store.gut;
     const CAP = store.energyCap;
     const IDS = store.id;
+    const metered = plan.metered;
     for (let e = 0; e < plan.nEntries; e++) {
       const slot = plan.slots[e];
       if (IDS[slot] !== plan.ids[e]) continue;
-      // One row per entry, one `got` per species: unmetered, only the ground's
-      // is ever non-zero, and the sum is what it always was.
+      // One row per entry, one `got` per species. Metered, each lands in the
+      // gut as itself and `runDigestion` decides what any of it is worth;
+      // unmetered, only the ground's is ever non-zero and it is money the
+      // moment it is swallowed, which is what this has always done.
       const ro = e * HARVEST_STRIDE + HARVEST_GOT;
+      if (metered) {
+        const go = slot * CHANNELS;
+        for (let c = 0; c < CHANNELS; c++) {
+          const g = got[ro + c];
+          if (g > 0) {
+            GUT[go + c] += g;
+            this.gutLive = true;
+          }
+        }
+        continue;
+      }
       let g = 0;
       for (let c = 0; c < CHANNELS; c++) g += got[ro + c];
       if (!(g > 0)) continue;
@@ -6721,14 +6780,143 @@ export class Sim {
   }
 
   /**
-   * The reaction table's excretion rows: tank -> field, conserved.
+   * The gut: what a body swallowed becomes what a body has, or does not.
    *
-   * Mass action on the tank, which is where "absolute honesty" comes from.
-   * The rate is proportional to what the body actually holds, so a body near
-   * empty excretes near nothing however loudly its genome would like to — the
-   * simplex bounds what you can say relative to what else you say, and
-   * conservation bounds it outright. Neither implies the other and they
-   * compound.
+   * The harvest is a *sample of the water* — a body cannot decline the part of
+   * the mixture it has no use for — so a body is necessarily holding species
+   * it may not be able to touch. This is where that is settled, and it is the
+   * whole reason the gut exists: waste is the gap between the sample and the
+   * recipe, and nothing has to nominate it.
+   *
+   * Three rules, and each is one line:
+   *
+   * - **The ground converts raw.** `CH.energy` needs no machinery and no
+   *   permission, which is what makes it the ground rather than a signal.
+   * - **The other three need the row.** A body's uptake row for a species is
+   *   its recipe for that species — `ROW_COUNT` in the factor so even
+   *   expression, which is what a seeded genome has, converts at exactly the
+   *   global rate, and clamped at one because a recipe is a capability and not
+   *   an amplifier. A body expressing nothing on a row converts none of that
+   *   species and holds it until excretion takes it away.
+   * - **Catabolism wants ground banked.** `catCoSubstrate` blends the other
+   *   three's rate against how full the tank is, which is §6b's co-substrate:
+   *   energy is the thing the others are converted *with*. Blended rather than
+   *   required, so a body with a little capability still does better than one
+   *   with none and selection has a slope to climb. Nothing is destroyed — the
+   *   gate buys access, never amplification.
+   *
+   * Bounded by room in the tank, which is what makes satiety three mechanisms
+   * deep rather than a clamp: a full body cannot digest, so its gut fills, so
+   * it cannot eat. And bounded that way rather than by discarding, because
+   * matter that had nowhere to go would have to be destroyed to fit.
+   */
+  private runDigestion(params: Params, t: number): void {
+    const rate = params.digestRate;
+    // Nothing has ever been swallowed, which is every frame of a pond running
+    // at `uptakeVmax` 0 — the whole of the shipped default. Guarded rather
+    // than walked, for the reason `HarvestPlan.build` guards on `meter`: a
+    // per-body pass that always finds zero is still a per-body pass.
+    if (!(rate > 0) || !this.gutLive) return;
+    const store = this.agentStore;
+    const GUT = store.gut;
+    const EX = store.expressAll;
+    const EXTRA = store.extra;
+    const CAP = store.energyCap;
+    const co = params.catCoSubstrate;
+    let live = false;
+    for (const a of this.agents.values()) {
+      const s = a.slot;
+      const go = s * CHEM_SPECIES;
+      let held = 0;
+      for (let c = 0; c < CHEM_SPECIES; c++) held += GUT[go + c];
+      if (held <= 0) continue;
+      live = true;
+      let room = CAP[s] - EXTRA[s];
+      if (room <= 0) continue;
+      const xo = s * ROW_COUNT + ROW_UPTAKE;
+      /*
+       * How much of what this body is holding is ground.
+       *
+       * The co-substrate has to be something that runs *out*, or "cannot live
+       * on scent alone" is not true of anything: a gate on the tank would let
+       * a body with a little banked convert scent without end, and converting
+       * scent is how it keeps a little banked. What is in the gut is consumed
+       * by the digesting, so a body standing on nothing but scent swallows
+       * nothing but scent, reads zero here, and starves on top of a feast —
+       * which is §6b's whole point, now asked inside the body rather than of
+       * the cell it happens to be standing in.
+       */
+      const gate = co > 0 ? 1 - co + co * (GUT[go + CH.energy] / held) : 1;
+      let moved = 0;
+      for (let c = 0; c < CHEM_SPECIES && room > 0; c++) {
+        const have = GUT[go + c];
+        if (have <= 0) continue;
+        let use = 1;
+        if (c !== CH.energy) {
+          const row = ROW_COUNT * EX[xo + c];
+          use = (row > 1 ? 1 : row) * gate;
+        }
+        if (!(use > 0)) continue;
+        // Mass action, as an exponential rather than a product, so a rate
+        // above one frame's worth cannot take more than the body is holding.
+        let take = have * (1 - Math.exp(-rate * use * t));
+        if (take > room) take = room;
+        if (!(take > 0)) continue;
+        GUT[go + c] = have - take;
+        room -= take;
+        moved += take;
+      }
+      if (moved > 0) EXTRA[s] += moved;
+    }
+    /*
+     * Read before this pass moved anything, so a pond that has just finished
+     * digesting the last of it runs one more empty pass and then stops. The
+     * error is one frame in the safe direction; the other direction would
+     * leave a gut that nothing ever drained.
+     */
+    this.gutLive = live;
+  }
+
+  /**
+   * Whether anything in the pond is holding something undigested.
+   *
+   * Set where a mouthful lands and cleared by the pass that finds every gut
+   * empty. It is a hint, not a fact: over-setting it costs one pass over the
+   * roster, and the only thing that must never happen — a gut nothing drains
+   * — needs it to be under-set, which nothing here does.
+   */
+  private gutLive = false;
+
+  /**
+   * The reaction table's excretion rows: gut -> field, conserved *per species*.
+   *
+   * Mass action on the *gut*, which is where "absolute honesty" comes from and
+   * is now honest about the species too. The rate is proportional to what the
+   * body is actually holding of that species, so a body near empty excretes
+   * near nothing however loudly its genome would like to — the simplex bounds
+   * what you can say relative to what else you say, and conservation bounds it
+   * outright. Neither implies the other and they compound.
+   *
+   * Two sources, one operation. A body wanting to put out species `c` takes it
+   * from the gut if it is holding any — it is already that species, and it is
+   * in the way — and synthesises the shortfall out of the tank, which is what
+   * this has always done and is where the three signal species come from at
+   * all. Mass is conserved either way; what the gut buys is that clearing
+   * waste is *free*, where saying the same thing out of stock costs.
+   *
+   * That the tank half survives is not a compromise. Per-species conservation
+   * is a stronger property than §5 asks for and it is one the pond cannot
+   * afford: nothing in a conserved dish creates `conP`, so a pond whose only
+   * input is ground would be permanently silent. Bodies conserve *matter*.
+   * Turning matter into a different molecule is what a metabolism is.
+   *
+   * What the gut half adds is the necessity. What a body cannot convert
+   * occupies the room that bounds its next mouthful, and the only way out of
+   * the gut is here — so a body must express the excretion row for whatever it
+   * cannot digest, or clog and starve holding food it cannot use. The rows
+   * stop being purely a preference about what to broadcast and become, for
+   * that species, a clearance rate. Nothing declares what a body's waste is;
+   * the shape of what it is stuck with does.
    *
    * `ROW_COUNT` in the rate so that even expression — which is what a seeded
    * genome has, every row at an eighth — runs each row at exactly
@@ -6745,36 +6933,63 @@ export class Sim {
     const store = this.agentStore;
     const EX = store.expressAll;
     const OUT = store.excreteAll;
+    const GUT = store.gut;
     const w = this.excreteScratch;
     const rate = params.excreteRate * t * ROW_COUNT;
     for (const a of this.agents.values()) {
       const s = a.slot;
       const eo = s * ROW_COUNT + ROW_EXCRETE;
       const oo = s * CHEM_SPECIES;
-      const have = a.extra > 0 ? a.extra : 0;
-      if (a.locked || have <= 0) {
+      const go = s * CHEM_SPECIES;
+      if (a.locked) {
+        OUT.fill(0, oo, oo + CHEM_SPECIES);
+        continue;
+      }
+      const banked = a.extra > 0 ? a.extra : 0;
+      let held = 0;
+      for (let c = 0; c < CHEM_SPECIES; c++) held += GUT[go + c];
+      // Mass action on everything the body is holding, digested or not: a body
+      // with more to give gives more, and one with nothing gives nothing.
+      const have = banked + held;
+      if (have <= 0) {
         OUT.fill(0, oo, oo + CHEM_SPECIES);
         continue;
       }
       let total = 0;
+      let owed = 0;
       for (let c = 0; c < CHEM_SPECIES; c++) {
         const amt = rate * EX[eo + c] * have;
         w[c] = amt;
         total += amt;
+        // What the gut cannot cover has to be built out of stock.
+        const gut = GUT[go + c];
+        owed += amt > gut ? amt - gut : 0;
       }
-      // A long frame, or a rate above one, could ask for more than the body
-      // holds. Scaled down rather than clamped per species, so the mix a body
-      // chose survives being unable to afford all of it.
-      if (total > have) {
-        const k = have / total;
-        for (let c = 0; c < CHEM_SPECIES; c++) w[c] *= k;
-        total = have;
+      /*
+       * A long frame, or a rate above one, can ask for more stock than the
+       * body has. The synthesised part scales down and the gut part does not:
+       * clearing what is already in the way is not something poverty should be
+       * able to prevent, and it is the half a clogged body most needs.
+       */
+      const k = owed > banked ? (owed > 0 ? banked / owed : 0) : 1;
+      total = 0;
+      let spent = 0;
+      for (let c = 0; c < CHEM_SPECIES; c++) {
+        const gut = GUT[go + c];
+        const amt = w[c];
+        const fromGut = amt > gut ? gut : amt;
+        const made = (amt - fromGut) * k;
+        const out = fromGut + made;
+        w[c] = out;
+        if (fromGut > 0) GUT[go + c] = gut - fromGut;
+        spent += made;
+        total += out;
       }
+      if (spent > 0) a.extra -= spent;
       if (total <= 0) {
         OUT.fill(0, oo, oo + CHEM_SPECIES);
         continue;
       }
-      a.extra -= total;
       for (let c = 0; c < CHEM_SPECIES; c++) OUT[oo + c] = w[c];
       this.energy.addSpeciesAt(a.x, a.y, w);
     }

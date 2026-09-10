@@ -968,6 +968,42 @@ export interface Params {
    */
   catCoSubstrate: number;
   /**
+   * How fast the gut turns into the tank, per second, per species.
+   *
+   * Mass action on what a body is holding, so a gut empties on an exponential
+   * and never overshoots. The ground converts at this rate flat — it is the
+   * thing everyone can use raw, which is what makes it the ground — and the
+   * other three convert at this rate scaled by the body's uptake row for that
+   * species and by `catCoSubstrate`. A body whose recipe cannot touch a
+   * species converts none of it, and it stays in the gut occupying the room
+   * that bounds the next mouthful until excretion clears it.
+   *
+   * Bounded by room in the tank, because a full body has nowhere to put what
+   * it digests, and matter that had nowhere to go would have to be destroyed.
+   * So a fed body stops digesting, its gut fills, and it stops eating — which
+   * is what satiety is here, and it is three mechanisms deep rather than a
+   * clamp.
+   *
+   * Inert until something fills a gut, and only the metered harvest does, so
+   * this dial does nothing at `uptakeVmax` 0.
+   */
+  digestRate: number;
+  /**
+   * How much a body can hold undigested, as a multiple of its `energyCap`.
+   *
+   * Not a trait of its own: `energyCap` is already heritable and already means
+   * "how much can this body hold", so a lineage that breeds a bigger tank
+   * breeds a bigger gut with it and there is one number to select on rather
+   * than two that must be selected together.
+   *
+   * This is the number that makes a filthy cell expensive twice over. The
+   * first cost is the sample — ground that is a quarter of what is standing in
+   * a cell is a quarter of the mouthful. The second is that the other three
+   * quarters have to *go* somewhere, and if the body cannot convert them they
+   * sit here, and the next mouthful is smaller for it.
+   */
+  gutSize: number;
+  /**
    * How many patches the ground is laid down in, at the same total mass.
    * 0 spreads it over the whole disk, which is what every preset does.
    *
@@ -1084,6 +1120,8 @@ export function defaultParams(): Params {
     excreteRate: 0,
     senseScale: SENSE_SCALE,
     catCoSubstrate: 0,
+    digestRate: 12,
+    gutSize: 1,
     groundPatches: 0,
   };
 }
@@ -1187,5 +1225,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'excreteRate', label: 'Excrete rate', min: 0, max: 2, step: 0.02 },
   { key: 'senseScale', label: 'Sense scale', min: 0.001, max: 8, step: 0.001 },
   { key: 'catCoSubstrate', label: 'Catabolism needs ground', min: 0, max: 1, step: 0.05 },
+  { key: 'digestRate', label: 'Digest rate', min: 0, max: 40, step: 0.5 },
+  { key: 'gutSize', label: 'Gut size', min: 0.1, max: 4, step: 0.1 },
   { key: 'groundPatches', label: 'Ground patches', min: 0, max: 128, step: 1 },
 ];

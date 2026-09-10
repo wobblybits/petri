@@ -60,6 +60,14 @@ export const COUPLINGS: readonly Coupling[] = [
     fix: 'senseScale 4.3 when excreteRate is 0, ~0.002 when it is on; run the two regimes as arms',
   },
   {
+    axis: 'uptakeVmax',
+    constant: 'digestRate',
+    why:
+      'nothing fills a gut at uptakeVmax 0, so digestRate and gutSize are inert there and ' +
+      'decide how much of a mouthful is ever worth anything above it',
+    fix: 'read the gut dials within a metered arm, never across the uptakeVmax 0 boundary',
+  },
+  {
     axis: 'excreteRate',
     constant: 'deposit',
     why: 'the minted deposit is off whenever excretion is on, so deposit is inert above zero',

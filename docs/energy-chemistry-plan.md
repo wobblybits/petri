@@ -444,6 +444,73 @@ metered uptake, which an earlier sweep had scored as inert (eta-squared 0.02).
 It looked inert because excretion was saturating the thing it controlled. A
 catabolism matrix adds many dials at once and the same trap is set.
 
+## 6c. The gut: what makes waste a consequence
+
+Added 2026-09-10, after uptake became a sample of the water (§4).
+
+§6b says the three non-ground species are "mass in the field that no body can
+touch without machinery". That was true of the *field* and false of the
+*body*, because a body had nowhere to put a species it could not touch: the
+tank is one scalar, so everything swallowed became `extra` the instant it
+crossed the membrane. A body took in `aux` and put out `conP` with nothing in
+between. Waste could not exist, because there was no such thing as an
+un-metabolised substance inside a body — and so "which species does this body
+treat as waste" could only ever be a genomic *broadcast*, never a consequence.
+
+The gut is that substance. Four floats a body, `store.gut`, and three passes
+that were already there now mean different things:
+
+| pass | before | now |
+|---|---|---|
+| harvest | sample → tank, at the recipe's rate | sample → **gut**, at the transporter's rate |
+| digestion | — | gut → tank, at the **recipe's** rate |
+| excretion | tank → field, mass action on the tank | **gut** → field first, tank → field for the shortfall |
+
+Swallowing and converting were one question and are now two, which is the
+whole of it. What a body can *pull out of the water* is a transporter — its
+`ks` gene, and the budget. What it can *do with what it swallowed* is a
+recipe — its uptake row, and `catCoSubstrate`. Waste is the gap between them,
+and nothing has to nominate it.
+
+### What falls out
+
+- **Excretion is a necessity.** What a body cannot convert occupies the room
+  that bounds its next mouthful, and the only way out of a gut is the
+  excretion rows. A body must express the row for whatever it cannot digest or
+  clog and starve holding food it cannot use. The rows stop being purely a
+  preference about what to broadcast and become, for that species, a clearance
+  rate — and clearing is free where saying the same thing out of stock costs.
+- **Satiety is three mechanisms deep.** Digestion is bounded by room in the
+  tank, so a full body cannot digest, so its gut fills, so it cannot eat. No
+  clamp anywhere.
+- **The co-substrate is asked of the body, not the cell.** `catCoSubstrate`
+  now blends against how much of the *gut* is ground. It has to be something
+  that runs out: a gate on the tank would let a body with a little banked
+  convert scent for ever, and converting scent is how it keeps a little
+  banked. A body standing on nothing but scent swallows nothing but scent and
+  starves on top of a feast, which is §6b's point stated where it belongs.
+- **Bodies mix the chemistry.** Swallow here, dump there. Diffusion cannot do
+  that, and it is the first time anything but the field moves a species across
+  the dish.
+
+### What deliberately did not change
+
+Excretion still synthesises from the tank when the gut cannot cover a row.
+Per-species conservation is a stronger property than §5 asks for and one the
+pond cannot afford: nothing in a conserved dish creates `conP`, so a pond
+whose only input is ground would be permanently silent. Bodies conserve
+*matter*. Turning matter into a different molecule is what a metabolism is.
+
+`gutSize` is a multiple of the body's own `energyCap` rather than a trait of
+its own, so a lineage that breeds a bigger tank breeds a bigger gut with it
+and selection has one number to move rather than two it must move together.
+
+Inert at `uptakeVmax = 0`, which is the shipped default: nothing fills a gut,
+`digestRate` and `gutSize` do nothing, and excretion is exactly the tank-fed
+pass it has always been.
+
+---
+
 ## 7. Order of work
 
 **Phase 0. Layout and parameters.** *Done, 2026-09-08.* The expression head

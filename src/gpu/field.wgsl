@@ -52,7 +52,9 @@ struct FieldParams {
   // Hill coefficient on uptake; 1 is plain Monod. See `UptakeKinetics.hillN`.
   hillN: f32,
   // How much the non-ground species need `CH.energy` present to be
-  // metabolised. See `UptakeKinetics.coSubstrate` and §6b of the plan.
+  // metabolised. Read by the host's `runDigestion`, not here: swallowing and
+  // converting are two different questions and only the first is this pass.
+  // Kept in the struct because the uniform is packed by index.
   coSubstrate: f32,
   pad6: f32,
   pad7: f32,
@@ -135,10 +137,9 @@ struct HarvestBlock {
 // written and a separate output span would double the buffer.
 const HARVEST_ROOM: u32 = 0u;
 const HARVEST_TOTAL: u32 = 1u;
-const HARVEST_VMAX: u32 = 2u;
+const HARVEST_KS: u32 = 2u;
 const HARVEST_GOT: u32 = 2u;
-const HARVEST_KS: u32 = 6u;
-const HARVEST_STRIDE: u32 = 10u;
+const HARVEST_STRIDE: u32 = 6u;
 
 // Matches `FLOW_EPS` in energy.ts: below this a take is not worth a cell walk.
 const FLOW_EPS: f32 = 1e-9;
@@ -536,15 +537,12 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
   let stock = density.x + density.y + density.z + density.w;
   for (var e = 0u; e < blk.count; e++) {
     let ro = (blk.first + e) * HARVEST_STRIDE;
+    // `room` is room in the body's gut; the host computes it, because what a
+    // body is holding undigested lives in the store and not on this side.
     var left = hFlow[ro + HARVEST_ROOM];
     let total = hFlow[ro + HARVEST_TOTAL];
-    // Read before the writeback overwrites them: `got` shares the rates' slots.
-    let vmax = vec4f(
-      hFlow[ro + HARVEST_VMAX],
-      hFlow[ro + HARVEST_VMAX + 1u],
-      hFlow[ro + HARVEST_VMAX + 2u],
-      hFlow[ro + HARVEST_VMAX + 3u],
-    );
+    // Read before the writeback overwrites them: `got` shares the affinities'
+    // slots.
     let ks = vec4f(
       hFlow[ro + HARVEST_KS],
       hFlow[ro + HARVEST_KS + 1u],
@@ -553,33 +551,23 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
     );
     for (var c = 0u; c < 4u; c++) {
       var got = 0.0;
-      /*
-       * Catabolism: the ground is the co-substrate the other three are
-       * converted *with*. Blended rather than required, so a body with a
-       * little capability still does a little better than one with none —
-       * a hard requirement leaves selection no slope to climb. The ground's
-       * own row is never gated, being the thing everyone can use raw. Kept in
-       * step with `runHarvestPlan` by hand.
-       */
-      var gate = 1.0;
-      if (P.coSubstrate > 0.0 && c != u32(P.harvestCh)) {
-        let e = density[u32(P.harvestCh)];
-        var avail = 0.0;
-        if (e > 0.0) { avail = e / (ks[u32(P.harvestCh)] + e); }
-        gate = 1.0 - P.coSubstrate + P.coSubstrate * avail;
-      }
-      // A species the body has no rate for takes nothing: the row is what it
-      // is expressing on that species, and nothing there is nothing eaten.
-      if (left > FLOW_EPS && vmax[c] > 0.0 && density[c] > 0.0 && gate > 0.0 && stock > 0.0) {
-        // Hill at `n`; 1 is plain Monod and does not pay for the two `pow`
-        // calls. Kept in step with `runHarvestPlan` by hand.
+      if (left > FLOW_EPS && total > 0.0 && density[c] > 0.0 && stock > 0.0) {
+        /*
+         * `vmax` is the whole budget for every species: how fast a body can
+         * pull one out of the water is a transporter question, and a body
+         * standing in nothing but one species may spend its whole mouthful on
+         * it. What it can *do* with what it swallowed is the host's
+         * `runDigestion`, not this. Hill at `n`; 1 is plain Monod and does not
+         * pay for the two `pow` calls. Kept in step with `runHarvestPlan` by
+         * hand.
+         */
         var sN = density[c];
         var kN = ks[c];
         if (P.hillN != 1.0) {
           sN = pow(density[c], P.hillN);
           kN = pow(ks[c], P.hillN);
         }
-        let rate = gate * vmax[c] * sN / (kN + sN);
+        let rate = total * sN / (kN + sN);
         // The proportional sample: this species' share of one budget, which
         // is the ceiling however good the body's transporter for it is. Kept
         // in step with `runHarvestPlan` by hand.

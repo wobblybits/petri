@@ -109,8 +109,10 @@ describe('preflight', () => {
     const fixed: Protocol = {
       ...tiny,
       arms: [
-        { name: 'a', set: { excreteRate: 0, senseScale: 4.3, uptakeVmax: 0 } },
-        { name: 'b', set: { excreteRate: 0.015, senseScale: 0.002, uptakeVmax: 6 } },
+        // `digestRate` differs because a constant set to the same value in
+        // every arm is still *held*; carrying it means choosing it per arm.
+        { name: 'a', set: { excreteRate: 0, senseScale: 4.3, uptakeVmax: 0, digestRate: 0 } },
+        { name: 'b', set: { excreteRate: 0.015, senseScale: 0.002, uptakeVmax: 6, digestRate: 12 } },
       ],
       accepts: [{ axis: 'excreteRate', constant: 'deposit', because: 'inert above zero' }],
     };

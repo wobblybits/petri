@@ -1,6 +1,6 @@
 import type { Agent, AgentKind } from './agents.ts';
 import { CH, CHANNELS, FIELD_CELL, type Fields } from './fields.ts';
-import { CHEM_LEN, ROW_COUNT, ROW_UPTAKE, uptakeKsOf } from './chem-layout.ts';
+import { CHEM_LEN, uptakeKsOf } from './chem-layout.ts';
 import type { AgentStore } from './agent-store.ts';
 import { KIND_ERA } from './native/solver.ts';
 import type { Rule } from './rewrite.ts';
@@ -967,6 +967,16 @@ export class HarvestPlan {
    * sizes, which is a quarter-megabyte table for a pond that touches a few
    * thousand of them.
    */
+  /**
+   * Whether the plan that was built is the metered one.
+   *
+   * The GPU path pays this plan out a frame later, in `Sim.creditHarvest`, and
+   * the two paths put a draw in different places — the gut, or straight into
+   * the tank. Recorded here rather than re-derived from a `Params` that may
+   * have been edited by a slider in between.
+   */
+  metered = false;
+
   private head = new Int32Array(0);
   private next = new Int32Array(0);
   private touched = new Int32Array(0);
@@ -992,8 +1002,8 @@ export class HarvestPlan {
      * this buffer mean anything.
      */
     const meter = kinetics !== undefined && kinetics.cap > 0;
+    this.metered = meter;
     const LOCKED = store.locked;
-    const EXPRESS = store.expressAll;
     const CHEM = store.chemAll;
     const KIND = store.kindCode;
     const EXTRA = store.extra;
@@ -1019,7 +1029,11 @@ export class HarvestPlan {
     for (const a of agents) {
       const s = a.slot;
       if (LOCKED[s]) continue;
-      if (EXTRA[s] >= CAP[s] - EXTRA_FULL_EPS) continue;
+      // Metered, what bounds a mouthful is room in the gut: a body swallows
+      // before it converts anything, and a gut full of what it could not
+      // convert is exactly the state this is meant to be able to reach.
+      if (meter ? gutRoomOf(store, s, kinetics.gutSize) <= EXTRA_FULL_EPS
+                : EXTRA[s] >= CAP[s] - EXTRA_FULL_EPS) continue;
       const x = X[s];
       const y = Y[s];
       // Off the map is barren, not merely empty: no ambient either.
@@ -1113,28 +1127,27 @@ export class HarvestPlan {
         const sl = slots[e];
         ids[e] = ID[sl];
         const ro = e * HARVEST_STRIDE;
-        rooms[ro + HARVEST_ROOM] = CAP[sl] - EXTRA[sl];
         if (meter) {
           /*
-           * Per body, not per pond. `vmax` is `uptakeVmax` scaled by what the
-           * body is expressing on that species' uptake row — `ROW_COUNT` in
-           * the factor so even expression, which is what a seeded genome has,
-           * runs at exactly the global. `ks` is the body's own affinity gene.
-           * Every species gets a rate: what a body may draw is bounded by the
-           * budget and by what is in front of it, not by a switch.
+           * Per body, not per pond. `total` is one mouthful a frame, whatever
+           * it turns out to be made of, and `ks` is the body's own affinity
+           * gene per species — how readily it can pull that species out of the
+           * water, which is a transporter and not a recipe.
+           *
+           * What the body can *do* with a species is not asked here. That is
+           * the uptake row, and it is asked in `Sim.runDigestion`, after the
+           * swallowing: a body cannot decline the part of the mixture it has
+           * no use for, and that is the whole point of a sample.
            */
-          const xo = sl * ROW_COUNT + ROW_UPTAKE;
           const g = sl * CHEM_LEN;
           const yield_ = KIND[sl] === KIND_ERA ? kinetics.yEra : kinetics.yDirect;
-          // One mouthful a frame, whatever it turns out to be made of. The
-          // rows below say how fast each species can be drawn *within* it, and
-          // the harvest shares it out by what is in the water; see
-          // `UptakeKinetics`.
+          rooms[ro + HARVEST_ROOM] = gutRoomOf(store, sl, kinetics.gutSize);
           rooms[ro + HARVEST_TOTAL] = kinetics.cap * yield_;
           for (let c = 0; c < CHANNELS; c++) {
-            rooms[ro + HARVEST_VMAX + c] = kinetics.cap * ROW_COUNT * EXPRESS[xo + c] * yield_;
             rooms[ro + HARVEST_KS + c] = uptakeKsOf(CHEM, g, c, kinetics.ks);
           }
+        } else {
+          rooms[ro + HARVEST_ROOM] = CAP[sl] - EXTRA[sl];
         }
       }
       this.nEntries = k;
@@ -1177,6 +1190,12 @@ export function uptakeRate(density: number, cap: number, ks: number): number {
  * samples all four species — what it cannot do is choose the sample. The
  * shares of `cap` go by what is standing in the cell, so they sum to `cap`
  * however rich or filthy the cell is.
+ *
+ * What is swallowed lands in the gut as itself. Nothing here asks whether a
+ * body can use a species: that is `Sim.runDigestion`, and keeping the two
+ * apart is what lets waste exist at all. A body that could decline the part of
+ * the mixture it has no recipe for would never be holding anything it had to
+ * get rid of.
  *
  * That shared ceiling is what used to be bought by switching the species rows
  * off below `excreteRate`. Four independent rates meant four times the cap,
@@ -1223,12 +1242,11 @@ export interface UptakeKinetics {
    */
   hillN: number;
   /**
-   * `params.catCoSubstrate`: how much the non-ground species need `CH.energy`
-   * present to be metabolised. See §6b of the chemistry plan and the note on
-   * the parameter itself. 0 leaves the rows eating their species raw, which is
-   * what phase 3 shipped.
+   * `params.gutSize`: how much a body may hold undigested, as a multiple of
+   * its own `energyCap`. This is what bounds a mouthful — room in the gut, not
+   * room in the tank. See `gutRoomOf`.
    */
-  coSubstrate: number;
+  gutSize: number;
 }
 
 /**
@@ -1245,22 +1263,28 @@ export interface UptakeKinetics {
  * stride costs memory and no bindings, which is the trade this file has to
  * keep making.
  *
- * `total` is the fifth number and the one that makes the other four a
- * *sample* rather than four independent meals: it is the whole budget for the
- * frame, and the rows spend it in proportion to what the water is made of. Per
- * body rather than a uniform because the trophic yield is per kind.
+ * `total` is the number that makes the four affinities a *sample* rather than
+ * four independent meals: it is the whole budget for the frame, and the
+ * species spend it in proportion to what the water is made of. Per body rather
+ * than a uniform because the trophic yield is per kind.
  *
- * `got` overwrites `vmax` on the way back out: the rate is consumed before
- * anything is written, the two are the same shape, and a separate output span
- * would double the buffer to carry four floats that are only read once.
- * `room` and `total` sit below it and are both read before the first write.
- * Derived on both sides from here; `field-kernel.test.ts` pins them together.
+ * `room` is room in the *gut*, not the tank. What a body swallows and what it
+ * can use are two different questions now, and only the first one belongs
+ * here: the expression rows and the co-substrate blend moved to
+ * `Sim.runDigestion`, which is what paid for `total` and then some — the
+ * stride is narrower than it was before either existed.
+ *
+ * `got` overwrites `ks` on the way back out: the affinities are consumed
+ * before anything is written, the two are the same shape, and a separate
+ * output span would double the buffer to carry four floats that are only read
+ * once. `room` and `total` sit below it and are both read before the first
+ * write. Derived on both sides from here; `field-kernel.test.ts` pins them
+ * together.
  */
 export const HARVEST_ROOM = 0;
 export const HARVEST_TOTAL = 1;
-export const HARVEST_VMAX = 2;
-export const HARVEST_GOT = HARVEST_VMAX;
-export const HARVEST_KS = HARVEST_VMAX + CHANNELS;
+export const HARVEST_KS = 2;
+export const HARVEST_GOT = HARVEST_KS;
 export const HARVEST_STRIDE = HARVEST_KS + CHANNELS;
 
 /**
@@ -1284,7 +1308,6 @@ export function runHarvestPlan(
   const B = plan.blocks;
   const metered = uptake !== undefined && uptake.cap > 0;
   const hill = uptake !== undefined && uptake.hillN > 0 ? uptake.hillN : 1;
-  const co = uptake !== undefined ? uptake.coSubstrate : 0;
   const R = plan.rooms;
   for (let b = 0; b < plan.nBlocks; b++) {
     const first = B[b * 6 + 4];
@@ -1344,47 +1367,36 @@ export function runHarvestPlan(
     // Nothing in the water at all: no shares to divide, and `stock` is about
     // to be a denominator.
     if (stock <= 0) continue;
+    const GUT = store.gut;
     for (let e = 0; e < count; e++) {
       const s = plan.slots[first + e];
-      const cap = CAP[s];
-      let left = cap - EXTRA[s];
-      if (left <= EXTRA_FULL_EPS) continue;
       const ro = (first + e) * HARVEST_STRIDE;
+      // Room in the gut, read off the plan so both field paths bound a
+      // mouthful by the same number.
+      let left = R[ro + HARVEST_ROOM];
+      if (left <= EXTRA_FULL_EPS) continue;
       const total = R[ro + HARVEST_TOTAL];
+      if (!(total > 0)) continue;
+      const go = s * CHANNELS;
       for (let c = 0; c < CHANNELS && left > EXTRA_FULL_EPS; c++) {
+        const density = SPECIES_DENSITY[c];
+        if (!(density > 0)) continue;
         /*
          * Monod inline rather than through `uptakeRate`, because the two mean
          * opposite things by a rate of zero. There, `cap <= 0` is the sentinel
          * for *unmetered* — take what fits — which is what the whole
-         * single-species path above rests on. Here a `vmax` of zero is a body
-         * expressing nothing on that row, and it must take nothing.
+         * single-species path above rests on.
+         *
+         * `vmax` is the whole budget, for every species: how fast a body can
+         * pull a species out of the water is a transporter question, and a
+         * body that is standing in nothing but one species may spend its whole
+         * mouthful on it. Hill at `n`, which is plain Monod at 1 and does not
+         * pay for the two `pow` calls there. See `UptakeKinetics.hillN`.
          */
-        const vmax = R[ro + HARVEST_VMAX + c];
-        const density = SPECIES_DENSITY[c];
-        if (!(vmax > 0) || !(density > 0)) continue;
-        /*
-         * Catabolism: the ground is the co-substrate the other three are
-         * converted *with*. Blended rather than required, because a hard
-         * requirement makes the machinery worthless until it is complete and
-         * leaves selection no slope to climb — at any `coSubstrate` above zero
-         * a body with a little capability still does a little better than one
-         * with none. The ground's own row is never gated: it is the thing
-         * everyone can already use raw, which is what makes it the ground.
-         */
-        let gate = 1;
-        if (co > 0 && c !== CH.energy) {
-          const e = SPECIES_DENSITY[CH.energy];
-          const avail = e > 0 ? e / (R[ro + HARVEST_KS + CH.energy] + e) : 0;
-          gate = 1 - co + co * avail;
-          if (!(gate > 0)) continue;
-        }
-        // Hill at `n`, which is plain Monod at 1 and does not pay for the two
-        // `pow` calls there. See `UptakeKinetics.hillN`.
         const ks = R[ro + HARVEST_KS + c];
         const sN = hill === 1 ? density : Math.pow(density, hill);
         const kN = hill === 1 ? ks : Math.pow(ks, hill);
-        const rate = (gate * vmax * sN) / (kN + sN);
-        if (!(rate > 0)) continue;
+        const rate = (total * sN) / (kN + sN);
         // The proportional sample: this species' share of one budget, which is
         // the ceiling however good the body's transporter for it is.
         const share = total * (density / stock);
@@ -1393,11 +1405,34 @@ export function runHarvestPlan(
         if (!(want > 0)) continue;
         const got = grid.takeFrom(key, c, want);
         if (got <= 0) continue;
-        EXTRA[s] = Math.min(cap, EXTRA[s] + got);
+        /*
+         * Into the gut as itself, not into the tank as money. Whether any of
+         * this is food to this body is `Sim.runDigestion`'s question, and a
+         * species it cannot convert stays here taking up the room that bounds
+         * the next mouthful until `Sim.runExcretion` puts it back.
+         */
+        GUT[go + c] += got;
         left -= got;
       }
     }
   }
+}
+
+/**
+ * Room left in one body's gut.
+ *
+ * `gutSize` multiples of the body's own `energyCap` rather than a trait of its
+ * own: `energyCap` is heritable and already means "how much can this body
+ * hold", so a lineage that breeds a bigger tank breeds a bigger gut with it
+ * and selection has one number to move rather than two it would have to move
+ * together. Never negative — a gut can be handed more than it has room for by
+ * a rate change mid-run, and that is a body that cannot eat, not a body with
+ * negative room.
+ */
+export function gutRoomOf(store: AgentStore, slot: number, gutSize: number): number {
+  const cap = store.energyCap[slot] * gutSize;
+  const room = cap - store.gutTotal(slot);
+  return room > 0 ? room : 0;
 }
 
 /** Block densities, one per species, reused across blocks. */

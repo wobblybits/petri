@@ -26,8 +26,9 @@ describe('couplings', () => {
   });
 
   it('is quiet when the coupled constant moves with the axis, on the grid or per arm', () => {
-    expect(checkCouplings(['excreteRate', 'senseScale', 'uptakeVmax', 'deposit'])).toEqual([]);
-    expect(checkCouplings(['excreteRate'], ['senseScale', 'uptakeVmax', 'deposit'])).toEqual([]);
+    const moved = ['senseScale', 'uptakeVmax', 'deposit', 'digestRate'];
+    expect(checkCouplings(['excreteRate', ...moved])).toEqual([]);
+    expect(checkCouplings(['excreteRate'], moved)).toEqual([]);
   });
 
   it('is quiet about an axis nothing is coupled to', () => {

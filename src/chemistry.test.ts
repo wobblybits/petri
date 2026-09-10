@@ -60,7 +60,9 @@ function matter(sim: Sim, bodyValue: number): number {
   let field = 0;
   const d = sim.fields.data;
   for (let k = 0; k < d.length; k++) field += d[k];
-  return held + inFlight + sim.escrowTotal() + field;
+  // The gut is a fourth place matter can be: swallowed, not yet digested, and
+  // in neither the ground nor a tank. See `Sim.totalGut`.
+  return held + inFlight + sim.escrowTotal() + sim.totalGut() + field;
 }
 
 describe('expression', () => {
@@ -304,11 +306,14 @@ describe('uptake', () => {
       }
     };
     const cap = p.uptakeVmax / 60;
-    const kinetics = { cap, ks: p.uptakeKs, yDirect: 1, yEra: 1, hillN: 1, coSubstrate: 0 };
+    const kinetics = { cap, ks: p.uptakeKs, yDirect: 1, yEra: 1, hillN: 1, gutSize: p.gutSize };
     /** Ground drawn out of the block in one frame. */
     const ground = (per: number[]): number => {
       paint(per);
       a.extra = 0;
+      // An empty gut as well as an empty tank: room in the gut is what bounds
+      // a mouthful now, so a second run on a full gut would measure nothing.
+      sim.agentStore.gut.fill(0, a.slot * CHEM_SPECIES, a.slot * CHEM_SPECIES + CHEM_SPECIES);
       const before = sim.energy.storedTotal();
       harvestSlotsFast([a], sim.agentStore, sim.energy, new HarvestPlan(), kinetics);
       return before - sim.energy.storedTotal();
@@ -562,6 +567,99 @@ describe('superadditivity', () => {
   });
 });
 
+describe('the gut', () => {
+  /*
+   * §6c. The tank is one scalar, so before this everything a body swallowed
+   * became `extra` the instant it crossed the membrane and there was no such
+   * thing as an un-metabolised substance inside a body. These are the two
+   * halves of there being one: a body holds what it cannot convert, and what
+   * it is holding is what stops it eating more.
+   */
+  const oneBody = (tweak: (p: Params) => void) => {
+    const p = chemistryParams();
+    p.soupCount = 1;
+    p.uptakeVmax = 6;
+    tweak(p);
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    // A frame to pin the world and fill the expression rows; see the note in
+    // 'caps each species at its share of one budget'.
+    sim.step(1 / 60, p);
+    const a = [...sim.agents.values()][0];
+    const cell = sim.energy.index(a.x, a.y);
+    const rect = sim.energy.blockRect(cell.i, cell.j)!;
+    const paint = (per: number[]): void => {
+      const d = sim.fields.data;
+      d.fill(0);
+      for (let y = 0; y < rect.wj; y++) {
+        for (let x = 0; x < rect.wi; x++) {
+          const k = ((rect.fj + y) * sim.fields.cols + (rect.fi + x)) * CHANNELS;
+          for (let c = 0; c < CHANNELS; c++) d[k + c] = per[c];
+        }
+      }
+    };
+    const gut = (c: number): number => sim.agentStore.gut[a.slot * CHEM_SPECIES + c];
+    const held = (): number => sim.agentStore.gutTotal(a.slot);
+    return { sim, p, a, paint, gut, held };
+  };
+
+  const alone = (c: number, v: number): number[] => {
+    const per = new Array(CHANNELS).fill(0);
+    per[c] = v;
+    return per;
+  };
+
+  it('holds what it swallowed and could not convert', () => {
+    /*
+     * A body standing on nothing but scent, with the ground as the
+     * co-substrate. It cannot decline the mouthful — that is what a sample is
+     * — and it cannot convert it either, because nothing it swallowed is
+     * ground. So it ends the frame holding scent it has no use for, which is
+     * the thing that could not previously be true of anything.
+     */
+    const { sim, p, a, paint, gut } = oneBody((q) => {
+      q.catCoSubstrate = 1;
+      q.excreteRate = 0;
+    });
+    paint(alone(CH.conP, 0.6));
+    a.extra = 0.5;
+    const before = a.extra;
+    for (let i = 0; i < 20; i++) sim.step(1 / 60, p);
+    // Swallowed: it is inside the body, not on the ground.
+    expect(gut(CH.conP)).toBeGreaterThan(0);
+    // And worth nothing to it, because it had no ground to convert it with.
+    expect(a.extra).toBeLessThanOrEqual(before);
+  });
+
+  it('cannot eat past a full gut', () => {
+    /*
+     * Satiety, three mechanisms deep rather than a clamp: digestion is bounded
+     * by room in the tank, so a full body cannot digest, so its gut fills, so
+     * it cannot eat. Here the middle step is skipped and the gut simply filled,
+     * which is the state a body that cannot digest what it holds arrives at.
+     */
+    const { sim, p, a, paint, held } = oneBody(() => {});
+    paint(alone(CH.energy, 0.6));
+    const store = sim.agentStore;
+    const go = a.slot * CHEM_SPECIES;
+    // Filled to its cap with something, and `gutSize` is a multiple of that.
+    store.gut[go + CH.conP] = store.energyCap[a.slot] * p.gutSize;
+    expect(held()).toBeGreaterThan(0);
+    const before = sim.energy.storedTotal();
+    harvestSlotsFast([a], store, sim.energy, new HarvestPlan(), {
+      cap: p.uptakeVmax / 60,
+      ks: p.uptakeKs,
+      yDirect: 1,
+      yEra: 1,
+      hillN: 1,
+      gutSize: p.gutSize,
+    });
+    // Ground under it, an empty tank, and not a unit taken: there is nowhere
+    // to put a mouthful.
+    expect(sim.energy.storedTotal()).toBeCloseTo(before, 12);
+  });
+});
+
 describe('catabolism', () => {
   /*
    * §6b. Eating a signalling species raw is what phase 3 shipped and what the
@@ -652,9 +750,17 @@ describe('catabolism', () => {
       for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
       return a.extra - before;
     };
+    /*
+     * Levels against the scent the dish is seeded with, which is 4. The gate
+     * reads the *sample*, and a body standing in a cell that is 99 parts scent
+     * to one part ground swallows 99 parts scent — so what matters here is the
+     * ratio, and levels far under the scent all sit at the same floor rather
+     * than on the slope. That is the mechanism, not a threshold: it is
+     * continuous in the ratio the whole way.
+     */
     const none = fed(1, 0);
-    const some = fed(1, 0.05);
-    const plenty = fed(1, 0.4);
+    const some = fed(1, 1);
+    const plenty = fed(1, 4);
     expect(some).toBeGreaterThan(none);
     expect(plenty).toBeGreaterThan(some);
   });

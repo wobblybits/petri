@@ -234,6 +234,29 @@ export class AgentStore {
   /** What this body excreted this frame, per species. Absolute, not a rate. */
   excreteAll!: Float64Array;
   /**
+   * What this body has swallowed and not yet turned into anything, per species.
+   *
+   * The tank used to be the only thing inside a body, and it is one scalar: a
+   * body did not hold `conP` or `aux`, it held *extra*. So every species a
+   * body ate was laundered into one currency the instant it crossed the
+   * membrane, and excretion — mass action on that scalar, split by the
+   * excretion rows — could take in `aux` and put out `conP`. That is
+   * transmutation, and it is why waste meant nothing here: there was no such
+   * thing as an un-metabolised substance inside a body.
+   *
+   * This is that substance. The harvest swallows a sample of the water it
+   * cannot choose (see `runHarvestPlan`), so a body necessarily takes in
+   * species it may have no use for; `Sim.runDigestion` moves out what its
+   * recipe can convert, and `Sim.runExcretion` dumps the rest back as itself.
+   * Waste is therefore *defined* rather than declared — it is the gap between
+   * the sample and the recipe — and no gene has to nominate it.
+   *
+   * Not on the genome shader and not in the net blob: it is frame state like
+   * `h`, and a net taken out of the pond and put back starts hungry rather
+   * than half-digested.
+   */
+  gut!: Float64Array;
+  /**
    * Whether this body's genome reads the scent field at all.
    *
    * `updateState` re-derived it every body every frame — sixteen `Float32`
@@ -502,6 +525,15 @@ export class AgentStore {
     this.tasteAll.fill(0, slot * 4, slot * 4 + 4);
     this.expressAll.fill(0, slot * ROW_COUNT, slot * ROW_COUNT + ROW_COUNT);
     this.excreteAll.fill(0, slot * CHEM_SPECIES, slot * CHEM_SPECIES + CHEM_SPECIES);
+    this.gut.fill(0, slot * CHEM_SPECIES, slot * CHEM_SPECIES + CHEM_SPECIES);
+  }
+
+  /** Everything this body is holding undigested, across all four species. */
+  gutTotal(slot: number): number {
+    const o = slot * CHEM_SPECIES;
+    let n = 0;
+    for (let c = 0; c < CHEM_SPECIES; c++) n += this.gut[o + c];
+    return n;
   }
 
   private growTo(newCapacity: number): void {
@@ -615,6 +647,9 @@ export class AgentStore {
     const newExcrete = new Float64Array(newCapacity * CHEM_SPECIES);
     if (this.excreteAll) newExcrete.set(this.excreteAll.subarray(0, live * CHEM_SPECIES));
     this.excreteAll = newExcrete;
+    const newGut = new Float64Array(newCapacity * CHEM_SPECIES);
+    if (this.gut) newGut.set(this.gut.subarray(0, live * CHEM_SPECIES));
+    this.gut = newGut;
 
     this.capacity = newCapacity;
     if (oldCapacity > 0) this.generation++;
