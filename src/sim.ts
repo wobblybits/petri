@@ -4354,7 +4354,15 @@ export class Sim {
     const regen = params.metabolicRegen;
     const workRate = params.metabolicWork * params.gaitSwell;
     const price = params.metabolicCost;
-    const excrete = params.excreteRate;
+    /*
+     * `upkeepExcrete`, and not `excreteRate`, which is what this read for four
+     * commits and is the whole of why `energy.test.ts`'s pond conservation
+     * broke: the comment below says "same accounting as rent", and rent's dial
+     * is `upkeepExcrete`. `excreteRate` is the reaction table's, a rate in its
+     * own units rather than a fraction — so at its default of zero the
+     * pathway's spend was destroyed, and above one it would have minted.
+     */
+    const excrete = params.upkeepExcrete;
     const grid = this.energy;
     const h = rate * dt;
     const sub = Math.max(1, Math.ceil(h / REACT_H));

@@ -35,6 +35,15 @@ function chemistryParams(): Params {
   p.decay = 0;
   p.diffuse = 0;
   p.upkeep = 0;
+  /*
+   * The gait's pathway buys substrate out of the tank, and `upkeepExcrete` is
+   * what decides whether that spend lands on the dish or is destroyed. It is
+   * rent by another name and it is on by default, so a conservation test that
+   * left this at zero was watching a pond with a spender it had not accounted
+   * for. Nothing else here is affected: `upkeep` is zero, so there is no rent
+   * for it to route.
+   */
+  p.upkeepExcrete = 1;
   // Bodies conservative, so a commute is a transfer and not a mint. See
   // `matter` and `energy.test.ts`'s conservation suite.
   p.bodyValue = REWRITE_SHARE;
@@ -422,6 +431,15 @@ describe('trophic yield', () => {
     const p = chemistryParams();
     p.ambientEnergy = 1;
     p.uptakeVmax = 1.5;
+    /*
+     * The gait's pathway off. These read the ground a body is standing on, and
+     * the pathway buys substrate out of the tank and returns the price to that
+     * ground — so a well-fed body fertilises the cell under it and a starving
+     * one does not, which is the opposite sign to the thing under test and
+     * large enough to flip it. It is a different mechanism spending from the
+     * same tank, and this is a uptake-yield question.
+     */
+    p.metabolicRate = 0;
     tweak(p);
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', p);

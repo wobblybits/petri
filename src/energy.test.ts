@@ -1061,6 +1061,23 @@ describe('conservation', () => {
     // is what stops a pond going permanently extinct — and it is not a body
     // reaction.
     p.spawnInterval = 0;
+    /*
+     * And the mint. `params.deposit` puts five times a body's voice into three
+     * channels out of nothing — a third source alongside `energyRegrow` and
+     * immigration, and as deliberate as either. It never had to be turned off
+     * here while the total counted `CH.energy` alone; now that rent leaves
+     * through the excretion rows and the total counts every channel, a pond
+     * that mints reads as one that creates.
+     */
+    p.deposit = 0;
+    /*
+     * And diffusion, for the reason `chemistry.test.ts` gives: the dish wall
+     * absorbs the three signal species and reflects only `CH.energy`, which is
+     * the dish doing its job rather than a body failing to conserve. It did
+     * not matter while a body could only put ground on the ground; rent now
+     * leaves as `conP` and `aux` too, and those the rim eats.
+     */
+    p.diffuse = 0;
     // The three dials.
     p.upkeepExcrete = 1;
     p.bodyValue = REWRITE_SHARE;
@@ -1092,7 +1109,21 @@ describe('conservation', () => {
     // Per rule: only a commute costs shares up front. An erase or an
     // annihilation is free to start and pays out on commit.
     for (const rw of sim.rewrites) inFlight += rewriteCost(rw.rule);
-    return inBodies + inFlight + sim.escrowTotal() + sim.totalGut() + sim.energy.storedTotal();
+    /*
+     * The whole field, not `energy.storedTotal()`.
+     *
+     * That counted `CH.energy` alone, which was right while the ground was the
+     * only channel a body could put anything on. It is not any more: rent
+     * leaves through the excretion rows, so a Con pays it in `conP` and `aux`,
+     * and counting only the ground reads that as matter going missing. Matter
+     * is matter whatever molecule it is in — `chemistry.test.ts`'s `matter`
+     * has summed the whole field for this reason since the species dimension
+     * existed.
+     */
+    let field = 0;
+    const d = sim.fields.data;
+    for (let k = 0; k < d.length; k++) field += d[k];
+    return inBodies + inFlight + sim.escrowTotal() + sim.totalGut() + field;
   };
 
   it('diffusion moves the substance without destroying it', () => {
@@ -1153,8 +1184,17 @@ describe('conservation', () => {
      * `tickRewrites`, where the pool is clamped at zero. Everything else
      * balances to a part in a hundred thousand, over nine hundred frames of a
      * pond that latched, commuted, erased and annihilated throughout.
+     *
+     * 1e-3 relative, and it was 1e-4 while rent could only land on one
+     * channel. Rent now leaves through the excretion rows, so what was one
+     * small `Float32` add a body a frame is four, and the quantisation is
+     * four times coarser for it. Measured on this pond: 0.0246% over 900
+     * frames, 0.0172% over 300 — sub-linear in the run, which is
+     * accumulation and not a leak, and at `upkeep = 0` it is exactly zero.
+     * A real leak grows with the run; see `chemistry.test.ts`'s twin, which
+     * carries the same argument for the same reason.
      */
-    expect(worst / before, `drifted ${worst} of ${before}`).toBeLessThan(1e-4);
+    expect(worst / before, `drifted ${worst} of ${before}`).toBeLessThan(1e-3);
   });
 
   it('conserves across a whole pond on the shipping path', () => {
@@ -1176,7 +1216,7 @@ describe('conservation', () => {
       worst = Math.max(worst, Math.abs(pondTotal(sim, p.bodyValue) - before));
     }
     expect(sim.tally.annihilations + sim.tally.commutes, 'no rewrites ran').toBeGreaterThan(4);
-    expect(worst / before, `drifted ${worst} of ${before}`).toBeLessThan(1e-4);
+    expect(worst / before, `drifted ${worst} of ${before}`).toBeLessThan(1e-3);
   });
 
   it('destroys the rent when upkeepExcrete is off, which is today', () => {
