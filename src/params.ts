@@ -892,13 +892,20 @@ export interface Params {
    */
   eraCapRatio: number;
   /**
-   * An Era's upkeep as a multiple of everyone else's. Negative today, which
-   * means an Era *produces*: a mint keyed on a glyph, conditional on nothing.
+   * A *producer's* upkeep as a multiple of everyone else's. Negative today,
+   * which means a producer earns rather than pays.
    *
-   * At 1 an Era pays rent like anything else, and its income has to come from
-   * the ground under it — which is what makes `#Eras` a net's boundary size
-   * against an upkeep charged per body, and surface-to-volume a real
-   * constraint on how big a net can get.
+   * No longer keyed on the glyph: `upkeepRateOf` interpolates it on how much
+   * of a body's chemical budget goes on the ground's excretion row, against
+   * what a seeded Era expresses. A seeded Era still lands on this value
+   * exactly and a seeded Con on 1 exactly, so nothing about a fresh pond
+   * moved; what is new is that a Con breeding toward making ground earns the
+   * discount and an Era abandoning it loses one.
+   *
+   * At 1 nobody is discounted and income has to come from the ground under a
+   * body — which is what makes `#Eras` a net's boundary size against an upkeep
+   * charged per body, and surface-to-volume a real constraint on how big a net
+   * can get.
    */
   eraUpkeepRatio: number;
   /**

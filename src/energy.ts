@@ -1,6 +1,6 @@
 import type { Agent, AgentKind } from './agents.ts';
 import { CH, CHANNELS, FIELD_CELL, type Fields } from './fields.ts';
-import { CHEM_LEN, ROW_COUNT, ROW_EXCRETE, uptakeKsOf } from './chem-layout.ts';
+import { CHEM_LEN, ERA_GROUND_SHARE, ROW_COUNT, ROW_EXCRETE, uptakeKsOf } from './chem-layout.ts';
 import type { AgentStore } from './agent-store.ts';
 import { KIND_ERA } from './native/solver.ts';
 import type { Rule } from './rewrite.ts';
@@ -183,6 +183,44 @@ export const ERA_UPKEEP_RATIO = -0.2;
  */
 export function upkeepRateFor(kind: AgentKind, rate: number, eraRatio = ERA_UPKEEP_RATIO): number {
   return kind === 'era' ? rate * eraRatio : rate;
+}
+
+/**
+ * The same, keyed on what a body *expresses* rather than on its glyph.
+ *
+ * `ERA_UPKEEP_RATIO` is a mint conditional on nothing — the last rule in the
+ * economy that reads a kind, and §9 says there are none. What it was reaching
+ * for is real: a body that spends its chemical budget making ground is doing
+ * the pond a service and should be cheaper to run. That is a property of the
+ * genome, and `seedProduction` put it there — an Era's whole production half
+ * is the ground row, a Con's is none of it.
+ *
+ * So the discount interpolates on how far a body has gone toward what a
+ * seeded Era expresses. At the seed it is bit-identical: an Era lands on
+ * `eraRatio` exactly and a Con on 1 exactly. What is new is everything
+ * between, and that it runs both ways — a Con that breeds toward making
+ * ground earns the discount, an Era that abandons it loses it, and whether
+ * they stay there is selection's business.
+ *
+ * Falls back to the glyph when nothing is expressed at all, which is a pond
+ * running no chemistry: `refreshExpression` does not run there, so the vector
+ * is the zero it was cleared to rather than a mix anyone chose. That is the
+ * whole of the shipped default, and there it is exactly what it always was.
+ */
+export function upkeepRateOf(
+  express: Float64Array,
+  slot: number,
+  kind: AgentKind,
+  rate: number,
+  eraRatio: number,
+): number {
+  const o = slot * ROW_COUNT;
+  let sum = 0;
+  for (let r = 0; r < ROW_COUNT; r++) sum += express[o + r];
+  if (!(sum > 0)) return upkeepRateFor(kind, rate, eraRatio);
+  const share = express[o + ROW_EXCRETE + CH.energy] / ERA_GROUND_SHARE;
+  const t = share > 1 ? 1 : share > 0 ? share : 0;
+  return rate * (1 + (eraRatio - 1) * t);
 }
 
 export function agentValue(kind: AgentKind): number {
@@ -1483,8 +1521,16 @@ export interface UpkeepOptions {
    * says it is.
    */
   excrete?: number;
-  /** `params.eraUpkeepRatio`; see `upkeepRateFor`. */
+  /** `params.eraUpkeepRatio`; see `upkeepRateFor` and `upkeepRateOf`. */
   eraRatio?: number;
+  /**
+   * Whether `refreshExpression` ran this frame, so the vectors mean something.
+   *
+   * Passed rather than derived, for the reason `HarvestPlan.build` guards on
+   * `meter`: reading eight floats a body to discover they are all zero is
+   * still a pass over the roster, and in the shipped default they always are.
+   */
+  expressed?: boolean;
 }
 
 export function tickUpkeep(
@@ -1559,6 +1605,7 @@ export function tickUpkeepFast(
   if (!(dt > 0)) return [];
   const excrete = opts.excrete ?? 0;
   const eraRatio = opts.eraRatio ?? ERA_UPKEEP_RATIO;
+  const expressed = opts.expressed ?? false;
   const LOCKED = store.locked;
   const KIND_CODE = store.kindCode;
   const EXPRESS = store.expressAll;
@@ -1572,7 +1619,9 @@ export function tickUpkeepFast(
   for (const a of agents) {
     const s = a.slot;
     if (LOCKED[s]) continue;
-    const r = KIND_CODE[s] === KIND_ERA ? rate * eraRatio : rate;
+    const r = expressed
+      ? upkeepRateOf(EXPRESS, s, KIND_CODE[s] === KIND_ERA ? 'era' : 'con', rate, eraRatio)
+      : KIND_CODE[s] === KIND_ERA ? rate * eraRatio : rate;
     if (r === 0) continue;
     const was = EXTRA[s];
     const next = was - r * dt;

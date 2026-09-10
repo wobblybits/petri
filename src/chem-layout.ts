@@ -229,6 +229,18 @@ export const X_BASE = X_OUT + ROW_COUNT * STATE_DIMS;
 export const KS_BASE = X_BASE + ROW_COUNT;
 
 /**
+ * What share of its whole chemical budget a seeded Era puts on making ground.
+ *
+ * `seedProduction` writes a bias of 2 against four uptake rows at a half, so
+ * after normalisation the ground's excretion row is exactly this. Written down
+ * because two places read it as a *scale* rather than a value: the producer's
+ * upkeep discount is "how far along is this body toward what an Era expresses",
+ * and one of the two would drift silently if the number lived only at the
+ * seed. `chemistry.test.ts` pins them together.
+ */
+export const ERA_GROUND_SHARE = 0.5;
+
+/**
  * `G`, state -> gait, and its base. One row: `anchor`.
  *
  * How hard this body holds still at its point in the stroke. It adds to the

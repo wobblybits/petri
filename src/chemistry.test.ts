@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { bareBody, expressVector, metabolismOf, seedChem, uptakeKsOf } from './agents.ts';
-import { CHEM_LEN, CHEM_SPECIES, KS_BASE, ROW_COUNT, ROW_EXCRETE, ROW_UPTAKE, STATE_DIMS, X_BASE, X_OUT } from './chem-layout.ts';
+import { CHEM_LEN, CHEM_SPECIES, ERA_GROUND_SHARE, KS_BASE, ROW_COUNT, ROW_EXCRETE, ROW_UPTAKE, STATE_DIMS, X_BASE, X_OUT } from './chem-layout.ts';
 import { HarvestPlan, REWRITE_SHARE, harvestSlotsFast, rewriteCost } from './energy.ts';
 import { CH, CHANNELS } from './fields.ts';
 import { defaultParams, type Params } from './params.ts';
@@ -633,6 +633,17 @@ describe('what a kind makes', () => {
   });
 
   it('leaves the Era the ground-maker it already was', () => {
+    /*
+     * And pins `ERA_GROUND_SHARE` to the seed it is a scale for. The producer's
+     * upkeep discount reads "how far along is this body toward what an Era
+     * expresses", so the two have to agree or the discount silently stops
+     * landing on `eraUpkeepRatio` for the body it was measured on.
+     */
+    const h = new Float64Array(STATE_DIMS);
+    const express = new Float64Array(ROW_COUNT);
+    expressVector(seedChem('era', defaultParams()), 0, h, 0, express, 0);
+    expect(express[ROW_EXCRETE + CH.energy]).toBeCloseTo(ERA_GROUND_SHARE, 12);
+
     const era = met('era');
     // Its whole production half on one row, which is what `farmRate` and the
     // emit head have said about an Era all along.

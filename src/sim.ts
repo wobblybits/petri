@@ -1156,6 +1156,9 @@ export class Sim {
     for (const id of tickUpkeepFast(this.agents.values(), this.agentStore, t, params.upkeep, this.energy, {
       excrete: params.upkeepExcrete,
       eraRatio: params.eraUpkeepRatio,
+      // The same condition `refreshExpression` returns early on; see
+      // `UpkeepOptions.expressed`.
+      expressed: this.expressed,
     })) {
       this.kill(id);
     }
@@ -6746,8 +6749,12 @@ export class Sim {
    * shader needs no new output slot and no new binding for any of the reaction
    * table. That pass is already at eight storage buffers of a guaranteed eight.
    */
+  /** Whether the last `refreshExpression` actually filled the vectors. */
+  private expressed = false;
+
   private refreshExpression(params: Params, t: number): void {
-    if (!(params.excreteRate > 0) && !(params.uptakeVmax > 0) && !(params.upkeepExcrete > 0)) return;
+    this.expressed = params.excreteRate > 0 || params.uptakeVmax > 0 || params.upkeepExcrete > 0;
+    if (!this.expressed) return;
     const store = this.agentStore;
     const CHEM = store.chemAll;
     const H = store.hAll;
