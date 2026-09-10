@@ -328,8 +328,8 @@ export const CHEM_SEGMENTS: readonly ChemSegment[] = [
   { name: 'X', at: X_OUT, len: ROW_COUNT * STATE_DIMS },
   { name: 'x0', at: X_BASE, len: ROW_COUNT },
   { name: 'ks', at: KS_BASE, len: CHEM_SPECIES },
-  { name: 'G', at: G_OUT, len: 2 * STATE_DIMS },
-  { name: 'g0', at: G_BASE, len: 2 },
+  { name: 'G', at: G_OUT, len: STATE_DIMS },
+  { name: 'g0', at: G_BASE, len: 1 },
 ];
 
 /**

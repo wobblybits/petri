@@ -170,15 +170,14 @@ describe('the header', () => {
 describe('migration', () => {
   it('seeds a head this build appended, and carries everything else bit for bit', () => {
     // The case that stranded every net in the library: `G` and `g0` went on
-    // the end, the width went 178 -> 188, and nothing a stored body carried
-    // had changed.
+    // the end, the width grew, and nothing a stored body carried had changed.
     const { sim, params } = learningPond(120, 400);
     const net = captureNets(sim)[0].data;
     const { blob, chem } = asOldBuild(
       net,
       NAMES.filter((n) => n !== 'G' && n !== 'g0'),
     );
-    expect(chem).toBe(CHEM_LEN - 10);
+    expect(chem).toBe(CHEM_LEN - segment('G').len - segment('g0').len);
 
     const c = compatibility(readHeader(blob));
     expect(c).toEqual({ kind: 'migratable', notes: ['G seeded (new in this build)', 'g0 seeded (new in this build)'] });
@@ -373,8 +372,8 @@ describe('migration', () => {
     const { net: now, notes } = migrateNet(old, () => marker.slice());
     expect(notes).toEqual(['g0 seeded (new in this build)']);
     const g0 = segment('g0');
-    expect([...now.bodies[0].chem.subarray(g0.at)]).toEqual([-7, -7]);
-    expect(() => migrateNet(old, () => new Float32Array(3))).toThrow(/not 188/);
+    expect([...now.bodies[0].chem.subarray(g0.at)]).toEqual(new Array(g0.len).fill(-7));
+    expect(() => migrateNet(old, () => new Float32Array(3))).toThrow(new RegExp(`not ${CHEM_LEN}`));
   });
 });
 
