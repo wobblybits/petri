@@ -86,10 +86,12 @@ export class AgentStore {
   /**
    * The gait, and the metabolism that is now its clock.
    *
-   * `atp` and `adp` are Selkov's two metabolites — substrate and product,
-   * where the product activates the enzyme that makes it. `gaitAnchor` is
-   * the amplitude the `G` head reads off `h`, and `anchor` is what it comes
-   * to this frame: `gaitAnchor * gaitWave`, added to this body's drag rate.
+   * `sub` is the pathway's upstream metabolite, bought out of the tank.
+   * `atp` is the charged part of a conserved adenylate pool of `adenylate`,
+   * so `adp` is `adenylate - atp` and is never stored — the pool is currency
+   * and cannot be minted, only cycled. `gaitAnchor` is the amplitude the `G`
+   * head reads off `h`, and `anchor` is what it comes to this frame:
+   * `gaitAnchor * gaitWave`, added to this body's drag rate.
    *
    * `gaitWave` is the bare `cos(phase)`, with no amplitude in it, and is what
    * a wire's rest length rides on in `Graph.syncRest`.
@@ -102,8 +104,9 @@ export class AgentStore {
    * `anchor` and `grip` leave of the velocity that correction induces, which
    * costs no second mechanism.
    */
+  sub!: Float64Array;
   atp!: Float64Array;
-  adp!: Float64Array;
+  adenylate!: Float64Array;
   gaitWave!: Float64Array;
   gaitAnchor!: Float64Array;
   anchor!: Float64Array;
@@ -469,10 +472,9 @@ export class AgentStore {
     this.assort[slot] = 0;
     this.transportThrust[slot] = 0;
     this.transportRecoil[slot] = 0;
-    // Off both axes, or the reaction has nothing to start from: `adp` at
-    // zero makes the autocatalytic term zero and the pathway never lights.
-    this.atp[slot] = 1;
-    this.adp[slot] = 0.5;
+    this.sub[slot] = 0;
+    this.atp[slot] = 0;
+    this.adenylate[slot] = 0;
     this.gaitWave[slot] = 0;
     this.gaitAnchor[slot] = 0;
     this.anchor[slot] = 0;
@@ -556,8 +558,9 @@ export class AgentStore {
     this.assort = growF64(this.assort);
     this.transportThrust = growF64(this.transportThrust);
     this.transportRecoil = growF64(this.transportRecoil);
+    this.sub = growF64(this.sub);
     this.atp = growF64(this.atp);
-    this.adp = growF64(this.adp);
+    this.adenylate = growF64(this.adenylate);
     this.gaitWave = growF64(this.gaitWave);
     this.gaitAnchor = growF64(this.gaitAnchor);
     this.anchor = growF64(this.anchor);

@@ -885,6 +885,7 @@ function snapshotTargets(
  * where the force reads it, which is the same arrangement as before.
  */
 export const TRAIT_KEYS = [
+  'adenylate',
   'requestDecay',
   'energyCap',
   'debtCap',
@@ -922,6 +923,17 @@ export const CHEM_TASTE_MAX = 4;
 export const CHEM_SLOPE_MAX = 1;
 
 export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: number }> = {
+  /*
+   * Working capital: how much adenylate a body carries, and so how much work
+   * it can have outstanding before it has to wait on its own regeneration.
+   *
+   * A small pool discharges fast and recharges fast, which is a quick shallow
+   * stroke; a large one rides through a lean patch on stored charge and
+   * strokes slower and deeper. Neither dominates, which is why it is a gene
+   * and not a constant — and it is the first thing about a lineage's
+   * metabolism that selection can reach.
+   */
+  adenylate: { min: 0.2, max: 6, mutate: 0.15 },
   requestDecay: { min: 0.5, max: 0.98, mutate: 0.03 },
   energyCap: { min: EXTRA_CAP * 0.5, max: EXTRA_CAP * 2, mutate: EXTRA_CAP * 0.1 },
   /*

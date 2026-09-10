@@ -4259,62 +4259,58 @@ export class Sim {
   /**
    * One step of the body's metabolism, and what this frame's stroke comes to.
    *
-   * A two-species autocatalytic pathway — the Brusselator, which is the
-   * standard minimal model of a chemical oscillator and the usual toy for
-   * Belousov-Zhabotinsky:
+   * Three reactions over two pools, and an adenylate pool that is conserved:
    *
-   *     d(adp)/dt = base - (feed + 1) * adp + adp^2 * atp
-   *     d(atp)/dt = feed * adp       - adp^2 * atp
+   *     supply   extra   -> sub        rate  metabolicSupply * (1 - charge),
+   *                                        priced at metabolicCost a unit
+   *     burn     sub, ATP -> ADP       rate  sub * (base + adp^2)
+   *     regen    ADP     -> ATP        rate  metabolicRegen * adp
+   *     work     ATP     -> ADP        rate  metabolicWork * swell * |wave|
    *
-   * `adp` is the activator, made by a reaction it catalyses itself, and `atp`
-   * the store that reaction eats. The autocatalysis is the whole trick, and
-   * it is the same one glycolysis uses: phosphofructokinase is activated by
-   * the ADP it produces, so the pathway runs away, exhausts its store, stalls
-   * while the store refills, and runs away again. These are a pathway's
-   * state, not pond stock — nothing here creates or destroys anything the
-   * economy counts.
+   * `atp + adp` is the body's `adenylate`, and nothing here changes it — the
+   * pool is currency and can only be cycled, never minted. What *is* spent is
+   * `extra`, bought as substrate, and `supply` is where this pathway joins
+   * the economy rather than shadowing it.
    *
-   * Selkov's own equations came first and would not do. `d(adp)/dt = atp *
-   * adp^2 - k * adp` factors to `adp * (atp * adp - k)`, so zero is a fixed
-   * point *and* a stable one: the moment the product dips the pathway
-   * collapses and never restarts. Integrated at the constants this ships, it
-   * flatlined at every fullness. Its oscillating window is also
-   * `v < k^(3/2)`, which is the wrong shape — a well-fed body would fall out
-   * of the top of it and go still. The Brusselator's condition is
+   * The regulation is the real one. A cell does not pull harder on its fuel
+   * because it is holding a lot; it pulls harder because it is *discharged*.
+   * So supply runs on `1 - charge`, which means a net that is working draws
+   * its tank down, a drawn-down tank is what `spreadRequests` carries, and
+   * `flowCharges` answers it from wherever the net has surplus. Two wired
+   * bodies are coupled through that whether or not `metabolicDiffuse` is set.
    *
-   *     feed > 1 + base^2
+   * `burn` is the autocatalysis, and it is the same one glycolysis uses:
+   * phosphofructokinase is activated by the ADP it produces, so a discharged
+   * body burns faster, discharges further, and burns faster still — until the
+   * substrate runs out and `regen` catches up. That is the oscillation, and
+   * it is a *consequence* of the regulation rather than a clock beside it.
    *
-   * which is monotone: the more a body has, the harder it runs. At the
-   * shipped `base` 0.5 the threshold is a feed of 1.25, so with
-   * `metabolicInflux` 2.5 a body oscillates above half a tank and sits
-   * perfectly still below it. That is the property this whole change is for.
-   * The clock it replaces was a constant, so a body undulated whether it was
-   * fed, starving, or attached to anything — a metronome bolted to the pond.
+   * `base` is not decoration. Without it the burn is `sub * adp^2`, which is
+   * zero at full charge, so a body that ever tops up stops metabolising for
+   * good — zero is absorbing. That is exactly why Selkov's own equations
+   * flatlined here at every fullness. Real phosphofructokinase turns over
+   * without ADP too; the activation is a multiplier on an enzyme that is
+   * already running.
    *
-   * Substepped to a ceiling of `REACT_H`. Explicit Euler on this is stiff
-   * where the activator spikes, and at `metabolicRate` 6 an unsubstepped step
-   * pinned a fed body at the cap and rang at the frame rate. Substepped, the
-   * amplitude is identical at every rate and the period is exactly `1/rate` —
-   * which is what makes `metabolicRate` the clean speed dial the parameter
-   * claims, and what keeps the whole slider safe rather than the part below
-   * a cliff.
+   * What leaves the tank lands on the ground, through the same `excreteRate`
+   * path `tickUpkeepFast` already uses for rent. So a body that metabolises
+   * hard fertilises the cell it stands in, nothing is destroyed, and the
+   * conservation the economy is checked against still holds.
    *
-   * `metabolicDiffuse` lets the activator cross a wire, which is what makes
-   * this a medium rather than a bag of separate oscillators: a reaction that
-   * diffuses carries a front, and a front running down a chain is
-   * peristalsis. So the coupling that used to be a Kuramoto pull toward a
-   * hand-set lag is the activator spreading, and the wavelength is whatever
-   * the reaction and the diffusion agree on.
+   * The wave is `(atp - adp) / adenylate`, which is the adenylate energy
+   * charge mapped to [-1, 1]: +1 fully charged, -1 fully spent, 0 half. No
+   * arbitrary normalisation, and a body whose pathway has stalled sits at
+   * whatever charge it stalled at and does not stroke.
    */
   private advanceGait(params: Params, dt: number): void {
     const store = this.agentStore;
+    const SUB = store.sub;
     const ATP = store.atp;
-    const ADP = store.adp;
+    const POOL = store.adenylate;
     const WAVE = store.gaitWave;
     const GA = store.gaitAnchor;
     const ANCHOR = store.anchor;
     const EXTRA = store.extra;
-    const CAP = store.energyCap;
     const rate = params.metabolicRate;
     if (!(rate > 0)) {
       for (const agent of this.agents.values()) {
@@ -4324,30 +4320,61 @@ export class Sim {
       return;
     }
 
-    const influx = params.metabolicInflux;
+    const supply = params.metabolicSupply;
     const base = params.metabolicBase;
+    const regen = params.metabolicRegen;
+    const workRate = params.metabolicWork * params.gaitSwell;
+    const price = params.metabolicCost;
+    const excrete = params.excreteRate;
+    const grid = this.energy;
     const h = rate * dt;
     const sub = Math.max(1, Math.ceil(h / REACT_H));
     const hs = h / sub;
+
     for (const agent of this.agents.values()) {
       const s = agent.slot;
-      const cap = CAP[s];
-      const raw = cap > 0 ? EXTRA[s] / cap : 0;
-      const full = raw <= 0 ? 0 : raw >= 1 ? 1 : raw;
-      // What the body is holding is what drives the pathway, so the rhythm
-      // comes from what the pond did with its energy.
-      const feed = influx * full;
-      let x = ADP[s];
-      let y = ATP[s];
-      for (let k = 0; k < sub; k++) {
-        const burn = x * x * y;
-        const nx = x + (base - (feed + 1) * x + burn) * hs;
-        const ny = y + (feed * x - burn) * hs;
-        x = nx <= 0 ? 0 : nx >= REACT_CAP ? REACT_CAP : nx;
-        y = ny <= 0 ? 0 : ny >= REACT_CAP ? REACT_CAP : ny;
+      const pool = POOL[s];
+      if (!(pool > 0)) {
+        WAVE[s] = 0;
+        ANCHOR[s] = 0;
+        continue;
       }
-      ADP[s] = x;
-      ATP[s] = y;
+      let a = ATP[s];
+      let m = SUB[s];
+      let spent = 0;
+      for (let k = 0; k < sub; k++) {
+        const d = pool - a;
+        const charge = a / pool;
+        // Bought, not conjured: a body with an empty tank cannot buy
+        // substrate and its pathway winds down.
+        // Priced, not free, and bounded by what the tank can actually pay for
+        // — a body with nothing left buys nothing and its pathway winds down.
+        const want = supply * (1 - charge) * hs;
+        const have = EXTRA[s] - spent;
+        const afford = price > 0 ? have / price : want;
+        const buy = want <= 0 || afford <= 0 ? 0 : want > afford ? afford : want;
+        spent += buy * price;
+        const burn = m * (base + d * d);
+        const back = regen * d;
+        const work = workRate * (a >= d ? a - d : d - a) / pool;
+        m = m + buy - burn * hs;
+        a = a + (back - burn - work) * hs;
+        if (m < 0) m = 0;
+        else if (m > REACT_CAP) m = REACT_CAP;
+        if (a < 0) a = 0;
+        else if (a > pool) a = pool;
+      }
+      SUB[s] = m;
+      ATP[s] = a;
+      if (spent > 0) {
+        EXTRA[s] -= spent;
+        // Same accounting as rent: what left the tank lands on the dish, so
+        // metabolising is fertilising and the pond's total is unchanged.
+        if (excrete > 0) grid.addAt(store.x[s], store.y[s], spent * excrete);
+      }
+      const w = (2 * a - pool) / pool;
+      WAVE[s] = w;
+      ANCHOR[s] = GA[s] * w;
     }
 
     const spread = params.metabolicDiffuse;
@@ -4368,43 +4395,22 @@ export class Sim {
         const A = this.agents.get(wire.a.id);
         const B = this.agents.get(wire.b.id);
         if (!A || !B) continue;
-        const d = ADP[B.slot] - ADP[A.slot];
+        const d = SUB[B.slot] - SUB[A.slot];
         pull[A.slot] += d;
         pull[B.slot] -= d;
         count[A.slot] += 1;
         count[B.slot] += 1;
       }
       // Per wire, so a hub is not driven as many times as it has wires, and
-      // capped at a half so an explicit step cannot overshoot its neighbours
-      // and ring.
+      // capped at a half so an explicit step cannot overshoot and ring.
       const step = Math.min(0.5, spread * dt);
       for (const agent of this.agents.values()) {
         const s = agent.slot;
         const n = count[s];
         if (n <= 0) continue;
-        const nb = ADP[s] + step * (pull[s] / n);
-        ADP[s] = nb <= 0 ? 0 : nb >= REACT_CAP ? REACT_CAP : nb;
+        const next = SUB[s] + step * (pull[s] / n);
+        SUB[s] = next <= 0 ? 0 : next >= REACT_CAP ? REACT_CAP : next;
       }
-    }
-
-    /*
-     * The wave is where the activator sits against the pathway's own resting
-     * level, which is `base` — the fixed point of the equations above. So a
-     * body strokes about its own middle rather than sitting permanently
-     * contracted, and a body whose pathway is not running reads exactly zero
-     * and does not stroke at all.
-     *
-     * `(x - base) / (x + base)` rather than a clamp: it is zero at rest, runs
-     * to -1 as the activator empties and to +1 as it spikes, and is smooth
-     * throughout. A plain ratio clipped at 1 spends most of a relaxation
-     * cycle pinned at the ceiling, which throws away the shape of the spike.
-     */
-    for (const agent of this.agents.values()) {
-      const s = agent.slot;
-      const x = ADP[s];
-      const w = x + base > 1e-9 ? (x - base) / (x + base) : 0;
-      WAVE[s] = w;
-      ANCHOR[s] = GA[s] * w;
     }
   }
 

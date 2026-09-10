@@ -122,27 +122,37 @@ not also be asked to do. Nothing else belongs here; measurements go in
   it is plain synchrony, which is the pond-wide pulse this branch began by
   removing.
 
-  The clock is a metabolism. Every body runs a two-species autocatalytic
-  pathway — the Brusselator, the standard minimal chemical oscillator and the
-  usual toy for Belousov-Zhabotinsky — fed at a rate set by its own fullness,
-  and the activator is the wave. It runs exactly when
-  `influx * fullness > 1 + base^2`, which at the shipped constants is half a
-  tank: a body over half full undulates and one under it is perfectly still.
-  So the gait is something the pond produces out of what it did with its
-  energy, rather than a metronome bolted beside it, and the coupling is the
-  activator diffusing along wires — a reaction that diffuses carries a front,
-  and a front running down a chain is peristalsis.
+  The clock is a metabolism, and it is in the economy rather than beside it.
+  Every body runs three reactions over two pools: it buys substrate out of its
+  own tank in proportion to how *discharged* it is, an autocatalytic step
+  burns that substrate and spends ATP into ADP, and a recharge step puts it
+  back. `atp + adp` is the body's `adenylate` and never changes — the pool is
+  currency and can only be cycled. What is spent is `extra`, and what leaves
+  the tank lands on the ground through the same `excreteRate` path rent
+  already uses, so metabolising is fertilising and nothing is destroyed.
 
-  Selkov's own equations came first and could not do it: `adp * (atp * adp -
-  k)` makes zero a stable fixed point, so the pathway collapses the moment
-  its product dips and never restarts, and its window `v < k^(3/2)` is the
-  wrong shape — a well-fed body falls out of the top of it and goes still.
+  The regulation is the real one: a cell pulls harder on its fuel because it
+  is discharged, not because it is holding a lot. So a net that works draws
+  its tank down, a drawn-down tank is what `spreadRequests` carries, and
+  `flowCharges` answers it — two wired bodies are coupled through the economy
+  whether or not `metabolicDiffuse` is set. The stroke discharges the pool in
+  proportion to how far it swings a wire, so moving costs something, and a
+  body that cannot buy substrate goes still within about half a minute.
 
-  Not yet true, and this is the list. Nothing about the pathway is heritable:
-  `metabolicInflux` and `metabolicBase` are global constants, where which
-  side of `1 + base^2` a lineage chooses to live on is exactly the sort of
-  thing it should own — that wants two more rows on `G`, or a head off `X`,
-  which is what the expression head is for. And an
+  The oscillation is a *consequence* of that regulation rather than a clock
+  beside it, and it lives in a window: too little income and the pathway is
+  supply-limited and sits charged, too much and it runs fully discharged and
+  sits there. Both ends are still. That window is narrow, which is a real
+  property of a two-pool network and not a tuning failure — saturating the
+  burn widens nothing, it removes the oscillation entirely. More species is
+  what would widen it.
+
+  Not yet true, and this is the list. Only the pool size is heritable, as
+  `adenylate`; every rate is still a global constant, where a lineage should
+  own them — that is what `X`, the expression head, exists for and is read by
+  nothing. The pathway is also its own private chemistry: it neither eats nor
+  excretes any of the four field species, so the only thing connecting it to
+  the dish is the price it pays and the fertiliser that price becomes. And an
   Era is both the leaf *and*, by `ERA_UPKEEP_RATIO` and its larger store, the
   fullest body on its wire — so the seeded head makes it the oar while the
   economy makes it the anchor, and those pull opposite ways. On the bench they

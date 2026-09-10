@@ -454,12 +454,23 @@ export class Agent {
     this.store.transportThrust[this.slot] = v;
   }
 
-  /** Selkov's product, this body's metabolic clock. See `Sim.advanceGait`. */
-  get adp(): number {
-    return this.store.adp[this.slot];
+  /** The charged part of this body's adenylate pool. See `Sim.advanceGait`. */
+  get atp(): number {
+    return this.store.atp[this.slot];
   }
-  set adp(v: number) {
-    this.store.adp[this.slot] = v;
+  set atp(v: number) {
+    this.store.atp[this.slot] = v;
+  }
+
+  /**
+   * How much adenylate this body carries: its working capital, and the
+   * ceiling on how much work it can have outstanding at once. Heritable.
+   */
+  get adenylate(): number {
+    return this.store.adenylate[this.slot];
+  }
+  set adenylate(v: number) {
+    this.store.adenylate[this.slot] = v;
   }
 
   /** How hard this body recoils, per unit of energy it pumps to a neighbour. */
@@ -1289,7 +1300,12 @@ export function createAgent(
   mix ^= mix >>> 13;
   mix = Math.imul(mix, 3266489917) >>> 0;
   mix ^= mix >>> 16;
-  store.adp[slot] = 0.2 + (mix / 4294967296) * 0.8;
+  const pool = params.adenylate;
+  store.adenylate[slot] = pool;
+  // Part charged, and not all of it: a pool that starts full has no ADP for
+  // the autocatalytic step to work on and the pathway never lights.
+  store.atp[slot] = pool * (0.25 + (mix / 4294967296) * 0.5);
+  store.sub[slot] = 0.5;
   // A body made outside a rewrite is a founder: generation zero of its own
   // line. `autoSpawn` makes a great many of these, which is the point of
   // being able to count them.

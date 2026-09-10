@@ -45,7 +45,7 @@ import type { AgentKind, PortSlot } from '../agents.ts';
  */
 
 /** Bumped when the payload's meaning changes in a way a reader must notice. */
-export const NET_FORMAT = 1;
+export const NET_FORMAT = 2;
 
 const MAGIC = 'petri-net';
 
@@ -70,6 +70,11 @@ export const SCALAR_FIELDS = [
   'debtCap',
   'rescueTo',
   'assort',
+  // Appended, never inserted: a stored blob's field order is its layout, and
+  // moving one would make every net in the library decode as something else.
+  // `NET_FORMAT` goes up with it so an older blob is refused rather than
+  // silently read one scalar short.
+  'adenylate',
 ] as const;
 export type ScalarField = (typeof SCALAR_FIELDS)[number];
 
@@ -128,6 +133,8 @@ export interface NetBody {
   debtCap: number;
   rescueTo: number;
   assort: number;
+  /** Working capital: the adenylate pool. See `Sim.advanceGait`. */
+  adenylate: number;
   born: number;
   lineage: number;
   /** `CHEM_LEN` floats. Copied, never a live view into a store. */
@@ -358,6 +365,7 @@ export function decodeNet(input: Uint8Array): NetData {
       debtCap: scalar[so + 3],
       rescueTo: scalar[so + 4],
       assort: scalar[so + 5],
+      adenylate: scalar[so + 6],
       born: ancestry[i * 2],
       lineage: ancestry[i * 2 + 1],
       chem: chem.subarray(i * L.chem, (i + 1) * L.chem),

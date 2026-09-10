@@ -293,53 +293,84 @@ export interface Params {
    */
   grip: number;
   /**
-   * How fast the body's metabolism runs, as a plain multiple. 0 = no
-   * pathway, so no gait at all.
+   * How fast the pathway runs, as a plain multiple. 0 = no metabolism, so no
+   * gait.
    *
-   * `Sim.advanceGait` steps Selkov's glycolytic oscillator per body, and
-   * multiplying both of its equations is a rescaling of time — so this moves
-   * the period without moving the window the pathway oscillates in. It is
-   * the frequency dial, and the only one.
+   * Multiplying every reaction rescales time and nothing else, so this moves
+   * the period without moving where the pathway oscillates.
    */
   metabolicRate: number;
   /**
-   * Substrate fed into the pathway, per unit of the body's own fullness.
+   * How hard a discharged body pulls substrate out of its own tank, per
+   * second at full discharge.
    *
-   * This is what ties the gait to the pond. The feed rate is `influx *
-   * fullness`, so a body's rhythm comes from what it is holding, and what it
-   * is holding is what the ground gave it and what its net sent it. An empty
-   * body has no pathway running and does not undulate.
+   * This is the join to the economy, and the reason the pathway is not a
+   * shadow of it. A body buys substrate with `extra` in proportion to how
+   * *discharged* it is, which is how a real cell regulates glycolytic flux —
+   * not by how much it is holding but by how little of its charge is left.
+   * So a net that is working draws on its tank, and a tank drawn down is what
+   * `spreadRequests` carries and `flowCharges` answers.
    *
-   * Read it against `metabolicBase`: the pathway runs exactly when
-   * `influx * fullness > 1 + base^2`. At the shipped 2.5 against a base of
-   * 0.5 that is half a tank, so a body over half full undulates and one
-   * under it is perfectly still. Monotone, which is the point — the more a
-   * body has, the harder it runs, with no window to fall out of the top of.
+   * What leaves the tank lands on the ground through the same `excreteRate`
+   * path upkeep already uses, so nothing is destroyed. A body that
+   * metabolises hard is a body that fertilises the cell it is standing in.
    */
-  metabolicInflux: number;
+  metabolicSupply: number;
   /**
-   * The pathway's basal feed, and so its resting level: the activator sits
-   * here when nothing is driving it, and the stroke is measured against it.
+   * The pathway's basal rate — what it runs at with no ADP to activate it.
    *
-   * With `metabolicInflux` it sets where the pathway starts running, since
-   * the Brusselator's fixed point goes unstable exactly at
-   * `feed > 1 + base^2`. At 0.5 that threshold is a feed of 1.25, which
-   * against an influx of 2.5 is half a tank. Raising it raises the bar a
-   * body has to clear to have a gait at all.
+   * Without it zero is an absorbing state: the autocatalytic step is
+   * `sub * adp^2`, which is zero when the pool is fully charged, so a body
+   * that ever reaches full charge stops metabolising forever. That is not a
+   * subtlety, it is the reason Selkov's own equations flatlined here. A basal
+   * rate is also what real phosphofructokinase has — the ADP activation is a
+   * multiplier on an enzyme that already turns over.
    */
   metabolicBase: number;
   /**
-   * How fast the activator crosses a wire, per second. 0 = every body is its
-   * own oscillator and a net is a bag of them.
+   * How fast ADP is recharged to ATP, per second. The payoff phase.
    *
-   * What makes this a medium rather than a collection. A reaction that
-   * diffuses carries a front, and a front running down a chain is
-   * peristalsis — so this is the coupling, and unlike the Kuramoto pull it
-   * replaces there is no lag to set: the wavelength is whatever the reaction
-   * and the diffusion agree on, which is the point of getting it from
-   * chemistry instead of from a slider.
+   * Against `metabolicBase` and the pool this sets whether the pathway
+   * oscillates or settles: recharge much faster than the autocatalytic burn
+   * and the pool sits full and still, much slower and it sits empty.
+   */
+  metabolicRegen: number;
+  /**
+   * ATP spent per unit of stroke, per second.
+   *
+   * What makes moving cost something. The stroke discharges the pool in
+   * proportion to how far it is actually swinging a wire, so a net that
+   * undulates hard runs its charge down, pulls harder on its tank, and has to
+   * eat — and one that cannot eat goes still. That is the loop `swimCost` was
+   * reaching for by charging on speed, arriving through the mechanism instead
+   * of beside it.
+   */
+  metabolicWork: number;
+  /**
+   * Energy debited from the tank per unit of substrate the pathway buys.
+   * 0 = metabolism is free, which is the pond before this.
+   *
+   * A yield, and the reason the reaction's own scale and the economy's can
+   * differ by two orders without either being wrong. A pathway turns its pool
+   * over many times per unit of matter consumed — that is what a *currency*
+   * is — so `metabolicSupply` is in reaction units and this is what converts
+   * them to tank units. At the shipped values a body at half charge spends
+   * about 0.015/s, which is the rent it already pays to exist: metabolising
+   * costs about as much as being alive.
+   */
+  metabolicCost: number;
+  /**
+   * How fast the upstream metabolite crosses a wire, per second. 0 = every
+   * body's pathway is its own.
+   *
+   * The fast coupling. The slow one is already there and costs nothing: two
+   * wired bodies both buy substrate out of tanks that `flowCharges` moves
+   * energy between, so their pathways are coupled through the economy
+   * whether this is set or not.
    */
   metabolicDiffuse: number;
+  /** What a fresh body's adenylate pool starts at. Heritable from there. */
+  adenylate: number;
   /**
    * How far the gait swings a wire's rest length, as a fraction of it.
    * 0 = the wire ignores the clock, which is the pond before this.
@@ -1003,9 +1034,13 @@ export function defaultParams(): Params {
     angDrag: 2.4,
     grip: 2,
     metabolicRate: 6,
-    metabolicInflux: 2.5,
-    metabolicBase: 0.5,
+    metabolicSupply: 3,
+    metabolicBase: 0.02,
+    metabolicRegen: 1,
+    metabolicWork: 0.6,
+    metabolicCost: 0.01,
     metabolicDiffuse: 2,
+    adenylate: 1.5,
     gaitSwell: 0.3,
     flockAlign: 5.5,
     flockSep: 48,
@@ -1081,8 +1116,12 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'angDrag', label: 'Spin damp', min: 0, max: 8, step: 0.05 },
   { key: 'grip', label: 'Grip (tank)', min: -4, max: 12, step: 0.05 },
   { key: 'metabolicRate', label: 'Metabolic rate', min: 0, max: 20, step: 0.1 },
-  { key: 'metabolicInflux', label: 'Substrate feed', min: 0, max: 8, step: 0.05 },
-  { key: 'metabolicBase', label: 'Basal feed', min: 0.05, max: 2, step: 0.05 },
+  { key: 'metabolicSupply', label: 'Substrate pull', min: 0, max: 6, step: 0.05 },
+  { key: 'metabolicBase', label: 'Basal enzyme', min: 0, max: 2, step: 0.01 },
+  { key: 'metabolicRegen', label: 'Recharge rate', min: 0.05, max: 6, step: 0.05 },
+  { key: 'metabolicWork', label: 'Stroke cost', min: 0, max: 4, step: 0.02 },
+  { key: 'metabolicCost', label: 'Substrate price', min: 0, max: 0.1, step: 0.002 },
+  { key: 'adenylate', label: 'Adenylate pool (seed)', min: 0.2, max: 6, step: 0.1 },
   { key: 'metabolicDiffuse', label: 'Activator spread', min: 0, max: 20, step: 0.1 },
   { key: 'gaitSwell', label: 'Gait swell', min: 0, max: 0.8, step: 0.01 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
