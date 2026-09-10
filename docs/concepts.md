@@ -97,14 +97,21 @@ not also be asked to do. Nothing else belongs here; measurements go in
   it is an appendage and on a Con's `p` it is an erase. Which one a lineage
   gets is about where it latches, which no gene here reaches.
 
-  The stroke is two mechanisms because the engine gives one thing each. An
-  impulse along a wire (`gaitDrive`) is the only actuator a centre of mass
-  responds to, since `grip` works on the coast after it — but a wire's span
-  constraint is near-rigid and puts the two ends back where `rest` says inside
-  the same frame, so on its own it walks a net and never changes its shape.
-  Driving `rest` (`gaitSwell`) is the exact reverse: the constraint serves it,
-  so it reads at once, and it is worth no travel at all. Both, off one phase
-  and agreeing. The impulse is what walks; the swell is what shows.
+  The stroke moves a wire's rest length, and that is the only actuator it
+  has. `rest` is what this engine already moves things with — `wireShrink`
+  reels a latch in through it, `Wire.collapse` hauls a rewrite's ends together
+  with it, `wireBreathe` makes tissue move with it — because the span
+  constraint serves it rather than fighting it. The gait is the fourth thing
+  that writes it, which is why it is `wireTug` with a better clock rather than
+  a new mechanism: the tug was driven by whichever packet last crossed, and
+  this is driven by a phase the net owns.
+
+  A correction shared by inverse mass moves both bodies and not their centre,
+  so the swing itself carries nothing. What carries is the velocity it induces
+  and `grip` then spends: a wire whose two ends damp differently keeps a step
+  out of every cycle, and one whose ends match keeps nothing. `grip *
+  fullness` is one such difference and `G`'s `anchor` is the other, riding the
+  same cosine as the swing so a body grips exactly while its wires pull.
 
   `gaitCouple` and `gaitLag` are what make it a pattern rather than n
   twitches. A body's share of its own stroke is divided by the whole net's

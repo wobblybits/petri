@@ -21,7 +21,7 @@ import { CHEM_LEN, HEAD_SCALE, LEARN_STRIDE } from '../chem-layout.ts';
  */
 
 /** Floats written per body: h(4), emit(4), taste(4), six heads. */
-const OUT_STRIDE = 20;
+const OUT_STRIDE = 19;
 /** 80 bytes: twenty f32/u32, and nothing here is a vec so nothing has to align. */
 const UNIFORM_BYTES = 80;
 /** Most learning rows read back in one frame. A frame that begins more
@@ -340,7 +340,6 @@ export class GenomeGpu {
       f32[14] = learn.discount;
       f32[15] = learn.maxWeight;
       f32[16] = HEAD_SCALE.anchor;
-      f32[17] = HEAD_SCALE.stroke;
       device.queue.writeBuffer(this.uniform!, 0, u);
       device.queue.writeBuffer(this.hPrev!, 0, this.hData.buffer, this.hData.byteOffset, n * 4 * 4);
       device.queue.writeBuffer(

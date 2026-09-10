@@ -1025,58 +1025,39 @@ export function flockGain(v: number): number {
 
 
 /**
- * The gait's two amplitudes, seeded by kind: an Era is an oar and a Con or a
- * Dup is a foot.
+ * How hard each kind grips at its point in the stroke: an Era is an oar and a
+ * Con or a Dup is a foot.
  *
- * Bases, not matrix entries, and the matrices stay zero — so a fresh body
- * strides at a constant amplitude and a lineage is free to make either one
- * depend on `h`, or to swap the two roles outright, by drifting `G`. Same
- * shape as `e0`, and the same argument: a behaviour should start as the
- * constant it would otherwise have been hardcoded to, and become a phenotype
- * by evolving rather than by being declared one.
+ * A base, not a matrix entry, and the matrix stays zero — so a fresh body
+ * grips by a constant and a lineage is free to make it depend on `h`, or to
+ * swap the two roles outright, by drifting `G`. Same shape as `e0`, and the
+ * same argument: a behaviour should start as the constant it would otherwise
+ * have been hardcoded to, and become a phenotype by evolving.
  *
- * The split is what the stroke is actually made of. A pair's centre keeps
- * `∮ F (1/k_a - 1/k_b) dt / M`, so it is driven by the *difference* in drag
- * between a wire's two ends and is exactly zero when they match. Until now
- * both ends anchored alike and the only difference available was
- * `grip * fullness` — which meant a net walked only while it held a gradient,
- * and a well-fed one went nowhere.
+ * The split is what the travel is made of. A wire swinging its rest length
+ * moves both its bodies and not their centre; what is left over is the
+ * velocity that correction induces, decaying at each body's own rate. Equal
+ * rates, nothing left. So the two ends of a wire have to grip differently,
+ * and an Era supplies that difference structurally: one port, so always a
+ * leaf, with one uncancelled stroke where an interior body has three that
+ * partly fight; light; and a producer holding a larger store, so it already
+ * sits at a fullness its neighbour does not, which `grip` turns into a second
+ * difference pointing the same way.
  *
- * An Era supplies that difference structurally. It has one port, so it is
- * always a leaf: an appendage attached at one point and free at the other,
- * with one wire and therefore one uncancelled stroke, where an interior body
- * has three that partly fight each other. It is light (`eraMass` 0.45), so
- * the same impulse carries it further. And it produces rather than pays
- * (`ERA_UPKEEP_RATIO`) and holds a larger store, so it sits at a different
- * fullness from its neighbour by economics alone — the gradient the stroke
- * wants, standing, for free.
- *
- * So the Era strokes and does not grip, and the interior grips and barely
- * strokes. Note what that changes: with the anchors differing by kind, a net
- * with Eras on it walks whether or not it holds an energy gradient, where
- * before it could not. Between two Cons the anchors still match and the old
- * rule still holds, which is the control `locomotion.test.ts` keeps.
- *
- * The anchor stays under `drag` on purpose. Past it the rate clamps at zero,
- * both ends clamp together, and the clamp destroys the very asymmetry this
- * exists to create.
+ * Under `drag` on purpose. Past it the rate clamps at zero, both ends clamp
+ * *together*, and the clamp destroys the asymmetry this exists to make.
  *
  * One structural condition is not seeded here and cannot be: an Era is a limb
  * only where it lands on an *auxiliary* port. A redex needs principals at
- * both ends (`Sim.collectReadyRedexes`), and an Era has nothing but a
+ * both ends (`Sim.collectReadyRedexes`) and an Era has nothing but a
  * principal — so on a Con's `l` or `r` it is an appendage, and on a Con's `p`
- * it is an erase waiting to happen. Which of those a lineage gets is about
- * where it latches, not about `G`.
+ * it is an erase waiting to happen.
  */
 const GAIT_ANCHOR_ERA = 0.02;
-const GAIT_STROKE_ERA = 2;
 const GAIT_ANCHOR_NODE = 0.25;
-const GAIT_STROKE_NODE = 0.3;
 
 function seedGait(c: Float32Array, kind: AgentKind): void {
-  const era = kind === 'era';
-  c[G_BASE] = era ? GAIT_ANCHOR_ERA : GAIT_ANCHOR_NODE;
-  c[G_BASE + 1] = era ? GAIT_STROKE_ERA : GAIT_STROKE_NODE;
+  c[G_BASE] = kind === 'era' ? GAIT_ANCHOR_ERA : GAIT_ANCHOR_NODE;
 }
 
 /**

@@ -85,32 +85,25 @@ export class AgentStore {
   transportRecoil!: Float64Array;
   /**
    * The gait. `gaitPhase` is the body's own clock, advanced once a frame by
-   * `params.gaitRate`; `gaitAnchor` and `gaitStroke` are the two amplitudes
-   * the `G` head reads off `h`; `anchor` and `stroke` are what those come to
-   * this frame — both `amplitude * cos(phase)`, one into the drag rate and
-   * one into an impulse along every wire on the body.
+   * `params.gaitRate`; `gaitAnchor` is the amplitude the `G` head reads off
+   * `h`, and `anchor` is what it comes to this frame — `gaitAnchor *
+   * cos(phase)`, added to this body's drag rate.
    *
    * `gaitWave` is the bare `cos(phase)`, with no amplitude in it, and is what
-   * a wire's rest length rides on.
+   * a wire's rest length rides on in `Graph.syncRest`.
    *
-   * Both halves, because the engine will only give one thing each. An impulse
-   * is the only actuator that moves a centre of mass — `grip` acts on the
-   * coast afterwards, and a position correction split by inverse mass never
-   * does. But an impulse along a wire is fought by that wire's span
-   * constraint, which is near-rigid and puts the two ends back where `rest`
-   * says within the same frame, so the *shape* never changes and there is
-   * nothing to see. Driving `rest` is the reverse: visible, and worth no
-   * travel at all.
-   *
-   * So the stroke pushes and the rest length agrees with it, off one phase.
-   * The impulse is what walks; the length is what shows.
+   * One actuator, not two. `rest` is what this engine already moves things
+   * with — `wireShrink` reels a latch in with it, `Wire.collapse` hauls a
+   * rewrite's ends together with it, `wireBreathe` makes tissue move with it
+   * — because the span constraint *serves* it rather than fighting it. The
+   * gait is the fourth thing that writes it. The travel is then whatever
+   * `anchor` and `grip` leave of the velocity that correction induces, which
+   * costs no second mechanism.
    */
   gaitPhase!: Float64Array;
   gaitWave!: Float64Array;
   gaitAnchor!: Float64Array;
-  gaitStroke!: Float64Array;
   anchor!: Float64Array;
-  stroke!: Float64Array;
   /** Whole units this body sends in one transfer. See `params.transportQuantum`. */
   transportQuantum!: Float64Array;
   /**
@@ -476,9 +469,7 @@ export class AgentStore {
     this.gaitPhase[slot] = 0;
     this.gaitWave[slot] = 0;
     this.gaitAnchor[slot] = 0;
-    this.gaitStroke[slot] = 0;
     this.anchor[slot] = 0;
-    this.stroke[slot] = 0;
     this.transportQuantum[slot] = 0;
     this.csHeading[slot] = 0;
     this.csCos[slot] = 0;
@@ -562,9 +553,7 @@ export class AgentStore {
     this.gaitPhase = growF64(this.gaitPhase);
     this.gaitWave = growF64(this.gaitWave);
     this.gaitAnchor = growF64(this.gaitAnchor);
-    this.gaitStroke = growF64(this.gaitStroke);
     this.anchor = growF64(this.anchor);
-    this.stroke = growF64(this.stroke);
     this.transportQuantum = growF64(this.transportQuantum);
     // Three a body, and -1 rather than 0 is the free marker, so a fresh tail
     // cannot read as "port held by wire 0".

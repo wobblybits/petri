@@ -54,12 +54,12 @@ describe('the genome shader matches the genome layout', () => {
     }
   });
 
-  it('writes the twenty floats a body the host unpacks', () => {
+  it('writes the nineteen floats a body the host unpacks', () => {
     // h(4) + emit(4) + taste(4) + six heads. The host reads them back by this
     // stride, so a mismatch shifts every field by a body.
     // state(4), emit(4), taste(4), then the heads: cruise, turn, align,
-    // sep, thrust, recoil, anchor, swell.
-    expect(shaderConst('OUT_STRIDE')).toBe(4 + 4 + 4 + 8);
+    // sep, thrust, recoil, anchor.
+    expect(shaderConst('OUT_STRIDE')).toBe(4 + 4 + 4 + 7);
   });
 
   it('has no genome offset the layout does not derive', () => {
@@ -91,7 +91,7 @@ describe('the genome shader matches the genome layout', () => {
       'n', 'chemLen', 'senseScale', 'groundScale',
       'sCruise', 'sTurn', 'sAlign', 'sSep', 'sThrust', 'sRecoil', 'energyCh',
       'learnRate', 'learnCritic', 'learnTrace', 'learnDiscount', 'maxWeight',
-      'sAnchor', 'sStroke', 'pad2', 'pad3',
+      'sAnchor', 'pad1', 'pad2', 'pad3',
     ]);
     // A uniform buffer's size has to be a whole number of sixteen-byte
     // blocks, which is what the pads are for.
@@ -123,7 +123,7 @@ describe('the genome shader matches the genome layout', () => {
      */
     expect(L_BASE + 2).toBe(X_OUT);
     expect(X_OUT).toBeLessThan(G_OUT);
-    expect(G_BASE + 2).toBe(CHEM_LEN);
+    expect(G_BASE + 1).toBe(CHEM_LEN);
   });
 });
 
@@ -200,7 +200,7 @@ function mirrorState(a: {
       sum += w;
     }
     if (sum > 1e-6) for (let c = 0; c < 4; c++) emit[c] /= sum;
-    const o = i * 20;
+    const o = i * 19;
     for (let d = 0; d < S; d++) out[o + d] = h[d];
     for (let c = 0; c < 4; c++) out[o + 4 + c] = emit[c];
     for (let c = 0; c < 4; c++) out[o + 8 + c] = chem[g + TASTE + c] + dot(T_OUT, c);
@@ -213,7 +213,6 @@ function mirrorState(a: {
     out[o + 16] = cl(head(P_OUT, P_BASE, 0, HEAD_SCALE.thrust), 0, 1);
     out[o + 17] = cl(head(P_OUT, P_BASE, 1, HEAD_SCALE.recoil), 0, 200);
     out[o + 18] = cl(head(G_OUT, G_BASE, 0, HEAD_SCALE.anchor), -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
-    out[o + 19] = cl(head(G_OUT, G_BASE, 1, HEAD_SCALE.stroke), -60, 60);
   }
   return out;
 }
@@ -345,7 +344,7 @@ describe('the genome shader computes what updateState computes', () => {
     let moved = 0;
     for (let i = 0; i < n; i++) {
       const s = list[i].slot;
-      const o = i * 20;
+      const o = i * 19;
       for (let d = 0; d < STATE_DIMS; d++) {
         worstH = Math.max(worstH, Math.abs(got[o + d] - store.hAll[s * STATE_DIMS + d]));
         if (Math.abs(store.hAll[s * STATE_DIMS + d]) > 1e-3) moved++;

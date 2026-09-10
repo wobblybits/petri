@@ -347,20 +347,6 @@ export interface Params {
    */
   gaitLag: number;
   /**
-   * Scales the stroke every body was seeded with. 1 = the seeded amplitude.
-   *
-   * There was no dial at all on the gait's size — `seedGait` writes the
-   * amplitudes into the genome and `gaitRate` only sets the frequency — so
-   * the mechanic could not be turned up to look at, and could not be put on a
-   * sweep axis, which meant it could not be measured against anything.
-   *
-   * Scaling the stroke rather than the anchor because the stroke is linear
-   * and unbounded while the anchor is not: the anchor is capped by `drag`,
-   * since past it the rate clamps at zero, both ends clamp *together*, and
-   * the clamp destroys the very asymmetry the stroke works on.
-   */
-  gaitDrive: number;
-  /**
    * How far the gait swings a wire's rest length, as a fraction of it.
    * 0 = the wire ignores the clock, which is the pond before this.
    *
@@ -1025,7 +1011,6 @@ export function defaultParams(): Params {
     gaitRate: 2,
     gaitCouple: 3,
     gaitLag: 1,
-    gaitDrive: 12,
     gaitSwell: 0.3,
     flockAlign: 5.5,
     flockSep: 48,
@@ -1103,7 +1088,6 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'gaitRate', label: 'Gait rate (rad/s)', min: 0, max: 16, step: 0.1 },
   { key: 'gaitCouple', label: 'Gait coupling', min: 0, max: 20, step: 0.1 },
   { key: 'gaitLag', label: 'Gait lag (rad/wire)', min: -3.2, max: 3.2, step: 0.05 },
-  { key: 'gaitDrive', label: 'Gait drive', min: 0, max: 60, step: 0.5 },
   { key: 'gaitSwell', label: 'Gait swell', min: 0, max: 0.8, step: 0.01 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
   { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },

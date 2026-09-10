@@ -35,7 +35,7 @@ const L_OUT: u32 = 124u;
 const L_BASE: u32 = 132u;
 // The gait head sits past the chemistry genes, at the end of the genome.
 const G_OUT: u32 = 178u;
-const G_BASE: u32 = 186u;
+const G_BASE: u32 = 182u;
 // `chem-layout.ts`'s GAIT_ANCHOR_MAX, transcribed with the offsets above.
 const GAIT_ANCHOR_MAX: f32 = 8.0;
 
@@ -50,7 +50,7 @@ const LEARN_PREV_V: u32 = 133u;
 const LEARN_STRIDE: u32 = 134u;
 
 // Floats written per body: h(4), emit(4), taste(4), then the six heads.
-const OUT_STRIDE: u32 = 20u;
+const OUT_STRIDE: u32 = 19u;
 
 struct GenomeParams {
   n: u32,
@@ -73,7 +73,7 @@ struct GenomeParams {
   learnDiscount: f32,
   maxWeight: f32,
   sAnchor: f32,
-  sStroke: f32,
+  pad1: f32,
   pad2: f32,
   pad3: f32,
 }
@@ -275,10 +275,9 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
   outv[o + 15u] = clampf(headAt(g, F_OUT, F_BASE, 1u, h) * G.sSep, -60.0, 120.0);
   outv[o + 16u] = clampf(headAt(g, P_OUT, P_BASE, 0u, h) * G.sThrust, 0.0, 1.0);
   outv[o + 17u] = clampf(headAt(g, P_OUT, P_BASE, 1u, h) * G.sRecoil, 0.0, 200.0);
-  // The gait's two amplitudes. Signed both ways: their relative sign is which
-  // way the net walks, so neither may be clamped to one side.
+  // The gait's grip. Signed both ways: a body that lets go where its
+  // neighbour holds walks the other way.
   outv[o + 18u] = clampf(headAt(g, G_OUT, G_BASE, 0u, h) * G.sAnchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
-  outv[o + 19u] = clampf(headAt(g, G_OUT, G_BASE, 1u, h) * G.sStroke, -60.0, 60.0);
 
   /*
    * What this body learns from the frame it has just had. A line-for-line

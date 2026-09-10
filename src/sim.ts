@@ -1013,7 +1013,6 @@ export class Sim {
     Sim.phase('syncForces');
     this.applyRadiationLoss();
     this.advanceGait(params, t);
-    this.strokeWires(t);
     this.dampVelocities(params, t);
     Sim.phase('damp');
 
@@ -4261,10 +4260,8 @@ export class Sim {
    * Turn every body's clock, and work out what this frame's stroke comes to.
    *
    * `anchor` is `gaitAnchor * cos(phase)` and goes into the drag rate below;
-   * `stroke` is `gaitStroke * cos(phase)` and becomes an equal and opposite
-   * impulse along every wire on the body, in `strokeWires`. Both on the same
-   * cosine, because the pair's centre keeps `∮ F (1/k_a - 1/k_b) dt / M` and
-   * that goes as the cosine of the angle between them — largest in phase.
+   * `gaitWave` is the bare cosine, and `Graph.syncRest` swings every wire on
+   * the body by it. One clock, so a body grips while its wires pull.
    *
    * The phase is a register rather than a readout of `h`, and that is the
    * second attempt. A rotation seeded into `Wh` is an oscillator on paper:
@@ -4283,14 +4280,11 @@ export class Sim {
     const store = this.agentStore;
     const PHASE = store.gaitPhase;
     const GA = store.gaitAnchor;
-    const GS = store.gaitStroke;
     const ANCHOR = store.anchor;
-    const STROKE = store.stroke;
     const rate = params.gaitRate;
     if (!(rate > 0)) {
       for (const agent of this.agents.values()) {
         ANCHOR[agent.slot] = 0;
-        STROKE[agent.slot] = 0;
         store.gaitWave[agent.slot] = 0;
       }
       return;
@@ -4368,52 +4362,12 @@ export class Sim {
         PHASE[s] = ph;
       }
     }
-    const drive = params.gaitDrive;
     const WAVE = store.gaitWave;
     for (const agent of this.agents.values()) {
       const s = agent.slot;
       const c = Math.cos(PHASE[s]);
       WAVE[s] = c;
       ANCHOR[s] = GA[s] * c;
-      STROKE[s] = GS[s] * drive * c;
-    }
-  }
-
-  /**
-   * The stroke: each wire shoves its two bodies apart, or pulls them
-   * together, by what the pair is asking for this frame.
-   *
-   * Equal and opposite, so it mints no momentum — the pond's centre of mass
-   * is exactly as fixed as it was. What makes it travel is `grip`: the two
-   * ends coast different distances from the same impulse, and the leftover
-   * is a step. That is the mechanism `transportRecoil` already had; this
-   * puts it on a clock the body owns instead of on whenever a packet
-   * happened to cross.
-   *
-   * A force rather than a velocity, so `dt` scales it and the stroke means
-   * the same at any frame rate; and read off the *mean* of the wire's two
-   * ends, so a wire is one muscle rather than two arguing.
-   */
-  private strokeWires(dt: number): void {
-    const store = this.agentStore;
-    const STROKE = store.stroke;
-    for (const wire of this.graph.wires.values()) {
-      const A = this.agents.get(wire.a.id);
-      const B = this.agents.get(wire.b.id);
-      if (!A || !B || poseHeld(A) || poseHeld(B)) continue;
-      const f = 0.5 * (STROKE[A.slot] + STROKE[B.slot]) * dt;
-      if (f === 0) continue;
-      const d = wrapDeltaVec(A.x, A.y, B.x, B.y, this.w, this.h);
-      const dist = Math.hypot(d.x, d.y);
-      if (!(dist > 1e-6)) continue;
-      const nx = d.x / dist;
-      const ny = d.y / dist;
-      const wA = 1 / Math.max(0.08, A.mass);
-      const wB = 1 / Math.max(0.08, B.mass);
-      A.vx -= nx * f * wA;
-      A.vy -= ny * f * wA;
-      B.vx += nx * f * wB;
-      B.vy += ny * f * wB;
     }
   }
 
@@ -6027,7 +5981,6 @@ export class Sim {
     const TT = store.transportThrust;
     const TR = store.transportRecoil;
     const GA = store.gaitAnchor;
-    const GS = store.gaitStroke;
     const PLASTIC = store.plasticAll;
     const TRACE = store.traceAll;
     const CRITIC = store.criticAll;
@@ -6259,10 +6212,9 @@ export class Sim {
       FS[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 1, H, ho, S) * HEAD_SCALE.sep, -60, 120);
       TT[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 0, H, ho, S) * HEAD_SCALE.thrust, 0, 1);
       TR[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 1, H, ho, S) * HEAD_SCALE.recoil, 0, 200);
-      // Signed both ways on purpose: the relative sign of the two is what
-      // decides which way the net walks, so neither may be clamped to one.
+      // Signed both ways on purpose: a body that lets go where its neighbour
+      // holds walks the other way, and that is a lineage's to choose.
       GA[slot] = clamp(headAt(CHEM, g, G_OUT, G_BASE, 0, H, ho, S) * HEAD_SCALE.anchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
-      GS[slot] = clamp(headAt(CHEM, g, G_OUT, G_BASE, 1, H, ho, S) * HEAD_SCALE.stroke, -60, 60);
 
       /*
        * What this body learns from the frame it has just had.
@@ -6466,7 +6418,6 @@ export class Sim {
       store.transportThrust[slot] = out[o + 16];
       store.transportRecoil[slot] = out[o + 17];
       store.gaitAnchor[slot] = out[o + 18];
-      store.gaitStroke[slot] = out[o + 19];
     }
   }
 
