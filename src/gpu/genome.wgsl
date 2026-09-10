@@ -30,12 +30,12 @@ const B_STATE: u32 = 100u;
 const F_OUT: u32 = 104u;
 const F_BASE: u32 = 112u;
 const P_OUT: u32 = 114u;
-const P_BASE: u32 = 122u;
-const L_OUT: u32 = 124u;
-const L_BASE: u32 = 132u;
+const P_BASE: u32 = 118u;
+const L_OUT: u32 = 119u;
+const L_BASE: u32 = 127u;
 // The gait head sits past the chemistry genes, at the end of the genome.
-const G_OUT: u32 = 178u;
-const G_BASE: u32 = 182u;
+const G_OUT: u32 = 173u;
+const G_BASE: u32 = 177u;
 // `chem-layout.ts`'s GAIT_ANCHOR_MAX, transcribed with the offsets above.
 const GAIT_ANCHOR_MAX: f32 = 8.0;
 
@@ -50,7 +50,7 @@ const LEARN_PREV_V: u32 = 133u;
 const LEARN_STRIDE: u32 = 134u;
 
 // Floats written per body: h(4), emit(4), taste(4), then the six heads.
-const OUT_STRIDE: u32 = 19u;
+const OUT_STRIDE: u32 = 18u;
 
 struct GenomeParams {
   n: u32,
@@ -62,7 +62,6 @@ struct GenomeParams {
   sTurn: f32,
   sAlign: f32,
   sSep: f32,
-  sThrust: f32,
   sRecoil: f32,
   energyCh: f32,
   // Learning. `learnRate` at zero is the whole thing switched off, and the
@@ -76,6 +75,7 @@ struct GenomeParams {
   pad1: f32,
   pad2: f32,
   pad3: f32,
+  pad4: f32,
 }
 
 @group(0) @binding(0) var<uniform> G: GenomeParams;
@@ -273,11 +273,10 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
   outv[o + 13u] = clampf(headAt(g, L_OUT, L_BASE, 1u, h) * G.sTurn, 0.0, 8.0);
   outv[o + 14u] = clampf(headAt(g, F_OUT, F_BASE, 0u, h) * G.sAlign, -8.0, 16.0);
   outv[o + 15u] = clampf(headAt(g, F_OUT, F_BASE, 1u, h) * G.sSep, -60.0, 120.0);
-  outv[o + 16u] = clampf(headAt(g, P_OUT, P_BASE, 0u, h) * G.sThrust, 0.0, 1.0);
-  outv[o + 17u] = clampf(headAt(g, P_OUT, P_BASE, 1u, h) * G.sRecoil, 0.0, 200.0);
+  outv[o + 16u] = clampf(headAt(g, P_OUT, P_BASE, 0u, h) * G.sRecoil, 0.0, 200.0);
   // The gait's grip. Signed both ways: a body that lets go where its
   // neighbour holds walks the other way.
-  outv[o + 18u] = clampf(headAt(g, G_OUT, G_BASE, 0u, h) * G.sAnchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
+  outv[o + 17u] = clampf(headAt(g, G_OUT, G_BASE, 0u, h) * G.sAnchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
 
   /*
    * What this body learns from the frame it has just had. A line-for-line

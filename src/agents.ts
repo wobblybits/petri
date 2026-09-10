@@ -451,13 +451,6 @@ export class Agent {
   }
 
   /** How much of a kick this body's own pumps hand off instead of keeping. */
-  get transportThrust(): number {
-    return this.store.transportThrust[this.slot];
-  }
-  set transportThrust(v: number) {
-    this.store.transportThrust[this.slot] = v;
-  }
-
   /** The charged part of this body's adenylate pool. See `Sim.advanceGait`. */
   get atp(): number {
     return this.store.atp[this.slot];
@@ -577,7 +570,6 @@ export function cloneAgent(a: Agent): Agent {
   clone.debtCap = a.debtCap;
   clone.rescueTo = a.rescueTo;
   clone.assort = a.assort;
-  clone.transportThrust = a.transportThrust;
   clone.transportRecoil = a.transportRecoil;
   clone.transportQuantum = a.transportQuantum;
   clone.csHeading = a.csHeading;
@@ -1169,8 +1161,7 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
   // pumping are exactly the constants they used to be.
   c[F_BASE] = params.flockAlign / HEAD_SCALE.align;
   c[F_BASE + 1] = params.flockSep / HEAD_SCALE.sep;
-  c[P_BASE] = params.transportThrust / HEAD_SCALE.thrust;
-  c[P_BASE + 1] = params.transportRecoil / HEAD_SCALE.recoil;
+  c[P_BASE] = params.transportRecoil / HEAD_SCALE.recoil;
   c[L_BASE] = params.stepSpeed / HEAD_SCALE.cruise;
   c[L_BASE + 1] = params.turnRate / HEAD_SCALE.turn;
   seedGait(c, kind);
@@ -1383,7 +1374,6 @@ export function createAgent(
   agent.debtCap = params.debtCap;
   agent.rescueTo = params.rescueTo;
   agent.assort = params.assortBias;
-  agent.transportThrust = params.transportThrust;
   agent.transportRecoil = params.transportRecoil;
   agent.transportQuantum = params.transportQuantum;
   return agent;

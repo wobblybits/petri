@@ -68,37 +68,6 @@ export interface Params {
    */
   declutter: number;
   /**
-   * Activity LOD budget. Settled taut islands run the cheap disc+span path
-   * even when they are on screen and close up; 0 turns the whole thing off.
-   * Live ropes, loners, grabs, rewrites and fresh latches stay NEAR whatever
-   * this says — the budget only caps how far a contact can propagate a wake.
-   *
-   * Off by default, because measured on this branch it costs more than it
-   * saves. It does exactly what it claims — a settled 1518-body mesh filling
-   * the viewport goes from 95% detailed to 2% — but the frame goes 22.8ms to
-   * 25.5ms, and the profiler puts the whole difference in `solve`. The reason
-   * is that the two mechanisms overlap almost perfectly: `ropeIsLive` already
-   * returns false for any wire whose `ropePath` is 'span', whatever the detail
-   * flag says, and a wire turns 'span' under the same aged-and-taut condition
-   * that makes its net sleepable. So the expensive half of NEAR is already off
-   * before sleep gets a vote, and all sleep can still remove is SAT on settled
-   * bodies — which is cheaper than the FAR path it moves them onto.
-   *
-   * Kept because the mechanism is sound and cheap when off, and because the
-   * branch it came from carried per-body audio work that NEAR paid for and
-   * this one no longer has. If NEAR ever grows an expensive per-body pass
-   * again, this is already here and already tested.
-   */
-  nearBudget: number;
-  /**
-   * How hard a wire crossing a principal connection reels its own ends
-   * together. Off by default: measured over three minutes of soup it made
-   * crossings, clumping and rewrite throughput all slightly worse once
-   * `declutter` was in, which already removes the crossings a local force
-   * can plausibly undo. Kept as a knob because the detection is the cheap part.
-   */
-  uncross: number;
-  /**
    * How hard a rope pushes off other ropes and off bodies it is not attached
    * to. Segment-based and one-way — a rope never moves an agent — so this
    * cannot feed back into the joint solver.
@@ -148,22 +117,6 @@ export interface Params {
    * over-packed net reconfigures instead of straining forever.
    */
   wireSnap: number;
-  /**
-   * Energy per second of penetration depth, charged to both bodies in a
-   * contact. 0 = collisions are free.
-   *
-   * Damage rather than death. One rule kills — `extra` reaching the floor —
-   * and everything lethal works through the economy, so a bad knock is
-   * survivable and a body can recover from it. A separate physics death path
-   * would also turn any numerical fault into an extinction: the pond flew
-   * apart once already this week from a constant that disagreed across the
-   * wasm wall, and that should stay a thing you can watch and diagnose.
-   *
-   * It is also what gives `flockSep` something to select on. Keeping your
-   * distance is now heritable and nothing rewarded it; a cost for crowding
-   * lets a lineage work out whether to space out or tolerate the scrum.
-   */
-  contactCost: number;
   wireMinRest: number;
   wireShrink: number;
   eraMass: number;
@@ -550,48 +503,6 @@ export interface Params {
   /** Extra drained per second. 0 = off. Hitting −1 kills the agent. */
   upkeep: number;
   /**
-   * Extra per second per unit of speed, charged for moving.
-   *
-   * What ties a net's energy to its locomotion, and so what lets a net have a
-   * motor at all. Swimming was free, which made thrust a property of a body
-   * rather than of the net that feeds it: a starving swimmer swam exactly as
-   * hard as a full one, and there was nothing for the transport machinery to
-   * be *for* beyond keeping redexes alive.
-   *
-   * With a price on it the wire network becomes a fuel line. A sub-net that
-   * swims runs itself down and asks; `spreadRequests` carries the ask inward
-   * and `flowCharges` sends stock back out; `applyTransportRecoil` already
-   * kicks the pair as it goes. Which bodies a net chooses to feed is which
-   * way it goes — and because `transportThrust`, `transportRecoil` and
-   * `requestDecay` are all heritable, what a lineage does with that is
-   * something it can evolve rather than something set here.
-   *
-   * Off by default. Turning it on is a real change to the economy: at a
-   * cruise of 38 and an upkeep of 0.015, a cost of 0.0004 roughly doubles
-   * what a moving body pays to exist.
-   */
-  swimCost: number;
-  /**
-   * How loudly a body asks for energy on account of liking where it is.
-   *
-   * The other half of the motor. A price on swimming alone gives a net a fuel
-   * bill; this is what makes the bill *directional*. A body with a free
-   * principal reads its own `trail` — everything it can smell, through its own
-   * taste weights — and asks in proportion, so the bodies standing where the
-   * net most wants to be are the ones that get fed and thrust hardest.
-   *
-   * Off by default, like the other two dials that change what energy is spent
-   * on. Not caution for its own sake: the field takes the largest claim it can
-   * see, so an appetite competes directly with `rescueNeed` and `redexNeed` —
-   * somebody about to die, and somebody about to reproduce. At 0.05 against
-   * the scent a pond makes of itself it already outbid a rescue, topping a
-   * dying body past its own `rescueTo` to a full tank while its donors went
-   * without. Wanting to go somewhere nice should lose to both of those, and
-   * where the crossover sits depends on how loud the pond is, which is four
-   * other sliders. Worth tuning by eye rather than guessing a default.
-   */
-  forageAsk: number;
-  /**
    * Fraction of this body's own tank a rescue fills, from `debtCap` at 0 to
    * `energyCap` at 1. The absolute extra it asks up to is
    * `debtCap + rescueTo * (energyCap - debtCap)`, so it cannot land outside
@@ -758,32 +669,6 @@ export interface Params {
    * income could pay for.
    */
   transportQuantum: number;
-  /**
-   * How much of the receiver's kick is withheld, 0–1, and therefore how much
-   * of a pump's recoil survives as motion of the pair.
-   *
-   * At 0 the pump is equal and opposite and a net can never shift itself by
-   * moving energy around inside itself. At 1 only the sender is kicked, so the
-   * pair — and any net holding a standing gradient — drifts back along the
-   * wire, against the direction the energy is flowing. That is the swimming
-   * stroke: pushing charge toward the hungry end pushes the body the other way.
-   *
-   * Drag bounds it, so this is a cruising speed rather than an acceleration.
-   * One whole unit pumped between an Era and a Con at the default recoil
-   * leaves the pair drifting `20 * thrust / (0.45 + 1)` px/s — ~7 at the
-   * default, ~14 at 1 — against settled speeds around 40. In a live soup that
-   * is invisible for the same reason the recoil gain is: mean speed over a
-   * seeded 30 s soup at 0 / 0.25 / 0.5 / 1 is 40 / 60 / 34 / 47 px/s, which is
-   * seed noise. It reads on the events, and on a net actually holding a
-   * gradient — drive one end full and the other hungry and the chain visibly
-   * runs away from its own supply.
-   *
-   * Heritable, like the two above. A transfer reads the *sender's* own
-   * `transportRecoil` and the *receiver's* own `transportThrust`, so breeding
-   * a strong low-thrust pump against a high-thrust receiver can drift a
-   * net's stroke somewhere neither parent line swims alone.
-   */
-  transportThrust: number;
   /**
    * How fast a body's state matrices change while it is alive. 0 = off, and
    * off is exactly the simulation as it was.
@@ -1105,8 +990,6 @@ export function defaultParams(): Params {
     springDamp: 45,
     auxSpread: 1.7,
     declutter: 1.4,
-    nearBudget: 0,
-    uncross: 0,
     wireClear: 1,
     portStiff: 2,
     wireBreathe: 0.04,
@@ -1114,7 +997,6 @@ export function defaultParams(): Params {
     wireSpanAge: 10,
     wireTaut: 1.08,
     wireSnap: 3,
-    contactCost: 0,
     wireMinRest: 48,
     wireShrink: 0.2,
     eraMass: 0.45,
@@ -1150,8 +1032,6 @@ export function defaultParams(): Params {
     energyRegrow: 0.04,
     fertilise: 0,
     upkeep: 0.015,
-    swimCost: 0,
-    forageAsk: 0,
     rescueTo: 0.9,
     assortBias: 0.5,
     debtCap: -1,
@@ -1159,7 +1039,6 @@ export function defaultParams(): Params {
     requestReach: 0,
     transportRecoil: 100,
     transportQuantum: 0.5,
-    transportThrust: 0,
     learnRate: 0.02,
     learnCritic: 0.2,
     learnTrace: 0.99,
@@ -1231,15 +1110,12 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'portStiff', label: 'Port stiffness', min: 0.1, max: 4, step: 0.05 },
   { key: 'auxSpread', label: 'Aux spread', min: 0, max: 3, step: 0.05 },
   { key: 'declutter', label: 'Personal space', min: 0, max: 4, step: 0.05 },
-  { key: 'nearBudget', label: 'NEAR budget', min: 0, max: 2000, step: 25 },
-  { key: 'uncross', label: 'Uncross', min: 0, max: 4, step: 0.05 },
   { key: 'wireClear', label: 'Wire clearance', min: 0, max: 4, step: 0.05 },
   { key: 'wireBreathe', label: 'Wire breathe', min: 0, max: 0.15, step: 0.005 },
   { key: 'wireShapeAge', label: 'Shape drop (s)', min: 0, max: 30, step: 0.1 },
   { key: 'wireSpanAge', label: 'Span-only (s)', min: 0, max: 60, step: 0.5 },
   { key: 'wireTaut', label: 'Taut ratio', min: 1, max: 1.5, step: 0.01 },
   { key: 'wireSnap', label: 'Wire snap ratio', min: 0, max: 6, step: 0.1 },
-  { key: 'contactCost', label: 'Impact cost', min: 0, max: 0.2, step: 0.005 },
   { key: 'eraMass', label: 'Era mass', min: 0.15, max: 2, step: 0.05 },
   { key: 'nodeMass', label: 'Con/Dup mass', min: 0.3, max: 4, step: 0.05 },
   { key: 'maxAgents', label: 'Max agents', min: 8, max: 8000, step: 1 },
@@ -1254,15 +1130,12 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'energyRegrow', label: 'Ground regrow', min: 0, max: 0.4, step: 0.005 },
   { key: 'fertilise', label: 'Fertilise', min: -2, max: 8, step: 0.1 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
-  { key: 'swimCost', label: 'Swim cost', min: 0, max: 0.002, step: 0.00005 },
-  { key: 'forageAsk', label: 'Forage ask', min: 0, max: 0.5, step: 0.01 },
   { key: 'rescueTo', label: 'Rescue fill', min: 0, max: 1, step: 0.05 },
   { key: 'assortBias', label: 'Assortment (seed)', min: 0, max: 1, step: 0.05 },
   { key: 'debtCap', label: 'Debt cap', min: -2.5, max: -0.05, step: 0.05 },
   { key: 'requestDecay', label: 'Demand decay', min: 0.5, max: 0.98, step: 0.01 },
   { key: 'requestReach', label: 'Demand hops/frame', min: 0, max: 12, step: 1 },
   { key: 'transportRecoil', label: 'Pump recoil (seed)', min: 0, max: 200, step: 5 },
-  { key: 'transportThrust', label: 'Pump thrust (seed)', min: 0, max: 1, step: 0.05 },
   { key: 'transportQuantum', label: 'Transport quantum', min: 0, max: 1, step: 0.05 },
   { key: 'learnRate', label: 'Learn rate', min: 0, max: 0.02, step: 0.0005 },
   { key: 'learnCritic', label: 'Learn critic', min: 0, max: 0.2, step: 0.005 },

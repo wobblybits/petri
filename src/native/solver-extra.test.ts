@@ -543,7 +543,6 @@ describe('force passes: WASM against the JS reference', () => {
     params.flockAlign = 0;
     params.flockSep = 0;
     params.declutter = 0;
-    params.uncross = 0;
     params.rewriteDuration = 0;
     params.upkeep = 0;
     const sim = new Sim(600, 400);
@@ -620,7 +619,6 @@ describe('every ported force pass against its JS reference', () => {
     params.sense = 0;
     params.rewriteDuration = 0;
     params.upkeep = 0;
-    params.uncross = 0;
     // The passes under test, all on.
     params.declutter = 1.4;
     params.flockAlign = 0.6;
@@ -683,7 +681,6 @@ describe('steering: WASM against the JS reference', () => {
     params.spawnInterval = 0;
     params.rewriteDuration = 0;
     params.upkeep = 0;
-    params.uncross = 0;
     params.swimNoise = 0;
     // These two compare a JS and a WASM copy run forward independently, and a
     // foraging soup separates them on its own — see the drift budget below.
@@ -778,7 +775,6 @@ describe('scent writing: WASM against the JS reference', () => {
     params.spawnInterval = 0;
     params.rewriteDuration = 0;
     params.upkeep = 0;
-    params.uncross = 0;
     const sim = new Sim(600, 400);
     sim.setViewExtent(600, 400);
     for (let i = 0; i < 12; i++) {

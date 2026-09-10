@@ -169,7 +169,7 @@ describe('grip', () => {
       sender.extra = sender.energyCap;
       receiver.extra = 0;
       const before = (sender.x + receiver.x) / 2;
-      applyTransportRecoil(sender, receiver, 1, 6, sim.w, sim.h, 0);
+      applyTransportRecoil(sender, receiver, 1, 6, sim.w, sim.h);
       expect(sender.vx * sender.mass + receiver.vx * receiver.mass, 'no momentum minted').toBeCloseTo(0, 9);
       run(sim, params, 4);
       return (sender.x + receiver.x) / 2 - before;
@@ -206,7 +206,7 @@ describe('grip', () => {
         if (f % 6 === 0) {
           sender.extra = sender.energyCap;
           receiver.extra = 0;
-          applyTransportRecoil(sender, receiver, 1, 6, sim.w, sim.h, 0);
+          applyTransportRecoil(sender, receiver, 1, 6, sim.w, sim.h);
         }
         if (f === 60) before = (sender.x + receiver.x) / 2;
         sim.step(1 / 60, params);

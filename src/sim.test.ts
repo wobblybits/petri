@@ -5,17 +5,6 @@ import { loadPreset } from './presets.ts';
 import { queryHit, SLOP } from './collide.ts';
 import { closestPointOnSegment, WIRE_RADIUS } from './geom.ts';
 import { applyTransportRecoil, mixScent, scentSlowFactor, scentTurnBoost, Sim } from './sim.ts';
-import {
-  EXTRA_CAP,
-  EXTRA_FLOOR,
-  flowCharges,
-  REQUEST_DECAY,
-  resetRequests,
-  seedRequest,
-  type SlotBody,
-  relaxRequests,
-  WireAdjacency,
-} from './energy.ts';
 import { nativeSolver } from './native/solver.ts';
 import { CH, FIELD_CELLS, FIELD_EXTENT } from './fields.ts';
 import { EMIT, bareBody } from './agents.ts';
@@ -1282,10 +1271,10 @@ describe('transport recoil', () => {
     return { x, y: 0, vx: 0, vy: 0, mass, locked: false };
   }
 
-  it('kicks the sender back and the receiver on, conserving momentum at thrust 0', () => {
+  it('kicks the sender back and the receiver on, conserving momentum', () => {
     const a = pumpBody(0, 1);
     const b = pumpBody(40, 1);
-    applyTransportRecoil(a, b, 1, 6, 800, 600, 0);
+    applyTransportRecoil(a, b, 1, 6, 800, 600);
     expect(a.vx, 'sends east, recoils west').toBeLessThan(0);
     expect(b.vx, 'receiver is pushed east').toBeGreaterThan(0);
     expect(a.vx * a.mass + b.vx * b.mass, 'net momentum unchanged').toBeCloseTo(0, 9);
@@ -1293,32 +1282,12 @@ describe('transport recoil', () => {
     expect(b.vy).toBe(0);
   });
 
-  it('thrust leaves the pair moving back against the flow', () => {
-    const a = pumpBody(0, 1);
-    const b = pumpBody(40, 1);
-    applyTransportRecoil(a, b, 1, 6, 800, 600, 1);
-    expect(a.vx, 'sender still recoils west').toBeCloseTo(-6, 9);
-    expect(b.vx, 'receiver catches nothing').toBe(0);
-    expect(a.vx * a.mass + b.vx * b.mass, 'energy east, momentum west').toBeCloseTo(-6, 9);
-  });
-
-  it('scales the net impulse with thrust, without touching the sender', () => {
-    const half = [pumpBody(0, 1), pumpBody(40, 1)] as const;
-    const full = [pumpBody(0, 1), pumpBody(40, 1)] as const;
-    applyTransportRecoil(half[0], half[1], 1, 6, 800, 600, 0.5);
-    applyTransportRecoil(full[0], full[1], 1, 6, 800, 600, 1);
-    expect(half[0].vx, 'sender recoil is thrust-independent').toBeCloseTo(full[0].vx, 9);
-    const netHalf = half[0].vx * half[0].mass + half[1].vx * half[1].mass;
-    const netFull = full[0].vx * full[0].mass + full[1].vx * full[1].mass;
-    expect(netHalf).toBeCloseTo(netFull * 0.5, 9);
-  });
-
   it('pushes the pair the other way when the flow reverses', () => {
     const a = pumpBody(0, 1);
     const b = pumpBody(40, 1);
-    applyTransportRecoil(b, a, 1, 6, 800, 600, 1);
+    applyTransportRecoil(b, a, 1, 6, 800, 600);
     expect(b.vx, 'sends west, recoils east').toBeGreaterThan(0);
-    expect(a.vx * a.mass + b.vx * b.mass).toBeCloseTo(6, 9);
+    expect(a.vx * a.mass + b.vx * b.mass, 'net momentum unchanged').toBeCloseTo(0, 9);
   });
 
   it('is an impulse, so a light body moves further than a heavy one', () => {
@@ -1347,56 +1316,10 @@ describe('transport recoil', () => {
     expect(a.vx).toBe(0);
     expect(anchored.vx).toBe(0);
   });
-
-  it('walks a whole chain against the direction its energy flows', () => {
-    // The point of thrust: a net that is moving charge from its fed end to its
-    // hungry end is also, by moving it, pushing itself the other way. Done on
-    // the transport passes alone — the sim's own steering noise is orders of
-    // magnitude louder than a frame's worth of pumping.
-    const chain = Array.from({ length: 6 }, (_, i) => ({
-      id: i + 1,
-      kind: 'con' as const,
-      x: i * 40,
-      y: 0,
-      extra: i === 5 ? 1.25 : 0,
-      request: 0,
-      recovering: false,
-      requestDecay: REQUEST_DECAY,
-      energyCap: EXTRA_CAP,
-      debtCap: EXTRA_FLOOR,
-      rescueTo: 0.9,
-      locked: false,
-      transportQuantum: 0,
-      vx: 0,
-      vy: 0,
-      mass: 1,
-    }));
-    const byId = new Map(chain.map((b) => [b.id, b]));
-    const list: SlotBody[] = chain;
-    const index = new Map(chain.map((b, i) => [b.id, i]));
-    const wires = chain.slice(1).map((b, i) => ({ a: { id: chain[i].id }, b: { id: b.id } }));
-    const adj = new WireAdjacency();
-    adj.build(list.length, index, () => wires);
-    const west = chain[0];
-    // Mirrors the frame order in `Sim.pulseRequests` at the shipped
-    // `requestReach` 0: this frame's claims, relaxed to the fixpoint.
-    for (let frame = 0; frame < 12; frame++) {
-      west.extra = -0.9;
-      resetRequests(list);
-      seedRequest(west, 0.9);
-      relaxRequests(list, adj);
-      flowCharges(list, adj, (from, to, amount) => {
-        applyTransportRecoil(byId.get(from.id)!, byId.get(to.id)!, amount, 12, 800, 600, 1);
-      });
-    }
-    const momentum = chain.reduce((sum, b) => sum + b.vx * b.mass, 0);
-    expect(momentum, 'energy went west, so the chain is headed east').toBeGreaterThan(0);
-    expect(chain.every((b) => b.vy === 0), 'nothing off-axis').toBe(true);
-  });
 });
 
 describe('per-agent transport traits', () => {
-  it("recoils by the sender's own transportRecoil and the receiver's own transportThrust", () => {
+  it("recoils by the sender's own transportRecoil, not the slider", () => {
     const params = fixedParams();
     params.spawnInterval = 0;
     params.ambientEnergy = 0;
@@ -1415,18 +1338,11 @@ describe('per-agent transport traits', () => {
     sim.wire(a.id, 'p', b.id, 'p', params);
     a.extra = 1.25;
     b.extra = -0.5;
-    // The global sliders stay at their defaults; only the two bodies' own
-    // genes are set, and set the opposite of what the sliders say — if the
-    // sim were still reading params.transportRecoil/transportThrust, this
-    // would recoil weakly and split the kick instead of withholding it.
+    // Only the donor's own gene is set, and set away from the slider.
     a.transportRecoil = 100;
     b.transportRecoil = 0;
-    b.transportThrust = 1;
     sim.step(1 / 60, params);
-    expect(Math.abs(a.vx), "the donor recoils on its own gene, not the slider").toBeGreaterThan(10);
-    expect(
-      Math.abs(b.vx),
-      "thrust 1 on the receiver: it keeps essentially none of the kick",
-    ).toBeLessThan(Math.abs(a.vx) * 0.05);
+    expect(Math.abs(a.vx), 'the donor recoils on its own gene, not the slider').toBeGreaterThan(10);
+    expect(Math.sign(b.vx), 'the receiver takes the equal and opposite kick').toBe(-Math.sign(a.vx));
   });
 });

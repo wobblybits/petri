@@ -54,12 +54,10 @@ describe('the genome shader matches the genome layout', () => {
     }
   });
 
-  it('writes the nineteen floats a body the host unpacks', () => {
-    // h(4) + emit(4) + taste(4) + six heads. The host reads them back by this
-    // stride, so a mismatch shifts every field by a body.
+  it('writes the eighteen floats a body the host unpacks', () => {
     // state(4), emit(4), taste(4), then the heads: cruise, turn, align,
-    // sep, thrust, recoil, anchor.
-    expect(shaderConst('OUT_STRIDE')).toBe(4 + 4 + 4 + 7);
+    // sep, recoil, anchor. The host reads them back by this stride.
+    expect(shaderConst('OUT_STRIDE')).toBe(4 + 4 + 4 + 6);
   });
 
   it('has no genome offset the layout does not derive', () => {
@@ -89,9 +87,9 @@ describe('the genome shader matches the genome layout', () => {
     const fields = [...body![1].matchAll(/^\s*([A-Za-z_]\w*)\s*:/gm)].map((m) => m[1]);
     expect(fields).toEqual([
       'n', 'chemLen', 'senseScale', 'groundScale',
-      'sCruise', 'sTurn', 'sAlign', 'sSep', 'sThrust', 'sRecoil', 'energyCh',
+      'sCruise', 'sTurn', 'sAlign', 'sSep', 'sRecoil', 'energyCh',
       'learnRate', 'learnCritic', 'learnTrace', 'learnDiscount', 'maxWeight',
-      'sAnchor', 'pad1', 'pad2', 'pad3',
+      'sAnchor', 'pad1', 'pad2', 'pad3', 'pad4',
     ]);
     // A uniform buffer's size has to be a whole number of sixteen-byte
     // blocks, which is what the pads are for.
@@ -200,7 +198,7 @@ function mirrorState(a: {
       sum += w;
     }
     if (sum > 1e-6) for (let c = 0; c < 4; c++) emit[c] /= sum;
-    const o = i * 19;
+    const o = i * 18;
     for (let d = 0; d < S; d++) out[o + d] = h[d];
     for (let c = 0; c < 4; c++) out[o + 4 + c] = emit[c];
     for (let c = 0; c < 4; c++) out[o + 8 + c] = chem[g + TASTE + c] + dot(T_OUT, c);
@@ -210,9 +208,8 @@ function mirrorState(a: {
     out[o + 13] = cl(head(L_OUT, L_BASE, 1, HEAD_SCALE.turn), 0, 8);
     out[o + 14] = cl(head(F_OUT, F_BASE, 0, HEAD_SCALE.align), -8, 16);
     out[o + 15] = cl(head(F_OUT, F_BASE, 1, HEAD_SCALE.sep), -60, 120);
-    out[o + 16] = cl(head(P_OUT, P_BASE, 0, HEAD_SCALE.thrust), 0, 1);
-    out[o + 17] = cl(head(P_OUT, P_BASE, 1, HEAD_SCALE.recoil), 0, 200);
-    out[o + 18] = cl(head(G_OUT, G_BASE, 0, HEAD_SCALE.anchor), -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
+    out[o + 16] = cl(head(P_OUT, P_BASE, 0, HEAD_SCALE.recoil), 0, 200);
+    out[o + 17] = cl(head(G_OUT, G_BASE, 0, HEAD_SCALE.anchor), -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
   }
   return out;
 }
@@ -264,8 +261,6 @@ describe('the genome shader computes what updateState computes', () => {
     params.decay = 0;
     params.energyRegrow = 0;
     params.energyDiffuse = 0;
-    params.swimCost = 0;
-    params.forageAsk = 0;
     params.fertilise = 0;
     params.reactFeed = 0;
     params.reactKill = 0;
@@ -343,7 +338,7 @@ describe('the genome shader computes what updateState computes', () => {
     let moved = 0;
     for (let i = 0; i < n; i++) {
       const s = list[i].slot;
-      const o = i * 19;
+      const o = i * 18;
       for (let d = 0; d < STATE_DIMS; d++) {
         worstH = Math.max(worstH, Math.abs(got[o + d] - store.hAll[s * STATE_DIMS + d]));
         if (Math.abs(store.hAll[s * STATE_DIMS + d]) > 1e-3) moved++;
@@ -358,8 +353,7 @@ describe('the genome shader computes what updateState computes', () => {
         Math.abs(got[o + 13] - store.turn[s]),
         Math.abs(got[o + 14] - store.flockAlign[s]),
         Math.abs(got[o + 15] - store.flockSep[s]),
-        Math.abs(got[o + 16] - store.transportThrust[s]),
-        Math.abs(got[o + 17] - store.transportRecoil[s]),
+        Math.abs(got[o + 16] - store.transportRecoil[s]),
       );
     }
     expect(moved, 'every state stayed at zero, so this compared nothing').toBeGreaterThan(n);

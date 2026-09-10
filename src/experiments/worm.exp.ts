@@ -78,11 +78,8 @@ export function rigParams(over: Partial<Params> = {}): Params {
   p.energyRegrow = 0;
   p.energyDiffuse = 0;
   p.upkeep = 0;
-  p.forageAsk = 0;
   p.fertilise = 0;
   p.uptakeVmax = 0;
-  p.swimCost = 0;
-  p.contactCost = 0;
   // No rewriting, and no latching that could start one.
   p.rewriteDuration = 0;
   p.snapRadius = 0;
@@ -110,7 +107,6 @@ export function rigParams(over: Partial<Params> = {}): Params {
   p.wireSnap = 0;
   p.wireMinRest = PITCH;
   // The reactionless drive off, so nothing here can move by minting momentum.
-  p.transportThrust = 0;
   return { ...p, ...over };
 }
 
@@ -694,24 +690,19 @@ describe('experiment: one worm on a bench', () => {
      */
     console.log('\n  grip 2, gradient quanta, source at low x so energy flows +x');
     console.log('  metered to 3 units/s, which is this worm at its whole upkeep on the');
-    console.log('  pond default — the unmetered bench supplies ~1180, and thrust');
-    console.log('  scales with the amount moved, so it flatters itself there.');
-    console.log('\n  recoil thrust       dx      dy   px/s     moved');
-    console.log('  ------ ------ -------- ------- ------ ---------');
-    const rows: [number, number][] = [
-      [0, 0],
-      [100, 0],
-      [100, 1],
-    ];
-    for (const [transportRecoil, transportThrust] of rows) {
+    console.log('  pond default; the unmetered bench supplies ~1180.');
+    console.log('\n  recoil       dx      dy   px/s     moved');
+    console.log('  ------ -------- ------- ------ ---------');
+    const rows: number[] = [0, 100];
+    for (const transportRecoil of rows) {
       const r = runFree({
         quanta: 'gradient',
         income: 3,
-        params: { grip: 2, transportRecoil, transportThrust },
+        params: { grip: 2, transportRecoil },
       });
       const px = Math.hypot(r.dx, r.dy) / 30;
       console.log(
-        `  ${String(transportRecoil).padStart(6)} ${transportThrust.toFixed(1).padStart(6)} ` +
+        `  ${String(transportRecoil).padStart(6)} ` +
           `${r.dx.toFixed(2).padStart(8)} ${r.dy.toFixed(2).padStart(7)} ${px.toFixed(3).padStart(6)} ${r.moved.toFixed(0).padStart(9)}`,
       );
       expect(Number.isFinite(r.dx)).toBe(true);
@@ -754,7 +745,7 @@ describe('experiment: one worm on a bench', () => {
       const r = runFree({
         quanta: 'gradient',
         income: 3,
-        params: { drag, grip, transportRecoil: 100, transportThrust: 0 },
+        params: { drag, grip, transportRecoil: 100 },
       });
       const px = Math.hypot(r.dx, r.dy) / 30;
       const ratio = (drag + grip) / drag;

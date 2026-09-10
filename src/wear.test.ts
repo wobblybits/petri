@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { EXTRA_FLOOR } from './energy.ts';
 import { defaultParams, type Params } from './params.ts';
 import { Sim } from './sim.ts';
 
@@ -77,57 +76,5 @@ describe('wire snapping', () => {
     b.x = 500 + params.wireMinRest * 8;
     for (let f = 0; f < 8; f++) sim.step(1 / 60, params);
     expect(sim.graph.wires.size).toBe(1);
-  });
-});
-
-describe('contact damage', () => {
-  /** Two bodies shoved into each other and held there. */
-  function crush(cost: number, frames: number): { extra: number; alive: boolean } {
-    const params = quiet();
-    params.contactCost = cost;
-    params.declutter = 0;
-    const sim = new Sim(4000, 4000);
-    const a = sim.spawn('con', 500, 500, 0, params, true)!;
-    const b = sim.spawn('con', 508, 500, Math.PI, params, true)!;
-    a.extra = 1;
-    b.extra = 1;
-    for (let f = 0; f < frames; f++) {
-      // Hold them overlapping: the solver would otherwise separate them in a
-      // frame or two and there would be nothing left to charge for.
-      a.x = 500;
-      b.x = 508;
-      a.vx = 0;
-      b.vx = 0;
-      sim.step(1 / 60, params);
-    }
-    const still = sim.agents.get(a.id);
-    return { extra: still ? still.extra : EXTRA_FLOOR, alive: !!still };
-  }
-
-  it('costs energy to be crushed', () => {
-    const free = crush(0, 60);
-    const paid = crush(0.2, 60);
-    expect(free.extra, 'nothing else should be draining it').toBeCloseTo(1, 3);
-    expect(paid.extra, `paid ${paid.extra.toFixed(3)} vs free ${free.extra.toFixed(3)}`)
-      .toBeLessThan(free.extra - 0.01);
-  });
-
-  it('kills only by running the tank down, never on impact alone', () => {
-    // One frame of a colossal cost still cannot kill a full body outright:
-    // damage is a rate, and death is the floor being reached.
-    const params = quiet();
-    params.contactCost = 100;
-    const sim = new Sim(4000, 4000);
-    const a = sim.spawn('con', 500, 500, 0, params, true)!;
-    const b = sim.spawn('con', 508, 500, Math.PI, params, true)!;
-    a.extra = 1;
-    b.extra = 1;
-    sim.step(1 / 60, params);
-    // Whatever happened, nobody died of a single touch while still in credit.
-    for (const body of sim.agents.values()) {
-      expect(body.extra, 'a body below the floor should have been reaped').toBeGreaterThan(
-        EXTRA_FLOOR,
-      );
-    }
   });
 });

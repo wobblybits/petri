@@ -81,7 +81,6 @@ export class AgentStore {
   rescueTo!: Float64Array;
   /** How particulate this lineage's inheritance is. See `assortChance`. */
   assort!: Float64Array;
-  transportThrust!: Float64Array;
   transportRecoil!: Float64Array;
   /**
    * The gait, and the metabolism that is now its clock.
@@ -494,7 +493,6 @@ export class AgentStore {
     this.debtCap[slot] = 0;
     this.rescueTo[slot] = 0;
     this.assort[slot] = 0;
-    this.transportThrust[slot] = 0;
     this.transportRecoil[slot] = 0;
     this.sub[slot] = 0;
     this.atp[slot] = 0;
@@ -589,7 +587,6 @@ export class AgentStore {
     this.debtCap = growF64(this.debtCap);
     this.rescueTo = growF64(this.rescueTo);
     this.assort = growF64(this.assort);
-    this.transportThrust = growF64(this.transportThrust);
     this.transportRecoil = growF64(this.transportRecoil);
     this.sub = growF64(this.sub);
     this.atp = growF64(this.atp);

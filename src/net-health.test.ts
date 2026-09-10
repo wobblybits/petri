@@ -300,45 +300,6 @@ describe('crowding and tangling', () => {
     // Contact alone would settle around the two bound radii, ~27 px.
     expect(gap, `stranger sits ${gap.toFixed(1)} px away`).toBeGreaterThan(34);
   });
-
-  it('never applies the uncross force to a pair of aux wires', () => {
-    // uncrossPrincipals skips a pair where neither wire is principal, on
-    // purpose: an aux tangle is the net's own shape, not a fault to correct.
-    //
-    // Tested by running the same net with the force off and at full strength
-    // and requiring the two to be identical. An earlier version of this test
-    // laid two aux wires in an X and asserted they were still crossed later,
-    // which also depended on the port torques not having rotated the bodies
-    // out of it — a different mechanism, and one that legitimately can.
-    const build = (uncross: number) => {
-      const sim = new Sim(480, 280);
-      const params = passiveParams();
-      params.snapRadius = 0;
-      params.spawnInterval = 0;
-      params.upkeep = 0;
-      params.uncross = uncross;
-      const a = sim.spawn('con', 200, 110, 0, params, true)!;
-      const b = sim.spawn('con', 280, 190, 0, params, true)!;
-      const c = sim.spawn('con', 200, 190, 0, params, true)!;
-      const d = sim.spawn('con', 280, 110, 0, params, true)!;
-      sim.wire(a.id, 'l', b.id, 'r', params);
-      sim.wire(c.id, 'l', d.id, 'r', params);
-      run(sim, params, 240);
-      return [...sim.agents.values()]
-        .sort((p, q) => p.id - q.id)
-        .map((ag) => ({ x: ag.x, y: ag.y, h: ag.heading }));
-    };
-    const off = build(0);
-    const on = build(4);
-    expect(on.length).toBe(off.length);
-    for (let i = 0; i < off.length; i++) {
-      expect(on[i].x, `agent ${i} x`).toBeCloseTo(off[i].x, 9);
-      expect(on[i].y, `agent ${i} y`).toBeCloseTo(off[i].y, 9);
-      expect(on[i].h, `agent ${i} heading`).toBeCloseTo(off[i].h, 9);
-    }
-    // And the wires are still there to have been left alone.
-    expect(off.length).toBe(4);
-  });
 });
 
 describe('topology', () => {

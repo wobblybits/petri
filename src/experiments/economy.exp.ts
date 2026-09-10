@@ -16,8 +16,6 @@ import { runSweep, summarize, writeSweep } from './harness.ts';
  *     npx vitest run --project experiments economy --disableConsoleIntercept
  */
 const AXES: Record<string, number[]> = {
-  swimCost: [0, 0.0002, 0.0004, 0.0008],
-  forageAsk: [0, 0.02, 0.05],
   fertilise: [0, 2, 4],
 };
 

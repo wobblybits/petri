@@ -603,8 +603,6 @@ describe('heritable traits', () => {
     con.requestDecay = 0.95;
     dup.energyCap = EXTRA_CAP * 0.6;
     con.energyCap = EXTRA_CAP * 1.8;
-    dup.transportThrust = 0.05;
-    con.transportThrust = 0.95;
     dup.transportRecoil = 10;
     con.transportRecoil = 190;
 

@@ -154,9 +154,9 @@ export const B_STATE = W_NET + STATE_DIMS * STATE_DIMS;
  */
 export const F_OUT = B_STATE + STATE_DIMS;
 export const F_BASE = F_OUT + 2 * STATE_DIMS;
-/** `P`, state -> transport. Two rows: thrust, then recoil. */
+/** `P`, state -> transport. One row: recoil. */
 export const P_OUT = F_BASE + 2;
-export const P_BASE = P_OUT + 2 * STATE_DIMS;
+export const P_BASE = P_OUT + STATE_DIMS;
 /**
  * `L`, state -> locomotion. Two rows: cruise, then turn.
  *
@@ -166,7 +166,7 @@ export const P_BASE = P_OUT + 2 * STATE_DIMS;
  * relocating it. A body could not previously swim differently because it was
  * hungry, however far its lineage had drifted.
  */
-export const L_OUT = P_BASE + 2;
+export const L_OUT = P_BASE + 1;
 export const L_BASE = L_OUT + 2 * STATE_DIMS;
 
 /**
@@ -354,7 +354,6 @@ export const GAIT_ANCHOR_MAX = 8;
 export const HEAD_SCALE = {
   align: 8,
   sep: 60,
-  thrust: 1,
   recoil: 100,
   cruise: 40,
   turn: 2,
