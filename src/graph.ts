@@ -659,6 +659,27 @@ export class Graph {
     return false;
   }
 
+  /**
+   * How many of this body's ports are open.
+   *
+   * An Era has one and a Con or a Dup three, so a wired Era reads zero: it is
+   * a cap, and a cap that is capped has no opening of its own.
+   *
+   * The count rather than the predicate `isWired` already gives, because how
+   * *much* of a body is still exposed is a different question from whether
+   * any of it is — it is a body's share of a net's boundary, which is what
+   * `income ~ d(net)` against `cost ~ |net|` is measured in. See
+   * `docs/energy-chemistry-plan.md` §6.
+   */
+  freePorts(agent: Agent): number {
+    const slots = agent.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
+    let n = 0;
+    for (let i = 0; i < slots.length; i++) {
+      if (this.isFreeAt(agent.id, slots[i])) n++;
+    }
+    return n;
+  }
+
   portsFilled(agent: Agent): boolean {
     const slots = agent.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
     for (let i = 0; i < slots.length; i++) {
