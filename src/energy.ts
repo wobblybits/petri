@@ -1759,6 +1759,80 @@ export function spreadRequests(
   }
 }
 
+/**
+ * Relax the need field to its fixpoint, inside this frame.
+ *
+ * The reach-0 path, and the pond's default. Queue-driven, so it costs one
+ * visit per body whose value actually improved rather than one sweep per hop
+ * — `O(n + wires)` against the `O(hops * (n + wires))` that iterating
+ * `spreadRequests` to the same answer would cost. That difference is not
+ * academic: iterating it `n` times to be sure of the fixpoint is quadratic in
+ * the roster, and at a few hundred founders it is already the frame.
+ *
+ * The answer is identical to what `spreadRequests` converges to. What this
+ * cannot do is take *time*: the field it leaves has no history, so nothing
+ * can propagate. That is what `params.requestReach` buys and what it costs.
+ */
+export function relaxRequestsFast(
+  list: Agent[],
+  store: AgentStore,
+  adj: WireAdjacency,
+  decay?: number,
+): void {
+  const { off, nei } = adj;
+  const q = adj.queue(list.length);
+  const REQUEST = store.request;
+  const REQUEST_DECAY = store.requestDecay;
+  let head = 0;
+  let tail = 0;
+  for (let i = 0; i < list.length; i++) {
+    if (REQUEST[list[i].slot] > REQUEST_FLOOR) q[tail++] = i;
+  }
+  while (head < tail) {
+    const at = q[head++];
+    const sAt = list[at].slot;
+    const keep = Math.min(0.99, Math.max(0, decay ?? REQUEST_DECAY[sAt]));
+    const next = REQUEST[sAt] * keep;
+    if (next <= REQUEST_FLOOR) continue;
+    for (let k = off[at]; k < off[at + 1]; k++) {
+      const ni = nei[k];
+      const other = list[ni];
+      if (!other) continue;
+      const sNi = other.slot;
+      if (REQUEST[sNi] >= next) continue;
+      REQUEST[sNi] = next;
+      if (tail >= q.length) return;
+      q[tail++] = ni;
+    }
+  }
+}
+
+/** Object twin of `relaxRequestsFast` — see `harvestSlotsFast`'s note. */
+export function relaxRequests(list: SlotBody[], adj: WireAdjacency, decay?: number): void {
+  const { off, nei } = adj;
+  const q = adj.queue(list.length);
+  let head = 0;
+  let tail = 0;
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].request > REQUEST_FLOOR) q[tail++] = i;
+  }
+  while (head < tail) {
+    const at = q[head++];
+    const body = list[at];
+    const keep = Math.min(0.99, Math.max(0, decay ?? body.requestDecay));
+    const next = body.request * keep;
+    if (next <= REQUEST_FLOOR) continue;
+    for (let k = off[at]; k < off[at + 1]; k++) {
+      const ni = nei[k];
+      const n = list[ni];
+      if (!n || n.request >= next) continue;
+      n.request = next;
+      if (tail >= q.length) return;
+      q[tail++] = ni;
+    }
+  }
+}
+
 /** Last frame's field, for `spreadRequests` to step off. */
 export function snapshotRequests(list: SlotBody[], into: number[]): number[] {
   into.length = list.length;

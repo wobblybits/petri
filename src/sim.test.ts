@@ -13,8 +13,7 @@ import {
   resetRequests,
   seedRequest,
   type SlotBody,
-  snapshotRequests,
-  spreadRequests,
+  relaxRequests,
   WireAdjacency,
 } from './energy.ts';
 import { nativeSolver } from './native/solver.ts';
@@ -1379,16 +1378,13 @@ describe('transport recoil', () => {
     const adj = new WireAdjacency();
     adj.build(list.length, index, () => wires);
     const west = chain[0];
-    // Mirrors the frame order in `Sim.pulseRequests`: snapshot the field,
-    // rewrite this frame's claims over it, then relay one hop off the
-    // snapshot. Demand takes a frame per wire to reach the far end now.
-    const prev: number[] = [];
+    // Mirrors the frame order in `Sim.pulseRequests` at the shipped
+    // `requestReach` 0: this frame's claims, relaxed to the fixpoint.
     for (let frame = 0; frame < 12; frame++) {
       west.extra = -0.9;
-      snapshotRequests(list, prev);
       resetRequests(list);
       seedRequest(west, 0.9);
-      spreadRequests(list, adj, prev);
+      relaxRequests(list, adj);
       flowCharges(list, adj, (from, to, amount) => {
         applyTransportRecoil(byId.get(from.id)!, byId.get(to.id)!, amount, 12, 800, 600, 1);
       });

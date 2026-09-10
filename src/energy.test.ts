@@ -31,6 +31,7 @@ import {
   type SlotBody,
   spareEnergy,
   spendExtra,
+  relaxRequests,
   snapshotRequests,
   spreadRequests,
   tickUpkeep,
@@ -84,19 +85,11 @@ function net(agents: Map<number, SlotBody>, wires: { a: { id: number }; b: { id:
 }
 
 /**
- * Run the need field to its fixpoint.
- *
- * `spreadRequests` carries demand one hop a frame now, so a test that wants
- * the settled potential has to let it settle. The fixpoint is the same one
- * the old in-frame relaxation solved, and a path can be no longer than the
- * roster, so this many steps always reaches it.
+ * The need field at its fixpoint — what `Sim` does at the shipped
+ * `requestReach` 0, and what these tests are about.
  */
-function settle(list: Parameters<typeof spreadRequests>[0], adj: Parameters<typeof spreadRequests>[1], decay?: number): void {
-  const prev: number[] = [];
-  for (let i = 0; i <= list.length; i++) {
-    snapshotRequests(list, prev);
-    spreadRequests(list, adj, prev, decay);
-  }
+function settle(list: Parameters<typeof relaxRequests>[0], adj: Parameters<typeof relaxRequests>[1], decay?: number): void {
+  relaxRequests(list, adj, decay);
 }
 
 describe('wire adjacency', () => {
