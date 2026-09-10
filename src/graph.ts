@@ -48,6 +48,19 @@ export interface Wire {
    */
   collapse: number;
   /**
+   * `rest` with the gait's swell taken back out — what this wire would be
+   * resting at if its two bodies were not mid-stroke.
+   *
+   * The rope reads this and the joint reads `rest`, which is the difference
+   * between a muscle and a conjuring trick. A stroke moves the two points a
+   * wire is anchored at; it does not change how much rope there is between
+   * them. Driving the material length as well puts the rope's shape targets
+   * through the same swing twice a second, and XPBD reads node velocity as a
+   * position delta over `h`, so every pixel of it becomes speed on a slack
+   * rope — which at `gaitSwell` 0.3 is a whip rather than a wave.
+   */
+  restQuiet: number;
+  /**
    * Shortest sounding length this wire will report, half its uncollapsed
    * rest. A rope squeezed below half its rest has buckled rather than
    * tightened, and letting the pitch keep climbing turns a wire retracting
@@ -473,7 +486,7 @@ export class Graph {
     if (!this.isFree(a) || !this.isFree(b)) return null;
     const id = this.nextWireId++;
     const len = Math.max(1, latchLen);
-    const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full' };
+    const wire: Wire = { id, a, b, collapse: 0, restQuiet: len, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full' };
     this.wires.set(id, wire);
     this.setWireAt(a.id, a.slot, id);
     this.setWireAt(b.id, b.slot, id);
@@ -581,6 +594,7 @@ export class Graph {
     wire.ropeLen = span;
     wire.latchLen = span;
     wire.rest = span;
+    wire.restQuiet = span;
     wire.pitchFloor = span * 0.5;
     wire.collapse = 0;
     wire.born = time;
@@ -1057,24 +1071,56 @@ export class Graph {
 
   /**
    * Rest length for a wire this frame: the shrink curve toward `wireMinRest`,
-   * plus a slow per-wire breath so a settled net keeps moving like tissue
-   * instead of freezing solid.
+   * the gait's swell, and a slow per-wire breath under both.
    *
-   * The breath is a decoration and stays one. It was briefly wired to the
-   * gait's clock, on the theory that a wire shortening while its bodies
-   * anchor is an inchworm — it is not, in this engine. Rest length is served
-   * by an XPBD span constraint, and a position correction split by inverse
-   * mass moves the two bodies and not their centre, at any phase and however
-   * hard it pulls. Measured at 0.000 px of travel in twenty seconds. The
-   * gait strokes with an impulse instead; see `Sim.strokeWires`.
+   * The swell is the visible half of the stroke. `Sim.strokeWires` pushes a
+   * wire's two ends apart with an impulse, which is the only actuator that
+   * moves a centre of mass — but this wire's span constraint is near-rigid
+   * and puts them back where `rest` says inside the same frame, so on its own
+   * the impulse walks the net and never changes its shape. Moving `rest` is
+   * the reverse: the constraint *serves* it, so it reads immediately, and it
+   * is worth no travel at all because a position correction split by inverse
+   * mass moves the two bodies and not their centre.
+   *
+   * So both, off one phase and agreeing: when the stroke pushes the ends
+   * apart the rest length lengthens to match, and when it pulls they close.
+   * The impulse is what walks; this is what shows. That is also why this is
+   * not `wireTug` returning — the tug was driven by whichever packet last
+   * crossed, and this is driven by a clock the net owns and couples along its
+   * own wires, so what runs along a chain is a wave rather than a twitch.
+   *
+   * Floored well above nothing: a wire hauling its ends into contact is a
+   * rewrite, and this is not one.
    */
-  syncRest(time: number, params: Params, detailed?: (wire: Wire) => boolean): void {
+  syncRest(
+    time: number,
+    params: Params,
+    agents: Map<number, Agent>,
+    wave: Float64Array,
+    detailed?: (wire: Wire) => boolean,
+  ): void {
+    const swell = params.gaitSwell;
     for (const wire of this.wires.values()) {
       const base = this.restLength(wire, time, params);
       const phase = wire.id * 2.399963;
       const rate = 0.55 + (wire.id % 7) * 0.11;
       const breathe = 1 + params.wireBreathe * Math.sin(time * rate + phase);
-      const raw = base * breathe;
+      // What the rope is made of: the shrink curve and the idle breath, with
+      // the stroke left out. The joint below swings around it.
+      const quiet = base * breathe;
+      wire.restQuiet = Number.isFinite(quiet) ? clamp(quiet, 4, REST_CAP) : params.wireMinRest;
+      let stroke = 1;
+      if (swell > 0) {
+        const A = agents.get(wire.a.id);
+        const B = agents.get(wire.b.id);
+        // The mean of the two ends, so a wire is one muscle rather than two
+        // arguing, and so a phase difference across it shortens the stroke
+        // rather than tearing it in half.
+        const w = ((A ? wave[A.slot] : 0) + (B ? wave[B.slot] : 0)) * 0.5;
+        stroke = 1 + swell * w;
+        if (stroke < 0.4) stroke = 0.4;
+      }
+      const raw = quiet * stroke;
       wire.rest = Number.isFinite(raw) ? clamp(raw, 4, REST_CAP) : params.wireMinRest;
       wire.pitchFloor = wire.rest * 0.5;
       // Applied under the floor on purpose: a collapsing wire has to be able
@@ -1172,13 +1218,13 @@ export class Graph {
     for (const wire of this.wires.values()) {
       if (detailed && !detailed(wire)) {
         clearShape(wire);
-        wire.ropeLen = Number.isFinite(wire.rest) ? wire.rest : 40;
+        wire.ropeLen = Number.isFinite(wire.restQuiet) ? wire.restQuiet : 40;
         this.sitNodesOnChord(wire, agents, w, h);
         continue;
       }
       if (wire.ropePath === 'span') {
         clearShape(wire);
-        wire.ropeLen = wire.rest;
+        wire.ropeLen = wire.restQuiet;
         continue;
       }
       const A = agents.get(wire.a.id);
@@ -1187,20 +1233,20 @@ export class Graph {
       const n0 = wire.nodes.length;
       if (n0 === 0 || wire.ropePath === 'no-shape') {
         clearShape(wire);
-        wire.ropeLen = wire.rest;
+        wire.ropeLen = wire.restQuiet;
         continue;
       }
       const bowed = this.curveLength(wire, agents, w, h);
-      if (!Number.isFinite(bowed) || bowed > Math.max(wire.rest * 8, 800)) {
+      if (!Number.isFinite(bowed) || bowed > Math.max(wire.restQuiet * 8, 800)) {
         this.rebuildRope(wire, agents, w, h);
       }
       const n = wire.nodes.length;
       if (n === 0) {
         clearShape(wire);
-        wire.ropeLen = wire.rest;
+        wire.ropeLen = wire.restQuiet;
         continue;
       }
-      const c = wireCubic(A, wire.a.slot, B, wire.b.slot, w, h, wire.rest);
+      const c = wireCubic(A, wire.a.slot, B, wire.b.slot, w, h, wire.restQuiet);
       const shape = wire.shape;
       if (shape.length !== n) {
         wire.shape = new Array(n);

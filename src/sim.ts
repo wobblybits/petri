@@ -867,7 +867,7 @@ export class Sim {
     Sim.phase('assignPhysicsLod');
     this.assignActivityLod(params);
     Sim.phase('assignActivityLod');
-    this.graph.syncRest(this.time, params, this.wireDetailed);
+    this.graph.syncRest(this.time, params, this.agents, this.agentStore.gaitWave, this.wireDetailed);
     Sim.phase('syncRest');
     this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
     Sim.phase('applyRopePaths');
@@ -2381,7 +2381,7 @@ export class Sim {
     this.collectRewriteFrozen();
     this.assignPhysicsLod(view);
     this.assignActivityLod(params);
-    this.graph.syncRest(this.time, params, this.wireDetailed);
+    this.graph.syncRest(this.time, params, this.agents, this.agentStore.gaitWave, this.wireDetailed);
     this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
     this.buildClearPairs(params);
@@ -4291,6 +4291,7 @@ export class Sim {
       for (const agent of this.agents.values()) {
         ANCHOR[agent.slot] = 0;
         STROKE[agent.slot] = 0;
+        store.gaitWave[agent.slot] = 0;
       }
       return;
     }
@@ -4368,9 +4369,11 @@ export class Sim {
       }
     }
     const drive = params.gaitDrive;
+    const WAVE = store.gaitWave;
     for (const agent of this.agents.values()) {
       const s = agent.slot;
       const c = Math.cos(PHASE[s]);
+      WAVE[s] = c;
       ANCHOR[s] = GA[s] * c;
       STROKE[s] = GS[s] * drive * c;
     }

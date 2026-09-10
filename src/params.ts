@@ -360,6 +360,28 @@ export interface Params {
    * the clamp destroys the very asymmetry the stroke works on.
    */
   gaitDrive: number;
+  /**
+   * How far the gait swings a wire's rest length, as a fraction of it.
+   * 0 = the wire ignores the clock, which is the pond before this.
+   *
+   * The visible half of the stroke, and it is a separate mechanism from the
+   * impulse on purpose because this engine will only give one thing each.
+   * `Sim.strokeWires` is what moves a net: an impulse is the only actuator a
+   * centre of mass responds to, since `grip` works on the coast afterwards.
+   * But a wire's span constraint is near-rigid, so it puts the two ends back
+   * where `rest` says inside the same frame — the net walks and its shape
+   * never changes, which is why the gait has been invisible.
+   *
+   * Driving `rest` is the exact reverse: the constraint serves it, so it
+   * reads at once, and it is worth no travel at all. So both, off one phase
+   * and agreeing — the ends pull together as the muscle pulls, and a chain
+   * with a phase lag along it shows a wave running down its length.
+   *
+   * Sized to be seen rather than to be safe: 0.3 swings a 48 px wire between
+   * about 34 and 62. `wireBreathe`, which this rides on top of, is 0.04 —
+   * two pixels, and never meant as a gait.
+   */
+  gaitSwell: number;
   /** Shoaling. See `declutter` for what this costs reproduction, and why the
    *  two only matter together. */
   flockAlign: number;
@@ -1003,7 +1025,8 @@ export function defaultParams(): Params {
     gaitRate: 2,
     gaitCouple: 3,
     gaitLag: 1,
-    gaitDrive: 1,
+    gaitDrive: 12,
+    gaitSwell: 0.3,
     flockAlign: 5.5,
     flockSep: 48,
     maxAgents: 100000,
@@ -1081,6 +1104,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'gaitCouple', label: 'Gait coupling', min: 0, max: 20, step: 0.1 },
   { key: 'gaitLag', label: 'Gait lag (rad/wire)', min: -3.2, max: 3.2, step: 0.05 },
   { key: 'gaitDrive', label: 'Gait drive', min: 0, max: 60, step: 0.5 },
+  { key: 'gaitSwell', label: 'Gait swell', min: 0, max: 0.8, step: 0.01 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
   { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },
   { key: 'snapRadius', label: 'Snap reach', min: 4, max: 48, step: 1 },

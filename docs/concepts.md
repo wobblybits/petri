@@ -97,12 +97,31 @@ not also be asked to do. Nothing else belongs here; measurements go in
   it is an appendage and on a Con's `p` it is an erase. Which one a lineage
   gets is about where it latches, which no gene here reaches.
 
-  Not yet true, and this is the list. The clock's *rate* is a free global
-  constant, so bodies cannot drift out of lock and back — there is no coupling
-  term, and a per-body rate wants one first; `Wn` already carries the mean of
-  a body's wired neighbours and is the obvious place for it. The phase scatter
-  is off the body's id, so it is a decoration of the kind this file exists to
-  make visible: it does mechanical work, and nothing can select on it. And an
+  The stroke is two mechanisms because the engine gives one thing each. An
+  impulse along a wire (`gaitDrive`) is the only actuator a centre of mass
+  responds to, since `grip` works on the coast after it — but a wire's span
+  constraint is near-rigid and puts the two ends back where `rest` says inside
+  the same frame, so on its own it walks a net and never changes its shape.
+  Driving `rest` (`gaitSwell`) is the exact reverse: the constraint serves it,
+  so it reads at once, and it is worth no travel at all. Both, off one phase
+  and agreeing. The impulse is what walks; the swell is what shows.
+
+  `gaitCouple` and `gaitLag` are what make it a pattern rather than n
+  twitches. A body's share of its own stroke is divided by the whole net's
+  mass, so at unrelated phases the shares sum as sqrt(n) against a mass of n
+  and a longer net moves itself *less*. Coupled with a lag, a chain settles at
+  a fixed phase difference per wire, the shares add, and a fixed difference
+  per wire is a travelling wave — which along a body is peristalsis. At lag 0
+  it is plain synchrony, which is the pond-wide pulse this branch began by
+  removing.
+
+  Not yet true, and this is the list. The lag is a global constant where it
+  should be a gene: it sets both the gait's wavelength and which way the
+  animal walks, which is exactly what a lineage should own. The phase a body
+  is born at comes off its id by a constant increment, so a chain built in id
+  order is already a wave of a wavelength nothing chose — coupling overrides
+  it, which is most of why it stops mattering, but it is still a decoration
+  doing mechanical work. And an
   Era is both the leaf *and*, by `ERA_UPKEEP_RATIO` and its larger store, the
   fullest body on its wire — so the seeded head makes it the oar while the
   economy makes it the anchor, and those pull opposite ways. On the bench they

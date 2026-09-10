@@ -90,11 +90,23 @@ export class AgentStore {
    * this frame — both `amplitude * cos(phase)`, one into the drag rate and
    * one into an impulse along every wire on the body.
    *
-   * In phase, because the actuator is an impulse rather than a length. See
-   * `chem-layout.ts`'s `G_OUT`, which has the arithmetic and the measurement
-   * that ruled the length out.
+   * `gaitWave` is the bare `cos(phase)`, with no amplitude in it, and is what
+   * a wire's rest length rides on.
+   *
+   * Both halves, because the engine will only give one thing each. An impulse
+   * is the only actuator that moves a centre of mass — `grip` acts on the
+   * coast afterwards, and a position correction split by inverse mass never
+   * does. But an impulse along a wire is fought by that wire's span
+   * constraint, which is near-rigid and puts the two ends back where `rest`
+   * says within the same frame, so the *shape* never changes and there is
+   * nothing to see. Driving `rest` is the reverse: visible, and worth no
+   * travel at all.
+   *
+   * So the stroke pushes and the rest length agrees with it, off one phase.
+   * The impulse is what walks; the length is what shows.
    */
   gaitPhase!: Float64Array;
+  gaitWave!: Float64Array;
   gaitAnchor!: Float64Array;
   gaitStroke!: Float64Array;
   anchor!: Float64Array;
@@ -462,6 +474,7 @@ export class AgentStore {
     this.transportThrust[slot] = 0;
     this.transportRecoil[slot] = 0;
     this.gaitPhase[slot] = 0;
+    this.gaitWave[slot] = 0;
     this.gaitAnchor[slot] = 0;
     this.gaitStroke[slot] = 0;
     this.anchor[slot] = 0;
@@ -547,6 +560,7 @@ export class AgentStore {
     this.transportThrust = growF64(this.transportThrust);
     this.transportRecoil = growF64(this.transportRecoil);
     this.gaitPhase = growF64(this.gaitPhase);
+    this.gaitWave = growF64(this.gaitWave);
     this.gaitAnchor = growF64(this.gaitAnchor);
     this.gaitStroke = growF64(this.gaitStroke);
     this.anchor = growF64(this.anchor);
