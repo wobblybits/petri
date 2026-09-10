@@ -1,4 +1,4 @@
-import { CHEM_LEN, EMIT, IN_DEMAND, STATE_DIMS, TASTE, T_OUT, W_IN, W_SELF } from '../chem-layout.ts';
+import { CHEM_LEN, EMIT, G_BASE, IN_DEMAND, STATE_DIMS, TASTE, T_OUT, W_IN, W_SELF } from '../chem-layout.ts';
 import { EXTRA_CAP } from '../energy.ts';
 import { CH, CHANNELS } from '../fields.ts';
 import type { Params } from '../params.ts';
@@ -79,11 +79,11 @@ export interface Diversity {
   /** Effective number of kinds, out of three. */
   kindsEffective: number;
   /**
-   * Mean per-locus variance over the genome's drifted span — the matrices and
-   * heads past the taste bases, which seed to zero. The raw material.
+   * Mean per-locus variance over the genome's drifted span — every locus that
+   * starts identical on every body, whatever its kind. The raw material.
    */
   varianceDrifted: number;
-  /** The same over the eight seeded bases, which start kind-specific. */
+  /** The same over the bases that start kind-specific: emit, taste and gait. */
   varianceSeeded: number;
   /**
    * Share of genetic variance lying between nets rather than within them —
@@ -409,10 +409,29 @@ export function measureDiversity(sim: Sim, params?: Params): Diversity {
   }
   const n = slots.length;
 
+  /*
+   * The split is by what a locus is *at birth*, not by where it sits.
+   *
+   * `drifted` is every locus that starts the same on every body, so its
+   * variance is raw material — something drift or selection put there.
+   * `seeded` is every locus that starts kind-specific, so its variance is
+   * only ever the pond's mix of Cons, Dups and Eras.
+   *
+   * That used to be one cut at `TASTE + 4`, because the emit and taste bases
+   * were the only kind-specific genes. `G`, the gait head, is the second:
+   * `seedGait` makes an Era an oar and a Con a foot, and those two bases sit
+   * at the far end of the genome. So the drifted span is no longer one range
+   * — which is why these are index lists and not bounds.
+   *
+   * The head *bases* only. `G`'s matrix still seeds to zero like every other,
+   * and belongs with the raw material.
+   */
+  const gait = new Set([G_BASE, G_BASE + 1]);
   const drifted: number[] = [];
-  for (let k = TASTE + 4; k < CHEM_LEN; k++) drifted.push(k);
+  for (let k = TASTE + 4; k < CHEM_LEN; k++) if (!gait.has(k)) drifted.push(k);
   const seeded: number[] = [];
   for (let k = EMIT; k < TASTE + 4; k++) seeded.push(k);
+  for (const k of gait) seeded.push(k);
 
   const variance = (loci: number[]): number => {
     if (n === 0) return 0;

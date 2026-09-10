@@ -454,6 +454,14 @@ export class Agent {
     this.store.transportThrust[this.slot] = v;
   }
 
+  /** Where this body is on the gait's clock. See `Sim.advanceGait`. */
+  get gaitPhase(): number {
+    return this.store.gaitPhase[this.slot];
+  }
+  set gaitPhase(v: number) {
+    this.store.gaitPhase[this.slot] = v;
+  }
+
   /** How hard this body recoils, per unit of energy it pumps to a neighbour. */
   get transportQuantum(): number {
     return this.store.transportQuantum[this.slot];
@@ -1017,32 +1025,58 @@ export function flockGain(v: number): number {
 
 
 /**
- * The gait's two amplitudes.
+ * The gait's two amplitudes, seeded by kind: an Era is an oar and a Con or a
+ * Dup is a foot.
  *
- * Bases, not matrix entries: a fresh body strides at a constant amplitude and
- * a lineage is free to make either one depend on `h` — on hunger, on how
- * wired-in it is, on what it can smell — by drifting `G`. That is the same
- * shape `F`, `P` and `L` already have, and the same reason: a behaviour
- * should start as the constant it would otherwise have been hardcoded to and
- * become a phenotype by evolving, not by being declared one.
+ * Bases, not matrix entries, and the matrices stay zero — so a fresh body
+ * strides at a constant amplitude and a lineage is free to make either one
+ * depend on `h`, or to swap the two roles outright, by drifting `G`. Same
+ * shape as `e0`, and the same argument: a behaviour should start as the
+ * constant it would otherwise have been hardcoded to, and become a phenotype
+ * by evolving rather than by being declared one.
  *
- * `anchor` is in units of drag rate, so 0.5 gene x `HEAD_SCALE.anchor` is a
- * swing of ±1/s about whatever `drag + grip * fullness` is already asking
- * for — the same order as `grip` itself at a half-full tank, which is what
- * makes it able to change which end of a pair is the anchored one rather
- * than merely modulating how anchored both are.
+ * The split is what the stroke is actually made of. A pair's centre keeps
+ * `∮ F (1/k_a - 1/k_b) dt / M`, so it is driven by the *difference* in drag
+ * between a wire's two ends and is exactly zero when they match. Until now
+ * both ends anchored alike and the only difference available was
+ * `grip * fullness` — which meant a net walked only while it held a gradient,
+ * and a well-fed one went nowhere.
  *
- * `stroke` is a force along the wire, in units of `HEAD_SCALE.stroke`. One
- * gene is about what a body at the pond's cruise spends holding station, so
- * the stroke is the same order as the swimming it replaces rather than a
- * nudge on top of it.
+ * An Era supplies that difference structurally. It has one port, so it is
+ * always a leaf: an appendage attached at one point and free at the other,
+ * with one wire and therefore one uncancelled stroke, where an interior body
+ * has three that partly fight each other. It is light (`eraMass` 0.45), so
+ * the same impulse carries it further. And it produces rather than pays
+ * (`ERA_UPKEEP_RATIO`) and holds a larger store, so it sits at a different
+ * fullness from its neighbour by economics alone — the gradient the stroke
+ * wants, standing, for free.
+ *
+ * So the Era strokes and does not grip, and the interior grips and barely
+ * strokes. Note what that changes: with the anchors differing by kind, a net
+ * with Eras on it walks whether or not it holds an energy gradient, where
+ * before it could not. Between two Cons the anchors still match and the old
+ * rule still holds, which is the control `locomotion.test.ts` keeps.
+ *
+ * The anchor stays under `drag` on purpose. Past it the rate clamps at zero,
+ * both ends clamp together, and the clamp destroys the very asymmetry this
+ * exists to create.
+ *
+ * One structural condition is not seeded here and cannot be: an Era is a limb
+ * only where it lands on an *auxiliary* port. A redex needs principals at
+ * both ends (`Sim.collectReadyRedexes`), and an Era has nothing but a
+ * principal — so on a Con's `l` or `r` it is an appendage, and on a Con's `p`
+ * it is an erase waiting to happen. Which of those a lineage gets is about
+ * where it latches, not about `G`.
  */
-const GAIT_ANCHOR = 0.2;
-const GAIT_STROKE = 1;
+const GAIT_ANCHOR_ERA = 0.02;
+const GAIT_STROKE_ERA = 2;
+const GAIT_ANCHOR_NODE = 0.25;
+const GAIT_STROKE_NODE = 0.3;
 
-function seedGait(c: Float32Array): void {
-  c[G_BASE] = GAIT_ANCHOR;
-  c[G_BASE + 1] = GAIT_STROKE;
+function seedGait(c: Float32Array, kind: AgentKind): void {
+  const era = kind === 'era';
+  c[G_BASE] = era ? GAIT_ANCHOR_ERA : GAIT_ANCHOR_NODE;
+  c[G_BASE + 1] = era ? GAIT_STROKE_ERA : GAIT_STROKE_NODE;
 }
 
 /**
@@ -1109,7 +1143,7 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
   c[P_BASE + 1] = params.transportRecoil / HEAD_SCALE.recoil;
   c[L_BASE] = params.stepSpeed / HEAD_SCALE.cruise;
   c[L_BASE + 1] = params.turnRate / HEAD_SCALE.turn;
-  seedGait(c);
+  seedGait(c, kind);
   if (kind === 'con') {
     c[EMIT] = 1;
     c[TASTE + 1] = M;
@@ -1257,6 +1291,22 @@ export function createAgent(
   agent.scale = 1;
   agent.locked = false;
   agent.pinned = false;
+  /*
+   * Somewhere of its own on the gait's clock.
+   *
+   * `reset` leaves this at 0 and every body advances at one global rate, so
+   * without this the whole founder soup shares a phase exactly and for life
+   * — every wire in the pond strokes on the same frame, which reads as one
+   * body-wide pulse rather than anything walking.
+   *
+   * The golden angle, so a run of ids spreads instead of landing in bands,
+   * and off the id rather than `Math.random` so a seeded pond stays
+   * reproducible. This is an initial condition and not a mechanism: nothing
+   * pulls two neighbours into a *useful* relative phase, which is what a
+   * travelling wave would do and what `docs/concepts.md` says the clock still
+   * owes. Scattering is only the proof that the lock was hardcoded.
+   */
+  agent.gaitPhase = (id * 2.399963) % (Math.PI * 2);
   // A body made outside a rewrite is a founder: generation zero of its own
   // line. `autoSpawn` makes a great many of these, which is the point of
   // being able to count them.

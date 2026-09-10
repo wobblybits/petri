@@ -80,10 +80,34 @@ not also be asked to do. Nothing else belongs here; measurements go in
   travels 0.000 px in twenty seconds and the same pair driven by an impulse
   travels 5.2.
 
-  Not yet true: the clock's *rate* is a free global constant, so bodies
-  cannot drift out of lock and back — there is no coupling term, and a
-  per-body rate wants one first. `Wn` already carries the mean of a body's
-  wired neighbours and is the obvious place for it.
+  What a wire's two ends differ in is the whole of the stroke, and there are
+  three places that difference comes from. Fullness is the economic one, and
+  makes a net walk only while it holds a gradient. Phase is an accident:
+  `createAgent` scatters it, so two bodies sit at different points of the same
+  cosine. Kind is the structural one, and is what makes an Era a limb — it has
+  one port so it is always a leaf, one wire so its stroke is uncancelled where
+  an interior body's three partly fight, and it is light. `seedGait` gives it
+  a large stroke and almost no anchor, and gives a Con or a Dup the reverse.
+  Measured on a fed pair held at one phase, twenty seconds: 1.281 px from a
+  fullness gradient alone, 0.756 from a phase difference alone, 1.205 from an
+  Era on the end alone, and 0.000 between two Cons with none of the three.
+
+  A leaf is a limb only on an *auxiliary* port. A redex needs principals at
+  both ends and an Era has nothing but a principal, so on a Con's `l` or `r`
+  it is an appendage and on a Con's `p` it is an erase. Which one a lineage
+  gets is about where it latches, which no gene here reaches.
+
+  Not yet true, and this is the list. The clock's *rate* is a free global
+  constant, so bodies cannot drift out of lock and back — there is no coupling
+  term, and a per-body rate wants one first; `Wn` already carries the mean of
+  a body's wired neighbours and is the obvious place for it. The phase scatter
+  is off the body's id, so it is a decoration of the kind this file exists to
+  make visible: it does mechanical work, and nothing can select on it. And an
+  Era is both the leaf *and*, by `ERA_UPKEEP_RATIO` and its larger store, the
+  fullest body on its wire — so the seeded head makes it the oar while the
+  economy makes it the anchor, and those pull opposite ways. On the bench they
+  are separate rigs and both carry a pair; which of them wins in a net where
+  both act at once is a pond question and has not been asked.
 - Communication within a net
 - Transport of energy within a net. Lives in the demand gradient: a body gives
   to whichever neighbour is strictly needier, and `transportQuantum` sets

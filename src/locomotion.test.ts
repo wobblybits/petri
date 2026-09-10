@@ -223,40 +223,42 @@ describe('the gait', () => {
    *
    * `grip` needs an impulse to work on: it turns a transport kick into travel
    * by letting the two ends coast different distances. The gait needs none.
-   * Every body carries a phase; its cosine goes into the drag rate and its
-   * sine into the rest length of its wires, so a wire shortens while the
-   * bodies on it are anchoring and lengthens while they let go. Displacement
-   * over a cycle is `-∮ L̇ β dt`, and sine against cosine is what stops that
-   * integral being zero.
+   * Every body carries a phase; its cosine goes into the drag rate and into
+   * an equal and opposite impulse along each of its wires.
    *
-   * The two bodies here run in step — one clock, one rate, and no coupling
-   * between them. That is not a simplification, it is the mechanism: the
-   * pair's centre moves as long as the two ends respond *differently* to the
-   * same anchor, and `drag + grip * fullness` already makes them differ
-   * whenever there is a gradient across the wire. Give them the same tank and
-   * it stops, which is the last case below.
+   * The pair's centre keeps `∮ F (1/k_a - 1/k_b) dt / M`, so the whole thing
+   * is driven by the *difference* between a wire's two ends, and there are
+   * exactly three places that difference can come from. These tests take them
+   * one at a time, which is why `phase` is settable: scattering it at birth
+   * is itself one of the three, and it would otherwise contaminate the other
+   * two.
    */
-  const walk = (over: Partial<Params> = {}, opts: { fullB?: number; flip?: boolean } = {}): number => {
+  const walk = (
+    over: Partial<Params> = {},
+    opts: { kindB?: 'con' | 'era'; fullB?: number; phase?: number; flip?: boolean } = {},
+  ): number => {
     const params = stillParams();
     params.gaitRate = 2;
     params.grip = 2;
     Object.assign(params, over);
     const sim = new Sim(4000, 4000);
     const a = sim.spawn('con', 1960, 2000, 0, params, true)!;
-    const b = sim.spawn('con', 2040, 2000, 0, params, true)!;
+    const b = sim.spawn(opts.kindB ?? 'con', 2040, 2000, 0, params, true)!;
+    if (opts.phase !== undefined) {
+      a.gaitPhase = opts.phase;
+      b.gaitPhase = opts.phase;
+    }
     if (opts.flip) {
-      // The stroke's amplitude, negated on both ends: same clock, same grip,
-      // the muscle pulling when it used to push.
       a.chem[G_BASE + 1] = -a.chem[G_BASE + 1];
       b.chem[G_BASE + 1] = -b.chem[G_BASE + 1];
     }
-    sim.graph.attach({ id: a.id, slot: 'l' }, { id: b.id, slot: 'r' }, 80, 0);
+    // An Era has only a principal, and two principals are a redex — so a
+    // limb lands on an auxiliary port. See `Sim.collectReadyRedexes`.
+    sim.graph.attach({ id: b.id, slot: opts.kindB === 'era' ? 'p' : 'r' }, { id: a.id, slot: 'l' }, 80, 0);
     const hold = () => {
       a.extra = a.energyCap;
       b.extra = b.energyCap * (opts.fullB ?? 0);
     };
-    // Let the latch finish reeling in before anything is measured, so the
-    // one-shot shrink is not read as travel.
     for (let f = 0; f < 300; f++) {
       hold();
       sim.step(1 / 60, params);
@@ -270,33 +272,56 @@ describe('the gait', () => {
   };
 
   it('walks a wired pair on its own clock, with nothing pumping', () => {
-    // 5.2 px over twenty seconds at the shipped dials, against a settling
-    // floor of nothing at all: with the clock stopped this rig is exactly
-    // static, so the bar is about resolving the stroke, not beating noise.
     expect(Math.abs(walk({ gaitRate: 0 })), 'no clock, no stroke').toBeLessThan(0.05);
-    expect(Math.abs(walk()), 'the clock alone carries the pair').toBeGreaterThan(1);
+    expect(Math.abs(walk()), 'the clock alone carries the pair').toBeGreaterThan(0.5);
   });
 
-  it('needs the two ends to differ, which is what makes it cost energy', () => {
+  it('goes nowhere when a wire has two identical ends', () => {
     /*
-     * The stroke is `∮ F (1/k_a - 1/k_b) dt / M`. Both ends share the clock,
-     * so `F` and the anchor are common to them and cancel out of the
-     * difference; what is left is the difference in their *baselines*, and
-     * that is `grip * fullness`. Give the pair the same tank, or take `grip`
-     * away, and there is nothing for the impulse to be asymmetric about.
-     *
-     * Which is the property worth having. A net only walks while it is
-     * holding a gradient, so locomotion is paid for out of the same economy
-     * that feeds it, rather than being free.
+     * The null the whole mechanism rests on. Same kind, same tank, same
+     * phase: `k_a` and `k_b` are equal at every instant, the difference in
+     * the integral is identically zero, and no amount of stroking moves the
+     * centre. Everything below is a way of breaking exactly this.
      */
-    expect(Math.abs(walk({}, { fullB: 1 })), 'two equal tanks go nowhere').toBeLessThan(0.05);
-    expect(Math.abs(walk({ grip: 0 })), 'and neither do two equal rates').toBeLessThan(0.05);
+    expect(Math.abs(walk({}, { fullB: 1, phase: 0 })), 'two of the same').toBeLessThan(0.05);
+    expect(Math.abs(walk({ grip: 0 }, { phase: 0 })), 'and with no grip to differ in').toBeLessThan(0.05);
+  });
+
+  it('takes its asymmetry from any of three places, and they are separable', () => {
+    /*
+     * Fullness is the economic one: `grip * fullness` differs, so the two
+     * ends damp differently and the net walks only while it holds a
+     * gradient. Phase is the accidental one — `createAgent` scatters it, so
+     * two bodies are at different points of the same cosine. Kind is the
+     * structural one, and the reason an Era is a limb: it strokes and does
+     * not grip, where a Con grips and barely strokes.
+     */
+    const fullness = walk({}, { fullB: 0, phase: 0 });
+    const phase = walk({}, { fullB: 1 });
+    const kind = walk({}, { kindB: 'era', fullB: 1, phase: 0 });
+    expect(Math.abs(fullness), 'a gradient across the wire').toBeGreaterThan(0.5);
+    expect(Math.abs(phase), 'a phase difference across the wire').toBeGreaterThan(0.1);
+    expect(Math.abs(kind), 'an Era on the end of it').toBeGreaterThan(0.5);
+  });
+
+  it('walks best on an Era, which is what makes a leaf a limb', () => {
+    /*
+     * The claim about body plan. Both pairs are fed identically and held at
+     * one phase, so fullness and phase are both out of it and the only thing
+     * left is what is on the end of the wire. An Era leaf should beat a
+     * second Con by a wide margin — it strokes seven times as hard, grips a
+     * tenth as much, and weighs half.
+     */
+    const era = Math.abs(walk({}, { kindB: 'era', fullB: 1, phase: 0 }));
+    const con = Math.abs(walk({}, { kindB: 'con', fullB: 1, phase: 0 }));
+    expect(con, 'two interior bodies have nothing to differ in').toBeLessThan(0.05);
+    expect(era / Math.max(con, 1e-6), 'an Era leaf is the limb').toBeGreaterThan(10);
   });
 
   it('reverses when the stroke does, which is what selection has to steer by', () => {
-    const fwd = walk();
-    const back = walk({}, { flip: true });
-    expect(Math.abs(back), 'still walking').toBeGreaterThan(1);
+    const fwd = walk({}, { kindB: 'era', fullB: 1, phase: 0 });
+    const back = walk({}, { kindB: 'era', fullB: 1, phase: 0, flip: true });
+    expect(Math.abs(back), 'still walking').toBeGreaterThan(0.5);
     expect(Math.sign(back), 'the other way').not.toBe(Math.sign(fwd));
   });
 });
