@@ -120,6 +120,78 @@ The firewall in `effEmit` — *"returns 0 for `CH.energy`, because the deposit
 path multiplies by `params.deposit`, which is five"* — stops being a special
 case and becomes a stoichiometry.
 
+### What a kind is a source of
+
+Added 2026-09-10.
+
+The table above says the four `excrete_c` rows subsume `effEmit` and
+`farmRate`. Until now that was true of the operator and not of the seed: `X`
+seeded to zero, so `expressVector`'s flat fallback gave every kind an eighth on
+every row, and the pond's three kinds all claimed to produce all four species
+equally. Only the Era actually produced anything, through `farmRate` and the
+emit head, which is the special case the table was written to remove.
+
+`seedProduction` puts it on the rows instead. A Con is a source of `conP` and
+`aux`, a Dup of `dupP` and `aux`, an Era of ground:
+
+    excrete bases    con: conP 1, aux 1    dup: dupP 1, aux 1    era: energy 2
+    uptake bases     all kinds, all four species, 0.5
+
+Those numbers are chosen so the uptake half lands on exactly an eighth a row —
+the flat fallback's own value. **A fresh body eats like a generalist and speaks
+like its kind.** Deciding what a body *produces* is deciding what it is;
+deciding what it can *digest* would be deciding its niche before selection got
+a say, so the seed does the first and not the second.
+
+The signed four-vector this implies — is this body a source or a sink for
+`aux`? — is `excrete_c - uptake_c`, and `metabolismOf` is that difference. It
+is derived and not stored, because a genome can express both rows for one
+species at once: that is a futile cycle, it is a real thing to drift into, and
+collapsing the pair in storage would make it unrepresentable rather than
+merely wasteful.
+
+### Rent is the negative half
+
+`upkeep` is the standing cost of existing and it is charged in the one
+currency, which is the negative half of that vector. `upkeepExcrete` is how
+much of it comes back out rather than vanishing, and it now comes out **as the
+body's own mix** rather than always as ground. So a Con paying rent lays down
+`conP` and `aux`; an Era lays down ground, which is what its rent always did
+and was the only thing any body's rent could do.
+
+Two consequences, both on mechanisms that already exist:
+
+- **A body fouls the cell it is standing in.** After §4 the harvest is a
+  sample of the water, so a body's own output dilutes its next mouthful. It
+  has to move, or eat its exhaust.
+- **What it lays down is another body's substrate.** §1's claim about four
+  species is finally paid for by something a body does whether it wants to or
+  not, rather than by a broadcast it chooses.
+
+`CH.aux` is also the free-port marker — `Sim.deposit` lays it at every open
+socket, meaning "there is somewhere to attach here". The two readings do not
+collide in a running pond: that deposit is gated on `scentMints`, so the marker
+exists only in the regime where excretion does not. The one overlap is
+`upkeepExcrete` on with `excreteRate` off, and there the marker is minted at
+`params.deposit` and a rent is a fraction of `upkeep`, so the marker drowns it
+by orders of magnitude rather than being confused with it.
+
+A net saved before this keeps its stored genome, zeros included, so it stays
+the old generalist until it breeds — the seeding reaches the pond through
+fresh immigrants, which is how every other seeded trait arrives.
+
+`farmRate` and the emit head are the half of the table still not folded in.
+They are a second path to the same place and should eventually be the
+excretion rows at their own rate; that is a change to the Era economy and not
+to this one.
+
+**Inherited and mutated, not learned.** `X` is outside the plastic span on
+purpose (§8). What moves within a life is regulation — the rows read `h`, so a
+body shifts its own mix with its state, and the learned weights that shape `h`
+move it indirectly. The constraint is the simplex: production trades against
+uptake on one unit budget, so a body cannot become a better source without
+becoming a worse sink.
+
 ### One unit simplex over all eight
 
 Expression is a new head `X`, normalised across all eight rows exactly as

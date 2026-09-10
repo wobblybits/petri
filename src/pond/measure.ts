@@ -1,4 +1,4 @@
-import { CHEM_LEN, EMIT, G_BASE, IN_DEMAND, STATE_DIMS, TASTE, T_OUT, W_IN, W_SELF } from '../chem-layout.ts';
+import { CHEM_LEN, CHEM_SPECIES, EMIT, G_BASE, IN_DEMAND, ROW_EXCRETE, STATE_DIMS, TASTE, T_OUT, W_IN, W_SELF, X_BASE } from '../chem-layout.ts';
 import { EXTRA_CAP } from '../energy.ts';
 import { CH, CHANNELS } from '../fields.ts';
 import type { Params } from '../params.ts';
@@ -83,7 +83,7 @@ export interface Diversity {
    * starts identical on every body, whatever its kind. The raw material.
    */
   varianceDrifted: number;
-  /** The same over the bases that start kind-specific: emit, taste and gait. */
+  /** The same over the bases that start kind-specific: emit, taste, gait and what a kind makes. */
   varianceSeeded: number;
   /**
    * Share of genetic variance lying between nets rather than within them —
@@ -418,20 +418,28 @@ export function measureDiversity(sim: Sim, params?: Params): Diversity {
    * only ever the pond's mix of Cons, Dups and Eras.
    *
    * That used to be one cut at `TASTE + 4`, because the emit and taste bases
-   * were the only kind-specific genes. `G`, the gait head, is the second:
-   * `seedGait` makes an Era an oar and a Con a foot, and those two bases sit
-   * at the far end of the genome. So the drifted span is no longer one range
-   * — which is why these are index lists and not bounds.
+   * were the only kind-specific genes. `G`, the gait head, was the second:
+   * `seedGait` makes an Era an oar and a Con a foot. `X`'s excretion bases are
+   * the third: `seedProduction` makes a Con a source of `conP` and an Era a
+   * source of ground. Both sit at the far end of the genome, so the drifted
+   * span is no longer one range — which is why these are index lists and not
+   * bounds.
    *
-   * The head *bases* only. `G`'s matrix still seeds to zero like every other,
-   * and belongs with the raw material.
+   * `X`'s *uptake* bases stay with the raw material, and that is not an
+   * oversight: `seedProduction` sets all four to the same half on every kind,
+   * so a locus there does start life identical everywhere. What a body makes
+   * is kind-specific; what it can digest is not.
+   *
+   * The head *bases* only. Both matrices still seed to zero like every other,
+   * and belong with the raw material.
    */
-  const gait = new Set([G_BASE, G_BASE + 1]);
+  const kindSeeded = new Set([G_BASE, G_BASE + 1]);
+  for (let c = 0; c < CHEM_SPECIES; c++) kindSeeded.add(X_BASE + ROW_EXCRETE + c);
   const drifted: number[] = [];
-  for (let k = TASTE + 4; k < CHEM_LEN; k++) if (!gait.has(k)) drifted.push(k);
+  for (let k = TASTE + 4; k < CHEM_LEN; k++) if (!kindSeeded.has(k)) drifted.push(k);
   const seeded: number[] = [];
   for (let k = EMIT; k < TASTE + 4; k++) seeded.push(k);
-  for (const k of gait) seeded.push(k);
+  for (const k of kindSeeded) seeded.push(k);
 
   const variance = (loci: number[]): number => {
     if (n === 0) return 0;

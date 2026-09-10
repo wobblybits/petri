@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bareBody, expressVector, seedChem, uptakeKsOf } from './agents.ts';
+import { bareBody, expressVector, metabolismOf, seedChem, uptakeKsOf } from './agents.ts';
 import { CHEM_LEN, CHEM_SPECIES, KS_BASE, ROW_COUNT, ROW_EXCRETE, ROW_UPTAKE, STATE_DIMS, X_BASE, X_OUT } from './chem-layout.ts';
 import { HarvestPlan, REWRITE_SHARE, harvestSlotsFast, rewriteCost } from './energy.ts';
 import { CH, CHANNELS } from './fields.ts';
@@ -80,14 +80,24 @@ describe('expression', () => {
     expect(sum).toBeCloseTo(1, 12);
   });
 
-  it('is flat at the seed, so every reaction runs at its own constant', () => {
-    // `X` and its base seed to zero, so relu leaves nothing to normalise. An
-    // eighth each is the even division; zero would make a fresh body inert
-    // from birth, which is not what shipping at the neutral value means.
+  it('is flat across what a body eats, and its kind across what it makes', () => {
+    /*
+     * `X`'s matrix seeds to zero, so at rest only the bases speak. The uptake
+     * bases are the same half on every kind, which lands every uptake row on
+     * the eighth the flat fallback used to give the whole table; the excretion
+     * bases are `seedProduction`'s, and are the one thing a kind is born
+     * committed to. See 'what a kind makes' below for the three answers.
+     */
     for (const kind of ['era', 'dup', 'con'] as const) {
       const chem = seedChem(kind, defaultParams());
       expressVector(chem, 0, h, 0, out, 0);
-      for (let r = 0; r < ROW_COUNT; r++) expect(out[r]).toBeCloseTo(1 / ROW_COUNT, 12);
+      let made = 0;
+      for (let c = 0; c < CHEM_SPECIES; c++) {
+        expect(out[ROW_UPTAKE + c], `${kind} uptake ${c}`).toBeCloseTo(1 / ROW_COUNT, 12);
+        made += out[ROW_EXCRETE + c];
+      }
+      // Half the budget on production either way, however it is divided up.
+      expect(made, `${kind} production`).toBeCloseTo(0.5, 12);
     }
   });
 
@@ -564,6 +574,115 @@ describe('superadditivity', () => {
     const halfH = monod(0.1, 3);
     const fullH = monod(0.2, 3);
     expect(fullH).toBeGreaterThan(2 * halfH);
+  });
+});
+
+describe('what a kind makes', () => {
+  /*
+   * §3's table, at the seed. The eight rows are one budget over four
+   * excretion reactions and four uptake ones, so "what is this body a source
+   * of" is a difference and not a row — `metabolismOf` is that difference, and
+   * these are the three kinds' answers to it.
+   */
+  const met = (kind: 'con' | 'dup' | 'era'): number[] => {
+    const chem = seedChem(kind, defaultParams());
+    const h = new Float64Array(STATE_DIMS);
+    const express = new Float64Array(ROW_COUNT);
+    const out = new Float64Array(CHEM_SPECIES);
+    expressVector(chem, 0, h, 0, express, 0);
+    metabolismOf(express, 0, out, 0);
+    return [...out];
+  };
+
+  it('makes a Con a source of conP and aux, and a Dup of dupP and aux', () => {
+    const con = met('con');
+    // A quarter of the budget on each of its two rows, against an eighth on
+    // every uptake row: +1/8 net on what it makes, -1/8 on what it only eats.
+    expect(con[CH.conP]).toBeCloseTo(0.125, 12);
+    expect(con[CH.aux]).toBeCloseTo(0.125, 12);
+    expect(con[CH.dupP]).toBeCloseTo(-0.125, 12);
+    expect(con[CH.energy]).toBeCloseTo(-0.125, 12);
+
+    const dup = met('dup');
+    expect(dup[CH.dupP]).toBeCloseTo(0.125, 12);
+    expect(dup[CH.aux]).toBeCloseTo(0.125, 12);
+    expect(dup[CH.conP]).toBeCloseTo(-0.125, 12);
+
+    // Each kind is a source of what the other listens for: a Con emits `conP`
+    // and tastes `dupP`, and now makes it as well as shouting it.
+    expect(con[CH.conP]).toBeGreaterThan(0);
+    expect(dup[CH.conP]).toBeLessThan(0);
+  });
+
+  it('leaves the Era the ground-maker it already was', () => {
+    const era = met('era');
+    // Its whole production half on one row, which is what `farmRate` and the
+    // emit head have said about an Era all along.
+    expect(era[CH.energy]).toBeCloseTo(0.375, 12);
+    expect(era[CH.conP]).toBeCloseTo(-0.125, 12);
+    expect(era[CH.dupP]).toBeCloseTo(-0.125, 12);
+    expect(era[CH.aux]).toBeCloseTo(-0.125, 12);
+  });
+
+  it('leaves every kind able to eat everything', () => {
+    /*
+     * The production half is kind-specific and the uptake half is not. A seed
+     * that decided what a body could *digest* would be deciding the niche
+     * before selection got a say; deciding what it emits is deciding what it
+     * is.
+     */
+    const h = new Float64Array(STATE_DIMS);
+    const express = new Float64Array(ROW_COUNT);
+    for (const kind of ['con', 'dup', 'era'] as const) {
+      expressVector(seedChem(kind, defaultParams()), 0, h, 0, express, 0);
+      for (let c = 0; c < CHEM_SPECIES; c++) {
+        // An eighth each, which is exactly the flat fallback's own value.
+        expect(express[ROW_UPTAKE + c], `${kind} uptake ${c}`).toBeCloseTo(1 / ROW_COUNT, 12);
+      }
+    }
+  });
+
+  it('pays rent out as what the body makes', () => {
+    /*
+     * Upkeep is the negative half of the stoichiometry and this is the
+     * positive one: what leaves through rent leaves as the body's own mix.
+     * Read on `aux`, which nothing seeds an emit weight for — so the minted
+     * scent path cannot be what put it there.
+     */
+    const run = (excrete: number): { conP: number; dupP: number; aux: number } => {
+      const p = chemistryParams();
+      p.upkeep = 0.5;
+      p.upkeepExcrete = excrete;
+      /*
+       * The mint off, which is the isolation this needs. `CH.aux` is also the
+       * free-port marker — `Sim.deposit` lays it at every open socket — and
+       * that is minted at `params.deposit`, orders of magnitude above a rent.
+       * The two never collide in a running pond, because the marker is gated
+       * on `scentMints` and so exists only where excretion does not; here it
+       * would simply drown the thing under test.
+       */
+      p.deposit = 0;
+      const sim = new Sim(1600, 1200, 128);
+      loadPreset(sim, 'soup', p);
+      for (const a of sim.agents.values()) a.extra = 1;
+      for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
+      const d = sim.fields.data;
+      const tot = (ch: number): number => {
+        let s = 0;
+        for (let k = ch; k < d.length; k += CHANNELS) s += d[k];
+        return s;
+      };
+      return { conP: tot(CH.conP), dupP: tot(CH.dupP), aux: tot(CH.aux) };
+    };
+    // Rent destroyed, and with nothing minting there is nothing anywhere.
+    const off = run(0);
+    expect(off.conP + off.dupP + off.aux).toBeCloseTo(0, 12);
+    // Rent conserved, and the pond's Cons and Dups have laid down what they
+    // are made of — including the `aux` they share.
+    const on = run(1);
+    expect(on.conP).toBeGreaterThan(0);
+    expect(on.dupP).toBeGreaterThan(0);
+    expect(on.aux).toBeGreaterThan(0);
   });
 });
 

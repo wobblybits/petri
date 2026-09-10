@@ -14,6 +14,8 @@ import {
   IN_SENSE,
   P_BASE,
   ROW_COUNT,
+  ROW_EXCRETE,
+  ROW_UPTAKE,
   STATE_DIMS,
   TASTE,
   T_OUT,
@@ -940,6 +942,65 @@ export function emitVector(chem: Float32Array, g: number, h: Float64Array, ho: n
   }
 }
 
+/**
+ * What a kind's metabolism makes, and what it can eat, at the seed.
+ *
+ * `X`'s eight rows are one unit budget over four excretion reactions and four
+ * uptake ones, and a genome seeded to zero takes `expressVector`'s flat
+ * fallback: an eighth each, which says every kind produces all four species
+ * equally and eats all four equally. That is a body with no metabolism in
+ * particular, and it is not what any of the three kinds are.
+ *
+ * A Con makes `conP` and `aux`, a Dup makes `dupP` and `aux`, and an Era makes
+ * ground — the same thing it has always done, now said in the same place as
+ * the other two rather than only through `farmRate` and the emit head. The
+ * plan's §3 table has held that the excretion rows subsume `effEmit` and
+ * `farmRate` since it was written; this is that half of it, at the seed.
+ *
+ * The uptake half is left at exactly even, which is what these particular
+ * numbers are for: four uptake rows at a half, against a production half
+ * summing to two, leaves every uptake row on an eighth — the flat fallback's
+ * own value. A fresh body eats like a generalist and speaks like its kind, and
+ * nothing about what it can digest has been decided for it.
+ *
+ * Inherited and mutated, not learned: `X` sits outside the plastic span on
+ * purpose (plan §8). What moves within a life is regulation — the rows read
+ * `h`, so a body shifts its own mix with its state, and the learned weights
+ * that shape `h` move it indirectly. A lineage that ought to make something
+ * else gets there by breeding, which is the timescale a metabolism belongs on.
+ */
+function seedProduction(c: Float32Array, kind: AgentKind): void {
+  const x = X_BASE + ROW_EXCRETE;
+  if (kind === 'con') {
+    c[x + CH.conP] = 1;
+    c[x + CH.aux] = 1;
+  } else if (kind === 'dup') {
+    c[x + CH.dupP] = 1;
+    c[x + CH.aux] = 1;
+  } else {
+    c[x + CH.energy] = 2;
+  }
+  const u = X_BASE + ROW_UPTAKE;
+  for (let i = 0; i < CHEM_SPECIES; i++) c[u + i] = 0.5;
+}
+
+/**
+ * This body's metabolism as one signed vector: what it makes, less what it
+ * takes, per species.
+ *
+ * The eight rows are four reactions each way, so the thing a reader actually
+ * wants to know — is this body a source or a sink for `aux` — is a difference
+ * and not a row. Derived rather than stored: a genome can express both rows
+ * for one species at once, which is a futile cycle and a real thing to drift
+ * into, and collapsing the pair in storage would make that unrepresentable
+ * rather than merely wasteful.
+ */
+export function metabolismOf(express: Float64Array, o: number, out: Float64Array, oo: number): void {
+  for (let c = 0; c < CHEM_SPECIES; c++) {
+    out[oo + c] = express[o + ROW_EXCRETE + c] - express[o + ROW_UPTAKE + c];
+  }
+}
+
 /** The taste vector. Signed, and not normalised — a taste weight is compared
  *  against other taste weights rather than spent, so there is no budget. */
 export function tasteVector(chem: Float32Array, g: number, h: Float64Array, ho: number, out: Float64Array, oo: number): void {
@@ -1136,6 +1197,7 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
   c[L_BASE] = params.stepSpeed / HEAD_SCALE.cruise;
   c[L_BASE + 1] = params.turnRate / HEAD_SCALE.turn;
   seedGait(c, kind);
+  seedProduction(c, kind);
   if (kind === 'con') {
     c[EMIT] = 1;
     c[TASTE + 1] = M;

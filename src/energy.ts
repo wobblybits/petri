@@ -1,6 +1,6 @@
 import type { Agent, AgentKind } from './agents.ts';
 import { CH, CHANNELS, FIELD_CELL, type Fields } from './fields.ts';
-import { CHEM_LEN, uptakeKsOf } from './chem-layout.ts';
+import { CHEM_LEN, ROW_COUNT, ROW_EXCRETE, uptakeKsOf } from './chem-layout.ts';
 import type { AgentStore } from './agent-store.ts';
 import { KIND_ERA } from './native/solver.ts';
 import type { Rule } from './rewrite.ts';
@@ -1561,6 +1561,7 @@ export function tickUpkeepFast(
   const eraRatio = opts.eraRatio ?? ERA_UPKEEP_RATIO;
   const LOCKED = store.locked;
   const KIND_CODE = store.kindCode;
+  const EXPRESS = store.expressAll;
   const EXTRA = store.extra;
   const CAP = store.energyCap;
   const FLOOR = store.debtCap;
@@ -1589,11 +1590,49 @@ export function tickUpkeepFast(
     // billed — a body in debt is not excreting anything.
     if (grid && excrete > 0) {
       const paid = Math.max(0, was) - Math.max(0, EXTRA[s]);
-      if (paid > 0) grid.addAt(X[s], Y[s], paid * excrete);
+      if (paid > 0) payOut(grid, EXPRESS, s, X[s], Y[s], paid * excrete);
     }
     if (was > floor && EXTRA[s] <= floor) dead.push(ID[s]);
   }
   return dead;
+}
+
+/** One body's payout mix, reused. */
+const PAYOUT = new Float64Array(CHANNELS);
+
+/**
+ * Rent, put back on the ground as whatever this body's metabolism makes.
+ *
+ * Upkeep is the negative half of a body's stoichiometry — the standing cost of
+ * existing, charged in the one currency — and this is the positive half. What
+ * a body is a *source* of is its excretion rows, so what leaves through rent
+ * leaves as that mix: a Con lays down `conP` and `aux`, a Dup `dupP` and
+ * `aux`, an Era ground. Which is what an Era's rent has always done, and it
+ * used to be all any body's rent could do.
+ *
+ * Two things follow, and both were already mechanisms rather than new ones. A
+ * body fouls the cell it is standing in, and after §4 the harvest is a sample
+ * of the water — so its own output dilutes its next mouthful and it has to
+ * move or eat its own exhaust. And what it lays down is another body's
+ * substrate, which is §1's claim about four species finally being paid for by
+ * something a body does whether it wants to or not.
+ *
+ * Falls back to ground when the rows are all zero, which is a pond running
+ * neither uptake nor excretion: `refreshExpression` never runs there, so the
+ * vector is the zero it was cleared to rather than a mix anyone chose, and
+ * ground is exactly what this used to do.
+ */
+function payOut(grid: EnergyGrid, express: Float64Array, slot: number, x: number, y: number, amount: number): void {
+  const eo = slot * ROW_COUNT + ROW_EXCRETE;
+  let sum = 0;
+  for (let c = 0; c < CHANNELS; c++) sum += express[eo + c];
+  if (!(sum > 0)) {
+    grid.addAt(x, y, amount);
+    return;
+  }
+  const k = amount / sum;
+  for (let c = 0; c < CHANNELS; c++) PAYOUT[c] = express[eo + c] * k;
+  grid.addSpeciesAt(x, y, PAYOUT);
 }
 
 /**

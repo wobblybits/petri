@@ -6729,7 +6729,9 @@ export class Sim {
    * was computed inside `runExcretion` at first, which meant a pond with
    * metered uptake and no excretion read an all-zero expression and took
    * nothing: the harvest's per-species `vmax` is the expression scaled, so
-   * zero expression is a body that cannot eat.
+   * zero expression is a body that cannot eat. `upkeepExcrete` is the third
+   * reader — rent leaves through the excretion rows, so a pond paying its rent
+   * back to the ground needs the mix even with both chemistry dials off.
    *
    * Computed on the host on both field paths — it is a pure function of `chem`
    * and `h`, and `unpackGenome` brings `h` back every frame, so the genome
@@ -6737,7 +6739,7 @@ export class Sim {
    * table. That pass is already at eight storage buffers of a guaranteed eight.
    */
   private refreshExpression(params: Params, t: number): void {
-    if (!(params.excreteRate > 0) && !(params.uptakeVmax > 0)) return;
+    if (!(params.excreteRate > 0) && !(params.uptakeVmax > 0) && !(params.upkeepExcrete > 0)) return;
     const store = this.agentStore;
     const CHEM = store.chemAll;
     const H = store.hAll;
