@@ -6808,12 +6808,16 @@ export class Sim {
    *   global rate, and clamped at one because a recipe is a capability and not
    *   an amplifier. A body expressing nothing on a row converts none of that
    *   species and holds it until excretion takes it away.
-   * - **Catabolism wants ground banked.** `catCoSubstrate` blends the other
-   *   three's rate against how full the tank is, which is §6b's co-substrate:
-   *   energy is the thing the others are converted *with*. Blended rather than
-   *   required, so a body with a little capability still does better than one
-   *   with none and selection has a slope to climb. Nothing is destroyed — the
-   *   gate buys access, never amplification.
+   * - **Catabolism spends ground.** `catCoSubstrate` is how many units of
+   *   `CH.energy` one unit of another species is converted *with*, drawn from
+   *   the gut and gone. A reagent, not a catalyst: it is a budget shared
+   *   across the three rows rather than a factor on their rate, so a body with
+   *   a little ground has to choose what to spend it on and one unit cannot
+   *   unlock everything. Continuous from zero, so a body with a little
+   *   capability still does better than one with none and selection has a
+   *   slope to climb rather than a cliff. Nothing is destroyed — the paired
+   *   ground lands in the tank alongside what it unlocked — so it still buys
+   *   access and never amplification.
    *
    * Bounded by room in the tank, which is what makes satiety three mechanisms
    * deep rather than a clamp: a full body cannot digest, so its gut fills, so
@@ -6845,36 +6849,69 @@ export class Sim {
       if (room <= 0) continue;
       const xo = s * ROW_COUNT + ROW_UPTAKE;
       /*
-       * How much of what this body is holding is ground.
+       * The ground is a *reagent*, not a catalyst.
        *
-       * The co-substrate has to be something that runs *out*, or "cannot live
-       * on scent alone" is not true of anything: a gate on the tank would let
-       * a body with a little banked convert scent without end, and converting
-       * scent is how it keeps a little banked. What is in the gut is consumed
-       * by the digesting, so a body standing on nothing but scent swallows
-       * nothing but scent, reads zero here, and starves on top of a feast —
-       * which is §6b's whole point, now asked inside the body rather than of
-       * the cell it happens to be standing in.
+       * §6b says the other three are converted *with* `CH.energy`, and a
+       * factor that only scales a rate says "in the presence of", which is a
+       * catalyst — one unit of ground in the gut licensed unlimited scent, and
+       * converting scent is how a body keeps a unit of ground. So the ground
+       * is spent here: `co` units of it per unit of species converted, drawn
+       * from what this body is holding, and gone.
+       *
+       * `pair` is that budget and it is shared across the three rows, which is
+       * the constraint the ratio could not express: a body with a little
+       * ground must choose what to spend it on. At `co` 0 it is unbounded and
+       * the ground is not drawn at all, which is what phase 3 shipped.
+       *
+       * Nothing is destroyed — the paired ground lands in the tank alongside
+       * what it unlocked, exactly as it would have on its own row. What it
+       * cannot do is unlock a second thing. Conservation is untouched and it
+       * still buys access rather than amplification.
        */
-      const gate = co > 0 ? 1 - co + co * (GUT[go + CH.energy] / held) : 1;
+      let pair = co > 0 ? GUT[go + CH.energy] : Infinity;
       let moved = 0;
-      for (let c = 0; c < CHEM_SPECIES && room > 0; c++) {
+      /*
+       * The three non-ground rows first, then the ground with whatever is
+       * left. The other order lets a body digest the co-substrate out from
+       * under its own catabolism in the same frame, and which reaction gets
+       * the last unit of ground would then be an artifact of species order
+       * rather than of anything a body is.
+       */
+      for (let k = 0; k < CHEM_SPECIES && room > 0; k++) {
+        // Ground last, so the loop is the three others in index order and then
+        // it; kept in step with the harvest's own arbitrary-but-fixed order.
+        const c = k === CHEM_SPECIES - 1 ? CH.energy : k >= CH.energy ? k + 1 : k;
         const have = GUT[go + c];
         if (have <= 0) continue;
+        const ground = c === CH.energy;
         let use = 1;
-        if (c !== CH.energy) {
+        if (!ground) {
           const row = ROW_COUNT * EX[xo + c];
-          use = (row > 1 ? 1 : row) * gate;
+          use = row > 1 ? 1 : row;
         }
         if (!(use > 0)) continue;
         // Mass action, as an exponential rather than a product, so a rate
         // above one frame's worth cannot take more than the body is holding.
         let take = have * (1 - Math.exp(-rate * use * t));
-        if (take > room) take = room;
+        // What it costs in ground, and what is left to pay with.
+        let spend = 0;
+        if (!ground && co > 0) {
+          if (take * co > pair) take = pair / co;
+          spend = take * co;
+        }
+        if (take + spend > room) {
+          const k2 = room / (take + spend);
+          take *= k2;
+          spend *= k2;
+        }
         if (!(take > 0)) continue;
         GUT[go + c] = have - take;
-        room -= take;
-        moved += take;
+        if (spend > 0) {
+          GUT[go + CH.energy] -= spend;
+          pair -= spend;
+        }
+        room -= take + spend;
+        moved += take + spend;
       }
       if (moved > 0) EXTRA[s] += moved;
     }
