@@ -111,14 +111,38 @@ describe('preflight', () => {
       arms: [
         // `digestRate` differs because a constant set to the same value in
         // every arm is still *held*; carrying it means choosing it per arm.
-        { name: 'a', set: { excreteRate: 0, senseScale: 4.3, uptakeVmax: 0, digestRate: 0 } },
-        { name: 'b', set: { excreteRate: 0.015, senseScale: 0.002, uptakeVmax: 6, digestRate: 12 } },
+        { name: 'a', set: { excreteRate: 0, senseScale: 4.3, uptakeVmax: 0, digestRate: 0, gutSize: 0.5 } },
+        { name: 'b', set: { excreteRate: 0.015, senseScale: 0.002, uptakeVmax: 6, digestRate: 12, gutSize: 1 } },
       ],
       accepts: [{ axis: 'excreteRate', constant: 'deposit', because: 'inert above zero' }],
     };
     const pf = preflight(fixed);
     expect(pf.warnings).toEqual([]);
     expect(pf.accepted).toEqual(['excreteRate/deposit: inert above zero']);
+  });
+
+  it('flags the gut dials held across the metering switch, and records an acceptance of them', () => {
+    const across: Protocol = {
+      ...tiny,
+      arms: [
+        { name: 'a', set: { excreteRate: 0, senseScale: 4.3, uptakeVmax: 0 } },
+        { name: 'b', set: { excreteRate: 0.015, senseScale: 0.002, uptakeVmax: 6 } },
+      ],
+      accepts: [{ axis: 'excreteRate', constant: 'deposit', because: 'inert above zero' }],
+    };
+    const pf = preflight(across);
+    expect(pf.warnings.some((w) => w.includes('uptakeVmax/digestRate'))).toBe(true);
+    expect(pf.warnings.some((w) => w.includes('uptakeVmax/gutSize'))).toBe(true);
+    const accepted = preflight({
+      ...across,
+      accepts: [
+        ...across.accepts!,
+        { axis: 'uptakeVmax', constant: 'digestRate', because: 'inert in the minted arm' },
+        { axis: 'uptakeVmax', constant: 'gutSize', because: 'inert in the minted arm' },
+      ],
+    });
+    expect(accepted.warnings).toEqual([]);
+    expect(accepted.accepted).toContain('uptakeVmax/digestRate: inert in the minted arm');
   });
 
   it('warns about an acceptance nothing tripped', () => {

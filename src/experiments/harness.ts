@@ -78,10 +78,16 @@ export interface Sample {
   annihilations: number;
   latches: number;
   snaps: number;
-  /** Energy: stock in bodies, on the ground, in escrow. */
+  /** Energy: stock in bodies, on the ground channel, in escrow. */
   free: number;
   ground: number;
   escrow: number;
+  /**
+   * Swallowed and not yet digested, across the pond, every species. In
+   * neither a tank nor the ground, and a total that leaves it out reads every
+   * mouthful in transit as matter that went missing — see `Sim.totalGut`.
+   */
+  gut: number;
   meanExtra: number;
   /** Fraction of bodies that could pay a rewrite share right now. */
   canPay: number;
@@ -183,6 +189,7 @@ export function sampleSim(sim: Sim, t: number): Sample {
     free: sim.totalFree(),
     ground: sim.energy.storedTotal(),
     escrow: sim.escrowTotal(),
+    gut: sim.totalGut(),
     meanExtra: n > 0 ? extraSum / n : 0,
     canPay: n > 0 ? canPay / n : 0,
     ppWires: pp,

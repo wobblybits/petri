@@ -77,7 +77,7 @@ function library(rows: Planted[], tweak?: (p: Params, i: number) => void): PondD
         snaps: 2,
         free: 900,
         ground: 500 - 100 * p.patches + 5 * r(),
-        escrow: 3,
+        escrow: 3, gut: 0,
         meanExtra: 2 + r(),
         canPay: 0.8,
         ppWires: 100,

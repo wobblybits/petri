@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bareBody, expressVector, metabolismOf, seedChem, uptakeKsOf } from './agents.ts';
+import { bareBody, expressVector, seedChem, uptakeKsOf } from './agents.ts';
 import { CHEM_LEN, CHEM_SPECIES, ERA_GROUND_SHARE, KS_BASE, ROW_COUNT, ROW_EXCRETE, ROW_UPTAKE, STATE_DIMS, X_BASE, X_OUT } from './chem-layout.ts';
 import { HarvestPlan, REWRITE_SHARE, harvestSlotsFast, rewriteCost } from './energy.ts';
 import { CH, CHANNELS } from './fields.ts';
@@ -595,6 +595,20 @@ describe('superadditivity', () => {
   });
 });
 
+/**
+ * A body's metabolism as one signed vector: what it makes, less what it takes,
+ * per species. The eight rows are four reactions each way, so "is this body a
+ * source or a sink for `aux`" is a difference and not a row. A test helper
+ * rather than a sim export, because nothing in the sim asks the question —
+ * `measure.ts` reads the rows themselves — and an export nothing reads is a
+ * promise the code is not keeping.
+ */
+function metabolismOf(express: Float64Array): number[] {
+  const out: number[] = [];
+  for (let c = 0; c < CHEM_SPECIES; c++) out.push(express[ROW_EXCRETE + c] - express[ROW_UPTAKE + c]);
+  return out;
+}
+
 describe('what a kind makes', () => {
   /*
    * §3's table, at the seed. The eight rows are one budget over four
@@ -606,10 +620,8 @@ describe('what a kind makes', () => {
     const chem = seedChem(kind, defaultParams());
     const h = new Float64Array(STATE_DIMS);
     const express = new Float64Array(ROW_COUNT);
-    const out = new Float64Array(CHEM_SPECIES);
     expressVector(chem, 0, h, 0, express, 0);
-    metabolismOf(express, 0, out, 0);
-    return [...out];
+    return metabolismOf(express);
   };
 
   it('makes a Con a source of conP and aux, and a Dup of dupP and aux', () => {

@@ -51,11 +51,11 @@ struct FieldParams {
   uptakeKs: f32,
   // Hill coefficient on uptake; 1 is plain Monod. See `UptakeKinetics.hillN`.
   hillN: f32,
-  // How much the non-ground species need `CH.energy` present to be
-  // metabolised. Read by the host's `runDigestion`, not here: swallowing and
-  // converting are two different questions and only the first is this pass.
-  // Kept in the struct because the uniform is packed by index.
-  coSubstrate: f32,
+  // Reserved. It carried `catCoSubstrate` while the co-substrate was a factor
+  // in this pass; catabolism is the host's `runDigestion` on both field paths
+  // now, so nothing here reads it. The slot stays because the uniform is a
+  // whole number of sixteen-byte blocks and is packed by index.
+  pad5: f32,
   pad6: f32,
   pad7: f32,
 }
@@ -120,7 +120,8 @@ struct HarvestBlock {
 
 @group(0) @binding(7) var<storage, read> hBlocks: array<HarvestBlock>;
 /*
- * Room in on each body's tank, what it got out, in the same slot.
+ * Room in each body's gut (its tank, on the unmetered path), and what it got
+ * out per species, in the same row.
  *
  * One buffer rather than two because WebGPU guarantees only eight storage
  * buffers per compute stage and this pass would have been the ninth — the
@@ -131,10 +132,12 @@ struct HarvestBlock {
  */
 @group(0) @binding(8) var<storage, read_write> hFlow: array<f32>;
 
-// One entry's row in `hFlow`, from `energy.ts`: the room in that body's tank,
-// then a rate and an affinity per species. `got` overwrites the rates on the
-// way back out, which is safe because they are read before anything is
-// written and a separate output span would double the buffer.
+// One entry's row in `hFlow`, from `energy.ts`: the room in that body's gut,
+// the frame's whole uptake budget, then an affinity per species. `got`
+// overwrites the affinities on the way back out, which is safe because they
+// are read before anything is written and a separate output span would double
+// the buffer; `room` and `total` sit below and are read first. Literals here,
+// pinned to `energy.ts`'s exports by `field-kernel.test.ts`.
 const HARVEST_ROOM: u32 = 0u;
 const HARVEST_TOTAL: u32 = 1u;
 const HARVEST_KS: u32 = 2u;
@@ -518,7 +521,7 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
    * the whole budget for the frame and each species may have at most its share
    * of it, `total * density / stock`, so the shares sum to the budget however
    * rich or filthy the cell is and nobody may eat only the good part. One
-   * tank, four species competing for it: `left` is the room after the species
+   * gut, four species competing for it: `left` is the room after the species
    * already taken, so a body that fills on the first thing it finds does not
    * also take the rest. Species in index order, which is arbitrary and has to
    * match `runHarvestPlan` exactly.
@@ -534,7 +537,9 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
     }
     density = sum / cells;
   }
-  let stock = density.x + density.y + density.z + density.w;
+  // Only what is actually there: a cell can sit below zero after a diffusion
+  // step, and the host counts the positive densities alone. Same line.
+  let stock = dot(max(density, vec4f(0.0)), vec4f(1.0));
   for (var e = 0u; e < blk.count; e++) {
     let ro = (blk.first + e) * HARVEST_STRIDE;
     // `room` is room in the body's gut; the host computes it, because what a
@@ -553,13 +558,14 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
       var got = 0.0;
       if (left > FLOW_EPS && total > 0.0 && density[c] > 0.0 && stock > 0.0) {
         /*
-         * `vmax` is the whole budget for every species: how fast a body can
+         * `total` stands in for `vmax` on every species: how fast a body can
          * pull one out of the water is a transporter question, and a body
          * standing in nothing but one species may spend its whole mouthful on
          * it. What it can *do* with what it swallowed is the host's
          * `runDigestion`, not this. Hill at `n`; 1 is plain Monod and does not
-         * pay for the two `pow` calls. Kept in step with `runHarvestPlan` by
-         * hand.
+         * pay for the two `pow` calls, and the host resolves a non-positive
+         * `hillN` to 1 before it is uploaded, so `!= 1.0` is the whole test.
+         * Kept in step with `runHarvestPlan` by hand.
          */
         var sN = density[c];
         var kN = ks[c];

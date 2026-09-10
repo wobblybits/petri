@@ -192,11 +192,14 @@ export const ROW_COUNT = 2 * CHEM_SPECIES;
  * the plan commits to, is a reaction whose rate constant comes from here —
  * nothing more. Row-major by row: `X_OUT + row * STATE_DIMS + d`.
  *
- * Seeded to zero along with its base, so a body expresses nothing and every
- * reaction runs at whatever constant it ran at before this existed. The rows
- * are read through a unit simplex like `emitVector`'s, so this is a budget
- * rather than eight independent dials: a body cannot both shout and eat
- * without giving something up, which is the trade-off division of labour
+ * The matrix seeds to zero; the bases are written by `seedProduction`, so a
+ * fresh body already expresses its kind's production half and an even uptake
+ * half (`SEED_PRODUCTION`, `SEED_UPTAKE`). Every reaction still runs at the
+ * constant it ran at before this existed, because those constants carry
+ * `ROW_COUNT` and the uptake rows land on the flat fallback's own eighth. The
+ * rows are read through a unit simplex like `emitVector`'s, so this is a
+ * budget rather than eight independent dials: a body cannot both shout and
+ * eat without giving something up, which is the trade-off division of labour
  * needs and the reason the head is one head and not eight.
  *
  * Outside `[PLASTIC_BASE, PLASTIC_BASE + PLASTIC_LEN)` on purpose — see the
@@ -229,16 +232,31 @@ export const X_BASE = X_OUT + ROW_COUNT * STATE_DIMS;
 export const KS_BASE = X_BASE + ROW_COUNT;
 
 /**
- * What share of its whole chemical budget a seeded Era puts on making ground.
+ * What `seedProduction` writes: the bias on a kind's production rows, and the
+ * bias on every uptake row.
  *
- * `seedProduction` writes a bias of 2 against four uptake rows at a half, so
- * after normalisation the ground's excretion row is exactly this. Written down
- * because two places read it as a *scale* rather than a value: the producer's
- * upkeep discount is "how far along is this body toward what an Era expresses",
- * and one of the two would drift silently if the number lived only at the
- * seed. `chemistry.test.ts` pins them together.
+ * Chosen together so that the uptake half lands on exactly an eighth a row —
+ * the flat fallback's own value, which is what a seeded genome expressed
+ * before any kind produced anything in particular. Four uptake rows at
+ * `SEED_UPTAKE` against production summing to `SEED_PRODUCTION` is a simplex
+ * of `SEED_PRODUCTION + CHEM_SPECIES * SEED_UPTAKE`, and `SEED_UPTAKE` over
+ * that has to be `1 / ROW_COUNT`. A kind with two production species splits
+ * `SEED_PRODUCTION` between them.
  */
-export const ERA_GROUND_SHARE = 0.5;
+export const SEED_PRODUCTION = 2;
+export const SEED_UPTAKE = 0.5;
+
+/**
+ * What share of its whole chemical budget a seeded Era puts on making ground:
+ * its entire production half, after normalisation.
+ *
+ * Derived from the seed rather than restated beside it, because two places
+ * read it as a *scale* — the producer's upkeep discount is "how far along is
+ * this body toward what an Era expresses" — and a copy of the number would
+ * drift the moment the seed moved. `chemistry.test.ts` pins the derivation to
+ * what `expressVector` actually produces.
+ */
+export const ERA_GROUND_SHARE = SEED_PRODUCTION / (SEED_PRODUCTION + CHEM_SPECIES * SEED_UPTAKE);
 
 /**
  * `G`, state -> gait, and its base. One row: `anchor`.

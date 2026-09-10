@@ -136,13 +136,18 @@ const ACCEPT_DEPOSIT: Accepted = {
   constant: 'deposit',
   because: 'deposit is inert in the conserved arm and the minted arm keeps its default; there is nothing to re-choose',
 };
-const ACCEPT_GUT: Accepted = {
-  axis: 'uptakeVmax',
-  constant: 'digestRate',
-  because:
-    'nothing fills a gut in the minted arm, so digestRate and gutSize are inert there and the ' +
-    'conserved arm keeps their defaults; there is nothing to re-choose',
-};
+const ACCEPT_GUT: Accepted[] = [
+  {
+    axis: 'uptakeVmax',
+    constant: 'digestRate',
+    because: 'nothing fills a gut in the minted arm, so digestRate is inert there and the conserved arm keeps its default; there is nothing to re-choose',
+  },
+  {
+    axis: 'uptakeVmax',
+    constant: 'gutSize',
+    because: 'nothing fills a gut in the minted arm, so gutSize bounds nothing there and the conserved arm keeps its default; there is nothing to re-choose',
+  },
+];
 
 export const PROTOCOLS: Protocol[] = [
   /*
@@ -359,7 +364,7 @@ export const PROTOCOLS: Protocol[] = [
       'signalling pond, it is the pre-chemistry pond with extra machinery.',
     arms: [MINTED, CONSERVED],
     axes: {},
-    accepts: [ACCEPT_DEPOSIT, ACCEPT_GUT],
+    accepts: [ACCEPT_DEPOSIT, ...ACCEPT_GUT],
     seeds: 5,
     seconds: 600,
     soupCount: 500,
@@ -407,7 +412,7 @@ export const PROTOCOLS: Protocol[] = [
     base: { energyRegrow: 0, groundPatches: 8 },
     accepts: [
       ACCEPT_DEPOSIT,
-      ACCEPT_GUT,
+      ...ACCEPT_GUT,
       {
         axis: 'ambientEnergy',
         constant: 'uptakeKs',

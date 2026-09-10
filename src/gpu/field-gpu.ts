@@ -356,7 +356,7 @@ export class FieldGpu {
     decayRate: number,
     grow: { ch: number; r: number; cap: number; catCh: number; gamma: number },
     react: { u: number; v: number; feed: number; kill: number; dt: number },
-    harvest: { ch: number; blocks: number; entries: number; uptakeCap: number; uptakeKs: number; hillN: number; coSubstrate: number },
+    harvest: { ch: number; blocks: number; entries: number; uptakeCap: number; uptakeKs: number; hillN: number },
     fill: { ch: number; value: number } | null,
   ): Promise<boolean> {
     if (!this.submit(fields, nDeposit, nProbe, mix, mix2, decayRate, grow, react, harvest, fill)) {
@@ -375,7 +375,7 @@ export class FieldGpu {
     decayRate: number,
     grow: { ch: number; r: number; cap: number; catCh: number; gamma: number },
     react: { u: number; v: number; feed: number; kill: number; dt: number },
-    harvest: { ch: number; blocks: number; entries: number; uptakeCap: number; uptakeKs: number; hillN: number; coSubstrate: number },
+    harvest: { ch: number; blocks: number; entries: number; uptakeCap: number; uptakeKs: number; hillN: number },
     fill: { ch: number; value: number } | null,
   ): boolean {
     const device = this.device;
@@ -431,7 +431,9 @@ export class FieldGpu {
       f32[38] = harvest.uptakeCap;
       f32[39] = harvest.uptakeKs;
       f32[40] = harvest.hillN;
-      f32[41] = harvest.coSubstrate;
+      // Slot 41 is `pad5`: catabolism left this pass for the host. Zeroed
+      // rather than skipped so a reused buffer cannot carry a stale value.
+      f32[41] = 0;
       device.queue.writeBuffer(this.uniform!, 0, u);
       if (nDeposit > 0) {
         device.queue.writeBuffer(

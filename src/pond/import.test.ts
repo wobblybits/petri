@@ -47,7 +47,7 @@ function seed(path: string, count: number, opts: { parents?: boolean } = {}): nu
       db.addSample(id, {
         t: 10, bodies: 100 + i, wires: 50, lines: 3, bornMean: 1, bornMax: 2, spawned: 0,
         born: 1, died: 0, commutes: 5, erases: 0, annihilations: 0, latches: 9, snaps: 0,
-        free: 1, ground: 2, escrow: 0, meanExtra: 1, canPay: 1, ppWires: 1, conDupWires: 1,
+        free: 1, ground: 2, escrow: 0, gut: 0, meanExtra: 1, canPay: 1, ppWires: 1, conDupWires: 1,
         commuteShare: null, commuteChance: 0.2, commuteEdge: null, matrixDrift: 0,
         diversity: { netFst: 0.1 },
       });

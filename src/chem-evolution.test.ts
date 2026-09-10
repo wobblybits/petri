@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { CHEM_LEN, EMIT, E_OUT, STATE_DIMS, TASTE, T_OUT, bareBody, effEmit, effTaste, emitEnergy, seedChem, type Agent } from './agents.ts';
+import { CHEM_LEN, EMIT, E_OUT, STATE_DIMS, TASTE, T_OUT, bareBody, effEmit, effTaste, emitVector, seedChem, type Agent } from './agents.ts';
+
+/**
+ * The emit head's ground slot. Nothing in the sim reads it any more — farming
+ * is the ground's excretion row on the expression head — so the accessor
+ * lives here, where the one thing still asked of the slot is asked: that it
+ * is a quarter of the simplex and seeds the way it always did.
+ */
+function emitEnergy(a: Agent): number {
+  const out = new Float64Array(4);
+  emitVector(a.chem, 0, a.h, 0, out, 0);
+  return out[CH.energy];
+}
 import { CHEM_SLOPE_MAX } from './rewrite.ts';
 import { CH } from './fields.ts';
 import { CHEM_TASTE_MAX } from './rewrite.ts';

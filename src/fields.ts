@@ -26,13 +26,28 @@ export const CHANNELS = 4;
 /**
  * The channels that carry a *signal* — everything but the ground.
  *
- * Not the same set as the emit budget, which is all four. A body can spend its
- * voice on the ground (that is farming: stock converted into ground, see
- * the ground's excretion row), but the ground is a substance rather than something
- * anybody is saying, so `peak` and anything asking "is this pond audible"
- * wants these three.
+ * Not the same set as the emit budget, which is still four wide: its ground
+ * slot is read by nothing since farming became the ground's excretion row on
+ * the expression head (see `effEmit`), and it stays only because dropping it
+ * would renormalise every genome in the library. The ground is a substance
+ * rather than something anybody is saying, so `peak` and anything asking "is
+ * this pond audible" wants these three.
  */
 export const VOICE = [CH.conP, CH.dupP, CH.aux] as const;
+
+/**
+ * The order a body digests what it swallowed: the three signalling species,
+ * then the ground.
+ *
+ * Not the harvest's order, and on purpose. The harvest visits species in
+ * index order, which is arbitrary and only has to match the shader; digestion
+ * spends the ground as the co-substrate the other three are converted *with*
+ * (`Sim.runDigestion`), so the ground has to be paired off last or a body
+ * digests it out from under its own catabolism in the same frame — and which
+ * reaction got the last unit would then be an artifact of where `CH.energy`
+ * happens to sit in the channel list rather than of anything a body is.
+ */
+export const DIGEST_ORDER = [CH.conP, CH.dupP, CH.aux, CH.energy] as const;
 
 /**
  * The channel whose presence accelerates the ground's regrowth — the fertiliser
@@ -42,7 +57,8 @@ export const VOICE = [CH.conP, CH.dupP, CH.aux] as const;
  * free port lays a flat marker into aux whatever its genome says, so
  * fertility keyed on aux would be a property of having sockets rather than
  * something a lineage decides to spend its voice on — and the whole point is
- * that farming and being heard come out of the same unit budget.
+ * that being heard is a unit budget a body divides, so fertilising is
+ * something it gives up something else for.
  *
  * A constant rather than a slider: an integer channel index in the parameter
  * list invites configurations that mean nothing. Change it here.

@@ -23,10 +23,16 @@ describe('couplings', () => {
     expect(warnings.map((w) => w.constant)).toContain('senseScale');
     // `uptakeVmax` used to be here too; see the retirement note on the table.
     expect(warnings.map((w) => w.constant)).not.toContain('uptakeVmax');
+    // And the gut dials are coupled to the metering switch, both of them.
+    const gut = checkCouplings(['uptakeVmax']).map((w) => w.constant);
+    expect(gut).toContain('digestRate');
+    expect(gut).toContain('gutSize');
   });
 
   it('is quiet when the coupled constant moves with the axis, on the grid or per arm', () => {
-    const moved = ['senseScale', 'uptakeVmax', 'deposit', 'digestRate'];
+    // `digestRate` and `gutSize` are here for the `uptakeVmax` axis in the
+    // grid form; per arm they are moot, because `uptakeVmax` is not an axis.
+    const moved = ['senseScale', 'uptakeVmax', 'deposit', 'digestRate', 'gutSize'];
     expect(checkCouplings(['excreteRate', ...moved])).toEqual([]);
     expect(checkCouplings(['excreteRate'], moved)).toEqual([]);
   });

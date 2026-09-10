@@ -63,9 +63,15 @@ export const COUPLINGS: readonly Coupling[] = [
     axis: 'uptakeVmax',
     constant: 'digestRate',
     why:
-      'nothing fills a gut at uptakeVmax 0, so digestRate and gutSize are inert there and ' +
-      'decide how much of a mouthful is ever worth anything above it',
-    fix: 'read the gut dials within a metered arm, never across the uptakeVmax 0 boundary',
+      'nothing fills a gut at uptakeVmax 0, so digestRate is inert there and decides how much ' +
+      'of a mouthful is ever worth anything above it',
+    fix: 'read digestRate within a metered arm, never across the uptakeVmax 0 boundary',
+  },
+  {
+    axis: 'uptakeVmax',
+    constant: 'gutSize',
+    why: 'nothing fills a gut at uptakeVmax 0, so gutSize bounds nothing there and bounds every mouthful above it',
+    fix: 'read gutSize within a metered arm, never across the uptakeVmax 0 boundary',
   },
   {
     axis: 'excreteRate',

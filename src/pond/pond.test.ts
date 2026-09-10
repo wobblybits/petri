@@ -349,7 +349,7 @@ describe('sweeps', () => {
         db.addSample(id, {
           t: 10, bodies, wires: 0, lines: 1, bornMean: 0, bornMax: 0,
           spawned: 0, born: 0, died: 0, commutes: 0, erases: 0, annihilations: 0,
-          latches: 0, snaps: 0, free: 0, ground: 0, escrow: 0, meanExtra: 0,
+          latches: 0, snaps: 0, free: 0, ground: 0, escrow: 0, gut: 0, meanExtra: 0,
           canPay: 0, ppWires: 0, conDupWires: 0, commuteShare: null,
           commuteChance: 0, commuteEdge: null, matrixDrift: 0,
           diversity: { netFst: fst },
@@ -429,7 +429,7 @@ describe('sweeps', () => {
         second.addSample(runId, {
           t: 0, bodies: 1, wires: 0, lines: 1, bornMean: 0, bornMax: 0,
           spawned: 0, born: 0, died: 0, commutes: 0, erases: 0, annihilations: 0,
-          latches: 0, snaps: 0, free: 0, ground: 0, escrow: 0, meanExtra: 0,
+          latches: 0, snaps: 0, free: 0, ground: 0, escrow: 0, gut: 0, meanExtra: 0,
           canPay: 0, ppWires: 0, conDupWires: 0, commuteShare: null,
           commuteChance: 0, commuteEdge: null, matrixDrift: 0,
           diversity: { netFst: 0.5 },

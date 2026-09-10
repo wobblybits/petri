@@ -259,54 +259,13 @@ describe('harvest slots', () => {
     expect(uptakeRate(0.5, 2, 0.25)).toBeGreaterThan(uptakeRate(0.25, 2, 0.25));
   });
 
-  it('takes what fits, exactly as before, at uptakeVmax zero', () => {
-    // Bit-identical, not close: the whole discipline of the plan is that a
-    // dial at its neutral value leaves the pond it was added to alone.
-    const plain = new EnergyGrid(10, 1);
-    const a1 = body(1, 2, 2);
-    harvestSlots([a1], plain);
-
-    const metered = new EnergyGrid(10, 1);
-    const a2 = body(1, 2, 2);
-    harvestSlots([a2], metered, { cap: 0, ks: 0.25, yDirect: 1, yEra: 1, hillN: 1, gutSize: 1 });
-
-    expect(a2.extra).toBe(a1.extra);
-    expect(metered.getAt(2, 2)).toBe(plain.getAt(2, 2));
-  });
-
-  it('shares a contested cell instead of handing it to the lowest id', () => {
-    // The sibling test above — 'gives a shared cell of 1 to the lower id
-    // only' — is the artifact this removes. Same cell, same two bodies.
-    const grid = new EnergyGrid(10, 1);
-    const a = body(1, 2, 2);
-    const b = body(2, 3, 2);
-    // A rate well under the cell's stock, so neither can drain it in a frame.
-    harvestSlots([a, b], grid, { cap: 0.2, ks: 0.25, yDirect: 1, yEra: 1, hillN: 1, gutSize: 1 });
-    expect(a.extra).toBeGreaterThan(0);
-    expect(b.extra).toBeGreaterThan(0);
-    // Drawn concurrently, so they get the same rate; order stops mattering
-    // except at exhaustion.
-    expect(b.extra).toBeCloseTo(a.extra, 9);
-    expect(a.extra + b.extra).toBeLessThanOrEqual(1 + 1e-9);
-  });
-
-  it('caps a rich cell at the rate and a poor one below it', () => {
-    const rich = new EnergyGrid(10, 4);
-    const r = body(1, 2, 2);
-    harvestSlots([r], rich, { cap: 0.2, ks: 0.25, yDirect: 1, yEra: 1, hillN: 1, gutSize: 1 });
-    // Saturated: near vmax*dt, and nowhere near the tank's room.
-    expect(r.extra).toBeGreaterThan(0.18);
-    expect(r.extra).toBeLessThanOrEqual(0.2 + 1e-9);
-
-    const poor = new EnergyGrid(10, 0.05);
-    const p = body(1, 2, 2);
-    harvestSlots([p], poor, { cap: 0.2, ks: 0.25, yDirect: 1, yEra: 1, hillN: 1, gutSize: 1 });
-    // Below half-saturation, so the rate is well under vmax — and this is the
-    // half of Monod that makes a low-Ks scavenger a viable different strategy
-    // rather than a strictly worse grazer.
-    expect(p.extra).toBeLessThan(r.extra);
-    expect(p.extra).toBeCloseTo(uptakeRate(0.05, 0.2, 0.25), 9);
-  });
+  /*
+   * The metered path is not pinned here. `harvestSlots` is the take-what-fits
+   * reference and nothing more; the sampled mouthful — the share ceiling, the
+   * contested cell, the rich cell at the rate and the poor one under it — is
+   * pinned in `chemistry.test.ts` against `harvestSlotsFast` with a store,
+   * which is the path the pond runs and the one `field.wgsl` mirrors.
+   */
 
   it('does not fill a slot that is already at the cap', () => {
     const grid = new EnergyGrid(10, 1);

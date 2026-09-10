@@ -3,6 +3,8 @@ import {
   CHEM_LEN,
   CHEM_SPECIES,
   EMIT,
+  SEED_PRODUCTION,
+  SEED_UPTAKE,
   E_OUT,
   F_BASE,
   G_BASE,
@@ -957,11 +959,12 @@ export function emitVector(chem: Float32Array, g: number, h: Float64Array, ho: n
  * plan's §3 table has held that the excretion rows subsume `effEmit` and
  * `farmRate` since it was written; this is that half of it, at the seed.
  *
- * The uptake half is left at exactly even, which is what these particular
- * numbers are for: four uptake rows at a half, against a production half
- * summing to two, leaves every uptake row on an eighth — the flat fallback's
- * own value. A fresh body eats like a generalist and speaks like its kind, and
- * nothing about what it can digest has been decided for it.
+ * The uptake half is left at exactly even, which is what `SEED_UPTAKE` and
+ * `SEED_PRODUCTION` are chosen for: every uptake row lands on an eighth — the
+ * flat fallback's own value — and the production half is `ERA_GROUND_SHARE`
+ * of the budget however a kind divides it. A fresh body eats like a
+ * generalist and speaks like its kind, and nothing about what it can digest
+ * has been decided for it.
  *
  * Inherited and mutated, not learned: `X` sits outside the plastic span on
  * purpose (plan §8). What moves within a life is regulation — the rows read
@@ -972,33 +975,16 @@ export function emitVector(chem: Float32Array, g: number, h: Float64Array, ho: n
 function seedProduction(c: Float32Array, kind: AgentKind): void {
   const x = X_BASE + ROW_EXCRETE;
   if (kind === 'con') {
-    c[x + CH.conP] = 1;
-    c[x + CH.aux] = 1;
+    c[x + CH.conP] = SEED_PRODUCTION / 2;
+    c[x + CH.aux] = SEED_PRODUCTION / 2;
   } else if (kind === 'dup') {
-    c[x + CH.dupP] = 1;
-    c[x + CH.aux] = 1;
+    c[x + CH.dupP] = SEED_PRODUCTION / 2;
+    c[x + CH.aux] = SEED_PRODUCTION / 2;
   } else {
-    c[x + CH.energy] = 2;
+    c[x + CH.energy] = SEED_PRODUCTION;
   }
   const u = X_BASE + ROW_UPTAKE;
-  for (let i = 0; i < CHEM_SPECIES; i++) c[u + i] = 0.5;
-}
-
-/**
- * This body's metabolism as one signed vector: what it makes, less what it
- * takes, per species.
- *
- * The eight rows are four reactions each way, so the thing a reader actually
- * wants to know — is this body a source or a sink for `aux` — is a difference
- * and not a row. Derived rather than stored: a genome can express both rows
- * for one species at once, which is a futile cycle and a real thing to drift
- * into, and collapsing the pair in storage would make that unrepresentable
- * rather than merely wasteful.
- */
-export function metabolismOf(express: Float64Array, o: number, out: Float64Array, oo: number): void {
-  for (let c = 0; c < CHEM_SPECIES; c++) {
-    out[oo + c] = express[o + ROW_EXCRETE + c] - express[o + ROW_UPTAKE + c];
-  }
+  for (let i = 0; i < CHEM_SPECIES; i++) c[u + i] = SEED_UPTAKE;
 }
 
 /** The taste vector. Signed, and not normalised — a taste weight is compared
@@ -1043,42 +1029,25 @@ const SCRATCH4 = new Float64Array(4);
 /**
  * Emit weight for one *signal* channel. Never negative.
  *
- * Still zero on `CH.energy`, and still here rather than at the three places
- * that lay a deposit. The ground is now something a body can spend its voice
- * on — see `emitEnergy` — but it must never reach the field through the scent
- * deposit path, because that path multiplies by `params.deposit`, which is
- * five. A body emitting a whole unit would put five units of food a frame into
- * the world out of nothing. Farming goes through the economy instead, at its
- * own rate and paid for; this stays the choke point that keeps the two apart.
+ * Zero on `CH.energy`, and the reason is now a choke point and nothing else.
+ * The ground is a thing a body can put into the field — that is the ground's
+ * excretion row, `runExcretion` at `excreteRate`, which is what farming became
+ * — but it must never reach the field through the scent deposit path, because
+ * that path multiplies by `params.deposit`, which is five. A body emitting a
+ * whole unit would put five units of food a frame into the world out of
+ * nothing.
+ *
+ * So the emit head's ground slot is read by nothing. It stays a quarter of
+ * `emitVector`'s simplex because dropping it would renormalise every genome
+ * in the library, and `seedChem` still writes an Era's unit of voice there
+ * because a seed says what a kind is for; what is left of the question is
+ * whether that simplex should be three wide, which is deferred for the same
+ * reason.
  */
 export function effEmit(a: Agent, c: number): number {
   if (c === CH.energy) return 0;
   emitVector(a.chem, 0, a.h, 0, SCRATCH4, 0);
   return SCRATCH4[c];
-}
-
-/**
- * What this body is putting into the ground: its emit weight on `CH.energy`.
- *
- * Nothing in the sim reads this any more. Farming was the reader, and §3's
- * table has now claimed it: ground production is `excrete_2` on the expression
- * head, at `excreteRate`, like every other species. The slot stays because it
- * is a quarter of `emitVector`'s simplex and removing it would renormalise
- * every genome in the library — and because a body spending voice on a channel
- * nothing hears is exactly the genetic load §8's F5 is about, which is now a
- * question about `emitVector`'s width rather than about farming.
- *
- * Separate from `effEmit` because it is not a signal and does not travel the
- * same road. The weight comes out of the same unit-sum budget as the three
- * things a body can say, which is the whole reason this is safe to allow:
- * spending voice on farming trades directly against being heard, so a body
- * that feeds the ground cannot also shout. That trade-off is what makes the
- * signalling honest — no separate cost term needed, and the tank pays for the
- * energy itself.
- */
-export function emitEnergy(a: Agent): number {
-  emitVector(a.chem, 0, a.h, 0, SCRATCH4, 0);
-  return SCRATCH4[CH.energy];
 }
 
 /** Taste weight for one channel. May be negative — that is avoidance. */
@@ -1247,7 +1216,7 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
      * the expression head now, and `seedProduction` is where an Era is told to
      * be a ground-maker. Left here because it is a quarter of a simplex and
      * because it still says what an Era is for, which is what a seed is; see
-     * `emitEnergy` for why the slot itself has not gone.
+     * `effEmit` for why the slot itself has not gone.
      */
     c[EMIT + CH.energy] = 1;
     c[TASTE] = S;
