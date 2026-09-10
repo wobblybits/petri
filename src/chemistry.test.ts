@@ -434,28 +434,38 @@ describe('uptake', () => {
 
   it('gives a fast grazer and a scavenger different answers', () => {
     /*
-     * The non-dominating pair, which is what §4 says the diversity comes from.
-     * Same expression, same ground, different affinity: on rich ground the
-     * high-affinity gene barely helps, and on poor ground it is most of the
-     * difference. Neither body wins everywhere, which is the property.
+     * What a lineage buys by breeding a better transporter depends on the dish
+     * it is standing in, which is what §4 says the diversity comes from. Same
+     * body, same expression, same species, different affinity: where there is
+     * plenty the high-affinity gene barely helps, and where there is not it is
+     * most of the difference. So no one gene is the answer everywhere, and
+     * there is something for selection to pull apart.
+     *
+     * One painted body and one harvest, the way `caps each species at its
+     * share of one budget` does it. Reading `a.extra` out of a soup was not
+     * the same question: the preset hands back whichever body it spawned
+     * first, and across the four arms that was a Con, a Dup, a Con and an Era
+     * — three kinds and three trophic yields, with the affinity the question
+     * is about somewhere underneath. The arms have to differ in the gene and
+     * in nothing else.
      */
-    const p = chemistryParams();
-    p.excreteRate = 0;
-    p.uptakeVmax = 1.5;
-    p.uptakeKs = 0.5;
+    const { sim, p, a, paint, gut, emptyGut } = oneBody((q) => {
+      q.uptakeVmax = 1.5;
+      q.uptakeKs = 0.5;
+    });
+    const kinetics = kineticsOf(p);
 
-    const run = (ambient: number, ksGene: number): number => {
-      const sim = new Sim(1600, 1200, 128);
-      const q = { ...p, ambientEnergy: ambient };
-      loadPreset(sim, 'soup', q);
-      const a = [...sim.agents.values()][0];
-      a.extra = 0;
-      // The gene is per species. `ambientEnergy` is what the two arms vary and
-      // the ground is the only species that converts raw, so the ground's
-      // affinity is the one this question is about.
+    const run = (density: number, ksGene: number): number => {
+      // The gene is per species. Density is what the two arms vary and the
+      // ground is the only species that converts raw, so the ground's affinity
+      // is the one this question is about.
       a.chem[KS_BASE + CH.energy] = ksGene;
-      for (let i = 0; i < 30; i++) sim.step(1 / 60, q);
-      return a.extra;
+      paint(alone(CH.energy, density));
+      // Room in the gut is what bounds a mouthful, so it is emptied between
+      // runs; the tank does not enter into it.
+      emptyGut();
+      harvestSlotsFast([a], sim.agentStore, sim.energy, new HarvestPlan(), kinetics);
+      return gut(CH.energy);
     };
 
     const richGeneralist = run(2, 1);
@@ -514,25 +524,47 @@ describe('trophic yield', () => {
   });
 
   it('makes an Era the net’s mouth without a mint', () => {
-    // §5's replacement for `ERA_UPKEEP_RATIO`: an Era's income comes from the
-    // ground under it, not from a rule keyed on its glyph.
-    const p = chemistryParams();
-    p.ambientEnergy = 1;
-    p.uptakeVmax = 1.5;
-    p.yDirect = 0.2;
-    p.yEra = 2;
-    const sim = new Sim(1600, 1200, 128);
-    loadPreset(sim, 'soup', p);
-    const cx = sim.w * 0.5;
-    const cy = sim.h * 0.5;
-    const era = sim.spawn('era', cx - 60, cy, 0, p, true)!;
-    const con = sim.spawn('con', cx + 60, cy, 0, p, true)!;
-    era.pinned = true;
-    con.pinned = true;
-    era.extra = 0;
-    con.extra = 0;
-    for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
-    expect(era.extra).toBeGreaterThan(con.extra * 2);
+    /*
+     * §5's replacement for `ERA_UPKEEP_RATIO`: an Era's income comes from the
+     * ground under it, not from a rule keyed on its glyph.
+     *
+     * Which is exactly what swapping the two yields over asks. If the glyph
+     * were doing the work the Era would win either way; it is the dial, so the
+     * answer swaps with it.
+     *
+     * That, and not a ratio. A mouthful ten times the size does not buy ten
+     * times the income: `total` scales with the yield but gut room does not,
+     * and gut room is the same for both, so satiety compresses a tenfold mouth
+     * to well under a twofold tank. This asked for twice and got 1.7, which is
+     * the bound reading a pond that had the gait's pathway draining both tanks
+     * when it was written rather than anything about the yield.
+     */
+    const earned = (yDirect: number, yEra: number): { era: number; con: number } => {
+      const p = chemistryParams();
+      p.ambientEnergy = 1;
+      p.uptakeVmax = 1.5;
+      p.yDirect = yDirect;
+      p.yEra = yEra;
+      // A different mechanism spending from the same tank — see `fed`, which
+      // takes it off for the same reason.
+      p.metabolicRate = 0;
+      const sim = new Sim(1600, 1200, 128);
+      loadPreset(sim, 'soup', p);
+      const cx = sim.w * 0.5;
+      const cy = sim.h * 0.5;
+      const era = sim.spawn('era', cx - 60, cy, 0, p, true)!;
+      const con = sim.spawn('con', cx + 60, cy, 0, p, true)!;
+      era.pinned = true;
+      con.pinned = true;
+      era.extra = 0;
+      con.extra = 0;
+      for (let i = 0; i < 60; i++) sim.step(1 / 60, p);
+      return { era: era.extra, con: con.extra };
+    };
+    const mouth = earned(0.2, 2);
+    expect(mouth.era, 'the Era eats better when the Era yield is the high one').toBeGreaterThan(mouth.con);
+    const swapped = earned(2, 0.2);
+    expect(swapped.con, 'and worse when it is not, which a glyph rule could not do').toBeGreaterThan(swapped.era);
   });
 });
 
@@ -555,7 +587,12 @@ describe('superadditivity', () => {
     loadPreset(sim, 'soup', p);
     const a = [...sim.agents.values()][0];
     a.extra = 1;
-    // Flat expression is all eight rows, so a seeded body pays for all eight.
+    // Said rather than assumed. A *seeded* body is not a generalist and has
+    // not been since the production rows were kind-seeded: it expresses the
+    // two or three it makes and all four it eats with, six rows of eight for a
+    // Con or a Dup and five for an Era. This is the generalist the sentence is
+    // about, so it is the one built here — every row switched on, evenly.
+    for (let r = 0; r < ROW_COUNT; r++) a.chem[X_BASE + r] = 1;
     // Charging it nothing would make "say nothing, act as a generalist" free
     // and strictly best at any cost, which is the opposite of the pressure.
     sim.step(1 / 60, p);
@@ -574,8 +611,11 @@ describe('superadditivity', () => {
     const specialist = bodies[1];
     generalist.extra = 1;
     specialist.extra = 1;
-    // Relu makes "switched off" an exact question, and driving a row's
-    // pre-activation below zero is how a lineage specialises.
+    // The two ends of the same axis, both built rather than inherited from the
+    // seed: `ROW_COUNT` rows against one. Relu makes "switched off" an exact
+    // question, and driving a row's pre-activation below zero is how a lineage
+    // specialises.
+    for (let r = 0; r < ROW_COUNT; r++) generalist.chem[X_BASE + r] = 1;
     for (let r = 1; r < ROW_COUNT; r++) specialist.chem[X_BASE + r] = -1;
     specialist.chem[X_BASE] = 1;
     sim.step(1 / 60, p);

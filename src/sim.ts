@@ -6785,11 +6785,14 @@ export class Sim {
        *
        * Counted on rows that are *expressed*, which relu makes an exact
        * question: a pre-activation at or below zero is a row switched off, and
-       * driving one there is how a lineage specialises. The all-zero seed
-       * takes `expressVector`'s flat fallback and so pays for all eight — it
-       * is expressing evenly, not expressing nothing, and charging it nothing
-       * would make "say nothing, act as a generalist" free and strictly best
-       * at any cost.
+       * driving one there is how a lineage specialises. A body whose `X` is
+       * all zero takes `expressVector`'s flat fallback and pays for all eight
+       * — it is expressing evenly, not expressing nothing, and charging it
+       * nothing would make "say nothing, act as a generalist" free and
+       * strictly best at any cost. The seed is not that body: `seedProduction`
+       * gives it the rows it makes and the four it eats with, so a seeded Con
+       * or Dup pays for six of eight and a seeded Era for five, which is the
+       * breadth each of them actually runs.
        *
        * Excreted on the same terms as upkeep, and for the same reason: what
        * left a tank has to arrive somewhere or a dial nobody turned on is
