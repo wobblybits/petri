@@ -261,6 +261,12 @@ const { net, notes } = loadFixture('walker', params);   // at this build's layou
 plantNet(sim, params, net, sim.w / 2, sim.h / 2);
 ```
 
+On the page (`npm run dev`): the **Load net…** button plants a file at the
+centre of the view, a `.petrinet` dropped on the dish plants where it lands,
+and `?net=mixed-308` in the URL plants one at start — `?soup=0&net=mixed-308`
+is a dish with nothing in it but the net. Vite serves `nets/` from the
+repository root in dev; a built page would need the file under `public/`.
+
 `net-version.test.ts` plants every file in `nets/` on every run of the suite,
 so a layout change that strands one is caught the day it happens, and the fix
 is `export --here` from a library that still has it, or a migration. Keep

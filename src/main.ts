@@ -14,6 +14,7 @@ import { getWaveSpeed, setWaveSpeed } from './audio/presets.ts';
 import { farGpu } from './gpu/far-gpu.ts';
 import { agentsGpu } from './gpu/agents-gpu.ts';
 import { nativeSolver } from './native/solver.ts';
+import { describePlant, fetchNet, netUrlFromQuery, plantNetBytes } from './net-load.ts';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('missing #app');
@@ -77,6 +78,11 @@ app.innerHTML = `
       <button type="button" data-preset="oscillator">Oscillator</button>
     </div>
     <p class="hint">Click empty space to spawn, drag it to pan. Drag a body to move it; drag from one free port to another to wire them. Eraser: click and drag to remove bodies under the cursor. Scroll to zoom. Keys E / D / C select type, X toggles the eraser. Space pauses.</p>
+    <div class="row">
+      <button type="button" id="load-net">Load net…</button>
+      <input type="file" id="net-file" accept=".petrinet" hidden />
+    </div>
+    <p class="hint" id="net-hint">A grown net from the library (<code>nets/*.petrinet</code>) into this dish: the button plants it at the centre of the view, dropping a file plants it where it lands, and <code>?net=mixed-308</code> in the URL plants it at start (<code>&amp;soup=0</code> for an empty dish).</p>
     <p class="stats" id="stats"></p>
     <p class="stats" id="solver"></p>
     <div id="sliders"></div>
@@ -466,6 +472,73 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-lambda]'))
   });
 }
 
+/*
+ * A stored net onto the dish. Three doors, one planter: the button (centre
+ * of the view), a file dropped on the canvas (where it lands), and `?net=`
+ * (centre, at start). The hint line says what went in and what the
+ * migration changed, or why it was refused.
+ */
+const netHint = document.querySelector<HTMLParagraphElement>('#net-hint')!;
+const netFile = document.querySelector<HTMLInputElement>('#net-file')!;
+
+function plantBytes(name: string, bytes: Uint8Array, wx: number, wy: number): void {
+  try {
+    const p = plantNetBytes(sim, params, bytes, wx, wy);
+    netHint.textContent = describePlant(name, p);
+    if (p.ids.length > 0) {
+      interaction.freeCamera = false;
+      snapCamera = true;
+    }
+  } catch (err) {
+    netHint.textContent = `${name}: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  paint();
+}
+
+function viewCentreWorld(): { x: number; y: number } {
+  const { w, h } = cssSize();
+  return camera.worldFromScreen(w * 0.5, h * 0.5);
+}
+
+async function plantFile(file: File, wx: number, wy: number): Promise<void> {
+  plantBytes(file.name.replace(/\.petrinet$/, ''), new Uint8Array(await file.arrayBuffer()), wx, wy);
+}
+
+document.querySelector('#load-net')!.addEventListener('click', () => netFile.click());
+netFile.addEventListener('change', () => {
+  const file = netFile.files?.[0];
+  netFile.value = '';
+  if (!file) return;
+  const c = viewCentreWorld();
+  void plantFile(file, c.x, c.y);
+});
+
+const viewport = document.querySelector<HTMLDivElement>('#viewport')!;
+viewport.addEventListener('dragover', (ev) => {
+  if (ev.dataTransfer?.types.includes('Files')) ev.preventDefault();
+});
+viewport.addEventListener('drop', (ev) => {
+  const files = ev.dataTransfer?.files;
+  if (!files || files.length === 0) return;
+  ev.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const w = camera.worldFromScreen(ev.clientX - rect.left, ev.clientY - rect.top);
+  for (const file of files) void plantFile(file, w.x, w.y);
+});
+
+async function loadNetFromQuery(): Promise<void> {
+  const url = netUrlFromQuery(location.search);
+  if (!url) return;
+  const name = url.replace(/^.*\//, '').replace(/\.petrinet$/, '');
+  try {
+    const bytes = await fetchNet(url);
+    const c = viewCentreWorld();
+    plantBytes(name, bytes, c.x, c.y);
+  } catch (err) {
+    netHint.textContent = `${name}: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 let last = performance.now();
 let ticking = false;
 async function tick(now: number): Promise<void> {
@@ -509,8 +582,15 @@ function frame(now: number): void {
 }
 
 sizeCanvas();
+// `?soup=n` sets the founder count before the first preset, so `?soup=0&net=x`
+// is a dish with nothing in it but the net.
+{
+  const soup = new URLSearchParams(location.search).get('soup');
+  if (soup !== null && Number.isFinite(Number(soup))) params.soupCount = Math.max(0, Math.floor(Number(soup)));
+}
 applyPreset('soup');
 void nativeSolver.init();
+void loadNetFromQuery();
 /*
  * The GPU FAR switch is only meaningful if WebGPU actually came up, so
  * say so in the label rather than leaving a tickbox that does nothing.
@@ -534,5 +614,5 @@ void agentsGpu.init(gpuCanvas);
  * `Sim.farGpuMode` set that way is set on a class the app has never heard
  * of. This is the handle that reaches the instance actually running.
  */
-Object.assign(window as unknown as Record<string, unknown>, { sim, Sim, params, camera });
+Object.assign(window as unknown as Record<string, unknown>, { sim, Sim, params, camera, paint });
 requestAnimationFrame(frame);

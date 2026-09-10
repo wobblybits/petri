@@ -18,13 +18,22 @@ Two documents are the ones to read before proposing anything:
   seed budgets, the coupling table, and the protocol format
   (`npm run pond -- protocols`).
 
-Standing rules, each argued in those files: a few well-tuned mechanics rather
-than new ones, and every proposal names the concept heading it serves and the
-mechanic that heading already has; no fitness term, selection is emergent; nothing decays but the eligibility trace; every mechanism ships at
-the value that reproduces yesterday's pond; immigrants are larval and never
-spawned from the population; measure the pipeline that ships (wasm solver,
-GPU field and genome, `stepAsync`); never quote a pond younger than a couple
-of simulated minutes or a sweep with fewer seeds than its measure needs.
+Standing design rules: a few well-tuned mechanics rather than new ones, and
+every proposal names the concept heading it serves and the mechanic that
+heading already has; no fitness term, selection is emergent; nothing decays
+but the eligibility trace; immigrants are larval and never spawned from the
+population. The pipeline that ships is the wasm solver, the GPU field and
+genome, and `stepAsync`.
 
-`npm test` is a change detector for mechanical rewrites, not a measure of
-behaviour. Behaviour is measured with `npm run pond` on runs of minutes.
+How features are built and judged: from first principles and from working
+code and papers elsewhere, named in the commit. A mechanism ships on, at a
+setting the eye can see, behind a slider. Done means the author opened the
+page and saw the effect, and the commit message says what to look for. If it
+does not look right it is turned down or taken out. No bench, sweep or
+protocol gates a feature, and nothing ships at zero to preserve the previous
+pond.
+
+`npm test` is a change detector; when a feature changes the pond, the tests
+follow the pond. `npm run pond` is for questions the eye cannot reach over
+ten minutes, and is not a gate. Grown nets for tests and for the page live
+under `nets/` (`src/pond/README.md`, "Nets as files").
