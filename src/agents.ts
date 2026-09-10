@@ -1276,18 +1276,33 @@ export function createAgent(
    * Somewhere of its own on the gait's clock.
    *
    * `reset` leaves this at 0 and every body advances at one global rate, so
-   * without this the whole founder soup shares a phase exactly and for life
-   * — every wire in the pond strokes on the same frame, which reads as one
+   * without it the whole founder soup shares a phase exactly and for life —
+   * every wire in the pond strokes on the same frame, which reads as one
    * body-wide pulse rather than anything walking.
    *
-   * The golden angle, so a run of ids spreads instead of landing in bands,
-   * and off the id rather than `Math.random` so a seeded pond stays
-   * reproducible. This is an initial condition and not a mechanism: nothing
-   * pulls two neighbours into a *useful* relative phase, which is what a
-   * travelling wave would do and what `docs/concepts.md` says the clock still
-   * owes. Scattering is only the proof that the lock was hardcoded.
+   * A *hash* of the id and not a multiple of it. `id * goldenAngle` was the
+   * first try and it is not a scatter at all: consecutive ids land a constant
+   * angle apart, so a chain latched in id order is already a travelling wave,
+   * of a wavelength nothing chose and nothing can select on. That made
+   * `gaitCouple` invisible — coupling did not create a wave, it only changed
+   * the wavelength of one that was already there, and two waves of different
+   * wavelength look much alike.
+   *
+   * Mixed rather than drawn from `Math.random`, so a body's starting phase is
+   * a property of the body and not of how many bodies happened to be made
+   * before it. Two runs of the same seed put the same body at the same phase
+   * however the roster was built.
+   *
+   * Still only an initial condition. What holds a *useful* relative phase is
+   * `gaitCouple`, and until a lineage can own the lag this is a decoration.
    */
-  agent.gaitPhase = (id * 2.399963) % (Math.PI * 2);
+  let mix = Math.imul(id, 2654435761) >>> 0;
+  mix ^= mix >>> 15;
+  mix = Math.imul(mix, 2246822519) >>> 0;
+  mix ^= mix >>> 13;
+  mix = Math.imul(mix, 3266489917) >>> 0;
+  mix ^= mix >>> 16;
+  agent.gaitPhase = (mix / 4294967296) * Math.PI * 2;
   // A body made outside a rewrite is a founder: generation zero of its own
   // line. `autoSpawn` makes a great many of these, which is the point of
   // being able to count them.

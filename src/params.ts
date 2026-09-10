@@ -245,6 +245,20 @@ export interface Params {
    * inverted: negative drag is an energy source and the soup comes apart in
    * seconds. Angular drag is left alone, so this does one thing.
    *
+   * Negative is worth reading carefully, because it looks like more life and
+   * is mostly less. Nothing about mass is involved — the rate multiplies
+   * velocity directly, so a heavy body and a light one damp alike. What a
+   * negative value does is make a *full* body slippery: at -2 against a
+   * `drag` of 0.55 the sum reaches zero at 27% of a tank, and every body
+   * fuller than that is frictionless and coasts until something hits it.
+   * The pond fills with motion, and none of it is anybody's doing.
+   *
+   * It also quietly kills the gait. A stroke travels on the *difference*
+   * between a wire's two ends, and once both ends are past the clamp they are
+   * both at exactly zero — identical, however hard the wires pull. So
+   * negative grip buys drift at the cost of the one term that made drift
+   * directed.
+   *
    * Two jobs at once even so, which `docs/concepts.md` asks to be visible. It
    * sets a net's stroke, and it sets how far a *loner* coasts — a hungry body
    * and a fed one no longer swim alike.
@@ -336,14 +350,23 @@ export interface Params {
    * Radians of phase a wire holds between its two ends. 0 = synchrony.
    *
    * The wavelength, in wires: a lag of `L` puts a whole cycle across
-   * `2 * pi / L` of them, so 1.0 is a wave about six bodies long. Sign is
+   * `2 * pi / L` of them, so pi/2 is a wave four bodies long. Sign is
    * direction — which end of a wire counts as upstream is fixed by the port
    * slots, so a chain wired `r` to `l` has a consistent head and tail, and
    * flipping this sends the wave the other way.
    *
-   * Nothing heritable yet, and that is the obvious next move: the lag is
-   * exactly the kind of thing a lineage should own, since it sets both the
-   * gait's wavelength and which way the animal walks.
+   * pi/2 because that is where the stroke is largest, and the argument is
+   * short enough to keep. `Graph.syncRest` swings a wire by the *mean* of its
+   * two ends, so the swell it gets is `cos(L/2)` of full — at `L = pi` the
+   * two ends cancel and the wire does not move at all. The travel comes from
+   * the *difference* between those ends' grip, which goes as `sin(L/2)`.
+   * Their product, which is what a step is made of, is `sin(L)/2`: zero at
+   * both extremes and largest at a quarter turn. No lag is no asymmetry; a
+   * half turn is no stroke.
+   *
+   * Nothing heritable yet, and that is the obvious next move: the lag sets
+   * both the gait's wavelength and which way the animal walks, which is
+   * exactly the kind of thing a lineage should own.
    */
   gaitLag: number;
   /**
@@ -1010,7 +1033,7 @@ export function defaultParams(): Params {
     grip: 2,
     gaitRate: 2,
     gaitCouple: 3,
-    gaitLag: 1,
+    gaitLag: Math.PI / 2,
     gaitSwell: 0.3,
     flockAlign: 5.5,
     flockSep: 48,

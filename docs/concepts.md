@@ -122,13 +122,19 @@ not also be asked to do. Nothing else belongs here; measurements go in
   it is plain synchrony, which is the pond-wide pulse this branch began by
   removing.
 
+  `gaitLag` sits at a quarter turn because that is where a step is largest.
+  `syncRest` swings a wire by the mean of its two ends, so the swell is
+  `cos(L/2)` of full and vanishes at half a turn; the travel comes from the
+  difference in those ends' grip, which goes as `sin(L/2)`. The product is
+  `sin(L)/2` — no lag is no asymmetry, half a turn is no stroke.
+
   Not yet true, and this is the list. The lag is a global constant where it
   should be a gene: it sets both the gait's wavelength and which way the
-  animal walks, which is exactly what a lineage should own. The phase a body
-  is born at comes off its id by a constant increment, so a chain built in id
-  order is already a wave of a wavelength nothing chose — coupling overrides
-  it, which is most of why it stops mattering, but it is still a decoration
-  doing mechanical work. And an
+  animal walks, which is exactly what a lineage should own. The clock is
+  free-running, so a net undulates whether it is fed, starving, or attached
+  to anything — the gait is a metronome bolted to the pond rather than
+  something the pond produces, and gating it on metabolism is the open
+  question the Selkov entry under Transport is for. And an
   Era is both the leaf *and*, by `ERA_UPKEEP_RATIO` and its larger store, the
   fullest body on its wire — so the seeded head makes it the oar while the
   economy makes it the anchor, and those pull opposite ways. On the bench they
