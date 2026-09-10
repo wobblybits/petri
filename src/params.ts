@@ -304,6 +304,62 @@ export interface Params {
    * clean. The ceiling is the drag law again, which is where it belongs.
    */
   gaitRate: number;
+  /**
+   * How hard a wire pulls its two ends toward a fixed phase offset, in
+   * radians a second. 0 = every body oscillates alone, which is the pond
+   * before this existed.
+   *
+   * The half of a central pattern generator that makes it a *pattern*. Left
+   * uncoupled, every body runs its own clock from wherever `createAgent` put
+   * it, and a net of `n` bodies is `n` strokes at unrelated phases: they sum
+   * as `sqrt(n)` against a mass that grows as `n`, so the effect a whole net
+   * has actually *shrinks* as the net grows. Coupled, they sum as `n` and it
+   * holds up.
+   *
+   * Kuramoto, over the wire graph: each end is pulled toward
+   * `sin(other - self ± gaitLag)`, normalised by degree so a hub is not
+   * dragged about by having many wires. At `gaitLag` 0 that is plain
+   * synchronisation and every wire strokes together, which is the pulse this
+   * branch started by removing. Non-zero, a chain settles at a fixed phase
+   * difference per wire, and a fixed phase difference per wire *is* a
+   * travelling wave — which along a body is peristalsis, and is how an
+   * earthworm gets along.
+   *
+   * On a graph with a cycle the lag is frustrated: it cannot hold all the way
+   * round unless the loop happens to sum to a multiple of a turn, so a ring
+   * settles somewhere between. That is left alone rather than special-cased —
+   * a net is mostly a tree, and what a loop does under a wave is a question
+   * worth being able to see.
+   */
+  gaitCouple: number;
+  /**
+   * Radians of phase a wire holds between its two ends. 0 = synchrony.
+   *
+   * The wavelength, in wires: a lag of `L` puts a whole cycle across
+   * `2 * pi / L` of them, so 1.0 is a wave about six bodies long. Sign is
+   * direction — which end of a wire counts as upstream is fixed by the port
+   * slots, so a chain wired `r` to `l` has a consistent head and tail, and
+   * flipping this sends the wave the other way.
+   *
+   * Nothing heritable yet, and that is the obvious next move: the lag is
+   * exactly the kind of thing a lineage should own, since it sets both the
+   * gait's wavelength and which way the animal walks.
+   */
+  gaitLag: number;
+  /**
+   * Scales the stroke every body was seeded with. 1 = the seeded amplitude.
+   *
+   * There was no dial at all on the gait's size — `seedGait` writes the
+   * amplitudes into the genome and `gaitRate` only sets the frequency — so
+   * the mechanic could not be turned up to look at, and could not be put on a
+   * sweep axis, which meant it could not be measured against anything.
+   *
+   * Scaling the stroke rather than the anchor because the stroke is linear
+   * and unbounded while the anchor is not: the anchor is capped by `drag`,
+   * since past it the rate clamps at zero, both ends clamp *together*, and
+   * the clamp destroys the very asymmetry the stroke works on.
+   */
+  gaitDrive: number;
   /** Shoaling. See `declutter` for what this costs reproduction, and why the
    *  two only matter together. */
   flockAlign: number;
@@ -945,6 +1001,9 @@ export function defaultParams(): Params {
     angDrag: 2.4,
     grip: 2,
     gaitRate: 2,
+    gaitCouple: 3,
+    gaitLag: 1,
+    gaitDrive: 1,
     flockAlign: 5.5,
     flockSep: 48,
     maxAgents: 100000,
@@ -1019,6 +1078,9 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'angDrag', label: 'Spin damp', min: 0, max: 8, step: 0.05 },
   { key: 'grip', label: 'Grip (tank)', min: -4, max: 12, step: 0.05 },
   { key: 'gaitRate', label: 'Gait rate (rad/s)', min: 0, max: 16, step: 0.1 },
+  { key: 'gaitCouple', label: 'Gait coupling', min: 0, max: 20, step: 0.1 },
+  { key: 'gaitLag', label: 'Gait lag (rad/wire)', min: -3.2, max: 3.2, step: 0.05 },
+  { key: 'gaitDrive', label: 'Gait drive', min: 0, max: 60, step: 0.5 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
   { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },
   { key: 'snapRadius', label: 'Snap reach', min: 4, max: 48, step: 1 },

@@ -229,6 +229,17 @@ type RedexEscrow = {
 };
 
 /**
+ * Which end of a wire is upstream, for the gait's phase lag.
+ *
+ * A principal leads, then right, then left — so a chain wired `r` to `l`
+ * runs head to tail in the order it was built, rather than against it.
+ * Any consistent order would do; what must not happen is taking the order
+ * off `wire.a` and `wire.b`, which is whichever way the latch happened to be
+ * made. Ties (two ends on the same slot) fall back to the agent id.
+ */
+const SLOT_ORDER: Record<'p' | 'l' | 'r', number> = { p: 0, r: 1, l: 2 };
+
+/**
  * One body's four taste weights, laid out for a consumer of the field.
  *
  * The ground scale has to be folded in in one place rather than left to each
@@ -428,6 +439,10 @@ export class Sim {
    * in whatever order the roster happens to be in.
    */
   private requestPrev = new Float64Array(0);
+
+  /** Scratch for one Kuramoto step: the pull on each body, and its degree. */
+  private gaitPull = new Float64Array(0);
+  private gaitDegree = new Float64Array(0);
 
   /** Per-agent unmet need this frame, rebuilt by `pulseRequests`. */
   private readonly wireAdj = new WireAdjacency();
@@ -4279,18 +4294,85 @@ export class Sim {
       }
       return;
     }
-    const TAU = Math.PI * 2;
-    const step = rate * dt;
+    const couple = params.gaitCouple;
+    const pull = this.gaitPull;
+    if (couple > 0) {
+      /*
+       * One Kuramoto step over the wire graph.
+       *
+       * Each wire wants its downstream end to sit `gaitLag` behind its
+       * upstream one, and pushes both halfway there. A fixed phase difference
+       * per wire is a travelling wave, and a travelling wave along a body is
+       * peristalsis — which is the whole reason to couple rather than to let
+       * every body run alone.
+       *
+       * Accumulated first and applied after, so a wire's correction is
+       * against the phases every other wire also saw. Applying in place would
+       * make the answer depend on the order the wire map happens to be in.
+       *
+       * Which end is upstream comes off the port slots, not off `wire.a` and
+       * `wire.b` — those are in whatever order the latch was made, so a chain
+       * would have no consistent direction and the lag would fight itself
+       * from one wire to the next.
+       */
+      if (pull.length < store.capacity) {
+        this.gaitPull = new Float64Array(store.capacity);
+        this.gaitDegree = new Float64Array(store.capacity);
+      }
+      const acc = this.gaitPull;
+      const deg = this.gaitDegree;
+      for (const agent of this.agents.values()) {
+        acc[agent.slot] = 0;
+        deg[agent.slot] = 0;
+      }
+      const lag = params.gaitLag;
+      for (const wire of this.graph.wires.values()) {
+        const A = this.agents.get(wire.a.id);
+        const B = this.agents.get(wire.b.id);
+        if (!A || !B) continue;
+        const aFirst =
+          SLOT_ORDER[wire.a.slot] !== SLOT_ORDER[wire.b.slot]
+            ? SLOT_ORDER[wire.a.slot] < SLOT_ORDER[wire.b.slot]
+            : A.id < B.id;
+        const up = aFirst ? A : B;
+        const down = aFirst ? B : A;
+        const err = Math.sin(PHASE[down.slot] - PHASE[up.slot] - lag);
+        acc[up.slot] += err;
+        acc[down.slot] -= err;
+        deg[up.slot] += 1;
+        deg[down.slot] += 1;
+      }
+      const TAU2 = Math.PI * 2;
+      for (const agent of this.agents.values()) {
+        const s = agent.slot;
+        const d = deg[s];
+        // Per wire rather than summed: a body with three wires should be as
+        // easy to entrain as one with a single wire, not three times as hard
+        // to move and three times as loud.
+        const k = d > 0 ? (couple * acc[s]) / d : 0;
+        let ph = PHASE[s] + (rate + k) * dt;
+        if (ph >= TAU2) ph -= TAU2;
+        else if (ph < 0) ph += TAU2;
+        PHASE[s] = ph;
+      }
+    } else {
+      const TAU = Math.PI * 2;
+      const step = rate * dt;
+      for (const agent of this.agents.values()) {
+        const s = agent.slot;
+        // Wrapped rather than left to grow: a body can live for minutes, and
+        // `cos` of a large float loses the precision the stroke is made of.
+        let ph = PHASE[s] + step;
+        if (ph >= TAU) ph -= TAU;
+        PHASE[s] = ph;
+      }
+    }
+    const drive = params.gaitDrive;
     for (const agent of this.agents.values()) {
       const s = agent.slot;
-      // Wrapped rather than left to grow: a body can live for minutes, and
-      // `cos` of a large float loses the precision the stroke is made of.
-      let ph = PHASE[s] + step;
-      if (ph >= TAU) ph -= TAU;
-      PHASE[s] = ph;
-      const c = Math.cos(ph);
+      const c = Math.cos(PHASE[s]);
       ANCHOR[s] = GA[s] * c;
-      STROKE[s] = GS[s] * c;
+      STROKE[s] = GS[s] * drive * c;
     }
   }
 

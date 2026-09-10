@@ -44,8 +44,11 @@ function stillParams(): Params {
   params.rewriteDuration = 0;
   params.angDrag = 0;
   // The gait is the other half of the drag law and these are about `grip`.
-  // Its own tests turn it back on.
+  // Its own tests turn it back on. Coupling too: it pulls two wired bodies to
+  // a fixed phase difference, which is a third asymmetry on top of the three
+  // the gait tests below take one at a time.
   params.gaitRate = 0;
+  params.gaitCouple = 0;
   return params;
 }
 

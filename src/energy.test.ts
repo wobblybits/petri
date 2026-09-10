@@ -32,8 +32,6 @@ import {
   spareEnergy,
   spendExtra,
   relaxRequests,
-  snapshotRequests,
-  spreadRequests,
   tickUpkeep,
   WireAdjacency,
 } from './energy.ts';
