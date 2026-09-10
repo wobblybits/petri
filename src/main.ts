@@ -82,7 +82,7 @@ app.innerHTML = `
       <button type="button" id="load-net">Load net…</button>
       <input type="file" id="net-file" accept=".petrinet" hidden />
     </div>
-    <p class="hint" id="net-hint">A grown net from the library (<code>nets/*.petrinet</code>) into this dish: the button plants it at the centre of the view, dropping a file plants it where it lands, and <code>?net=mixed-308</code> in the URL plants it at start (<code>&amp;soup=0</code> for an empty dish).</p>
+    <p class="hint" id="net-hint">A grown net from the library (<code>nets/*.petrinet</code>) into this dish: the button plants it at the centre of the view, dropping a file plants it where it lands, and <code>?net=mixed-308</code> in the URL plants it at start (<code>&amp;soup=0</code> for an empty dish). Reset puts back what you planted; a preset button starts clean.</p>
     <p class="stats" id="stats"></p>
     <p class="stats" id="solver"></p>
     <div id="sliders"></div>
@@ -229,7 +229,7 @@ document.querySelector('#step')!.addEventListener('click', () => {
     paint();
   });
 });
-document.querySelector('#reset')!.addEventListener('click', () => applyPreset(currentPreset));
+document.querySelector('#reset')!.addEventListener('click', () => resetDish());
 document.querySelector('#recentre')!.addEventListener('click', () => {
   interaction.freeCamera = false;
   snapCamera = true;
@@ -307,7 +307,10 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-kind]')) {
 }
 eraserBtn.addEventListener('click', () => setEraser(!interaction.eraserMode));
 for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-preset]')) {
-  btn.addEventListener('click', () => applyPreset(btn.dataset.preset as PresetName));
+  btn.addEventListener('click', () => {
+    seeds.length = 0;
+    applyPreset(btn.dataset.preset as PresetName);
+  });
 }
 
 function pointerWorld(ev: PointerEvent): { wx: number; wy: number; sx: number; sy: number } {
@@ -481,11 +484,26 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-lambda]'))
 const netHint = document.querySelector<HTMLParagraphElement>('#net-hint')!;
 const netFile = document.querySelector<HTMLInputElement>('#net-file')!;
 
-function plantBytes(name: string, bytes: Uint8Array, wx: number, wy: number): void {
+/**
+ * What has been planted since the dish was last chosen, so Reset puts it
+ * back. A net is the dish's seeding as much as the founders are, and a reset
+ * that kept the founders and lost the net came back blank at `?soup=0`.
+ * Picking a preset is choosing a different dish and starts clean.
+ */
+interface Seed {
+  name: string;
+  bytes: Uint8Array;
+  x: number;
+  y: number;
+}
+const seeds: Seed[] = [];
+
+function plantBytes(name: string, bytes: Uint8Array, wx: number, wy: number, remember = true): void {
   try {
     const p = plantNetBytes(sim, params, bytes, wx, wy);
     netHint.textContent = describePlant(name, p);
     if (p.ids.length > 0) {
+      if (remember) seeds.push({ name, bytes, x: wx, y: wy });
       interaction.freeCamera = false;
       snapCamera = true;
     }
@@ -493,6 +511,12 @@ function plantBytes(name: string, bytes: Uint8Array, wx: number, wy: number): vo
     netHint.textContent = `${name}: ${err instanceof Error ? err.message : String(err)}`;
   }
   paint();
+}
+
+/** The dish as it was seeded: the preset, then every net planted onto it, where it was. */
+function resetDish(): void {
+  applyPreset(currentPreset);
+  for (const seed of seeds) plantBytes(seed.name, seed.bytes, seed.x, seed.y, false);
 }
 
 function viewCentreWorld(): { x: number; y: number } {
