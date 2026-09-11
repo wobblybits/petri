@@ -23,22 +23,15 @@ import {
 import { wrapAngle } from './wrap.ts';
 
 /**
- * Lambda terms compiled to interaction nets, using the three combinators this
- * simulation already runs: Con is γ, Dup is δ, Era is ε.
- *
- * Port convention, forced by the rules in rewrite.ts rather than chosen:
- *
+ * Lambda terms compiled to interaction nets: Con is γ, Dup is δ, Era is ε.
+ * Port convention, forced by the rules in rewrite.ts:
  *   abstraction λx.b   Con: p = its value, l = the binder x, r = the body
  *   application (f a)  Con: p = the function, l = the result, r = the argument
- *
  * Beta reduction is then exactly `annihilate-con`, which reconnects crossed
- * (`l1↔r2, r1↔l2`); that is why an application keeps its result on `l` and
- * its argument on `r`.
- *
- * A variable used more than once becomes a Dup tree; an unused one gets an
- * Era. This encoding is not sound for every lambda term (general duplication
- * of higher-order terms needs bookkeeping this lacks); it is sound for the
- * arithmetic here, and `normalize` reports a term that fails to normalise.
+ * (`l1↔r2, r1↔l2`). A variable used more than once becomes a Dup tree; an
+ * unused one gets an Era. Not sound for every lambda term (general
+ * duplication needs bookkeeping this lacks); sound for the arithmetic here,
+ * and `normalize` reports a term that fails to normalise.
  */
 
 export type Term =
@@ -97,10 +90,8 @@ function port(id: number, slot: PortSlot): PortRef {
 export interface Compiled {
   net: NetSnapshot;
   /**
-   * Aux port of an inert marker node wired to the term's value. The value
-   * port itself cannot be the handle: rewrites consume the nodes it sits on
-   * and a free port is dropped. The marker's principal stays free, so it can
-   * never be half of a redex.
+   * Aux port of an inert marker node wired to the term's value: rewrites
+   * consume the value port's own node, and the marker's principal stays free.
    */
   root: PortRef;
   nextId: number;
@@ -136,8 +127,7 @@ export function compile(term: Term, startId = 1): Compiled {
   const rootEnd = go(term, new Map());
   b.links.push([{ port: port(marker, 'l') }, rootEnd]);
 
-  // Resolve named wires. Each name has one binder and zero or more uses: none
-  // needs an Era, one is a plain wire, more than one needs a Dup tree.
+  // Resolve named wires: no use needs an Era, one a plain wire, more a Dup tree.
   const uses = new Map<string, PortRef[]>();
   const wires: NetWire[] = [];
   for (const [x, y] of b.links) {
@@ -167,9 +157,8 @@ export function compile(term: Term, startId = 1): Compiled {
 }
 
 /**
- * Wire one source to many uses through a tree of Dup nodes, and return the port
- * the source should attach to. Dup's principal faces the binder, so a copy
- * travelling down the tree meets each use head-on.
+ * Wire one source to many uses through a tree of Dup nodes, and return the
+ * port the source should attach to. Dup's principal faces the binder.
  */
 function fanOut(b: Build, sites: PortRef[], wires: NetWire[]): PortRef {
   if (sites.length === 1) return sites[0];
@@ -228,10 +217,7 @@ export function normalize(start: Compiled, maxSteps = 20000): Normalized {
 
 // ------------------------------------------------------------------ decoding
 
-/**
- * Read a normal form back as a Church numeral, or null if it is not one:
- * walks λf.λx. then counts applications down the spine.
- */
+/** Read a normal form back as a Church numeral, or null if it is not one. */
 export function decodeChurch(net: NetSnapshot, root: PortRef): number | null {
   const kind = (id: number): AgentKind | undefined =>
     net.agents.find((a) => a.id === id)?.kind;
@@ -244,8 +230,7 @@ export function decodeChurch(net: NetSnapshot, root: PortRef): number | null {
   const fBinder = port(outer.id, 'l');
   const xBinder = port(inner.id, 'l');
 
-  // Which ports can supply f to an application: the binder itself when f is
-  // used once, or the aux ports of the Dup tree fanning out of it.
+  // Which ports can supply f to an application: the binder or its Dup tree's aux ports.
   const supply = new Set<string>();
   const visit = (from: PortRef): void => {
     const key = `${from.id}.${from.slot}`;
@@ -305,11 +290,7 @@ interface TermNode {
   kids: TermNode[];
 }
 
-/**
- * Straight-line drawing of a compiled net: the term tree packed downward,
- * Dup/Era trees in a side gutter aligned with their use sites, then a short
- * untangle pass over any leftover crossings.
- */
+/** Straight-line drawing of a compiled net: the term tree packed downward, sharing nodes in a side gutter, then an untangle pass. */
 export function layoutNet(net: NetSnapshot, root: PortRef, cx: number, cy: number): NetPose[] {
   const kindOf = new Map(net.agents.map((a) => [a.id, a.kind]));
   const adj = adjacency(net);
@@ -884,17 +865,12 @@ function centerPoses(poses: NetPose[], cx: number, cy: number): void {
 
 // ------------------------------------------------------------------ injecting
 
-/**
- * Drop a compiled term into a running simulation, in a planar drawing so
- * wires start uncrossed. Every port the term does not use is sealed, because
- * a free port would latch onto whatever drifts past.
- */
+/** Drop a compiled term into a running simulation. Every unused port is sealed, or it would latch onto whatever drifts past. */
 export function injectTerm(
   sim: {
     agents: Map<number, Agent>;
-    // The sim's own store, never the private one-slot store `createAgent`
-    // makes by default: a body's slot is how every per-frame pass finds its
-    // data, and two bodies on one slot make `HarvestPlan.build`'s chain loop forever.
+    // The sim's own store, never `createAgent`'s private one-slot default:
+    // two bodies on one slot make `HarvestPlan.build`'s chain loop forever.
     agentStore: AgentStore;
     graph: Graph;
     nextId: number;

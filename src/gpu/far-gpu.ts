@@ -18,10 +18,7 @@ const NEI_CAP = 4;
 /** Grid ceiling, so the broadphase is bounded however far the pond drifts; `collect_pairs` in native/solver.c does the same. */
 const MAX_CELLS = 131072;
 
-/**
- * Cells to aim for at a given body count. Four cells a body keeps occupancy
- * near zero and under CELL_CAP, past which the broadphase drops contacts.
- */
+/** Cells to aim for at a given body count: four a body keeps occupancy under CELL_CAP. */
 function cellTarget(n: number): number {
   return Math.max(256, Math.min(MAX_CELLS, n * 4));
 }
@@ -38,10 +35,7 @@ type GpuEntry =
   | 'clearNei'
   | 'buildNei';
 
-/**
- * WebGPU host for the FAR kernel. One submit per frame, one readback.
- * Falls back to the CPU twin when the adapter is missing or a pass fails.
- */
+/** WebGPU host for the FAR kernel. One submit per frame, one readback. Falls back to the CPU twin. */
 export class FarGpu {
   ready = false;
   private device: GPUDevice | null = null;
@@ -78,8 +72,7 @@ export class FarGpu {
       });
       this.device = device;
       this.module = device.createShaderModule({ code: shader });
-      // A WGSL error does not throw; the invalid pipeline quietly drops every
-      // dispatch and the pack reads back as it went in. Ask the module directly.
+      // A WGSL error does not throw; the invalid pipeline quietly drops every dispatch.
       const info = await this.module.getCompilationInfo?.();
       const errors = info ? info.messages.filter((m) => m.type === 'error') : [];
       if (errors.length > 0) {
@@ -137,9 +130,8 @@ export class FarGpu {
   }
 
   /**
-   * Run `substeps` of FAR physics. `data` is packed `FAR_STRIDE` floats per
-   * body; `wires` is `[a, b, rest, pad, oax, oay, obx, oby] * nWires`. Mutates `data` in place.
-   * Returns false if the CPU twin ran instead.
+   * Run `substeps` of FAR physics in place on `data` (`FAR_STRIDE` floats per
+   * body); `wires` is `[a, b, rest, pad, oax, oay, obx, oby] * nWires`. False if the CPU twin ran.
    */
   async step(
     data: Float32Array,
@@ -241,10 +233,8 @@ export class FarGpu {
   }
 
   /**
-   * Grid to bin the pack into. Cell size starts at the widest contact gap in
-   * the pack, so a body can only touch something one cell away, then doubles
-   * until the grid fits MAX_CELLS; coarser cells never miss a pair. Bounds
-   * come from the start of the step and `cellXY` clamps drift within it.
+   * Grid to bin the pack into. Cell size starts at the widest contact gap,
+   * then doubles until the grid fits MAX_CELLS; `cellXY` clamps drift.
    */
   private computeGrid(
     data: Float32Array,

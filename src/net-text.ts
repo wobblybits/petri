@@ -3,17 +3,13 @@ import type { DesignSnapshot } from './net-edit.ts';
 import type { Sim } from './sim.ts';
 
 /**
- * HVM2 / hvm-core net IR (HigherOrderCO). A net is one root tree plus redexes:
- *
+ * HVM2 / hvm-core net IR (HigherOrderCO): one root tree plus redexes.
  *     TERM ::= * | (TERM TERM) | {TERM TERM} | name
  *     NET  ::= TERM | & TERM ~ TERM NET
- *
  * `*` is an eraser, `(a b)` a constructor (aux ports `l`, `r`), `{a b}` a
- * duplicator. A name is a wire and occurs twice in a closed net. `& A ~ B`
- * joins the two trees' principal ports (an active pair).
- *
- * Open nets may have unmatched names, whose ports stay free; a closed net
- * may omit the root, starting at `&`. Pose is not stored.
+ * duplicator; a name is a wire and occurs twice in a closed net; `& A ~ B`
+ * joins two principal ports. Open nets may have unmatched names, whose
+ * ports stay free; a closed net may omit the root. Pose is not stored.
  */
 
 type Term =
@@ -131,10 +127,7 @@ export function formatWires(
   });
 }
 
-/**
- * Encode the live graph as an HVM2 net. Layout is discarded.
- * Pass `ids` to encode a subgraph; wires that leave the set become free ports.
- */
+/** Encode the live graph as an HVM2 net. Pass `ids` to encode a subgraph; wires that leave the set become free ports. */
 export function formatNet(sim: Sim, ids?: Iterable<number>): string {
   const filter = ids ? new Set(ids) : null;
   const agents = [...sim.agents.values()]

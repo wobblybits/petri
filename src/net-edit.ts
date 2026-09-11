@@ -316,10 +316,7 @@ export function pasteFragment(
   return ids;
 }
 
-/**
- * Pointer tools and history for the net designer. History snapshots topology
- * and pose, not rope nodes or scent; a restore rebuilds wires from the port pairs.
- */
+/** Pointer tools and history for the net designer. History snapshots topology and pose; a restore rebuilds wires from the port pairs. */
 export class NetEditor {
   tool: DesignTool = 'select';
   selection = new Set<number>();

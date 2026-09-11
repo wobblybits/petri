@@ -1,12 +1,9 @@
 /*
- * Instanced dot/triangle rendering for the FAR tier (see render.ts). One
- * quad per instance, corners from vertex_index, rotated to the body's
- * heading, then clipped to a circle or a triangle in the fragment shader.
- *
+ * Instanced dot/triangle rendering for the FAR tier (see render.ts): one
+ * quad per instance, rotated to the heading, clipped in the fragment shader.
  * Instance layout, 9 floats (36 bytes) per body:
  *   [0] x, [1] y (world), [2] radius (world units), [3] heading (radians),
- *   [4] shape (0 = circle, 1 = triangle),
- *   [5] r, [6] g, [7] b, [8] a
+ *   [4] shape (0 = circle, 1 = triangle), [5] r, [6] g, [7] b, [8] a
  */
 struct Camera {
   // world -> NDC: ndc = (world - origin) * scale, then the standard Y flip.
@@ -45,8 +42,7 @@ fn vs_main(@builtin(vertex_index) vIdx: u32, @builtin(instance_index) iIdx: u32)
   let heading = instances[base + 3u];
   let corner = CORNERS[vIdx];
 
-  // Rotate the quad to the body's heading; the fragment shader's shape
-  // tests stay in this un-rotated local frame.
+  // Rotate the quad to the heading; the fragment shader's shape tests stay in the local frame.
   let c = cos(heading);
   let s = sin(heading);
   let rotated = vec2f(corner.x * c - corner.y * s, corner.x * s + corner.y * c);
@@ -97,7 +93,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     edge = 1.0 - smoothstep(0.85, 1.0, r);
   }
   let a = in.color.a * edge;
-  // Premultiplied, to match the canvas's alphaMode and the pipeline's blend
-  // state (agents-gpu.ts); straight alpha here would multiply twice.
+  // Premultiplied, to match the canvas's alphaMode and the blend state in agents-gpu.ts.
   return vec4f(in.color.rgb * a, a);
 }

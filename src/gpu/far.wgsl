@@ -1,6 +1,5 @@
-// FAR body step: integrate, translation-only disc XPBD, stem span.
-// Matches src/gpu/far-kernel.ts. No SAT, no rope nodes, no torque.
-// The packed radius is the glyph-area disc, not the SAT bound, and span
+// FAR body step: integrate, translation-only disc XPBD, stem span. Matches
+// src/gpu/far-kernel.ts. The packed radius is the glyph-area disc and span
 // compliance is per wire, so this tier settles where NEAR settles.
 
 struct SimParams {
@@ -67,23 +66,16 @@ const NEI_CAP: u32 = 4u;
 
 const PI: f32 = 3.14159265;
 const TAU: f32 = 6.2831853;
-// Exactly the largest finite f32. Spelled in hex because the decimal form
-// rounds up and is rejected as unrepresentable.
+// Exactly the largest finite f32, in hex because the decimal form rounds up.
 const F32_MAX: f32 = 0x1.fffffep+127;
 
-/**
- * `Number.isFinite`, which WGSL has no builtin for. A magnitude test rather
- * than `x - x == 0`, which a shader compiler is free to fold to `true`; NaN
- * fails every comparison, so this rejects NaN and both infinities.
- */
+// `Number.isFinite`. A magnitude test rather than `x - x == 0`, which a
+// compiler may fold to `true`; NaN fails every comparison.
 fn isFinite(x: f32) -> bool {
   return abs(x) <= F32_MAX;
 }
 
-/**
- * Grid column/row for a point, clamped into range. Clamping is monotone, so
- * neighbouring cells stay neighbours and an off-grid body still collides at the edge.
- */
+// Grid column/row for a point, clamped: monotone, so an off-grid body still collides at the edge.
 fn cellXY(x: f32, y: f32) -> vec2i {
   if (!isFinite(x) || !isFinite(y)) { return vec2i(0, 0); }
   let cx = clamp(i32(floor((x - params.gridMinX) * params.invCell)), 0, i32(params.cols) - 1);
@@ -121,8 +113,7 @@ fn buildNei(@builtin(global_invocation_id) gid: vec3u) {
   let w = gid.x;
   if (w >= params.nWires) { return; }
   let wire = wires[w];
-  // Exactly `fillDiscNeighbours`'s gate, not span's rest check: on the twin
-  // a wire with a bad rest still marks the pair wired.
+  // Exactly `fillDiscNeighbours`'s gate: a wire with a bad rest still marks the pair wired.
   if (!isFinite(wire.a) || !isFinite(wire.b)) { return; }
   let ia = i32(wire.a);
   let ib = i32(wire.b);
@@ -168,8 +159,7 @@ fn disc(@builtin(global_invocation_id) gid: vec3u) {
   if (pi.locked >= 0.5 || pi.invMass <= 0.0) { return; }
   var push = vec2f(0.0, 0.0);
   let alpha = params.contactComp / max(1e-12, params.h * params.h);
-  // Span owns wired gaps: colliding a neighbour the chord is holding fights
-  // the rest length. The wired partners come off the prebuilt table.
+  // Span owns wired gaps; the wired partners come off the prebuilt table.
   var nb = array<u32, 4>(0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu);
   let ncnt = min(atomicLoad(&neiCount[i]), NEI_CAP);
   for (var k = 0u; k < ncnt; k++) {
@@ -178,8 +168,7 @@ fn disc(@builtin(global_invocation_id) gid: vec3u) {
     let ib = u32(i32(wire.b));
     nb[k] = select(ia, ib, ia == i);
   }
-  // Cell size is at least the widest contact gap in the pack, so anything
-  // close enough to touch is at most one cell away on each axis.
+  // Cell size is at least the widest contact gap, so a touch is at most one cell away.
   let cc = cellXY(pi.x, pi.y);
   let cols = i32(params.cols);
   let rows = i32(params.rows);
@@ -228,8 +217,7 @@ fn span(@builtin(global_invocation_id) gid: vec3u) {
   var push = vec2f(0.0, 0.0);
   var count = 0u;
   let si = i32(i);
-  // `buildNei` has applied the endpoint and self-wire gate; what is left is
-  // the rest check, since negative or non-finite makes C meaningless.
+  // `buildNei` has gated endpoints; a negative or non-finite rest makes C meaningless.
   let ncnt = min(atomicLoad(&neiCount[i]), NEI_CAP);
   for (var k = 0u; k < ncnt; k++) {
     let wire = wires[nei[i * NEI_CAP + k]];
@@ -253,8 +241,7 @@ fn span(@builtin(global_invocation_id) gid: vec3u) {
     let pj = parts[j];
     var d = vec2f(pj.x + ojx - (pi.x + oix), pj.y + ojy - (pi.y + oiy));
     var dist = length(d);
-    // A body far enough out overflows the length to +inf, and inf/inf is a
-    // NaN normal that poisons the whole sum.
+    // A body far enough out overflows the length to +inf, and inf/inf is NaN.
     if (!isFinite(dist)) { continue; }
     if (dist < 1e-6) {
       d = vec2f(select(-1.0, 1.0, i < j), 0.0);
@@ -272,10 +259,9 @@ fn span(@builtin(global_invocation_id) gid: vec3u) {
     push += -nrm * (lam * pi.invMass);
     count = count + 1u;
   }
-  // Every wire here is solved against the same start pose, so k wires on a
-  // body would overshoot k-fold summed. Averaging is the Jacobi fix and
-  // cannot move where the net settles, only how fast it walks there, which
-  // is why this tier gets FAR_SUBSTEPS passes.
+  // Every wire is solved against the same start pose, so k wires summed
+  // would overshoot k-fold. Averaging (Jacobi) cannot move where the net
+  // settles, only how fast it walks there; hence FAR_SUBSTEPS passes.
   if (count > 1u) { push /= f32(count); }
   delta[i] = push;
 }

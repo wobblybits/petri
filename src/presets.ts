@@ -15,17 +15,14 @@ function soupKind(): AgentKind {
 export type PresetName = 'soup' | 'commute' | 'annihilate-con' | 'annihilate-dup' | 'oscillator';
 
 /**
- * `n` points in a disk, on a jittered hexagonal lattice in a shuffled order,
- * so bodies never overlap until the dish is fuller than they can be.
- * Shuffled because ids are handed out in this order and every id-ordered
- * tie-break would otherwise sweep across the dish. Falls back to random
- * points for any shortfall at the rim.
+ * `n` points in a disk, on a jittered hexagonal lattice so bodies never
+ * overlap, in a shuffled order so no id-ordered tie-break sweeps across the
+ * dish. Falls back to random points for any shortfall at the rim.
  */
 function latticeInDisk(cx: number, cy: number, r: number, n: number): { x: number; y: number }[] {
   const pts: { x: number; y: number }[] = [];
   if (n <= 0) return pts;
-  // Hex cells of side `s` tile at (sqrt(3)/2) s^2 each; aim for 15% more
-  // cells than bodies so the rim's partial cells still leave enough.
+  // Hex cells of side `s` tile at (sqrt(3)/2) s^2 each; 15% more than bodies covers the rim.
   const s = Math.sqrt((Math.PI * r * r) / (0.8660254 * n * 1.15));
   const rowH = s * 0.8660254;
   const jitter = s * 0.2;
@@ -124,10 +121,7 @@ export function loadPreset(sim: Sim, name: PresetName, params: Params): void {
   con.extra = 1;
 }
 
-/**
- * Drop up to `n` free agents in a disk around `(x, y)`. Skips points outside
- * the world bound and stops at `maxAgents`. Returns how many actually landed.
- */
+/** Drop up to `n` free agents in a disk around `(x, y)`, inside the world bound and `maxAgents`. Returns how many landed. */
 export function splatter(
   sim: Sim,
   x: number,

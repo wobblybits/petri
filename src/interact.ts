@@ -6,10 +6,7 @@ import type { Sim } from './sim.ts';
 /** How close the pointer must be to a port, in world units, to grab it. */
 const PORT_PICK = 9;
 
-/**
- * Extra reach the eraser brush gets past an agent's own `boundRadius`, which
- * bounds the triangle body and not the port stems reaching past it.
- */
+/** Extra reach the eraser brush gets past `boundRadius`, which does not cover the port stems. */
 const ERASE_BRUSH = 10;
 
 /** Pointer travel past which a press stops counting as a click. */
@@ -67,9 +64,8 @@ export function pickAgent(sim: Sim, x: number, y: number): Agent | null {
 
 /**
  * Pointer gestures over the canvas, chosen by what is under the cursor: a
- * free port starts a wire, a body drags it, empty space pans, and a press
- * that never moves is a click. `tool` overrides that pick: erase and paint
- * are strokes, splat is one drop per press (the caller supplies `onSplat`).
+ * free port starts a wire, a body drags it, empty space pans, a still press
+ * is a click. `tool` overrides that pick: erase and paint are strokes, splat is one drop per press.
  */
 export class Interaction {
   gesture: Gesture = { kind: 'none' };
@@ -187,10 +183,7 @@ export class Interaction {
     this.sim.grabbed = null;
   }
 
-  /**
-   * Kill every agent whose glyph the brush swept between the last point and
-   * this one. Collected before killing: `kill` mutates the map this iterates.
-   */
+  /** Kill every agent the brush swept since the last point. Collected first: `kill` mutates the map this iterates. */
   private eraseAlong(x0: number, y0: number, x1: number, y1: number): void {
     const reach = ERASE_BRUSH / Math.max(0.2, this.camera.zoom);
     const dead: number[] = [];
@@ -202,10 +195,7 @@ export class Interaction {
     for (const id of dead) this.sim.kill(id);
   }
 
-  /**
-   * Deposit `PAINT_DEPOSIT` into every energy cell whose centre is within one
-   * cell of the stroke. `visited` is the stroke's own set, so hovering does not stack.
-   */
+  /** Deposit `PAINT_DEPOSIT` into every energy cell within one cell of the stroke, once per stroke. */
   private paintAlong(
     x0: number,
     y0: number,

@@ -508,7 +508,6 @@ function loadHash(): void {
   try {
     text = decodeURIComponent(raw);
   } catch {
-    /* keep raw */
   }
   if (!looksLikeNet(text)) return;
   if (!editor.importText(text)) return;

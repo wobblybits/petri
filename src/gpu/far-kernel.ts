@@ -149,8 +149,7 @@ export function farDisc(
       const keep = ri + data[oj + FAR.radius];
       if (dist >= keep) continue;
       const wired = j === n0 || j === n1 || j === n2;
-      // Coincident: span has no normal, so these are not skipped. Index
-      // order so both bodies do not pick the same axis and translate together.
+      // Coincident: span has no normal. Index order so both bodies do not pick the same axis.
       if (dist < 1e-6) {
         dx = i < j ? 1 : -1;
         dy = 0;

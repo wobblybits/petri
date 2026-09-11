@@ -144,10 +144,7 @@ type Exp = {
   _initialize?: () => void;
 };
 
-/**
- * C FAR solver, NEAR XPBD, and scent field, compiled to WASM. Same SoA as
- * the TS/GPU kernel for bodies. After `init`, steps are synchronous.
- */
+/** C FAR solver, NEAR XPBD, and scent field, compiled to WASM. Same SoA as the TS/GPU kernel. After `init`, steps are synchronous. */
 export class NativeSolver {
   ready = false;
   lastError = '';
@@ -194,8 +191,7 @@ export class NativeSolver {
   /** Per-body chemistry, mirroring Agent.chem. Four weights each. */
   bodyEmit: Float32Array | null = null;
   bodyTaste: Float32Array | null = null;
-  /** Three sensor readings per body — left, right, own — when the field is
-   *  somewhere this module cannot sample. */
+  /** Three sensor readings per body (left, right, own) when the field is somewhere this module cannot sample. */
   steerSamples: Float32Array | null = null;
   swim: Uint8Array | null = null;
   adjCap = 0;
@@ -277,10 +273,7 @@ export class NativeSolver {
     return this.ready && n <= this.bodyCap && nWires <= this.wireCap && nNodes <= this.nodeCap;
   }
 
-  /**
-   * Run the FAR kernel in place on `data` / `wires`. Uses WASM when loaded
-   * and the pack fits; otherwise the TS twin. Always mutates `data`.
-   */
+  /** Run the FAR kernel in place on `data` / `wires`: WASM when loaded and the pack fits, else the TS twin. */
   stepFar(
     data: Float32Array,
     n: number,
@@ -306,11 +299,7 @@ export class NativeSolver {
     return true;
   }
 
-  /**
-   * The same FAR step against bodies the caller has already written into
-   * `bodies` and `wires`. Saves a copy of the whole scene in and another out;
-   * `stepFar` above stays for the GPU path, which packs into its own array.
-   */
+  /** The same FAR step against bodies the caller has already written into `bodies` and `wires`. */
   stepFarInPlace(n: number, nWires: number, dt: number, substeps = FAR_SUBSTEPS, cx = 0, cy = 0, r = 0): boolean {
     const exp = this.exp;
     if (!this.ready || !exp || !this.bodies || !this.wires) return false;
@@ -336,10 +325,7 @@ export class NativeSolver {
     this.exp?.solver_near_finalize(n, nWires, h, ropeKeep, held, grabMax);
   }
 
-  /**
-   * Per-wire port torques, in place on the packed bodies. Only `omega` moves,
-   * so the caller can unpack that alone.
-   */
+  /** Per-wire port torques, in place on the packed bodies. Only `omega` moves. */
   portTorques(n: number, nWires: number, gain: number, splay: number, dt: number): void {
     this.exp?.solver_port_torques(n, nWires, gain, splay, dt);
   }
@@ -347,17 +333,12 @@ export class NativeSolver {
   /** Which field the resident scent buffer currently mirrors. */
   private scentOwner: Fields | null = null;
 
-  /**
-   * Copy the live scent window in and tell the solver where it sits in the
-   * world, so steering can sample it. Returns false when it will not fit.
-   * Only the live box crosses, not the whole grid.
-   */
+  /** Copy the live scent box in and tell the solver where it sits, so steering can sample it. False when it will not fit. */
   loadScent(fields: Fields): boolean {
     if (!this.ready || !this.exp || !this.scent) return false;
     const n = fields.cols * fields.rows;
     if (n * 4 > this.scentCap) return false;
-    // Only the box crosses, so outside it both sides must already be zero;
-    // a field the module has not seen before gets the buffer zeroed first.
+    // Only the box crosses, so a field the module has not seen gets the buffer zeroed first.
     if (this.scentOwner !== fields) {
       this.scent.fill(0);
       this.scentOwner = fields;
@@ -416,16 +397,12 @@ export class NativeSolver {
     );
   }
 
-  /** Standalone contact pass. `nWires` lets it skip wired pairs the way
-   *  `stepNear` does; pass 0 for a scene with no wires packed. */
+  /** Standalone contact pass. `nWires` lets it skip wired pairs as `stepNear` does; 0 for no wires packed. */
   nearContacts(n: number, nWires: number, h: number): number {
     return this.exp?.solver_near_contacts(n, nWires, h) ?? 0;
   }
 
-  /**
-   * Eight-substep NEAR pass in WASM: integrate, XPBD, grab, SAT (detailed)
-   * / disc (FAR-FAR), finalize. Pack state before, unpack after.
-   */
+  /** Eight-substep NEAR pass in WASM: integrate, XPBD, grab, SAT / disc, finalize. Pack before, unpack after. */
   stepNear(
     n: number,
     nWires: number,
@@ -459,9 +436,8 @@ export class NativeSolver {
     return this.ready && n <= this.bodyCap && nAdj <= this.adjCap;
   }
 
-  // Owner of the flocking neighbourhood cache inside the wasm module. The
-  // module is a singleton shared by every Sim in the process; a caller whose
-  // key does not match must repack the adjacency.
+  // Owner of the flocking neighbourhood cache inside the wasm module, which
+  // every Sim in the process shares; a caller whose key does not match repacks.
   private fkSim = -1;
   private fkGraph = -1;
   private fkRoster = -1;
@@ -469,18 +445,13 @@ export class NativeSolver {
   private fkHops = -1;
 
   // Owner of the per-body scratch arrays the force passes read (steerFlags,
-  // steerPwire, declComp, declSat): derived from topology and roster, shared
-  // by every Sim in the process like the flocking cache.
+  // steerPwire, declComp, declSat), shared like the flocking cache.
   private skSim = -1;
   private skGraph = -1;
   private skRoster = -1;
   private skN = -1;
 
-  /**
-   * Forget every cache and every mode a Sim left behind, so a fresh Sim does
-   * not inherit the scent buffer or sampling mode from whoever ran last.
-   * `test-setup` calls this before every test.
-   */
+  /** Forget every cache and mode a Sim left behind. `test-setup` calls this before every test. */
   resetCaches(): void {
     this.fkSim = -1;
     this.fkGraph = -1;
