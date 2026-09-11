@@ -245,6 +245,7 @@ describe('plasticity: direction', () => {
     seed(7);
     const params = still();
     params.learnRate = 0.02;
+    params.soupCount = 0;
     const sim = new Sim(600, 400);
     loadPreset(sim, 'soup', params);
     const a = sim.spawn('con', 300, 200, 0, params, true)!;
@@ -263,7 +264,7 @@ describe('plasticity: direction', () => {
     const early = mean(0, 120);
     mean(120, 2400);
     const late = mean(2400, 3000);
-    expect(late, 'h[0] should have risen, since h[0] high is what fills the tank').toBeGreaterThan(early);
     Math.random = realRandom;
+    expect(late, 'h[0] should have risen, since h[0] high is what fills the tank').toBeGreaterThan(early);
   });
 });
