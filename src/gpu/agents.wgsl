@@ -1,12 +1,7 @@
 /*
- * Instanced dot/triangle rendering for the population Canvas2D skips (the
- * FAR tier — see render.ts, which draws NEAR-tier agents in full detail on
- * the canvas layered on top of this one, and everything else as one draw
- * call here). One quad (two triangles, six vertices, no vertex buffer —
- * corners come from vertex_index) per instance, billboarded and rotated to
- * the body's heading, then clipped to a circle or a triangle in the
- * fragment shader depending on SHAPE — Era is round, Con and Dup are the
- * same triangle Canvas2D draws them as, just simplified.
+ * Instanced dot/triangle rendering for the FAR tier (see render.ts). One
+ * quad per instance, corners from vertex_index, rotated to the body's
+ * heading, then clipped to a circle or a triangle in the fragment shader.
  *
  * Instance layout, 9 floats (36 bytes) per body:
  *   [0] x, [1] y (world), [2] radius (world units), [3] heading (radians),
@@ -50,8 +45,8 @@ fn vs_main(@builtin(vertex_index) vIdx: u32, @builtin(instance_index) iIdx: u32)
   let heading = instances[base + 3u];
   let corner = CORNERS[vIdx];
 
-  // Rotate the quad to the body's heading before placing it in world space;
-  // the fragment shader's shape tests stay in this un-rotated local frame.
+  // Rotate the quad to the body's heading; the fragment shader's shape
+  // tests stay in this un-rotated local frame.
   let c = cos(heading);
   let s = sin(heading);
   let rotated = vec2f(corner.x * c - corner.y * s, corner.x * s + corner.y * c);
@@ -76,8 +71,7 @@ fn edgeDist(a: vec2f, b: vec2f, p: vec2f) -> f32 {
   return (e.x * w.y - e.y * w.x) / length(e);
 }
 
-// A triangle pointing along local +X (heading's own direction, since the
-// vertex stage rotates the quad by heading before this UV space is reached).
+// A triangle pointing along local +X, the heading's own direction.
 const TRI_TIP = vec2f(1.0, 0.0);
 const TRI_BACK_L = vec2f(-0.7, 0.75);
 const TRI_BACK_R = vec2f(-0.7, -0.75);
@@ -103,10 +97,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     edge = 1.0 - smoothstep(0.85, 1.0, r);
   }
   let a = in.color.a * edge;
-  // Premultiplied: the canvas is configured alphaMode: 'premultiplied', and
-  // the pipeline's own blend state (agents-gpu.ts) is premultiplied too, so
-  // this has to be consistent both ways — straight alpha here would double
-  // up the multiply once shapes start overlapping or blending against the
-  // page.
+  // Premultiplied, to match the canvas's alphaMode and the pipeline's blend
+  // state (agents-gpu.ts); straight alpha here would multiply twice.
   return vec4f(in.color.rgb * a, a);
 }

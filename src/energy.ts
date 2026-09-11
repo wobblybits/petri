@@ -1220,7 +1220,7 @@ export class WireAdjacency {
 
   /**
    * Builds the CSR from an id-keyed index. Only the tests call this; the
-   * frame reads `Sim.refreshWakeGraph`'s CSR. `index` maps agent id to its
+   * frame reads `Sim.refreshWireGraph`'s CSR. `index` maps agent id to its
    * slot in the caller's dense list. `wires` is a factory, not an iterable:
    * the counting sort walks the set twice, and a one-shot iterator would
    * leave the second pass empty with every neighbour reading as body 0.

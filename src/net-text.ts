@@ -12,10 +12,8 @@ import type { Sim } from './sim.ts';
  * duplicator. A name is a wire and occurs twice in a closed net. `& A ~ B`
  * joins the two trees' principal ports (an active pair).
  *
- * Open nets (the designer) may have unmatched names — those ports stay free —
- * and a closed net may omit the root, starting at `&`. Extra disconnected
- * trees with a free principal are written `& t ~ x` with a once-used name.
- * Pose is not stored; import lays agents on a grid and settle can pull them.
+ * Open nets may have unmatched names, whose ports stay free; a closed net
+ * may omit the root, starting at `&`. Pose is not stored.
  */
 
 type Term =
@@ -257,9 +255,7 @@ function spawnPose(index: number): { x: number; y: number } {
   return { x: (index % 8) * GAP, y: Math.floor(index / 8) * GAP };
 }
 
-/**
- * Parse an HVM2 net into a designer snapshot. Returns null if the string is not a net.
- */
+/** Parse an HVM2 net into a designer snapshot. Returns null if the string is not a net. */
 export function parseNet(src: string): DesignSnapshot | null {
   const trimmed = src.trim();
   if (!trimmed) return { nextId: 1, agents: [], wires: [] };

@@ -1,25 +1,13 @@
 import type { Params } from '../params.ts';
 
 /*
- * Dials whose meaning depends on another dial.
- *
- * A sweep holds every parameter it is not varying at one value and assumes
- * that value means the same thing at every point of the grid. It does not.
- * `senseScale` is the right gain for a minted pond and three orders too large
- * for an excreting one; `energyRegrow` is a producer on a patchy dish and
- * nothing at all on a uniform one seeded at capacity. Both were held constant
- * across the axis that changed their meaning, in sweeps about exactly the
- * thing they blinded — four sweeps and two afternoons, in one session.
- *
- * The harness cannot detect this. The assumption is about the model, not the
- * grid, so the model's own couplings have to be written down where the
- * harness can read them. That is this table. `sweep` and `protocol` warn when
- * an axis is crossed with a coupled constant that does not move with it; a
- * protocol that knowingly holds one says so in `accepts`, with the reason,
- * and the reason is recorded rather than the warning suppressed.
- *
- * Add a row the moment a held constant is found to mean two things. The
- * table is the memory this project did not have.
+ * Dials whose meaning depends on another dial. A sweep holds every parameter
+ * it is not varying at one value and assumes that value means the same thing
+ * at every point of the grid; the harness cannot detect where it does not,
+ * so the model's couplings are written down here. `sweep` and `protocol`
+ * warn when an axis is crossed with a coupled constant that does not move
+ * with it; a protocol that knowingly holds one says so in `accepts`, with
+ * the reason. Add a row the moment a held constant is found to mean two things.
  */
 export interface Coupling {
   /** The dial whose setting changes what `constant` means. */
@@ -30,26 +18,10 @@ export interface Coupling {
   why: string;
   /** What to do instead. */
   fix: string;
-  /**
-   * A held setting at which the coupling is moot. `fertilise` at 0 cannot
-   * be confounded by `energyRegrow` because it does nothing; a learning
-   * horizon is irrelevant with `learnRate` at 0. Usually the constant's own
-   * neutral value, sometimes another dial's.
-   */
+  /** A held setting at which the coupling is moot: usually the constant's own neutral value, sometimes another dial's. */
   unless?: { key: keyof Params; is: number };
 }
 
-/*
- * Retired: `excreteRate` x `uptakeVmax`.
- *
- * The species uptake rows used to follow `excreteRate`, so `uptakeVmax` metered
- * the ground alone in one arm and four species in the other — a different
- * mechanism at each level of the axis. Uptake is now one budget shared across
- * the four by what is standing in the cell, which is what the switch was
- * bought for, so `uptakeVmax` means the same thing at every level and the pair
- * is no longer coupled. Kept as a note because a coupling that quietly stops
- * being one is as misleading as one that is missed.
- */
 export const COUPLINGS: readonly Coupling[] = [
   {
     axis: 'excreteRate',
@@ -171,14 +143,10 @@ export interface CouplingWarning {
 }
 
 /**
- * Which couplings a sweep trips.
- *
- * `axes` are the parameters the sweep varies; `varied` are parameters that
- * move with them by some other route — set differently per arm, say; `held`
- * is what everything else is set to. A warning is a coupled constant of some
- * axis that is in neither moving set and not at a setting that makes the
- * coupling moot: held at one value across an axis that changes what the value
- * means.
+ * Which couplings a sweep trips. `axes` are the parameters the sweep varies;
+ * `varied` are parameters that move with them by some other route; `held` is
+ * what everything else is set to. A warning is a coupled constant of some
+ * axis that is in neither moving set and not at a moot setting.
  */
 export function checkCouplings(
   axes: Iterable<string>,

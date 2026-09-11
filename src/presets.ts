@@ -15,19 +15,11 @@ function soupKind(): AgentKind {
 export type PresetName = 'soup' | 'commute' | 'annihilate-con' | 'annihilate-dup' | 'oscillator';
 
 /**
- * `n` points in a disk, on a jittered hexagonal lattice in a shuffled order.
- *
- * Uniform random placement put a tenth of a ten-thousand-body soup inside
- * another body's radius, and the disc contact resolved the pile at speeds in
- * the thousands for the first two seconds — the "flung apart" that showed up
- * in every early census and had nothing to do with the solver. A lattice at
- * the spacing the area affords, jittered by a fifth of it, never overlaps
- * until the dish is genuinely fuller than its bodies can be.
- *
- * Shuffled, because ids are handed out in this order and a spatially sorted
- * roster would make every id-ordered tie-break — harvest, latch — a
- * left-to-right sweep across the dish. Falls back to random points for any
- * shortfall at the rim.
+ * `n` points in a disk, on a jittered hexagonal lattice in a shuffled order,
+ * so bodies never overlap until the dish is fuller than they can be.
+ * Shuffled because ids are handed out in this order and every id-ordered
+ * tie-break would otherwise sweep across the dish. Falls back to random
+ * points for any shortfall at the rim.
  */
 function latticeInDisk(cx: number, cy: number, r: number, n: number): { x: number; y: number }[] {
   const pts: { x: number; y: number }[] = [];

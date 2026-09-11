@@ -7,13 +7,8 @@ import type { Sim } from './sim.ts';
 const PORT_PICK = 9;
 
 /**
- * Extra reach the eraser brush gets past an agent's own `boundRadius`.
- *
- * `boundRadius` bounds the triangle body, not the port stems reaching past
- * it — a Con or Dup's principal tip sits about 25px from centre against a
- * ~18px bound — so brushing the visible port nub of a body should still
- * erase it. The rest is slack for a fast drag across closely-spaced bodies,
- * whose centres the segment can miss by a pixel or two between samples.
+ * Extra reach the eraser brush gets past an agent's own `boundRadius`, which
+ * bounds the triangle body and not the port stems reaching past it.
  */
 const ERASE_BRUSH = 10;
 
@@ -71,13 +66,10 @@ export function pickAgent(sim: Sim, x: number, y: number): Agent | null {
 }
 
 /**
- * Pointer gestures over the canvas, chosen by what is under the cursor rather
- * than by a mode switch: a free port starts a wire, a body drags it, and empty
- * space pans. A press that never really moves is still a click, so spawning
- * keeps working.
- *
- * `tool` overrides that pick: erase and paint are strokes, splat is one drop
- * per press (the caller supplies `onSplat`).
+ * Pointer gestures over the canvas, chosen by what is under the cursor: a
+ * free port starts a wire, a body drags it, empty space pans, and a press
+ * that never moves is a click. `tool` overrides that pick: erase and paint
+ * are strokes, splat is one drop per press (the caller supplies `onSplat`).
  */
 export class Interaction {
   gesture: Gesture = { kind: 'none' };
@@ -87,10 +79,7 @@ export class Interaction {
   /** Fired once on pointer-down while the splat tool is selected. */
   onSplat: ((x: number, y: number) => void) | null = null;
 
-  /**
-   * Lab checkbox compatibility. Setting false always returns to the default
-   * pick, even if paint/splat was active — the lab only ever toggles erase.
-   */
+  /** Lab checkbox compatibility. Setting false always returns to the default pick. */
   get eraserMode(): boolean {
     return this.tool === 'erase';
   }
@@ -200,10 +189,7 @@ export class Interaction {
 
   /**
    * Kill every agent whose glyph the brush swept between the last point and
-   * this one. Collected before killing rather than removed mid-scan: `kill`
-   * mutates the same agents map this is iterating, and a starved body's own
-   * death yield lands back on the grid, which is easier to reason about as a
-   * clean batch than interleaved with the scan that found it.
+   * this one. Collected before killing: `kill` mutates the map this iterates.
    */
   private eraseAlong(x0: number, y0: number, x1: number, y1: number): void {
     const reach = ERASE_BRUSH / Math.max(0.2, this.camera.zoom);
@@ -218,8 +204,7 @@ export class Interaction {
 
   /**
    * Deposit `PAINT_DEPOSIT` into every energy cell whose centre is within one
-   * cell of the stroke. `visited` is the stroke's own set — hovering the same
-   * cell does not stack, a new press does.
+   * cell of the stroke. `visited` is the stroke's own set, so hovering does not stack.
    */
   private paintAlong(
     x0: number,

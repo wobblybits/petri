@@ -53,15 +53,10 @@ struct Wire {
 @group(0) @binding(1) var<storage, read_write> parts: array<Particle>;
 @group(0) @binding(2) var<storage, read_write> delta: array<vec2f>;
 @group(0) @binding(3) var<storage, read> wires: array<Wire>;
-// Uniform-grid broadphase, rebuilt every substep because bodies move. The twin
-// tests every pair; one thread per body made that 30x parallel and still lost
-// to `native/solver.c`, which spatial-hashes on one core. Parallelism was never
-// going to cover an asymptote.
+// Uniform-grid broadphase, rebuilt every substep because bodies move.
 @group(0) @binding(4) var<storage, read_write> cellCount: array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read_write> cellBodies: array<u32>;
-// Wire indices touching each body, built once per step. Both disc and span used
-// to scan the whole wire list per body, which is the same quadratic in a second
-// costume -- and with a wire for every other body, the larger half of it.
+// Wire indices touching each body, built once per step.
 @group(0) @binding(6) var<storage, read_write> nei: array<u32>;
 @group(0) @binding(7) var<storage, read_write> neiCount: array<atomic<u32>>;
 
@@ -77,21 +72,17 @@ const TAU: f32 = 6.2831853;
 const F32_MAX: f32 = 0x1.fffffep+127;
 
 /**
- * `Number.isFinite`, which the twin leans on in several places and WGSL has no
- * builtin for. Written as a magnitude test rather than the usual `x - x == 0`
- * because that identity is exactly what a shader compiler is free to fold to
- * `true`. A comparison cannot be folded, and NaN fails every comparison, so
- * this rejects NaN and both infinities.
+ * `Number.isFinite`, which WGSL has no builtin for. A magnitude test rather
+ * than `x - x == 0`, which a shader compiler is free to fold to `true`; NaN
+ * fails every comparison, so this rejects NaN and both infinities.
  */
 fn isFinite(x: f32) -> bool {
   return abs(x) <= F32_MAX;
 }
 
 /**
- * Grid column/row for a point, clamped into range. Clamping rather than
- * dropping is what keeps the 3x3 scan honest: it is monotone, so two bodies
- * whose true cells are neighbours stay neighbours after it, and a body that
- * has drifted off the grid still collides with whatever is at the edge.
+ * Grid column/row for a point, clamped into range. Clamping is monotone, so
+ * neighbouring cells stay neighbours and an off-grid body still collides at the edge.
  */
 fn cellXY(x: f32, y: f32) -> vec2i {
   if (!isFinite(x) || !isFinite(y)) { return vec2i(0, 0); }
@@ -130,9 +121,8 @@ fn buildNei(@builtin(global_invocation_id) gid: vec3u) {
   let w = gid.x;
   if (w >= params.nWires) { return; }
   let wire = wires[w];
-  // Exactly `fillDiscNeighbours`'s gate, and deliberately not span's rest
-  // check: on the twin a wire with a bad rest still marks the pair wired and
-  // suppresses their contact, even though the chord itself does nothing.
+  // Exactly `fillDiscNeighbours`'s gate, not span's rest check: on the twin
+  // a wire with a bad rest still marks the pair wired.
   if (!isFinite(wire.a) || !isFinite(wire.b)) { return; }
   let ia = i32(wire.a);
   let ib = i32(wire.b);
@@ -178,10 +168,8 @@ fn disc(@builtin(global_invocation_id) gid: vec3u) {
   if (pi.locked >= 0.5 || pi.invMass <= 0.0) { return; }
   var push = vec2f(0.0, 0.0);
   let alpha = params.contactComp / max(1e-12, params.h * params.h);
-  // Span owns wired gaps. Bound discs are fatter than SAT, so colliding a
-  // neighbour the chord is holding fights the rest length.
-  // The wired partners, read off the prebuilt table instead of rescanning
-  // every wire. NEI_CAP entries because three ports cannot make a fourth.
+  // Span owns wired gaps: colliding a neighbour the chord is holding fights
+  // the rest length. The wired partners come off the prebuilt table.
   var nb = array<u32, 4>(0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu);
   let ncnt = min(atomicLoad(&neiCount[i]), NEI_CAP);
   for (var k = 0u; k < ncnt; k++) {
@@ -240,9 +228,8 @@ fn span(@builtin(global_invocation_id) gid: vec3u) {
   var push = vec2f(0.0, 0.0);
   var count = 0u;
   let si = i32(i);
-  // Only this body's own wires. `buildNei` has already applied the endpoint
-  // and self-wire gate, so what is left is the rest check: negative or
-  // non-finite makes C meaningless.
+  // `buildNei` has applied the endpoint and self-wire gate; what is left is
+  // the rest check, since negative or non-finite makes C meaningless.
   let ncnt = min(atomicLoad(&neiCount[i]), NEI_CAP);
   for (var k = 0u; k < ncnt; k++) {
     let wire = wires[nei[i * NEI_CAP + k]];
@@ -266,9 +253,8 @@ fn span(@builtin(global_invocation_id) gid: vec3u) {
     let pj = parts[j];
     var d = vec2f(pj.x + ojx - (pi.x + oix), pj.y + ojy - (pi.y + oiy));
     var dist = length(d);
-    // Was `dist != dist`, which is only the NaN half of the twin's
-    // `Number.isFinite`. A body far enough out overflows the length to +inf,
-    // and inf/inf is a NaN normal that poisons the whole sum.
+    // A body far enough out overflows the length to +inf, and inf/inf is a
+    // NaN normal that poisons the whole sum.
     if (!isFinite(dist)) { continue; }
     if (dist < 1e-6) {
       d = vec2f(select(-1.0, 1.0, i < j), 0.0);
@@ -286,16 +272,10 @@ fn span(@builtin(global_invocation_id) gid: vec3u) {
     push += -nrm * (lam * pi.invMass);
     count = count + 1u;
   }
-  // The twin solves wires in sequence, so each one sees the last one's
-  // result. One thread per body cannot: every wire here is solved against
-  // the same start pose, so k wires on a body each correct the whole error
-  // and the sum overshoots k-fold. Three wires between one pair -- legal,
-  // Con and Dup have three ports each -- diverged outright.
-  //
-  // Averaging is the standard Jacobi fix and cannot move where the net
-  // settles: at rest every correction is zero, and zero averages to zero.
-  // It only walks there in smaller steps, which is why this tier gets
-  // FAR_SUBSTEPS passes at it.
+  // Every wire here is solved against the same start pose, so k wires on a
+  // body would overshoot k-fold summed. Averaging is the Jacobi fix and
+  // cannot move where the net settles, only how fast it walks there, which
+  // is why this tier gets FAR_SUBSTEPS passes.
   if (count > 1u) { push /= f32(count); }
   delta[i] = push;
 }

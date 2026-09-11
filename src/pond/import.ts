@@ -3,26 +3,11 @@ import { basename } from 'node:path';
 import { PondDb, SCHEMA_VERSION } from './db.ts';
 
 /*
- * Fold one library file into another.
- *
- * The runs from a single session ended up in thirty-eight separate database
- * files, one per question, which is the habit the format was built to break:
- * a run in a file of its own informs the sweep it belonged to and nothing
- * else, while a run in the library joins every regression asked of it
- * afterwards. `explore` reads the whole library, so this is what makes the
- * history worth anything.
- *
- * Two things it has to survive, both of which the real files have:
- *
- * - **Schema drift.** A file written before `net_fst` existed has no such
- *   column, and a file written before `origin` did has no such column either.
- *   Columns are intersected per table rather than assumed, and the source is
- *   opened read-only so importing never migrates — or damages — the thing it
- *   is reading.
- * - **Re-import.** Every run remembers where it came from as `file#id`, and a
- *   run already carrying that origin is skipped. Importing the same file
- *   twice is a no-op, which means this can be run over a directory whenever,
- *   without keeping track of what has already been folded in.
+ * Fold one library file into another. Survives schema drift (columns are
+ * intersected per table, and the source is opened read-only so importing
+ * never migrates it) and re-import (every run remembers where it came from
+ * as `file#id`, and a run already carrying that origin is skipped, so
+ * importing the same file twice is a no-op).
  */
 
 export interface ImportResult {
@@ -79,19 +64,12 @@ export function importRuns(dest: PondDb, path: string): ImportResult {
     const lastId = dest.db.prepare('SELECT last_insert_rowid() AS id');
     const newId = (): number => Number((lastId.get() as { id: number }).id);
 
-    /*
-     * One transaction for the file. A half-imported library is worse than an
-     * un-imported one: the origins of the runs that landed would make a
-     * second attempt skip them and leave their samples behind forever.
-     */
+    // One transaction for the file: a half-imported run's origin would make
+    // a second attempt skip it and leave its samples behind forever.
     dest.db.exec('BEGIN');
     try {
       const runMap = new Map<number, number>();
-      /*
-       * By id, so a run whose `parent_run` is in the same file meets its
-       * parent already mapped. A forward reference would have to be a cycle,
-       * which the runner cannot write.
-       */
+      // By id, so a run whose `parent_run` is in the same file meets its parent already mapped.
       for (const r of src.prepare('SELECT * FROM run ORDER BY id').all() as Record<string, unknown>[]) {
         const origin = `${tag}#${r.id}`;
         if (already.has(origin)) {
@@ -108,13 +86,8 @@ export function importRuns(dest: PondDb, path: string): ImportResult {
         runMap.set(Number(r.id), newId());
         out.runs++;
       }
-      /*
-       * Nothing new in this file. Fall through to the commit rather than
-       * returning: an early return here left the transaction open and the
-       * next file's BEGIN failed with "cannot start a transaction within a
-       * transaction", which is how importing a directory died on its second
-       * already-imported file.
-       */
+      // Nothing new in this file. Fall through to the commit rather than
+      // returning, so the transaction is not left open for the next file.
       const netMap = new Map<number, number>();
       const netRows = runMap.size === 0
         ? []
@@ -148,8 +121,7 @@ export function importRuns(dest: PondDb, path: string): ImportResult {
       for (const p of plantRows) {
         const run = runMap.get(Number(p.run_id));
         const net = netMap.get(Number(p.net_id));
-        // A plant whose net came from a file not yet imported has nothing to
-        // point at; the run it seeded is still worth keeping.
+        // A plant whose net came from a file not yet imported has nothing to point at.
         if (run === undefined || net === undefined) continue;
         insertPlant.run(
           ...plantCols.map((c) => (c === 'run_id' ? run : c === 'net_id' ? net : (p[c] as never))),

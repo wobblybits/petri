@@ -2,20 +2,9 @@ export const CH = {
   conP: 0,
   dupP: 1,
   /**
-   * Energy. Not a signal — the stuff itself, stored where everything else
-   * about this world is stored.
-   *
-   * It was the channel an Era's principal laid into, and it was the one
-   * channel nothing listened to: `seedChem` gives no kind a taste for it, so
-   * Eras spent their whole unit of voice shouting into a band with no
-   * receivers. That made it the obvious place to put a substance, and putting
-   * it here is what turns "how much food is at this spot" into something the
-   * same diffusion, the same disk mask and the same sampling already answer
-   * for everything else.
-   *
-   * Nothing deposits into it through `emit`. A body's voice is spent across
-   * the three signalling channels; energy arrives by dying, by a rewrite's
-   * leftovers, by a full producer spilling, and by growing.
+   * Energy. Not a signal — the stuff itself. Nothing deposits into it
+   * through `emit`; it arrives by dying, by a rewrite's leftovers, by a full
+   * producer spilling, by excretion, and by growing.
    */
   energy: 2,
   aux: 3,
@@ -24,75 +13,35 @@ export const CH = {
 export const CHANNELS = 4;
 
 /**
- * The channels that carry a *signal* — everything but the ground.
- *
- * Not the same set as the emit budget, which is still four wide: its ground
- * slot is read by nothing since farming became the ground's excretion row on
- * the expression head (see `effEmit`), and it stays only because dropping it
- * would renormalise every genome in the library. The ground is a substance
- * rather than something anybody is saying, so `peak` and anything asking "is
- * this pond audible" wants these three.
+ * The channels that carry a signal — everything but the ground. The emit
+ * budget is still four wide (see `effEmit`), but `peak` and anything asking
+ * "is this pond audible" wants these three.
  */
 export const VOICE = [CH.conP, CH.dupP, CH.aux] as const;
 
 /**
  * The order a body digests what it swallowed: the three signalling species,
- * then the ground.
- *
- * Not the harvest's order, and on purpose. The harvest visits species in
- * index order, which is arbitrary and only has to match the shader; digestion
- * spends the ground as the co-substrate the other three are converted *with*
- * (`Sim.runDigestion`), so the ground has to be paired off last or a body
- * digests it out from under its own catabolism in the same frame — and which
- * reaction got the last unit would then be an artifact of where `CH.energy`
- * happens to sit in the channel list rather than of anything a body is.
+ * then the ground. The ground is the co-substrate the other three are
+ * converted with (`Sim.runDigestion`), so it must be paired off last or a
+ * body digests it out from under its own catabolism in the same frame.
  */
 export const DIGEST_ORDER = [CH.conP, CH.dupP, CH.aux, CH.energy] as const;
 
 /**
- * The channel whose presence accelerates the ground's regrowth — the fertiliser
- * signal. See `params.fertilise`.
- *
- * A voice channel rather than `CH.aux`, because it has to be a *choice*. Every
- * free port lays a flat marker into aux whatever its genome says, so
- * fertility keyed on aux would be a property of having sockets rather than
- * something a lineage decides to spend its voice on — and the whole point is
- * that being heard is a unit budget a body divides, so fertilising is
- * something it gives up something else for.
- *
- * A constant rather than a slider: an integer channel index in the parameter
- * list invites configurations that mean nothing. Change it here.
+ * The channel whose presence accelerates the ground's regrowth — the
+ * fertiliser signal. See `params.fertilise`. A voice channel rather than
+ * `CH.aux`, so fertilising is something a lineage spends its voice budget
+ * on rather than a property of having free ports.
  */
 export const FERTILISE_CH: number = CH.conP;
 
 /*
- * The world grid, shared by the scent field and the energy grid.
- *
- * Cell size is the parameter that matters, and it is not free. Steering
- * compares two sensors `sensorDist` apart — 22 world units — against a dead
- * zone of 5% of the signal, and that dead zone is doing real work: it rejects
- * the sampling asymmetry an agent reads off its own trail, which is
- * proportional to signal strength in the same way. So a real gradient is only
- * visible when the sensors straddle something close to a whole cell.
- *
- * At 20 units they straddle about 1.1, which is where the steering constants
- * were tuned — the old field sized itself to the camera and was roughly this
- * fine when zoomed in. Measured at 160 units the sensors straddled 0.14 of a
- * cell, a real gradient read 0.043 against a dead zone of 0.237, and nothing
- * turned at all. Shrinking the dead zone does not rescue it: then the
- * self-trail artifact steers instead, at every resolution tried.
- *
- * Extent is the other side of the same coin, and it is the cheap side: cost
- * scales with the number of cells, so a finer cell costs nothing and a wider
- * world costs everything. 256 squared at 20 units is 65,536 cells — about a
- * millisecond for two diffusion passes and a decay — over a world 5,120 units
- * across. At the ~52-unit spacing the pond actually settles to, that holds
- * something like 9,700 bodies packed solid.
- *
- * One grid, not two. An earlier plan had a fine GPU field with a coarse CPU
- * fallback, which would have meant agents steering differently depending on
- * whether WebGPU turned up — a second simulation rather than a second code
- * path. A GPU field is still worth having; it buys extent, not fidelity.
+ * The world grid, shared by the scent field and the energy grid. Cell size
+ * is not free: steering compares two sensors `sensorDist` apart against a
+ * dead zone that rejects the self-trail artifact, so a real gradient is only
+ * visible when the sensors straddle close to a whole cell. Cost scales with
+ * the number of cells. One grid on both field paths, so agents steer the
+ * same whether or not WebGPU turned up.
  */
 export const FIELD_CELLS = 1024;
 export const FIELD_CELL = 10;
@@ -107,10 +56,7 @@ export const WORLD_BOUND_INSET = FIELD_CELL;
 
 /**
  * Radius of the largest disk centred on `(cx, cy)` that sits inside the field
- * window `[origin, origin + FIELD_EXTENT)` by `WORLD_BOUND_INSET`.
- *
- * `Fields.cover` snaps the origin to a whole cell, so a circle of radius
- * `FIELD_HALF` can poke up to half a cell past the tight edge. This is the
+ * window `[origin, origin + FIELD_EXTENT)` by `WORLD_BOUND_INSET`. The one
  * number the wall, the scent mask, the energy bound, and soup spawn share.
  */
 export function worldBoundRadius(
@@ -142,53 +88,24 @@ export class Fields {
   /** Live-disk radius. `<= 0` means no Dirichlet mask and no wall. */
   boundR = 0;
   data: Float32Array;
-  /**
-   * The diffusion ping-pong's other half, allocated the first time a pass
-   * needs it. Sixteen megabytes, and on the GPU path no pass ever does.
-   */
+  /** The diffusion ping-pong's other half, allocated the first time a pass needs it. */
   private tmp: Float32Array | null = null;
 
   /**
-   * Per-channel multipliers on the global diffuse and decay rates.
-   *
-   * The sliders stay one number each, because "how volatile is this world"
-   * is one property of the world. What a channel *is* then scales it: these
-   * say how fast this particular substance moves and how fast it goes away,
-   * relative to everything else.
-   *
-   * They exist because the four channels stopped being four of the same
-   * thing. A signal wants to spread and fade — that is what makes a trail a
-   * trail. A conserved quantity wants to spread and stay, because energy
-   * that evaporates is energy the economy has to mint back. And a
-   * reaction-diffusion pair only patterns at all when the two species move
-   * at different speeds: Gray-Scott wants the substrate about twice the
-   * activator, and at one rate for everything there is no instability to
-   * find.
-   *
-   * All ones is exactly the old behaviour, which is also the only shape the
-   * SIMD kernel in the solver can take — it splats one rate across the whole
-   * register. `uniform` is what decides whether the native path is still
-   * allowed to answer.
-   *
-   * Float64, so that a rate of 1 multiplies a mix of 0.6 back into 0.6.
-   * Float32 rounds both of the mixes a frame actually uses — 0.6 and 0.39 —
-   * and the pass would then land every cell a few bits off the one it
-   * replaces, for a change that is supposed to do nothing until a rate moves.
-   * Four numbers; there is nothing to save by narrowing them.
+   * Per-channel multipliers on the global diffuse and decay rates: a signal
+   * spreads and fades, a conserved quantity spreads and stays, and a
+   * reaction-diffusion pair only patterns when its species move at different
+   * speeds. All ones is the only shape the solver's SIMD kernel can take.
+   * Float64, so a rate of 1 leaves a mix bit-identical.
    */
   readonly diffuseRate = new Float64Array([1, 1, 1, 1]);
   readonly decayRate = new Float64Array([1, 1, 1, 1]);
 
   /**
-   * `cells` a side over `extent` world units.
-   *
-   * The two are separate so a smaller dish can keep the same cell. The
-   * steering constants — the sensor spacing, the dead zone, the deposit
-   * normalisation — are tuned to a ten-unit cell (see `FIELD_CELL`), and a
-   * field that shrank its cell count over the full extent would be a
-   * coarser world, not a smaller one. `Sim` passes `cells * FIELD_CELL`;
-   * the default keeps `new Fields(n)` meaning what it always did for the
-   * kernel tests, a coarse grid over the whole world.
+   * `cells` a side over `extent` world units. Separate so a smaller dish can
+   * keep the same cell: the steering constants are tuned to `FIELD_CELL`.
+   * `Sim` passes `cells * FIELD_CELL`; the default gives the kernel tests a
+   * coarse grid over the whole world.
    */
   constructor(cells = FIELD_CELLS, extent = FIELD_EXTENT) {
     this.cols = cells;
@@ -199,33 +116,11 @@ export class Fields {
   }
 
   /*
-   * The rectangle of cells that have ever been deposited into, plus a margin.
-   *
-   * The grid is a million cells and a pond touches a small patch of it, so
-   * diffusing and decaying the whole thing spends almost all of its time on
-   * zeros — which stay zero however many times they are averaged with their
-   * neighbours. Tracking where the scent actually is turns both passes into
-   * work proportional to the pond rather than to the world.
-   *
-   * The margin is what diffusion is allowed to spread into before a deposit
-   * extends the box again. Two passes at the default mix move a meaningful
-   * amount about a cell, so sixteen is many frames of headroom; beyond it a
-   * vanishing tail is clipped, and decay was taking it to nothing anyway.
-   *
-   * The box only ever grows, which keeps the invariant the ping-pong needs:
-   * outside it both buffers are exactly zero, so a cell entering the box for
-   * the first time is zero in whichever buffer is about to be read.
-   *
-   * It briefly grew a shrinking half — a `trim` that pulled the sides back
-   * past rows decay had emptied, and a widening conditional on the edge
-   * holding something. Both are gone, and the reason is worth keeping. At
-   * this world's rates the field fills the dish within seconds however few
-   * bodies are in it — measured, a 198-body pond and a 20,000-body one both
-   * occupy the whole grid — so there is never anything to reclaim. What the
-   * trim did instead was fold sub-threshold mass near the rim back inward,
-   * against a Dirichlet boundary whose whole job is to absorb it, and that
-   * moved a settled pond for no measurable gain. The disk mask below is what
-   * actually keeps this cheap.
+   * The rectangle of cells that have ever been deposited into, plus a
+   * margin, so the passes skip cells that are zero and will stay zero. The
+   * box only ever grows, which keeps the invariant the ping-pong needs:
+   * outside it both buffers are exactly zero. In practice the field fills
+   * the dish within seconds; the disk mask is what keeps the passes cheap.
    */
   private static readonly MARGIN = 16;
   private loI = 0;
@@ -233,19 +128,14 @@ export class Fields {
   private hiI = -1;
   private hiJ = -1;
 
-  /** World units per cell. Fixed — this is the whole point of the rework. */
+  /** World units per cell. Fixed. */
   get cellSize(): number {
     return this.worldW / this.cols;
   }
 
   /**
-   * Slide the field so it stays centred on (cx, cy) — normally `home`.
-   *
-   * Slide only. The old version also resized to track the camera, which is
-   * what made a cell 340 world units when zoomed out and 40 when zoomed in,
-   * and what made a zoom of more than 18% throw the entire field away. Extent
-   * and cell size are now constants, so scrolling by whole cells is the only
-   * thing left to do and nothing is ever discarded except what scrolls off.
+   * Slide the field by whole cells so it stays centred on (cx, cy) —
+   * normally `home`. Nothing is discarded except what scrolls off.
    */
   cover(cx: number, cy: number): void {
     const cell = this.cellSize;
@@ -253,9 +143,7 @@ export class Fields {
     const di = Math.round((cx - half - this.originX) / cell);
     const dj = Math.round((cy - half - this.originY) / cell);
     if (di === 0 && dj === 0) return;
-    // Only a field holding something has anything to move. In practice this
-    // is called once, at the pin, before the first deposit — it used to
-    // allocate a second sixteen-megabyte buffer to copy a field of zeros.
+    // Only a field holding something has anything to move.
     if (this.hiI >= this.loI) this.shiftCells(di, dj);
     this.originX += di * cell;
     this.originY += dj * cell;
@@ -282,7 +170,7 @@ export class Fields {
   /**
    * Dirichlet disk: cell centres outside this radius read and write as 0, so
    * scent decays toward the rim rather than reflecting off it. `r <= 0` turns
-   * the mask off (Neumann at the square grid edge, the old behaviour).
+   * the mask off (Neumann at the square grid edge).
    */
   setWorldBound(cx: number, cy: number, r: number): void {
     this.boundX = cx;
@@ -292,32 +180,14 @@ export class Fields {
   }
 
   /*
-   * The disk, as one inclusive column span per row, instead of a predicate.
-   *
-   * `cellOut` is a world-space distance — two subtractions, two multiplies
-   * and a compare — and `diffuse` asked it five times per cell, once for the
-   * cell and once for each neighbour it might read from. Measured over the
-   * whole grid that was 11.6 ms of a 52.3 ms field frame: the mask cost more
-   * than a fifth of the work, to exclude a fifth of the grid that the loops
-   * then iterated anyway.
-   *
-   * A disk is convex, so its intersection with a row is one contiguous run,
-   * and the whole mask is two integers per row. Rows above and below it are
-   * skipped outright, the inner loop runs the span instead of the width, and
-   * every `cellOut` in the hot path becomes an integer compare against the
-   * span of the row being read from.
-   *
-   * With no bound the spans are full rows, so the masked and unmasked paths
-   * are the same loop and neither pays a branch for the other.
+   * The disk, as one inclusive column span per row: a disk is convex, so its
+   * intersection with a row is one contiguous run, and every `cellOut` in
+   * the hot path becomes an integer compare. With no bound the spans are
+   * full rows, so the masked and unmasked paths are the same loop.
    */
   private spanLo: Int32Array | null = null;
   private spanHi: Int32Array | null = null;
-  /**
-   * Inputs the cached spans were built from. Six numbers compared directly
-   * rather than a template string: this is asked five times a frame (diffuse
-   * twice, react, decay, grow) and a string was built and thrown away each
-   * time to answer a question six compares settle.
-   */
+  /** Inputs the cached spans were built from. */
   private spanBX = NaN;
   private spanBY = NaN;
   private spanBR = NaN;
@@ -376,15 +246,10 @@ export class Fields {
       if (a < 0) a = 0;
       if (b > cols - 1) b = cols - 1;
       /*
-       * Then walk the ends onto the exact run `cellOut` describes.
-       *
-       * The span is derived through a square root and `cellOut` is a squared
-       * compare, so on a cell sitting all but exactly on the rim the two can
-       * disagree in the last bit. That would be harmless if the span were the
-       * only answer, but `add` and `at` still ask `cellOut` directly — a
-       * deposit would land in a cell the diffusion then treated as outside.
-       * One question, one answer: these loops move each end by a cell at
-       * most, once per rebuild, and cost nothing per frame.
+       * Then walk the ends onto the exact run `cellOut` describes: the span
+       * comes through a square root and `cellOut` is a squared compare, and
+       * `add` still asks `cellOut` directly, so the two must agree on the rim
+       * or a deposit lands in a cell diffusion treats as outside.
        */
       while (a <= b && this.cellOut(a, j)) a++;
       while (b >= a && this.cellOut(b, j)) b--;
@@ -407,14 +272,10 @@ export class Fields {
   }
 
   /**
-   * `new[j][i] = old[j + dj][i + di]`, in place.
-   *
-   * Rows are moved in the order that reads each source row before anything
-   * overwrites it — ascending when the source is below, descending when it
-   * is above — and within a row `copyWithin` has memmove semantics. The
-   * scratch buffer is zeroed rather than moved: the ping-pong's contract is
-   * that outside the live box both buffers are exactly zero, and a shifted
-   * scratch would carry stale cells into wherever the box grows next.
+   * `new[j][i] = old[j + dj][i + di]`, in place. Rows are moved in the order
+   * that reads each source row before anything overwrites it. The scratch
+   * buffer is zeroed rather than moved: outside the live box both buffers
+   * must be exactly zero.
    */
   private shiftCells(di: number, dj: number): void {
     const { cols, rows, data } = this;
@@ -452,21 +313,10 @@ export class Fields {
   }
 
   /**
-   * Reference cell size the scent response curves were tuned against.
-   *
-   * `slow_factor` and `turn_boost` in the solver, and the dead zone in the
-   * steering comparison, all read raw cell values. This is the cell size they
-   * are calibrated for, so at the grid's own resolution the scale is 1 and a
-   * deposit lands exactly as it always did.
-   *
-   * A cell holds whatever was deposited into it, so it is a total and not a
-   * density: widen the cell and the same pond's bodies all deposit into fewer,
-   * bigger cells, and every reading scales with the cell's area. Going from
-   * 17-unit cells to 160-unit ones multiplied the trail an agent reads by
-   * about ninety, which drove `slow_factor` to nearly zero — agents stopped
-   * dead — and inflated the dead zone until the difference between two sensors
-   * could never clear it. Normalising by area makes a reading mean the same
-   * thing at any resolution, which is the whole point of a fixed grid.
+   * Reference cell size the scent response curves were tuned against:
+   * `slow_factor`, `turn_boost` and the steering dead zone all read raw cell
+   * values. A cell holds a total, not a density, so a deposit is normalised
+   * by cell area to read the same at any resolution.
    */
   static readonly REF_CELL = FIELD_CELL;
 
@@ -491,18 +341,10 @@ export class Fields {
   }
 
   /**
-   * Add a *quantity* at a world point, spread bilinearly over the four cells
-   * that straddle it.
-   *
-   * `deposit`'s twin, and the difference is `depositScale`. A scent deposit is
-   * a density: widen the cell and the same emitter should still read the same
-   * strength, so the amount is scaled by the cell's area. Energy is a count of
-   * things, and a unit of it has to stay a unit however the grid is cut, or
-   * the economy's totals move when the resolution does.
-   *
-   * Bilinear rather than into one cell, so that what lands is independent of
-   * where inside a cell it landed — a corpse a hair either side of a boundary
-   * should not be worth a different amount.
+   * Add a quantity at a world point, spread bilinearly over the four cells
+   * that straddle it. `deposit`'s twin without `depositScale`: a scent
+   * deposit is a density, energy is a count and a unit must stay a unit
+   * however the grid is cut.
    */
   addAt(ch: number, x: number, y: number, amount: number): void {
     if (amount === 0) return;
@@ -513,20 +355,10 @@ export class Fields {
     const tx = gx - i0;
     const ty = gy - j0;
     /*
-     * Renormalised over the cells that will actually take it, which matters
-     * only at the rim and matters a lot there.
-     *
-     * A point inside the disk can still straddle cells whose *centres* are
-     * outside it, because `inBounds` asks about the point and `cellOut` asks
-     * about the centre. `add` drops those, so a corpse near the wall used to
-     * lose whatever share of itself landed in them — silently, and worse the
-     * closer to the edge it died. A signal channel would never notice; a
-     * conserved one is exactly where a small unbounded leak is unaffordable.
-     *
-     * Spreading the whole amount over whichever of the four are legal keeps
-     * `addAt` conservative for any point the disk accepts at all. When none of
-     * them are, the point is outside in every sense and the deposit is
-     * genuinely dropped.
+     * Renormalised over the cells that will actually take it: a point inside
+     * the disk can straddle cells whose centres are outside it, and `add`
+     * drops those. Spreading the whole amount over the legal cells keeps
+     * `addAt` conservative for any point the disk accepts at all.
      */
     const wi = [1 - tx, tx, 1 - tx, tx];
     const wj = [1 - ty, 1 - ty, ty, ty];
@@ -594,39 +426,10 @@ export class Fields {
   }
 
   /**
-   * One diffusion pass.
-   *
-   * **The single most expensive thing in the frame at the sizes anyone runs.**
-   * It is a fixed cost — the field fills the dish within seconds however few
-   * bodies are in it, so both passes always walk the whole disk. At 325 bodies
-   * that is 70% of the frame; at 4575, still a quarter. The 20k stress profile,
-   * where it looks like a minor phase, is nobody's actual case.
-   *
-   * It is *not* memory-bound, though this comment claimed so for a while. That
-   * reading came from counting five neighbour reads a cell as five cache
-   * misses, which a stencil does not have — the rows above and below are
-   * already resident. Unique traffic is nearer 26 MB a pass at ~2.9 GB/s, well
-   * inside what the machine gives. What it spends on instead is deciding
-   * things: see the edge/interior split below.
-   *
-   * Two things measured and *not* worth doing. Hoisting the per-row span out
-   * of the inner loop changed 9.17 ms to 9.18 — V8 already does it, since
-   * `sLo` is provably not written inside the loop. And fusing `decay` with
-   * `grow` to save a traversal was neutral; see the note there.
-   *
-   * What is still on the table is fewer passes. `Sim` runs two — at `mix` and
-   * `0.65 * mix` — and two successive Jacobi steps compose into a single
-   * thirteen-point stencil, which would halve the write traffic and the
-   * ping-pong. Exact in real arithmetic, not in float, and the boundary
-   * handling against the disk mask gets a good deal harder at two cells of
-   * reach. Worth doing only with a reason and a parity test — the field hash
-   * over a fixed-frame soup is the parity test to use.
-   *
-   * Written the long way on purpose: the readable version called a closure four
-   * times per channel per cell, which on a 160x107x4 grid is half a million
-   * calls with bounds checks, and it dominated the frame at low agent counts.
-   * Neighbour offsets are resolved once per cell, and the buffers ping-pong
-   * rather than copying a quarter-megabyte each pass.
+   * One diffusion pass over the live disk: the most expensive thing in the
+   * frame at the sizes anyone runs, and a fixed cost, since the field fills
+   * the dish. Written the long way: neighbour offsets are resolved once per
+   * cell and the buffers ping-pong rather than copy.
    */
   diffuse(mix: number): void {
     if (mix <= 0) return;
@@ -650,89 +453,42 @@ export class Fields {
     const rowStride = cols * CHANNELS;
 
     /*
-     * Widen by a cell before diffusing, because a diffusion pass moves scent
-     * exactly one cell and the box has to be somewhere for it to move into.
-     *
-     * Without this the box was a hard ceiling on how far scent could ever
-     * spread — sixteen cells from the nearest deposit, whatever the diffusion
-     * rate — so turning diffusion up flattened the peak without extending the
-     * reach, which looks exactly like turning it down. The box is meant to
-     * skip cells that are zero and will stay zero, not to clip the physics.
-     *
-     * It grows to the whole grid if scent genuinely reaches the whole grid,
-     * which is the correct cost of that happening — and at this world's rates
-     * it does, within seconds. Decay does not bound it in practice; the disk
-     * mask is what keeps the work down.
+     * Widen by a cell before diffusing: a pass moves scent exactly one cell,
+     * and the box must not be a ceiling on how far scent can spread.
      */
     if (this.loI > 0) this.loI--;
     if (this.loJ > 0) this.loJ--;
     if (this.hiI < this.cols - 1) this.hiI++;
     if (this.hiJ < this.rows - 1) this.hiJ++;
     /*
-     * No bound: -1 reflects off the square edge (neither absorbs nor invents).
-     * Bound set: a neighbour outside the disk is 0, so scent leaks into the rim.
-     *
-     * **Except `CH.energy`, which always reflects.** A rim that absorbs is
-     * right for a signal — it is what stops the dish filling with everybody's
-     * shouting — and wrong for the substance, which nothing is supposed to be
-     * able to destroy. `decayRate[CH.energy]` is zero for exactly that reason,
-     * and `maxSignal` excludes the channel because it is "the stuff itself";
-     * the wall was quietly undoing both.
-     *
-     * Measured with no bodies in the dish and decay off, over 900 frames —
-     * 10.587% of the ground at 128 cells a side, 2.658% at 512, **1.330% at
-     * the production 1024**. All of it into the rim: the interior is uniform
-     * so diffusion moves nothing there, and the rim kept draining and being
-     * refilled from inside. It goes as perimeter over area, which is why a
-     * bigger dish leaks proportionally less.
-     *
-     * What hid it is `grow`. Regrowth kept topping the dish up, so the ground
-     * sat at an equilibrium between regrowth and a wall nobody knew was there
-     * rather than at `cellCap` — visible only as a standing crop that never
-     * quite reached the capacity it was told to hold.
-     *
-     * The channel is hard-coded rather than a `Params` flag on both sides
-     * because it is a fact about what the model *is*: a substance is
-     * conserved and a signal is not. `field-kernel.test.ts` pins the two
-     * implementations together.
+     * No bound: -1 reflects off the square edge. Bound set: a neighbour
+     * outside the disk is 0, so scent leaks into the rim — except
+     * `CH.energy`, which always reflects: a substance is conserved and a
+     * signal is not, and an absorbing rim would drain the ground as
+     * perimeter over area. Hard-coded, not a `Params` flag;
+     * `field-kernel.test.ts` pins the two implementations together.
      */
     const dirichlet = this.boundR > 0;
     const { lo: sLo, hi: sHi } = this.spans();
     for (let j = this.loJ; j <= this.hiJ; j++) {
-      // The disk's run on this row, clipped to the box. Its neighbours' runs
-      // are read once here rather than per cell; an empty row (hi < lo) fails
-      // every `>= lo && <= hi` below, so no branch is needed for it.
+      // The disk's run on this row, clipped to the box. An empty row
+      // (hi < lo) fails every `>= lo && <= hi` below, so no branch is needed.
       const a0 = sLo[j] > this.loI ? sLo[j] : this.loI;
       const b0 = sHi[j] < this.hiI ? sHi[j] : this.hiI;
       const upLo = j > 0 ? sLo[j - 1] : 0;
       const upHi = j > 0 ? sHi[j - 1] : -1;
       const dnLo = j < rows - 1 ? sLo[j + 1] : 0;
       const dnHi = j < rows - 1 ? sHi[j + 1] : -1;
-      /*
-       * Cells of this row that are in the box but outside the disk still have
-       * to be written zero — the ping-pong's contract is that `dst` is fully
-       * defined over the box, and the mask used to satisfy it a cell at a
-       * time. Two `fill`s do it as a memset instead, which is most of why
-       * dropping `cellOut` pays twice: the distance math goes, and so does
-       * the per-cell store it was guarding.
-       */
+      // Cells in the box but outside the disk are written zero: `dst` must
+      // be fully defined over the box.
       const rowBase = j * cols * CHANNELS;
       if (a0 > this.loI) dst.fill(0, rowBase + this.loI * CHANNELS, rowBase + a0 * CHANNELS);
       if (b0 < this.hiI) dst.fill(0, rowBase + (b0 + 1) * CHANNELS, rowBase + (this.hiI + 1) * CHANNELS);
       if (b0 < a0) continue;
       /*
-       * Split into edge and interior.
-       *
-       * `iLo`..`iHi` is the run where a cell provably has all four neighbours:
-       * inside its own row's span by one on each side, and inside the spans of
-       * the rows above and below. Every cell in it took thirty-two branches —
-       * four neighbours by four channels — to re-establish something constant
-       * across the whole run.
-       *
-       * The arithmetic below is identical and in the same order, so this is
-       * the same pass; what goes is the checking. It is nearly all of the work,
-       * because a row of the dish is around a thousand cells and its two edges
-       * are one apiece.
+       * Split into edge and interior: `iLo`..`iHi` is the run where a cell
+       * provably has all four neighbours. The arithmetic is identical and in
+       * the same order on both paths, so this is the same pass.
        */
       const rowLo = sLo[j];
       const rowHi = sHi[j];
@@ -751,18 +507,8 @@ export class Fields {
         const right = i < rowHi ? base + CHANNELS : -1;
         const up = i >= upLo && i <= upHi ? base - rowStride : -1;
         const down = i >= dnLo && i <= dnHi ? base + rowStride : -1;
-        /*
-         * Unrolled over the four channels, because they no longer share a
-         * rate and reading one out of an array per channel per cell is the
-         * whole of what per-channel rates would otherwise cost. Measured over
-         * a 1024^2 pass: 15.9 ms through a Float32Array, 14.9 ms through a
-         * Float64Array, 9.5 ms with the rates as locals. The array is small
-         * enough to sit in L1 either way — what it costs is the load itself,
-         * eight of them per cell, and unrolling is how they go away.
-         *
-         * Same shape as the one-rate version it replaces, in the same order,
-         * so at a rate of 1 every cell lands on the same bits it used to.
-         */
+        // Unrolled over the four channels with the rates as locals, in the
+        // same order as the interior loop.
         const s0 = src[base];
         const s1 = src[base + 1];
         const s2 = src[base + 2];
@@ -822,18 +568,7 @@ export class Fields {
         const right = i < rowHi ? base + CHANNELS : -1;
         const up = i >= upLo && i <= upHi ? base - rowStride : -1;
         const down = i >= dnLo && i <= dnHi ? base + rowStride : -1;
-        /*
-         * Unrolled over the four channels, because they no longer share a
-         * rate and reading one out of an array per channel per cell is the
-         * whole of what per-channel rates would otherwise cost. Measured over
-         * a 1024^2 pass: 15.9 ms through a Float32Array, 14.9 ms through a
-         * Float64Array, 9.5 ms with the rates as locals. The array is small
-         * enough to sit in L1 either way — what it costs is the load itself,
-         * eight of them per cell, and unrolling is how they go away.
-         *
-         * Same shape as the one-rate version it replaces, in the same order,
-         * so at a rate of 1 every cell lands on the same bits it used to.
-         */
+        // Same edge stencil as above.
         const s0 = src[base];
         const s1 = src[base + 1];
         const s2 = src[base + 2];
@@ -885,21 +620,6 @@ export class Fields {
     this.decayCells(rate);
   }
 
-  /*
-   * Fusing this with `grow` into one traversal was tried and is not worth it.
-   *
-   * They walk the same eight hundred thousand cells and the second reads what
-   * the first just wrote, so one pass looks obviously better. Measured, the
-   * two separate passes are 3.17 ms and the fused one 3.13 — inside the noise
-   * — and a first attempt that also skipped channels whose keep was exactly 1
-   * came out at 3.67, because five loop-invariant branches per cell cost more
-   * than the walk they saved.
-   *
-   * The reason is that these are not traversal-bound: a multiply and a store
-   * per channel is little enough that the second walk is nearly free once the
-   * rows are resident. `diffuse` is the pass where the per-cell work is large
-   * enough for structure to matter, and it is where the wins have been.
-   */
   private decayCells(rate: number): void {
     if (this.hiI < this.loI) return;
     const d = this.data;
@@ -931,39 +651,12 @@ export class Fields {
   }
 
   /**
-   * Logistic regrowth on one channel: `E += r * E * (1 - E / cap)`.
-   *
-   * The world's productivity, and the shape of it matters more than the rate.
-   *
-   * Growth is proportional to what is already there, so **a cell grazed to
-   * exactly nothing does not come back**. Zero is a fixed point of the
-   * logistic, and the only thing that can recolonise a dead cell is diffusion
-   * from a neighbour that still has something — which spreads at a finite
-   * speed, from the edges inward. That is the whole anti-strip-mine argument
-   * in one line: overgraze a patch and you have made a scar that heals slowly
-   * and from its rim, rather than a cell that refills on a timer wherever you
-   * happen to be standing.
-   *
-   * Bounded by `cap`, so this is not a free-energy tap: it is the carrying
-   * capacity of the ground, and the most the whole dish can hold is fixed.
-   *
-   * One-directional. A cell above capacity — a corpse's whole worth dropped
-   * in one place — is left alone rather than pulled back down, because this
-   * is a resource and not a signal, and the tidy-looking symmetric version
-   * would quietly destroy energy the economy is careful to conserve. Excess
-   * spreads out by diffusion instead, and stops growing until it is under
-   * capacity again.
-   *
-   * The result is clamped at `cap` because a single explicit step can overshoot
-   * it. `E + r*E*(1 - E/K)` only stays under `K` while `r` is small, and at the
-   * shipped regrowth rate times a frame it is very small — but the fertiliser
-   * term multiplies `r` by `1 + gamma*C`, which makes an instability that was
-   * latent reachable. A cell at 0.9 of capacity with a strong catalyst
-   * overshoots to 1.05 in one step, and a carrying capacity that a body can
-   * push past by smelling at it is not a carrying capacity.
-   *
-   * `r` is per frame, already multiplied by dt by the caller — this pass has
-   * no idea what a second is.
+   * Logistic regrowth on one channel: `E += r * E * (1 - E / cap)`. Zero is
+   * a fixed point, so a cell grazed to nothing only comes back by diffusion
+   * from its rim. One-directional: a cell above `cap` is left alone, never
+   * pulled down, because the ground is conserved. The result is clamped at
+   * `cap` because the fertiliser term can make a single explicit step
+   * overshoot. `r` is per frame, already multiplied by dt by the caller.
    */
   grow(ch: number, r: number, cap: number, catCh = -1, gamma = 0): void {
     if (!(r > 0) || !(cap > 0)) return;
@@ -977,20 +670,14 @@ export class Fields {
       const rowBase = j * cols * CHANNELS;
       const a0 = sLo[j] > this.loI ? sLo[j] : this.loI;
       const b0 = sHi[j] < this.hiI ? sHi[j] : this.hiI;
-      // Two loops rather than a flag inside one; see the note on `decayCells`
-      // for what a loop-invariant branch per cell costs.
+      // Two loops rather than a loop-invariant branch per cell.
       if (catalysed) {
         const off = catCh - ch;
         for (let i = a0, k = rowBase + a0 * CHANNELS + ch; i <= b0; i++, k += CHANNELS) {
           const e = d[k];
           if (e <= 0 || e >= cap) continue;
-          /*
-           * The catalyst scales the *rate*, never the outcome. Clamped at zero
-           * so that a negative gamma — an inhibitor, which is a thing a lineage
-           * should be able to become — can stall regrowth but never run it
-           * backwards. Growth that could go negative would be a body destroying
-           * ground by smelling at it, and the ground is conserved.
-           */
+          // The catalyst scales the rate, never the outcome. Clamped at zero so
+          // an inhibitor (negative gamma) can stall regrowth but never run it backwards.
           const rr = r * (1 + gamma * d[k + off]);
           if (rr <= 0) continue;
           const next = e + rr * e * (1 - e * invCap);
@@ -1014,30 +701,13 @@ export class Fields {
    *     u  +=  -uvv + feed * (1 - u)
    *     v  +=   uvv - (feed + kill) * v
    *
-   * What it buys is the one thing four independent decaying blobs cannot do.
-   * As it stands every channel is a hill around whoever is emitting, so what a
-   * body smells is always *who is there* — the field carries information but
-   * does not hold any of its own. A reaction puts local maxima where nobody is
-   * standing, travelling fronts, and regions that have just been used up and
-   * are briefly unusable. Signal comes apart from source, and "over there" can
-   * mean something no emitter is saying.
-   *
-   * Two things it needs to work at all, both of which are the caller's job.
-   * The species must diffuse at different rates — `diffuseRate` exists partly
-   * for this, and Gray-Scott wants the substrate at roughly twice the
-   * activator; equal rates have no instability to find and simply blur. And
-   * `feed`/`kill` live in a thin sliver of their own plane, roughly F in
-   * [0.01, 0.09] and k in [0.045, 0.07], with the interesting behaviour in a
-   * fraction of that. Outside it the pattern is a uniform wash either way,
-   * which is why this is off unless someone deliberately turns it on rather
-   * than something with a plausible-looking default.
-   *
-   * `u` is normalised toward 1 by the feed term, so this expects a channel
-   * whose natural scale is about 1 — `CH.energy` read against `cellCap`, or a
-   * signal channel that is not also carrying deposits at peaks of ten. Handed
-   * a raw signal channel it will not explode, because `soft`-free arithmetic
-   * on bounded inputs stays bounded, but the pattern will sit outside its
-   * regime and do nothing interesting.
+   * Puts local maxima where nobody is standing, so signal comes apart from
+   * source. Needs the species to diffuse at different rates (`diffuseRate`;
+   * substrate about twice the activator) and `feed`/`kill` inside roughly
+   * F in [0.01, 0.09], k in [0.045, 0.07]; outside that it is a uniform wash,
+   * which is why it is off unless deliberately turned on. `u` is normalised
+   * toward 1 by the feed term, so it expects a channel whose natural scale
+   * is about 1.
    */
   react(uCh: number, vCh: number, feed: number, kill: number, dt: number): void {
     if (!(dt > 0) || uCh === vCh) return;
@@ -1066,12 +736,7 @@ export class Fields {
 
   /**
    * Set one channel to `value` across every cell inside the live disk, and
-   * open the box over it.
-   *
-   * How a world starts with ground in it. The sparse grid this replaces could
-   * answer "ambient" for a cell nobody had touched; a field holds what it
-   * holds, so the ground has to actually be put there — once, when the world
-   * is pinned and the disk first exists.
+   * open the box over it. How a world starts with ground in it.
    */
   fillDisk(ch: number, value: number): void {
     if (this.boundR <= 0) return;
@@ -1120,29 +785,7 @@ export class Fields {
     return a * (1 - tx) * (1 - ty) + b * tx * (1 - ty) + c * (1 - tx) * ty + d * tx * ty;
   }
 
-  /**
-   * The loudest thing anything is *saying* — the signal channels only.
-   *
-   * `CH.energy` is deliberately not in it. The ground sits at capacity across
-   * the whole dish, so including it would make this a constant a bit under
-   * `cellCap` no matter what the pond was doing, which is useless as a
-   * normaliser for the scent overlay and wrong as an answer to "is anything
-   * being emitted". Pass a channel to ask about one specifically, the ground
-   * included.
-   */
-  /**
-   * All four channels at one point, into `out[off .. off+4)`.
-   *
-   * `sample` four times over would redo the grid transform, the two floors and
-   * the four corner indices each time, for readings that always come from the
-   * same four cells. This is the same arithmetic once and four lerps after it.
-   *
-   * It exists because the state vector needs the channels *separately*. A body
-   * has only ever had `trail` — the taste-weighted sum — which is one number,
-   * so nothing could condition on which channel it was smelling, only on how
-   * much it liked the mixture. Emitting on one channel because you smell
-   * another was outside the language.
-   */
+  /** All four channels at one point, into `out[off .. off+4)`: `sample` once, four lerps. */
   sampleAll(x: number, y: number, out: Float64Array, off = 0): void {
     const { gx, gy } = this.toGrid(x, y);
     const i0 = Math.floor(gx);
@@ -1167,6 +810,11 @@ export class Fields {
     }
   }
 
+  /**
+   * The loudest thing anything is saying — the signal channels only, since
+   * the ground sits at capacity across the dish. Pass a channel to ask about
+   * one specifically, the ground included.
+   */
   peak(ch?: number): number {
     let m = 0;
     const d = this.data;
@@ -1174,18 +822,7 @@ export class Fields {
       for (let i = ch; i < d.length; i += CHANNELS) if (d[i] > m) m = d[i];
       return m;
     }
-    /*
-     * Unrolled rather than `for (const c of VOICE)`.
-     *
-     * That inner loop allocated an iterator per cell — a million a call — and
-     * this runs once a frame out of `paintOverlay` whenever the scent overlay
-     * is on. Measured over 1024^2: 6.92 ms through the for-of, 2.04 ms
-     * unrolled. It cost five milliseconds a frame and no benchmark in this repo
-     * could see it, because they all time `sim.step` and none of them render.
-     *
-     * `VOICE` stays the statement of which channels are signals; this is the
-     * same three written out.
-     */
+    // `VOICE`, unrolled: a `for...of` allocates an iterator per cell.
     for (let i = 0; i < d.length; i += CHANNELS) {
       if (d[i + CH.conP] > m) m = d[i + CH.conP];
       if (d[i + CH.dupP] > m) m = d[i + CH.dupP];

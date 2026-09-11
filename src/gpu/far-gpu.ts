@@ -15,19 +15,12 @@ const PARTICLE_BYTES = FAR_STRIDE * 4;
 /** Must match `CELL_CAP` and `NEI_CAP` in far.wgsl. */
 const CELL_CAP = 64;
 const NEI_CAP = 4;
-/**
- * Grid ceiling, so the broadphase is bounded by how far apart the pond has
- * drifted rather than unbounded. `collect_pairs` in native/solver.c bounds
- * itself the same way and for the same reason.
- */
+/** Grid ceiling, so the broadphase is bounded however far the pond drifts; `collect_pairs` in native/solver.c does the same. */
 const MAX_CELLS = 131072;
 
 /**
- * Cells to aim for at a given body count. A fixed ceiling looks fine until the
- * pond outgrows it: cells then double until the grid fits, and at 100k bodies
- * that left ~20 per cell, which is both a slow scan and over CELL_CAP -- the
- * broadphase quietly starts dropping contacts exactly when it matters. Four
- * cells a body keeps occupancy near zero and the 3x3 scan short.
+ * Cells to aim for at a given body count. Four cells a body keeps occupancy
+ * near zero and under CELL_CAP, past which the broadphase drops contacts.
  */
 function cellTarget(n: number): number {
   return Math.max(256, Math.min(MAX_CELLS, n * 4));
@@ -85,11 +78,8 @@ export class FarGpu {
       });
       this.device = device;
       this.module = device.createShaderModule({ code: shader });
-      // A WGSL error does not throw here, and the pipeline built from it comes
-      // back invalid rather than failing, so every dispatch is quietly dropped
-      // and the pack reads back exactly as it went in. That is indistinguishable
-      // from a solver that ran and had nothing to do -- it cost an afternoon
-      // once. Ask the module directly, and fall back to wasm if it is broken.
+      // A WGSL error does not throw; the invalid pipeline quietly drops every
+      // dispatch and the pack reads back as it went in. Ask the module directly.
       const info = await this.module.getCompilationInfo?.();
       const errors = info ? info.messages.filter((m) => m.type === 'error') : [];
       if (errors.length > 0) {
@@ -253,10 +243,8 @@ export class FarGpu {
   /**
    * Grid to bin the pack into. Cell size starts at the widest contact gap in
    * the pack, so a body can only touch something one cell away, then doubles
-   * until the grid fits MAX_CELLS -- coarser cells cost more tests per body but
-   * never miss a pair, which is the direction to err in. Bounds come from the
-   * start of the step and bodies drift within it; `cellXY` clamps, so that
-   * costs a few crowded edge cells rather than correctness.
+   * until the grid fits MAX_CELLS; coarser cells never miss a pair. Bounds
+   * come from the start of the step and `cellXY` clamps drift within it.
    */
   private computeGrid(
     data: Float32Array,

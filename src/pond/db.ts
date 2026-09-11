@@ -7,27 +7,12 @@ import { NET_FORMAT, decodeNet, readHeader, type NetData, type NetHeader } from 
 import type { CapturedNet, NetStats } from './capture.ts';
 
 /*
- * The pond library: one SQLite file holding runs, the nets they produced, and
- * the timeline each run was sampled into.
- *
- * SQLite because `node:sqlite` is in Node itself — this project has no runtime
- * dependencies and a store for evolved genomes is not the place to acquire the
- * first one — and because the questions worth asking of a library of ponds are
- * queries. "The twenty deepest nets across every run since Tuesday" is one
- * line of SQL and no line of JavaScript.
- *
- * Everything heavy is one BLOB per net (see `net-blob.ts`); everything a query
- * might filter or sort on is a column beside it. That split is what lets the
- * lab page list a hundred nets without reading a hundred genomes.
- *
- * ## Reading this from the browser
- *
- * Nothing in this module is importable from a page — `node:sqlite` is not. The
- * format is split so it does not have to be: `net-blob.ts` is pure and
- * portable, and the lab page gets its rows either through a dev-server
- * endpoint that runs this module, or by fetching the `.db` file and opening it
- * with a wasm SQLite build. Either way the blob it decodes is the same one,
- * with the same reader.
+ * The pond library: one SQLite file (`node:sqlite`, no runtime dependency)
+ * holding runs, the nets they produced, and the timeline each run was
+ * sampled into. Everything heavy is one BLOB per net (see `net-blob.ts`,
+ * which is pure and portable so a page can decode it); everything a query
+ * might filter or sort on is a column beside it. Nothing here is importable
+ * from a page.
  */
 
 /** Bumped when a migration is needed; stored in `meta`. */
@@ -157,19 +142,13 @@ CREATE TABLE IF NOT EXISTS sample (
 `;
 
 /**
- * Columns added after a database in the wild already had the table.
- *
- * `CREATE TABLE IF NOT EXISTS` does nothing to a table that exists, so a
- * library grown before a measure existed would keep its old shape and every
- * insert naming the new column would fail. Adding them one at a time, guarded
- * by what `PRAGMA table_info` reports, means an old file keeps its runs and
- * gains the columns — which matters here more than usual, because the whole
- * point of the library is that knowledge accumulates across sessions.
+ * Columns added after a database in the wild already had the table, added
+ * one at a time guarded by `PRAGMA table_info`, so an old file keeps its runs.
  */
 const MIGRATIONS: { table: string; column: string; decl: string }[] = [
   { table: 'run', column: 'sweep', decl: 'TEXT' },
   // `file#id` of the database a run was imported from; NULL if it ran here.
-  // What makes `pond import` idempotent — see `import.ts`.
+  // Makes `pond import` idempotent; see `import.ts`.
   { table: 'run', column: 'origin', decl: 'TEXT' },
   { table: 'run', column: 'point', decl: 'TEXT' },
   { table: 'sample', column: 'lines_effective', decl: 'REAL' },
@@ -302,10 +281,8 @@ export class PondDb {
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    // WAL so a long run's writes do not block the lab page reading the same
-    // file, and foreign keys on so `ON DELETE CASCADE` actually cascades —
-    // SQLite leaves them off per connection, which is a footgun rather than a
-    // default.
+    // WAL so a long run's writes do not block a reader of the same file, and
+    // foreign keys on so `ON DELETE CASCADE` cascades; SQLite leaves them off per connection.
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA foreign_keys = ON');
     this.db.exec(SCHEMA);
@@ -315,13 +292,9 @@ export class PondDb {
         this.db.exec(`ALTER TABLE ${m.table} ADD COLUMN ${m.column} ${m.decl}`);
       }
     }
-    /*
-     * After the migrations, not inside `SCHEMA`: an old file has no `origin`
-     * column until the loop above adds it, and indexing a column that does
-     * not exist yet fails the open. NULLs are all distinct to SQLite, so runs
-     * made here never collide, and a second import of a file cannot double a
-     * run even under a race.
-     */
+    // After the migrations, since an old file has no `origin` column until
+    // the loop above adds it. NULLs are all distinct to SQLite, so runs made
+    // here never collide.
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS run_by_origin ON run(origin)');
 
     const have = this.meta('schema_version');
@@ -412,13 +385,9 @@ export class PondDb {
   }
 
   /**
-   * Store one harvested net, and attribute it to its ancestor when it has one.
-   *
-   * A body planted from the database carries a negative founder line (see
-   * `PlantOptions.lineage`), and a net's dominant line is therefore either a
-   * positive id — it grew here — or a negative one naming a `plant` row. That
-   * is the whole ancestry mechanism: no ids are carried across ponds, and a
-   * net that has drifted onto a different founder is not falsely attributed.
+   * Store one harvested net, and attribute it to its ancestor when it has
+   * one: a net's dominant line is either a positive id (it grew here) or a
+   * negative one naming a `plant` row (see `PlantOptions.lineage`).
    */
   addNet(runId: number, t: number, frame: number, net: CapturedNet, blob: Uint8Array): number {
     const s = net.stats;

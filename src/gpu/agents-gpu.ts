@@ -4,21 +4,10 @@ const UNIFORM_BYTES = 16; // 4 f32: originX, originY, scaleX, scaleY
 const INSTANCE_STRIDE = 9; // floats per instance — see agents.wgsl
 
 /**
- * Instanced-dot layer for the population Canvas2D skips. One draw call
- * regardless of count, versus one drawAgent() Canvas2D call per agent — see
- * render.ts for which agents end up here (the FAR LOD tier) versus drawn in
- * full detail on the canvas layered underneath this one.
- *
- * On top rather than under: this canvas clears to transparent everywhere it
- * isn't drawing a dot, so stacking it above Canvas2D means a FAR-tier dot
- * can never end up buried under a wire or an opaque energy-grid cell —
- * Canvas2D still draws all of that, just one layer down.
- *
- * A second, separate canvas rather than sharing the existing one: a canvas
- * is either a 2D context or a WebGPU context, never both, and Canvas2D
- * already owns everything else this app draws (wires, ports, ghosts, UI
- * overlays) — replacing that wholesale is a much bigger project than
- * getting the population count off the per-agent-draw-call ceiling.
+ * Instanced-dot layer for the FAR-tier population Canvas2D skips (see
+ * render.ts): one draw call regardless of count. A separate canvas layered
+ * on top, clearing to transparent, so a FAR-tier dot is never buried under a
+ * wire; a canvas is either a 2D context or a WebGPU context, never both.
  */
 export class AgentsGpu {
   ready = false;
@@ -63,10 +52,8 @@ export class AgentsGpu {
           targets: [
             {
               format,
-              // Premultiplied source (the shader outputs color.rgb * alpha, to
-              // match the canvas's own alphaMode: 'premultiplied' below) — so
-              // color uses srcFactor 'one', not 'src-alpha', or the alpha
-              // multiply would apply twice once dots overlap.
+              // Premultiplied source, matching the shader's output and the
+              // canvas's alphaMode: srcFactor 'one', or alpha applies twice.
               blend: {
                 color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
                 alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
@@ -106,10 +93,7 @@ export class AgentsGpu {
 
   /**
    * Uploads `count` instances (INSTANCE_STRIDE floats each, packed as
-   * agents.wgsl expects) and draws them. `camera` matches Camera's own
-   * fields; the world->NDC transform is derived here rather than passed
-   * pre-computed so this stays a pure function of the same state render.ts
-   * already has.
+   * agents.wgsl expects) and draws them. `camera` matches Camera's own fields.
    */
   render(
     instances: Float32Array,
@@ -119,7 +103,7 @@ export class AgentsGpu {
     const device = this.device;
     if (!this.ready || !device || !this.context || !this.pipeline || !this.bindLayout) return;
     if (count <= 0) {
-      // Still clear the canvas — an empty pond should not show the last frame.
+      // Still clear the canvas: an empty pond should not show the last frame.
       const encoder = device.createCommandEncoder();
       encoder
         .beginRenderPass({

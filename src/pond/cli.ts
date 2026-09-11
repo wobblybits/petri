@@ -17,15 +17,9 @@ import { gridPoints, runSweep } from './sweep.ts';
 import { closeWebGpu } from './webgpu-node.ts';
 
 /*
- * `npm run pond -- <command>`
- *
- * A pond you can leave running. The page is the instrument for watching one;
- * this is for growing one — overnight, at a size and a length no tab wants to
- * hold — and for reopening what the last one grew.
- *
- * Every run writes a row saying when it started, what it ran, and which
- * commit it ran from, so a database is a record of an experiment rather than
- * a heap of genomes with no provenance.
+ * `npm run pond -- <command>`: the headless pond, for growing one and for
+ * reopening what the last one grew. Every run writes a row saying when it
+ * started, what it ran, and which commit it ran from.
  */
 
 const USAGE = `
@@ -216,19 +210,8 @@ function netRows(rows: NetRow[]): string {
 
 async function cmdRun(args: Args): Promise<void> {
   const { flags, sets } = args;
-  /*
-   * Turn the solver on.
-   *
-   * `Sim.nativeForces` is true by default but `nativeSolver.ready` is not:
-   * the wasm is instantiated by an explicit `init()`, which the three pages
-   * each call at startup and which nothing headless did. Without it every
-   * guarded call falls through to the JavaScript twin, silently and
-   * correctly — the pond is right, it is just running the reference
-   * implementation of a solver that exists in C.
-   *
-   * Measured back to back at 1,800 bodies: 57.0 ms a frame on the twin,
-   * 16.9 ms with this line, and the solve phase alone 37.6 -> 4.8 ms.
-   */
+  // Turn the solver on: `nativeSolver.ready` needs an explicit `init()`, and
+  // without it every guarded call falls through to the JavaScript twin.
   const wasm = await nativeSolver.init();
   if (!wasm) {
     process.stderr.write(`pond: wasm solver unavailable (${nativeSolver.lastError}); running the JS twin, which is ~3x slower\n`);
@@ -254,9 +237,7 @@ async function cmdRun(args: Args): Promise<void> {
       parentRun = Number(fromRun);
       if (!Number.isInteger(parentRun)) throw new Error('pond: --from-run wants a run id');
       const top = num(flags, 'top', 8);
-      // The close of that run, not every harvest it made: continuing from an
-      // hour-old snapshot of the same net as well as its final state would
-      // plant the same lineage twice and call it two.
+      // The close of that run, not every harvest it made, so a lineage is not planted twice.
       const last = db.db
         .prepare('SELECT MAX(t) AS t FROM net WHERE run_id = ?')
         .get(parentRun) as { t: number | null } | undefined;
@@ -282,8 +263,7 @@ async function cmdRun(args: Args): Promise<void> {
     }
     const gpu: 'auto' | 'on' | 'off' = gpuFlag;
     const params = paramsWith(sets);
-    // Sugar over `groundPatches`, so a one-off run reads well and a sweep can
-    // still put the same thing on an axis.
+    // Sugar over `groundPatches`.
     if (flags.has('ground')) params.groundPatches = parseGround(flags.get('ground')!);
     const worldFlag = flags.get('world') ?? '1600x1200';
     const [ww, wh] = worldFlag.split('x').map(Number);
@@ -312,9 +292,7 @@ async function cmdRun(args: Args): Promise<void> {
       dt: spec.dt,
       world: spec.world,
       fieldCells: spec.fieldCells,
-      // A pond seeded only from the library did not come from a preset, and
-      // saying `soup` would make the row claim something untrue about how it
-      // started.
+      // A pond seeded only from the library did not come from a preset.
       preset: spec.soupCount > 0 ? 'soup' : null,
       soupCount: spec.soupCount,
       parentRun,
@@ -499,11 +477,7 @@ function cmdAnalyze(args: Args): void {
     if (trials.length === 0) throw new Error(`pond: no runs tagged ${JSON.stringify(name)}`);
     process.stdout.write(`sweep ${name}: ${trials.length} trial(s)\n\n`);
     process.stdout.write(`${pointTable(trials, metrics)}\n\n`);
-    /*
-     * The ranking is the point. The per-point table is what a sweep produced;
-     * the effect table is what it *found* — which dial moved which measure,
-     * and by how much against the disagreement between seeds.
-     */
+    // The per-point table is what a sweep produced; the effect table is what it found.
     process.stdout.write('effect of each axis, by share of variance explained\n');
     process.stdout.write(`${effectTable(effects(trials, metrics), num(args.flags, 'limit', 25))}\n`);
   } finally {
@@ -579,8 +553,7 @@ async function cmdSweep(args: Args): Promise<void> {
   if (nRandom > 0) {
     if (!sampleSpec) throw new Error('pond: --random needs --sample to say which parameters');
     const axes = sampleSpec.split(',').map((a) => parseAxis(a.trim()));
-    // Seeded off the sweep's name, so re-running the same sweep re-draws the
-    // same points and a resumed sweep lines up with the rows already stored.
+    // Seeded off the sweep's name, so a resumed sweep lines up with the rows already stored.
     let h = 2166136261 >>> 0;
     for (let i = 0; i < name.length; i++) {
       h ^= name.charCodeAt(i);
@@ -591,20 +564,12 @@ async function cmdSweep(args: Args): Promise<void> {
   } else if (Object.keys(grid).length === 0) {
     throw new Error('pond: sweep needs --axis, or --random with --sample');
   }
-  /*
-   * Validated here rather than inside the loop. A typo in an axis name should
-   * fail before the first trial, not after the twentieth — `paramsWith` throws
-   * on a key `Params` does not have, which is the whole check.
-   */
+  // Validated before the loop: `paramsWith` throws on a key `Params` does not have.
   const probe = new Map<string, number>(Object.entries(Object.fromEntries(sets)));
   for (const [k, v] of Object.entries(grid)) probe.set(k, v[0]);
   paramsWith(probe);
-  /*
-   * What the sweep holds that does not mean the same thing at every point.
-   * A warning, not a refusal: the grid may be exactly what was meant, but
-   * it has been exactly what was not meant twice, and both times the confound
-   * was invisible in the numbers. See `couplings.ts`.
-   */
+  // What the sweep holds that does not mean the same thing at every point.
+  // A warning, not a refusal. See `couplings.ts`.
   const couplings = checkCouplings(Object.keys(grid), [], paramsWith(sets) as unknown as Record<string, number>);
   if (couplings.length > 0) process.stderr.write(`${formatCouplings(couplings)}\n`);
 
@@ -667,11 +632,8 @@ async function cmdSweep(args: Args): Promise<void> {
       },
     });
     if (points) {
-      /*
-       * A sampled sweep has no levels — every point is its own — so the eta
-       * table would read "1 level, thin" for every row and say nothing. The
-       * exploration report is the analyser that fits a sample.
-       */
+      // A sampled sweep has no levels, so the eta table would say nothing;
+      // the exploration report is the analyser that fits a sample.
       process.stdout.write(`\nsweep ${name}: ${points.length} sampled point(s)\n\n`);
       process.stdout.write(renderExplore(exploreLibrary(db, { sweep: name })));
       process.stdout.write(`\npond analyze --name ${name}, or explore over the whole library with pond explore\n`);
@@ -695,11 +657,7 @@ function cmdProtocols(): void {
 
 /**
  * Run a protocol: preflight, then every arm as its own sweep, then the report.
- *
- * The arms run in order and each is a sweep the library already knows how to
- * hold, so a protocol interrupted after its first arm has lost nothing: run it
- * again and the second arm lands beside the first. (The first arm runs again
- * too; resuming is not built.)
+ * A protocol interrupted after its first arm has lost nothing; resuming is not built.
  */
 async function cmdProtocol(args: Args): Promise<void> {
   const { flags } = args;
@@ -806,13 +764,9 @@ async function main(): Promise<void> {
 }
 
 /**
- * Run, then let go of the device.
- *
- * A live `GPUDevice` holds Node's event loop open, so a finished run with the
- * database closed and nothing left to do would simply sit there. Destroying it
- * is the polite way out; the explicit exit is the one that works whether or
- * not Dawn has anything else outstanding, and it happens after stdout has
- * drained so the summary is not truncated on a pipe.
+ * Run, then let go of the device: a live `GPUDevice` holds Node's event loop
+ * open. The explicit exit happens after stdout has drained so the summary is
+ * not truncated on a pipe.
  */
 main()
   .catch((e: unknown) => {

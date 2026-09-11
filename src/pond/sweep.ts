@@ -4,35 +4,17 @@ import { gitCommit } from './provenance.ts';
 import { paramsWith, runPond, type PondRunSpec } from './run.ts';
 
 /*
- * A parameter sweep whose results accumulate.
- *
- * `src/experiments/` already sweeps: a grid crossed with seeds, a table on
- * stdout, one JSON file per invocation. What it cannot do is remember. Every
- * sweep is a fresh file, nothing relates one to the next, and the question
- * "what have we learned about `declutter`" is answered by opening the files
- * you happen to still have and reading them by eye.
- *
- * So this writes into the pond library instead. A trial is a `run` row with
- * its whole `Params`, its commit, its timeline and its nets; a sweep is a
- * name and a grid point recorded on each of them. Which makes the analysis a
- * query over everything ever run rather than over this afternoon — and makes
- * a sweep resumable, comparable across commits, and joinable against the nets
- * it produced.
- *
- * `analyze.ts` is the reading half.
+ * A parameter sweep whose results accumulate in the pond library: a trial is
+ * a `run` row with its whole `Params`, its commit, its timeline and its nets;
+ * a sweep is a name and a grid point recorded on each. `analyze.ts` is the
+ * reading half.
  */
 
 export interface SweepSpec {
   name: string;
   /** Parameter axes. Every combination of every axis is run, once per seed. */
   grid: Record<string, number[]>;
-  /**
-   * Points sampled from continuous ranges instead of crossed as a grid.
-   *
-   * When present this replaces `grid`. See `sample.ts` for why: a grid point
-   * informs its own grid and nothing else, while a sampled point joins every
-   * regression ever run over the library.
-   */
+  /** Points sampled from continuous ranges instead of crossed as a grid. Replaces `grid` when present; see `sample.ts`. */
   points?: Record<string, number>[];
   seeds: number[];
   /** Applied to every point, before the grid overrides it. */
@@ -44,13 +26,7 @@ export interface SweepSpec {
   world: { w: number; h: number };
   sampleEvery: number;
   gpu: 'auto' | 'on' | 'off';
-  /**
-   * Store nets from each trial, or only the timeline.
-   *
-   * Off by default. A sweep is a hundred ponds and their genomes are hundreds
-   * of megabytes; the timeline is what a sweep is for, and a point worth
-   * keeping bodies from can be re-run on its own.
-   */
+  /** Store nets from each trial, or only the timeline. Off by default: the genomes are hundreds of megabytes. */
   keepNets: boolean;
   note: string | null;
 }
@@ -104,8 +80,7 @@ export async function runSweep(
         sampleEvery: spec.sampleEvery,
         harvestEvery: 0,
         minBodies: 2,
-        // A sweep that stores nets stores only the biggest handful per trial;
-        // the timeline is the deliverable and the genomes are a by-product.
+        // A sweep that stores nets stores only the biggest handful per trial.
         limit: spec.keepNets ? 8 : 0,
         gpu: spec.gpu,
       };

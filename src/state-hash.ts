@@ -1,30 +1,18 @@
 import type { Sim } from './sim.ts';
 
 /**
- * A hash of everything a frame can move, over the raw f64 bits.
- *
- * Lives outside any test file so that suites needing it — the determinism
- * harness, the flocking cache — can import it without dragging each other's
- * `describe` blocks into their run.
- *
- * Hashing the bits rather than comparing rounded values is the point: a
- * refactor that is supposed to change nothing should produce the identical
- * hash, and anything that shifts a single ulp shows up immediately. Several
- * bugs the 500-test suite passed straight through were caught only by this.
+ * A hash of everything a frame can move, over the raw f64 bits, so a
+ * refactor that shifts a single ulp shows up. Outside any test file so
+ * several suites can import it.
  */
 
-/**
- * FNV-1a over the raw bits of every number fed in, so two runs that differ in
- * the last bit of one velocity hash differently. Order matters and is part of
- * what is being checked.
- */
+/** FNV-1a over the raw bits of every number fed in. Order matters and is part of what is checked. */
 class BitHash {
   private h = 0x811c9dc5;
   private readonly buf = new DataView(new ArrayBuffer(8));
 
   num(v: number): void {
-    // Normalize the two zeros and every NaN payload so a sign flip on an
-    // exact zero is not reported as a divergence.
+    // Normalize the two zeros and every NaN payload.
     this.buf.setFloat64(0, v === 0 ? 0 : Number.isNaN(v) ? NaN : v);
     for (let i = 0; i < 8; i++) {
       this.h ^= this.buf.getUint8(i);

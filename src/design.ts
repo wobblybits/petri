@@ -193,8 +193,7 @@ function setRunMode(mode: RunMode, opts: { force?: boolean; kick?: boolean } = {
   const next: RunMode = !opts.force && runMode === mode ? 'stop' : mode;
   if ((next === 'play' || next === 'listen') && runMode !== next) editor.checkpoint();
   runMode = next;
-  // Play rewrites existing principal pairs. Snap stays off so free ports
-  // cannot grow new wires; leftover connections from a rewrite still appear.
+  // Snap stays off so free ports cannot grow new wires.
   params.snapRadius = 0;
   params.rewriteDuration = runMode === 'play' ? live.rewriteDuration : 0;
   params.stepSpeed = runMode === 'play' ? live.stepSpeed : 0;

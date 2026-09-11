@@ -1,16 +1,10 @@
 /**
- * CPU twin of far.wgsl disc, with Gauss–Seidel stem-span (the shader stays
- * Jacobi: one thread per body). Translation-only: FAR bodies do not pick up
- * contact torque.
- *
- * The tier has to agree with NEAR, or crossing the LOD line moves the net.
- * Two things buy that: the packed radius is the glyph-area disc rather than
- * the SAT bound (see `discRadius`), and span compliance is the same per-wire
- * softness NEAR uses rather than a fixed constant. Wired pairs still skip
- * disc — span owns that gap and fighting it costs a substep for nothing.
- * A coincident pair is the exception: span has no normal at dist 0, so
- * skipping it too would freeze a pile. The unstick axis is unit-length so
- * the impulse is not 1/1e-6.
+ * CPU twin of far.wgsl disc, with Gauss–Seidel stem-span (the shader is
+ * Jacobi). Translation-only. The tier has to agree with NEAR, or crossing
+ * the LOD line moves the net: the packed radius is the glyph-area disc (see
+ * `discRadius`) and span compliance is NEAR's per-wire softness. Wired pairs
+ * skip disc, since span owns that gap, except a coincident pair, where span
+ * has no normal.
  */
 export const FAR_SLOP = 0.35;
 export const FAR_CONTACT_COMP = 4.0e-6;
@@ -97,11 +91,7 @@ export function farIntegrate(data: Float32Array, n: number, h: number): void {
   }
 }
 
-/**
- * Wired-neighbour table, three slots per body — an agent has three ports, so
- * that is the whole of it. Built once per pass: scanning the wire list inside
- * the body loop made the cheap tier O(bodies x wires).
- */
+/** Wired-neighbour table, three slots per body (an agent has three ports). Built once per pass. */
 function fillDiscNeighbours(n: number, wires: Float32Array, nWires: number): Int32Array {
   if (discNei.length < n * 3) discNei = new Int32Array(Math.max(48, n * 6));
   discNei.fill(-1, 0, n * 3);
@@ -144,8 +134,7 @@ export function farDisc(
     const iy = data[oi + FAR.y];
     const wA = data[oi + FAR.invMass];
     const ri = data[oi + FAR.radius];
-    // Span already owns the gap on a wire; colliding the pair as well just
-    // fights the chord.
+    // Span owns the gap on a wire; colliding the pair as well fights the chord.
     const n0 = nei[i * 3];
     const n1 = nei[i * 3 + 1];
     const n2 = nei[i * 3 + 2];
@@ -160,9 +149,8 @@ export function farDisc(
       const keep = ri + data[oj + FAR.radius];
       if (dist >= keep) continue;
       const wired = j === n0 || j === n1 || j === n2;
-      // Coincident: span has no normal, so a sanitize pile would stay a pile
-      // if we skipped these the way we skip a healthy wired gap. Index order
-      // so both bodies do not pick the same world axis and translate together.
+      // Coincident: span has no normal, so these are not skipped. Index
+      // order so both bodies do not pick the same axis and translate together.
       if (dist < 1e-6) {
         dx = i < j ? 1 : -1;
         dy = 0;

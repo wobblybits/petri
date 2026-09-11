@@ -174,8 +174,7 @@ function syncCamera(dt: number): void {
       camera.follow(com.x, com.y, dt);
     }
   }
-  // The field follows `home` from inside beginFrame now, so there is nothing
-  // to do here but tell the sim how much world is on screen for auto-spawn.
+  // Tell the sim how much world is on screen for auto-spawn.
   sim.setViewExtent(camera.coverWidth() * 1.7, camera.coverHeight() * 1.7);
 }
 
@@ -240,21 +239,15 @@ document.querySelector('#kind-colors')!.addEventListener('change', (ev) => {
 document.querySelector('#energy-grid')!.addEventListener('change', (ev) => {
   view.energyGrid = (ev.target as HTMLInputElement).checked;
 });
-/*
- * The WebGPU FAR solve, off by default and behind a switch rather than a
- * rebuild, because the thing it needs is somebody watching a real pond on
- * real hardware. See src/gpu/far-gpu-check.ts for the kernel-level
- * comparison this cannot replace: that one pins the shader against the CPU
- * twin, this one exercises the whole path including packFar, which is where
- * the fault was the one time this ran and sent wires to infinite length.
- */
+// The WebGPU FAR solve, off by default and behind a switch: it needs somebody
+// watching a real pond on real hardware. See src/gpu/far-gpu-check.ts for
+// the kernel-level comparison; this exercises the whole path including packFar.
 document.querySelector('#gpu-far')!.addEventListener('change', (ev) => {
   Sim.farGpuMode = (ev.target as HTMLSelectElement).value as 'auto' | 'on' | 'off';
 });
 soundCheck.addEventListener('change', () => {
-  // Booting builds the whole synthesis graph, so a pond nobody is listening to
-  // never pays for one. Ticking the box is the gesture that boots it, and it
-  // counts as the user activation an AudioContext needs.
+  // Ticking the box boots the synthesis graph, and counts as the user
+  // activation an AudioContext needs.
   if (soundCheck.checked && !audioReady) {
     void bootAudio();
     return;
@@ -277,10 +270,8 @@ function armAudio(): void {
   if (soundCheck.checked) void bootAudio();
 }
 
-// Dev-only handle for checking what the audio path is actually doing:
-// whether synthesis moved to the worker, how full the ring is, and whether
-// the callback has had to pad. None of it is reachable from the UI, and none
-// of it ships.
+// Dev-only handle on the audio path: whether synthesis moved to the worker,
+// how full the ring is, and whether the callback has had to pad.
 if (import.meta.env.DEV) {
   (globalThis as unknown as { swimmers: unknown }).swimmers = {
     audio,
@@ -360,11 +351,8 @@ window.addEventListener('keydown', (ev) => {
   if (ev.key === 'x' || ev.key === 'X') setEraser(!interaction.eraserMode);
 });
 
-/*
- * Move the scent field to the GPU if this machine has one. All or nothing for
- * the session — see `openFieldGpu`. Nothing waits on it: until it resolves the
- * field runs here, and if there is no device it simply keeps doing so.
- */
+// Move the scent field to the GPU if this machine has one. All or nothing
+// for the session (see `openFieldGpu`); until it resolves the field runs here.
 void sim.openFieldGpu().then((ok) => {
   if (ok) console.info('scent field: GPU');
 });
@@ -411,11 +399,8 @@ function paint(): void {
   render(ctx, sim, camera, view, audio.waves);
   drawGesture();
   statsEl.textContent = `${sim.agents.size} agents · ${sim.graph.wires.size} wires · ${sim.rewrites.length} rewrites · ${format(sim.totalFree())} extra / ${sim.totalBound()} bound`;
-  // Which solver took the frame, and the pond's fastest body. Both are here
-  // for the GPU FAR switch above: the first says whether it engaged at all,
-  // the second is where "flung apart" shows up first.
-  // Body count sits next to the path because it is what 'auto' switches on,
-  // so a surprising path reads as a threshold question rather than a mystery.
+  // Which solver took the frame, and the pond's fastest body, for the GPU FAR
+  // switch above. Body count sits next to the path because 'auto' switches on it.
   solverEl.textContent =
     `solver: ${sim.lastFarPath} · ${sim.agents.size} bodies` +
     ` · peak speed ${sim.peakSpeed().toFixed(1)}`;
@@ -484,20 +469,9 @@ async function tick(now: number): Promise<void> {
 
 /**
  * One tick at a time, and the next frame asked for only once it is done.
- *
- * The guard never fires as this stands — measured, 0 of 96 callbacks — because
- * the only `requestAnimationFrame` for `frame` is the one below, so a single
- * callback is ever outstanding. It is not a throttle and it is not why a heavy
- * pond ticks at 20-odd a second: that is just the tick's own length plus the
- * wait for the next vsync.
- *
- * It is also not dead. It arrived with the step becoming async (see the WASM
- * FAR solver commit) and it is what makes that safe if the scheduling changes.
- * The tempting change here is to ask for the next frame at the top, to hold
- * vsync cadence rather than chaining off completion — and then ticks overlap.
- * Two `stepAsync` calls in flight is not slow, it is wrong: `farGpu` has one
- * set of GPU buffers and one readback, so the second pack lands on top of the
- * first, and the force block assumes one frame at a time.
+ * Two `stepAsync` calls in flight is wrong, not slow: `farGpu` has one set
+ * of GPU buffers and one readback, and the force block assumes one frame at
+ * a time. The guard is what keeps that true if the scheduling changes.
  */
 function frame(now: number): void {
   if (ticking) return;
@@ -511,10 +485,7 @@ function frame(now: number): void {
 sizeCanvas();
 applyPreset('soup');
 void nativeSolver.init();
-/*
- * The GPU FAR switch is only meaningful if WebGPU actually came up, so
- * say so in the label rather than leaving a tickbox that does nothing.
- */
+// The GPU FAR switch is only meaningful if WebGPU came up; say so in the label.
 void farGpu.init().then((ok) => {
   if (ok) return;
   const box = document.querySelector<HTMLSelectElement>('#gpu-far')!;
@@ -525,14 +496,8 @@ void farGpu.init().then((ok) => {
 });
 void agentsGpu.init(gpuCanvas);
 
-/*
- * The live pond and its class, on the console.
- *
- * Not a debug leftover: the GPU FAR path can only be judged on real
- * hardware against a real pond, and importing './sim.ts' from the console
- * hands back a second copy of the module with its own statics — so
- * `Sim.farGpuMode` set that way is set on a class the app has never heard
- * of. This is the handle that reaches the instance actually running.
- */
+// The live pond and its class, on the console: importing './sim.ts' from
+// the console hands back a second copy of the module with its own statics,
+// so `Sim.farGpuMode` set that way is set on a class the app never sees.
 Object.assign(window as unknown as Record<string, unknown>, { sim, Sim, params, camera });
 requestAnimationFrame(frame);

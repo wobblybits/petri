@@ -317,12 +317,8 @@ export function pasteFragment(
 }
 
 /**
- * Pointer tools and history for the net designer.
- *
- * Selection, clipboard and undo live here rather than on `Sim` — the pond
- * does not know about lassos, and the page should stay a thin chrome around
- * this. History snapshots topology and pose, not rope nodes or scent; a
- * restore rebuilds wires from the port pairs.
+ * Pointer tools and history for the net designer. History snapshots topology
+ * and pose, not rope nodes or scent; a restore rebuilds wires from the port pairs.
  */
 export class NetEditor {
   tool: DesignTool = 'select';
@@ -498,10 +494,7 @@ export class NetEditor {
     return true;
   }
 
-  /**
-   * Pin the selection so Settle cannot move them. If every selected body is
-   * already pinned, unpin them instead.
-   */
+  /** Pin the selection so Settle cannot move them; if every selected body is already pinned, unpin them. */
   togglePinSelection(): boolean {
     this.pruneSelection();
     if (this.selection.size === 0) return false;
@@ -624,8 +617,7 @@ export class NetEditor {
     }
     const agent = pickAgent(this.sim, wx, wy);
     if (agent) {
-      // Grab always moves the body under the pointer. Shift keeps the rest of
-      // the selection so a lassoed net can still be slid as a group.
+      // Shift keeps the rest of the selection so a lassoed net slides as a group.
       if (opts.shift) this.selection.add(agent.id);
       else {
         this.selection.clear();

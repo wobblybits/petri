@@ -80,10 +80,7 @@ export class Camera {
     this.zoom = clamp(minDim / span, CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
   }
 
-  /**
-   * World-space origin the GPU path should treat as the canvas centre, so a
-   * shifted 2d projection (inset chrome) and the FAR dots stay lined up.
-   */
+  /** World-space origin the GPU path treats as the canvas centre, so a shifted 2d projection and the FAR dots line up. */
   gpuView(): { x: number; y: number; zoom: number; viewW: number; viewH: number } {
     return {
       x: this.x + (this.viewW * 0.5 - this.screenCX) / this.zoom,

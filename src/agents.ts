@@ -41,24 +41,10 @@ export interface PortRef {
 
 /*
  * A flyweight over AgentStore: every field is a getter/setter pair reading
- * and writing one slot of a shared set of typed arrays, not data the
- * instance itself holds. See agent-store.ts for why (the AoS-vs-SoA
- * rewrite) and for the field-by-field storage layout.
- *
- * The accessors live on `Agent.prototype` — ordinary `get`/`set` class
- * members, shared by every instance — not installed per instance. That
- * used to be the other way around (`Object.defineProperties(this, ...)`
- * in the constructor), specifically so `{ ...agent }` would copy real
- * data instead of nothing: prototype accessors are not *own* enumerable
- * properties, so a spread only ever sees the plain instance fields
- * (`store`, `slot`). What that design didn't account for is V8: an object
- * whose *own* shape includes accessor properties (not just its
- * prototype's) gets pushed into dictionary-mode property storage, which
- * measured 8x slower than a plain field for `slot` — a field that isn't
- * even an accessor — sitting right next to them. Prototype accessors keep
- * every instance on one fast, shared hidden class instead; `store`/`slot`
- * read at plain-object speed, and the accessors themselves came out ~3x
- * faster too. See `cloneAgent` below for how spread got replaced.
+ * and writing one slot of a shared set of typed arrays. The accessors live
+ * on `Agent.prototype`, never per instance: own accessor properties push V8
+ * into dictionary-mode storage. Consequently `{ ...agent }` copies nothing
+ * but `store` and `slot`; use `cloneAgent`.
  */
 export class Agent {
   readonly store: AgentStore;
@@ -213,9 +199,8 @@ export class Agent {
   }
 
   /**
-   * Energy on top of existence, in [−1, 1]. Positive is stock it can spend or
-   * pass on, negative is debt it must settle before it can do either, and −1
-   * is death. Upkeep decrements this directly.
+   * Energy on top of existence: positive is stock, negative is debt, and
+   * `debtCap` is death. Upkeep decrements this directly.
    */
   get extra(): number {
     return this.store.extra[this.slot];
@@ -234,15 +219,9 @@ export class Agent {
 
   /**
    * How much this body cares about matching its neighbours' heading and
-   * velocity, and how hard it pushes off them when they crowd. Heritable, so a
-   * lineage can become a shoal or a scatter — flocking was one number for the
-   * whole pond, which meant every net moved with the same temperament.
-   *
-   * A pair uses the mean of the two, not each body's own: the force is equal
-   * and opposite with mass weighting, and per-body gains would break the
-   * momentum conservation the settled-net tests check for. The mean still lets
-   * a high-align lineage shoal and a low-align one ignore its neighbours, and
-   * makes a mixed pair negotiate rather than one of them win.
+   * velocity, and how hard it pushes off them when they crowd. A pair uses
+   * the mean of the two: the force must stay equal and opposite, or momentum
+   * is not conserved.
    */
   get flockAlign(): number {
     return this.store.flockAlign[this.slot];
@@ -259,32 +238,12 @@ export class Agent {
   }
 
   /**
-   * Chemistry: what this body says, and what it listens for.
-   *
-   * Eight floats in one array — `emit` in 0..3, `taste` in 4..7 — because both
-   * sides of the scent field were already linear maps with the coefficients
-   * hardcoded by kind. A principal port laid into the channel for its kind;
-   * `mixScent` was a fixed dot product chosen by a switch. Making them per-body
-   * turns those constants into genes without changing the shape of anything.
-   *
-   * Seeded from kind so a fresh pond behaves exactly as it did, and inherited
-   * with mutation at a commute like the other heritable traits. Once they
-   * drift the channels stop meaning con/dup/era/aux and become four registers
-   * whose meaning is whatever a lineage has settled on — which is the point:
-   * a net can evolve onto a channel pair nobody else answers.
-   *
-   * Aux ports still lay into channel 3 regardless, so that channel keeps its
-   * kind-independent "a free port is here" sense.
-   *
-   * Thirty-two floats, not eight: each of emit and taste has a base per
-   * channel and a slope against every dimension of the body's inner state, so
-   * what it says and what it listens for can depend on how its neighbourhood
-   * is doing, on how full it is itself, and on how much it likes where it is
-   * standing — separately, and with a sign. See `STATE_DIMS`.
-   *
-   * A live view into AgentStore.chemAll, cached and re-sliced only when the
-   * store's `generation` changes (a growth reallocation). Always
-   * index-written (`agent.chem[k] = ...`), never reassigned.
+   * The genome, laid out by `chem-layout.ts`: what this body says, what it
+   * listens for, and the heads that read its inner state. Seeded from kind,
+   * inherited with mutation at a commute. Once the channels drift they stop
+   * meaning con/dup/era/aux; aux ports still lay into channel 3 regardless.
+   * A live view into `AgentStore.chemAll`, re-sliced only when the store's
+   * `generation` changes. Always index-written, never reassigned.
    */
   get chem(): Float32Array {
     const store = this.store;
@@ -297,14 +256,7 @@ export class Agent {
 
   /**
    * How many rewrites deep this body is from a founder, and which founder.
-   *
-   * Read by nothing the sim does. They are here so that "did this change
-   * help?" is a question with an answer. Every heritable trait in this project
-   * drifts as well as adapts, and with `CHEM_MUTATE` across a genome this size
-   * the drift is not small — a genome that has moved away from its seed, which
-   * is all `chem-evolution` can currently show, is equally consistent with
-   * selection and with a random walk. Telling those apart needs to know how
-   * deep a line is and which lines are still alive.
+   * Read by nothing the sim does; exists to be measured.
    */
   get born(): number {
     return this.store.born[this.slot];
@@ -320,12 +272,7 @@ export class Agent {
     this.store.lineage[this.slot] = v;
   }
 
-  /**
-   * This body's recurrent state, a live view into `AgentStore.hAll`.
-   *
-   * Re-sliced only when the store reallocates, like `chem`. Always
-   * index-written, never reassigned.
-   */
+  /** This body's recurrent state, a live view into `AgentStore.hAll`, cached like `chem`. */
   get h(): Float64Array {
     const store = this.store;
     if (this._hGen !== store.generation) {
@@ -338,13 +285,8 @@ export class Agent {
   /**
    * The four channel readings at this body's position, scaled as the genome
    * reads them: signals by `1 / SENSE_SCALE`, the ground by `1 / cellCap`.
-   *
-   * Scaled at the write, on both paths, rather than raw here and scaled in
-   * place by the state pass — which left this holding scaled values on the
-   * CPU path and raw ones on the GPU path, depending on which pass had run
-   * last. On the CPU path it is only refreshed on frames where this body's
-   * `Wx` actually reads the field; stale otherwise, and not fed into the
-   * state when stale.
+   * Scaled at the write on both field paths. On the CPU path it is only
+   * refreshed on frames where this body's `Wx` reads the field.
    */
   get sense(): Float64Array {
     const store = this.store;
@@ -373,14 +315,9 @@ export class Agent {
   }
 
   /**
-   * Set when the body falls into debt, cleared when it is back on its feet.
-   *
-   * Hunger measured against break-even stops the moment the debt is settled,
-   * which left a rescued body pinned at exactly 0 — alive, one frame of upkeep
-   * from dying again, and permanently unable to afford the share a rewrite
-   * costs. The latch is what lets the ask outlive the debt: while it is set,
-   * the body keeps asking up to its own `rescueTo` fill, so a rescue tops it back up to
-   * something it can act with instead of parking it on the line.
+   * Set when the body falls into debt, cleared once it is back at its
+   * `rescueTo` fill. The latch lets the ask outlive the debt, so a rescue
+   * tops a body up to something it can act with instead of parking it at 0.
    */
   get recovering(): boolean {
     return this.store.recovering[this.slot] !== 0;
@@ -391,11 +328,9 @@ export class Agent {
 
   /**
    * Heritable traits. Seeded from the matching global slider when a body is
-   * created outside a rewrite, so a fresh soup starts homogeneous just as it
-   * did before these existed. A Con+Dup commute instead recombines both
-   * parents' values into each child — blended for a Con child, assorted
-   * whole from one parent per trait for a Dup child (see `inheritTraits` in
-   * rewrite.ts) — which is the only place a population's traits can drift.
+   * created outside a rewrite; a Con+Dup commute recombines both parents'
+   * values into each child (`inheritTraits` in rewrite.ts), which is the
+   * only place a population's traits can drift.
    */
   /** How much of this body's own demand survives one more hop outward. */
   get requestDecay(): number {
@@ -436,12 +371,9 @@ export class Agent {
   }
 
   /**
-   * How particulate this lineage's inheritance is, 0 to 1.
-   *
-   * Not read by the body itself — it is read when the body *breeds*, to decide
-   * per gene whether a child copies one parent whole or blends the two. See
-   * `assortChance`, which offsets it by the child's kind so that the seeded
-   * 0.5 reproduces the old absolute Con-blends/Dup-assorts rule.
+   * How particulate this lineage's inheritance is, 0 to 1: read when the body
+   * breeds, per gene, to decide whether a child copies one parent whole or
+   * blends the two. See `assortChance`.
    */
   get assort(): number {
     return this.store.assort[this.slot];
@@ -450,7 +382,6 @@ export class Agent {
     this.store.assort[this.slot] = v;
   }
 
-  /** How much of a kick this body's own pumps hand off instead of keeping. */
   /** The charged part of this body's adenylate pool. See `Sim.advanceGait`. */
   get atp(): number {
     return this.store.atp[this.slot];
@@ -486,15 +417,8 @@ export class Agent {
 
   /**
    * Memoized cosine and sine of `heading`, with the heading they were taken
-   * at. Every port position in the sim goes through `stemOffsetInto`, which
-   * needs both; at pond scale that was ~60,000 sin and 60,000 cos a frame in
-   * the wall-mask pass alone, and as much again in the length refresh and the
-   * rope shape pass — all of them recomputing the same handful of headings,
-   * because the work is indexed per wire-endpoint and the heading is per body.
-   *
-   * Memoizing on the agent rather than in a frame-keyed side table means the
-   * guard is exact and self-invalidating: heading moves, the memo misses. NaN
-   * starts it cold and keeps it cold if a heading ever goes bad.
+   * at. The guard is exact and self-invalidating: heading moves, the memo
+   * misses. NaN starts it cold and keeps it cold if a heading ever goes bad.
    */
   get csHeading(): number {
     return this.store.csHeading[this.slot];
@@ -520,14 +444,7 @@ export class Agent {
 
 /**
  * An independent copy: same field values, own private single-agent store.
- *
- * Prototype accessors read `this.store`/`this.slot`, not a value captured
- * at construction, so a shallow `{ ...agent }` spread would copy those
- * live — aliasing straight back into the original's slot instead of
- * producing a real snapshot. This builds a genuinely separate `Agent`.
- * Exists mainly for native/solver.test.ts and native/solver-extra.test.ts,
- * which snapshot an agent before handing it to the JS reference path, so
- * the WASM-vs-JS comparison has something the solver hasn't already moved.
+ * A `{ ...agent }` spread would alias the original's slot instead.
  */
 export function cloneAgent(a: Agent): Agent {
   const store = new AgentStore(1);
@@ -547,9 +464,7 @@ export function cloneAgent(a: Agent): Agent {
   clone.born = a.born;
   clone.lineage = a.lineage;
   clone.bound = a.bound;
-  // A clone that does not clone these is a body with someone else's genome and
-  // a blank mind. Latent — only native-parity tests call this today — but the
-  // next caller (a designer ghost, a rollback) would get it silently.
+  // Without these a clone has someone else's genome and a blank mind.
   clone.h.set(a.h);
   clone.sense.set(a.sense);
   refreshReadsField(clone);
@@ -583,13 +498,7 @@ export function poseHeld(a: Agent): boolean {
   return poseHeldAt(a.store, a.slot);
 }
 
-/**
- * `poseHeld` from a store and a slot, for packs that walk every body.
- *
- * The flyweight's `locked` and `pinned` getters each reach through `store`
- * and `slot` to arrive at the array this reads directly. One definition, two
- * ways in: the packs hold the store already, and everything else holds a body.
- */
+/** `poseHeld` from a store and a slot, for packs that walk every body. */
 export function poseHeldAt(store: AgentStore, slot: number): boolean {
   return store.locked[slot] !== 0 || store.pinned[slot] !== 0;
 }
@@ -599,14 +508,7 @@ export function slotIndex(slot: PortSlot): number {
   return slot === 'p' ? 0 : slot === 'l' ? 1 : 2;
 }
 
-/**
- * A port's identity as a number.
- *
- * This was a template string, and it is looked up constantly — every free-port
- * test in steering, deposit, flocking and snapping goes through it, some sixty
- * thousand times a frame on a grown pond. That was sixty thousand strings a
- * frame built only to be hashed and thrown away.
- */
+/** A port's identity as a number: `id * 3 + slotIndex`. */
 export function portKeyAt(id: number, slot: PortSlot): number {
   return id * 3 + slotIndex(slot);
 }
@@ -616,12 +518,8 @@ export function portKey(p: PortRef): number {
 }
 
 /*
- * Frozen and shared, because `slotsFor` builds a fresh array on every call and
- * a `for...of` over it builds a fresh iterator. Once a body a frame that is
- * nothing; once a body in the GPU deposit pack, at five thousand bodies, it is
- * ten thousand short-lived objects for a value with two possible answers.
- * Callers that only iterate should reach for these; `slotsFor` stays for the
- * ones that want a list of their own.
+ * Frozen and shared, for callers that only iterate; `slotsFor` stays for
+ * the ones that want a list of their own.
  */
 export const ERA_SLOTS: readonly PortSlot[] = Object.freeze(['p'] as PortSlot[]);
 export const NODE_SLOTS: readonly PortSlot[] = Object.freeze(['p', 'l', 'r'] as PortSlot[]);
@@ -665,19 +563,14 @@ export function boundRadius(agent: Agent): number {
 
 /**
  * Radius of the disc with the same area as the Con/Dup triangle, as a
- * multiple of `agentSize`. The glyph is 1.312 s^2 for s = 16 * scale, so the
- * equal-area radius is s * sqrt(1.312 / PI).
+ * multiple of `agentSize`: the glyph is 1.312 s^2 for s = 16 * scale.
  */
 export const TRI_DISC_RATIO = Math.sqrt(1.312 / Math.PI);
 
 /**
  * Contact radius for the tiers that collide discs instead of SAT polygons.
- *
- * `boundRadius` is the circumscribed bound, which for a triangle is ~1.7x too
- * fat to use as a contact radius: a net that settles at ~22 px under SAT is
- * held ~36 px apart by bound discs, so it visibly inflates the moment the
- * camera crosses the LOD line. Equal area is the closest single radius to
- * where SAT actually settles, which is what keeps the tiers agreeing.
+ * Equal area, not the circumscribed `boundRadius`, so a net does not inflate
+ * when the camera crosses the LOD line.
  */
 export function discRadius(agent: Agent): number {
   if (agent.kind === 'era') return ERA_RADIUS * agent.scale;
@@ -686,29 +579,15 @@ export function discRadius(agent: Agent): number {
 
 /**
  * Sum of squared vertex radii of the unit Con/Dup triangle (`triangleLocal`
- * at `s = 1`): `1.05^2 + 2 * (0.55^2 + 0.82^2)`. The inertia below used to
- * build the three vertices and sum them, which allocated an array and three
- * points per call — and `packPose` asks for the inertia of every body every
- * frame, so that was two hundred thousand short-lived objects a frame at a
- * fifty-thousand-body pond, in a function whose answer is a constant times
- * `scale^2`.
+ * at `s = 1`): `1.05^2 + 2 * (0.55^2 + 0.82^2)`.
  */
 const TRI_VERTEX_R2 = 1.05 * 1.05 + 2 * (0.55 * 0.55 + 0.82 * 0.82);
 
 export function momentOfInertia(agent: Agent): number {
-  // Straight out of the store rather than back through the string: the code
-  // is what is stored, and `agent.kind` exists to turn it into a name.
   return momentOfInertiaAt(agent.store.kindCode[agent.slot], agent.mass, agent.scale);
 }
 
-/**
- * `momentOfInertia` from a kind code rather than a body.
- *
- * The store already holds the kind as the same small integer the solver
- * wants, so a pack that goes through the flyweight turns it into a string to
- * compare against `'era'` and then back into an integer to write out. One
- * definition, and the packs no longer round-trip through the string.
- */
+/** `momentOfInertia` from a kind code rather than a body, for the packs. */
 export function momentOfInertiaAt(kindCode: number, mass: number, scale: number): number {
   const m = Math.max(0.08, mass);
   if (kindCode === KIND_ERA) {
@@ -803,14 +682,10 @@ export {
 
 
 /**
- * A bare body carrying just what `effEmit` and `effTaste` read, for tests that
- * want to poke a genome without building a `Sim`.
- *
- * It exists because the alternative kept going wrong. Tests were writing
- * `{ chem, request } as unknown as Agent`, and every time the shape changed
- * that cast turned what should have been a compile error into `undefined`
- * arithmetic, surfacing as a *zero* emit weight in some other file. Twice.
- * Going through here means the next change breaks the build at one function.
+ * A bare body carrying just what `effEmit` and `effTaste` read, for tests
+ * that want to poke a genome without building a `Sim`. The one place the
+ * cast lives, so a shape change breaks the build here rather than
+ * surfacing as `undefined` arithmetic elsewhere.
  */
 export function bareBody(chem: Float32Array, over: { h?: number[] } = {}): Agent {
   return {
@@ -823,12 +698,9 @@ export function bareBody(chem: Float32Array, over: { h?: number[] } = {}): Agent
 
 
 /**
- * Recompute the cached "does this genome look at the field" flag.
- *
- * Must be called after anything writes `chem`. That is birth — `createAgent`
- * and `inheritChem` — plus `cloneAgent` and whatever tests poke directly. A
- * stale `false` here is a body that has evolved sense weights and cannot see,
- * which would look exactly like the weights not working.
+ * Recompute the cached "does this genome look at the field" flag. Must be
+ * called after anything writes `chem`: a stale `false` is a body that has
+ * evolved sense weights and cannot see.
  */
 export function refreshReadsField(a: Agent): void {
   const ch = a.chem;
@@ -843,8 +715,7 @@ export function refreshReadsField(a: Agent): void {
     }
   }
   a.store.readsField[a.slot] = reads;
-  // This is the one choke point every chem write already has to pass through,
-  // so it is also where the GPU's copy of the genome learns it is stale.
+  // The one choke point every chem write passes through, so the GPU's copy learns it is stale here.
   a.store.markChem(a.slot);
 }
 
@@ -859,34 +730,14 @@ export function head(a: Agent, matrix: number, base: number, row: number): numbe
 }
 
 /**
- * The realised emit vector: what this genome actually says, into `out`.
- *
- * `relu(E.h + e0)` per channel and then **normalised to one unit across all
- * four**, which is the budget the whole honesty argument rests on and which
- * was, until this function existed, enforced nowhere.
- *
- * It had been applied to `e0` at birth by `inheritChem` and never again. `E`
- * is free to add up to `CHEM_SLOPE_MAX` per state dimension on top, so a
- * genome satisfying every invariant inheritance guarantees — bases
- * non-negative and summing to one, every `E` entry inside its bound —
- * realised a total of 17 against a documented budget of 1. "Louder is
- * strictly better" was reachable, which is the exact thing the budget exists
- * to prevent, and the trade-off that justified deleting `emitCost` did not
- * hold: measured, the ground channel and both signal channels rose *together*
- * off a single state dimension.
- *
- * Normalising the realised vector rather than tightening the slope bound is
- * the fix that restores the documented invariant instead of merely shrinking
- * the violation. It has to see all four channels at once, which is why this
- * is a vector and not four scalar calls.
- *
- * A body that has mutated its way to silence stays silent rather than being
- * amplified back out of noise — the same rule `inheritChem` uses on the bases.
+ * The realised emit vector: `relu(E.h + e0)` per channel, then normalised to
+ * one unit across all four, into `out`. The unit sum is the budget that
+ * keeps "louder is strictly better" unreachable, and it must be enforced on
+ * the realised vector, which is why this is a vector and not four scalar
+ * calls. A body that has mutated its way to silence stays silent.
  */
 export function emitVector(chem: Float32Array, g: number, h: Float64Array, ho: number, out: Float64Array, oo: number): void {
-  // Unrolled for the same reason the state update is: four channels by four
-  // dimensions is a compile-time shape, and the loop around sixteen
-  // multiply-adds costs more than the arithmetic.
+  // Unrolled: four channels by four dimensions is a compile-time shape.
   const h0 = h[ho];
   const h1 = h[ho + 1];
   const h2 = h[ho + 2];
@@ -929,7 +780,6 @@ export function emitVector(chem: Float32Array, g: number, h: Float64Array, ho: n
     sum += w;
   }
 
-  // Reciprocal once rather than four divides; this runs per body per frame.
   if (sum > 1e-6) {
     const inv = 1 / sum;
     for (let c = 0; c < 4; c++) out[oo + c] *= inv;
@@ -937,32 +787,13 @@ export function emitVector(chem: Float32Array, g: number, h: Float64Array, ho: n
 }
 
 /**
- * What a kind's metabolism makes, and what it can eat, at the seed.
- *
- * `X`'s eight rows are one unit budget over four excretion reactions and four
- * uptake ones, and a genome seeded to zero takes `expressVector`'s flat
- * fallback: an eighth each, which says every kind produces all four species
- * equally and eats all four equally. That is a body with no metabolism in
- * particular, and it is not what any of the three kinds are.
- *
- * A Con makes `conP` and `aux`, a Dup makes `dupP` and `aux`, and an Era makes
- * ground — the same thing it has always done, now said in the same place as
- * the other two rather than only through `farmRate` and the emit head. The
- * plan's §3 table has held that the excretion rows subsume `effEmit` and
- * `farmRate` since it was written; this is that half of it, at the seed.
- *
- * The uptake half is left at exactly even, which is what `SEED_UPTAKE` and
- * `SEED_PRODUCTION` are chosen for: every uptake row lands on an eighth — the
- * flat fallback's own value — and the production half is `ERA_GROUND_SHARE`
- * of the budget however a kind divides it. A fresh body eats like a
- * generalist and speaks like its kind, and nothing about what it can digest
- * has been decided for it.
- *
- * Inherited and mutated, not learned: `X` sits outside the plastic span on
- * purpose (plan §8). What moves within a life is regulation — the rows read
- * `h`, so a body shifts its own mix with its state, and the learned weights
- * that shape `h` move it indirectly. A lineage that ought to make something
- * else gets there by breeding, which is the timescale a metabolism belongs on.
+ * What a kind's metabolism makes, and what it can eat, at the seed. A Con
+ * makes `conP` and `aux`, a Dup `dupP` and `aux`, an Era ground; every
+ * uptake row lands on an eighth, the flat fallback's own value, so a fresh
+ * body eats like a generalist and speaks like its kind. `SEED_UPTAKE` and
+ * `SEED_PRODUCTION` are chosen so the production half is `ERA_GROUND_SHARE`
+ * of the budget. Inherited and mutated, not learned: `X` sits outside the
+ * plastic span.
  */
 function seedProduction(c: Float32Array, kind: AgentKind): void {
   const x = X_BASE + ROW_EXCRETE;
@@ -1019,22 +850,11 @@ export function tasteVector(chem: Float32Array, g: number, h: Float64Array, ho: 
 const SCRATCH4 = new Float64Array(4);
 
 /**
- * Emit weight for one *signal* channel. Never negative.
- *
- * Zero on `CH.energy`, and the reason is now a choke point and nothing else.
- * The ground is a thing a body can put into the field — that is the ground's
- * excretion row, `runExcretion` at `excreteRate`, which is what farming became
- * — but it must never reach the field through the scent deposit path, because
- * that path multiplies by `params.deposit`, which is five. A body emitting a
- * whole unit would put five units of food a frame into the world out of
- * nothing.
- *
- * So the emit head's ground slot is read by nothing. It stays a quarter of
- * `emitVector`'s simplex because dropping it would renormalise every genome
- * in the library, and `seedChem` still writes an Era's unit of voice there
- * because a seed says what a kind is for; what is left of the question is
- * whether that simplex should be three wide, which is deferred for the same
- * reason.
+ * Emit weight for one signal channel. Never negative. Always zero on
+ * `CH.energy`: the ground reaches the field only through its excretion row,
+ * never through the scent deposit path, which multiplies by `params.deposit`
+ * and would mint food. The emit head's ground slot stays a quarter of the
+ * simplex because dropping it would renormalise every genome in the library.
  */
 export function effEmit(a: Agent, c: number): number {
   if (c === CH.energy) return 0;
@@ -1049,15 +869,10 @@ export function effTaste(a: Agent, c: number): number {
 }
 
 /**
- * A flocking gain as the force sees it: never negative.
- *
- * The genes are allowed below zero so mutation has no reflecting barrier at
- * the off position, but neither force survives a negative gain. Alignment
- * pushes a body toward its neighbour's velocity, so a negative gain pushes it
- * away and relative velocity grows without bound — negative damping.
- * Separation only acts while a pair is closer than it wants to be, so a
- * negative gain pulls them together with no equilibrium to stop at. Both blow
- * up. Below zero simply means as off as off gets.
+ * A flocking gain as the force sees it: never negative. The genes may go
+ * below zero so mutation has no reflecting barrier at off, but a negative
+ * alignment gain is negative damping and a negative separation gain has no
+ * equilibrium; both blow up.
  */
 export function flockGain(v: number): number {
   return v > 0 ? v : 0;
@@ -1066,33 +881,12 @@ export function flockGain(v: number): number {
 
 
 /**
- * How hard each kind grips at its point in the stroke: an Era is an oar and a
- * Con or a Dup is a foot.
- *
- * A base, not a matrix entry, and the matrix stays zero — so a fresh body
- * grips by a constant and a lineage is free to make it depend on `h`, or to
- * swap the two roles outright, by drifting `G`. Same shape as `e0`, and the
- * same argument: a behaviour should start as the constant it would otherwise
- * have been hardcoded to, and become a phenotype by evolving.
- *
- * The split is what the travel is made of. A wire swinging its rest length
- * moves both its bodies and not their centre; what is left over is the
- * velocity that correction induces, decaying at each body's own rate. Equal
- * rates, nothing left. So the two ends of a wire have to grip differently,
- * and an Era supplies that difference structurally: one port, so always a
- * leaf, with one uncancelled stroke where an interior body has three that
- * partly fight; light; and a producer holding a larger store, so it already
- * sits at a fullness its neighbour does not, which `grip` turns into a second
- * difference pointing the same way.
- *
- * Under `drag` on purpose. Past it the rate clamps at zero, both ends clamp
- * *together*, and the clamp destroys the asymmetry this exists to make.
- *
- * One structural condition is not seeded here and cannot be: an Era is a limb
- * only where it lands on an *auxiliary* port. A redex needs principals at
- * both ends (`Sim.collectReadyRedexes`) and an Era has nothing but a
- * principal — so on a Con's `l` or `r` it is an appendage, and on a Con's `p`
- * it is an erase waiting to happen.
+ * How hard each kind grips at its point in the stroke: an Era is an oar and
+ * a Con or a Dup is a foot. A base, not a matrix entry, so a fresh body grips
+ * by a constant and a lineage may make it depend on `h` by drifting `G`. The
+ * two ends of a wire must grip differently or the swing moves nothing, and
+ * an Era supplies that difference. Both under `drag`: past it the rate
+ * clamps at zero on both ends together and the asymmetry is gone.
  */
 const GAIT_ANCHOR_ERA = 0.02;
 const GAIT_ANCHOR_NODE = 0.25;
@@ -1102,63 +896,27 @@ function seedGait(c: Float32Array, kind: AgentKind): void {
 }
 
 /**
- * The hardcoded weights, written out as a genome.
- *
- * Emit is one-hot on the channel that kind's principal used to lay into. Taste
- * is the row `mixScent` used to select with a switch — Con seeks Dup, Dup seeks
- * Con, the pairing that makes a redex, and Era seeks both strongly. Everyone is
- * mildly drawn to the aux channel, which is "unwired tissue here" rather than a
- * kind.
- *
- * The attract sliders seed a new body and are not read again, which is how
- * every other heritable trait already works: the slider sets where a fresh
- * population starts, and breeding takes it from there.
+ * A kind's seed genome. Emit is one-hot on the kind's channel. Taste: Con
+ * seeks Dup, Dup seeks Con, the pairing that makes a redex, and Era seeks
+ * both strongly; everyone is mildly drawn to the aux channel, "unwired
+ * tissue here". The attract sliders seed a new body and are not read again.
+ * Slopes start at zero, so modulation is inert until breeding moves it.
  */
 export function seedChem(kind: AgentKind, params: Params): Float32Array {
-  // Slopes start at zero, so a seeded body says the same thing however its
-  // net is doing and the whole modulation is inert until breeding moves it.
   const c = new Float32Array(CHEM_LEN);
   const S = params.attractStrong;
   const M = params.attractMedium;
   /*
-   * Drawn to food when hungry, and blind to it when fed. On the slope against
-   * `request`, not on the base — the one place in this seed where a slope
-   * starts anywhere but zero, and it earns the exception.
-   *
-   * A constant attraction looks safe, on the argument that a flat field steers
-   * nothing: where the ground is untouched both sensors read the same and
-   * there is nothing to turn on. That argument is wrong, and measurably so. A
-   * body harvests from the cell it is standing in, so within a frame or two it
-   * has eaten a dip underneath itself — and then it smells the dip. It is
-   * chasing a gradient of its own making, which is the same self-trail
-   * artifact the sensor geometry is tuned to reject, arriving by a different
-   * door. Seeded flat at 0.9 it cost eight tests: nets dispersed instead of
-   * settling, and a lone body wound itself in circles on its own grazing.
-   *
-   * Gating on need fixes it at the root rather than by turning the gain down.
-   * A fed body has nothing to gain from food and ignores it, so it keeps the
-   * behaviour it always had; a hungry one — and `request` is the
-   * neighbourhood's hunger, already spread along the wires — turns toward the
-   * ground. Which is what foraging is, and what none of this was able to
-   * express at any genome before the ground was something you could smell.
-   */
-  /*
-   * The one place a matrix is seeded away from zero, and it is a two-hop
-   * pathway rather than a weight: `h[0]` is wired to carry `DEMAND`, and taste
-   * for the ground is wired to read `h[0]`. So a fresh body is drawn to food
-   * exactly when its neighbourhood is short of energy, and is blind to it
-   * otherwise — which is the behaviour, and it now has to be *built* out of
-   * the same parts a lineage would use rather than hardcoded as a slope.
-   *
-   * Blind when fed matters for a reason worth keeping: a body harvests the
-   * cell it stands in, so within a frame or two it has eaten a dip underneath
-   * itself and would otherwise chase the dip. `phi` compresses [0,1] to
-   * [0,0.5], so the gain is doubled to land where the old flat slope did.
+   * The one place a matrix is seeded away from zero: a two-hop pathway,
+   * `h[0]` carries `DEMAND` and taste for the ground reads `h[0]`, so a
+   * fresh body is drawn to food exactly when its neighbourhood is short of
+   * energy and blind to it otherwise. Blind when fed is load-bearing: a body
+   * harvests the cell it stands in and would otherwise chase the dip it just
+   * ate. `phi` compresses [0,1] to [0,0.5], so the gain is doubled.
    */
   c[W_IN + 0 * IN_DIMS + IN_DEMAND] = 1;
   c[T_OUT + CH.energy * STATE_DIMS + 0] = params.attractFood * 2;
-  // Output-head bases: the sliders' values, so a fresh body's flocking and
-  // pumping are exactly the constants they used to be.
+  // Output-head bases: the sliders' values.
   c[F_BASE] = params.flockAlign / HEAD_SCALE.align;
   c[F_BASE + 1] = params.flockSep / HEAD_SCALE.sep;
   c[P_BASE] = params.transportRecoil / HEAD_SCALE.recoil;
@@ -1176,71 +934,27 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
     c[TASTE + 3] = M;
   } else {
     /*
-     * An Era says nothing at seed.
-     *
-     * It used to spend its whole unit of voice on channel 2, which no kind
-     * has ever had a taste for — it was shouting into a band with no
-     * receivers, and that is exactly why channel 2 was free for the ground to
-     * move into. Emitting nothing is what it already amounted to; this just
-     * stops pretending otherwise, and stops the unit-sum budget being spent
-     * on a channel that cannot carry it.
-     *
-     * Not permanent. An Era is the body that produces energy rather than
-     * spending it, so it is the obvious thing to give a voice back to once
-     * emitting *is* producing — but that is an economy change and this is a
-     * storage one. Breeding will hand its descendants a voice long before
-     * then: one erase past the seed, mutation and the renormalisation give a
-     * child a full unit spread across the three channels that carry.
-     */
-    /*
-     * An Era's one unit of voice goes into the ground.
-     *
-     * It said nothing at all for a while, because its seeded channel became
-     * the ground and nothing emits onto the ground through the scent path.
-     * Farming is what an Era is *for* under this economy: one port, cannot
-     * commute, pays no rent. Its whole job is to be somewhere useful, and the
-     * useful thing to do with stock is put it where the logistic term can
-     * multiply it — seeding a scarred cell restarts growth that a depleted
-     * cell can never restart on its own.
-     *
-     * The *emit* slot, which nothing reads any more: farming is `excrete_2` on
-     * the expression head now, and `seedProduction` is where an Era is told to
-     * be a ground-maker. Left here because it is a quarter of a simplex and
-     * because it still says what an Era is for, which is what a seed is; see
-     * `effEmit` for why the slot itself has not gone.
+     * An Era's one unit of voice goes into the ground slot, which `effEmit`
+     * never reads: `seedProduction` is where an Era is told to make ground.
+     * Kept because it is a quarter of the simplex and says what an Era is for.
      */
     c[EMIT + CH.energy] = 1;
     c[TASTE] = S;
     c[TASTE + 1] = S;
     c[TASTE + 3] = M;
   }
-  /*
-   * The affinity genes, at one natural unit each: a fresh body's uptake reads
-   * `params.uptakeKs` on every species, which is exactly what it read before
-   * this gene existed. `X` and its base stay at zero, so expression is flat
-   * across all eight rows and every reaction runs at whatever constant it ran
-   * at. See `chem-layout.ts`.
-   */
+  // The affinity genes, at one natural unit each: a fresh body's uptake
+  // reads `params.uptakeKs` on every species. See `chem-layout.ts`.
   for (let k = 0; k < CHEM_SPECIES; k++) c[KS_BASE + k] = 1;
   return c;
 }
 
 /**
- * Expression: how a body divides one unit of chemical effort across the eight
- * rows of the reaction table. See `docs/history/energy-chemistry-plan.md` §3.
- *
- * Same shape as `emitVector` and for the same reason — relu, then normalised
- * to a unit sum across the whole table at once. The simplex is the trade-off
- * the plan is built on: a body cannot both shout and eat without giving
- * something up, and extending the budget past emission to *uptake* is the
- * strongest form of that, because it means feeding the ground trades against
- * feeding yourself.
- *
- * Seeded flat at zero, which relu and the normalisation turn into an even
- * eighth each — so a fresh body expresses every row equally and the global
- * rate constants are what decide anything. A body that mutates its way to
- * silence on every row stays silent rather than being amplified back out of
- * noise, exactly as `emitVector` handles the same case.
+ * Expression: how a body divides one unit of chemical effort across the
+ * eight rows of the reaction table. Relu, then normalised to a unit sum
+ * across the whole table, like `emitVector`: the simplex is the trade-off,
+ * a body cannot both shout and eat without giving something up. Seeded flat
+ * at zero, which comes out as an even eighth each.
  */
 export function expressVector(
   chem: Float32Array,
@@ -1255,9 +969,6 @@ export function expressVector(
   const h2 = h[ho + 2];
   const h3 = h[ho + 3];
   let sum = 0;
-  // Eight rows by four dimensions is a loop rather than the unrolled form the
-  // four-wide vectors use: twice the rows for the same shape, and this runs
-  // once a body a frame against `emitVector`'s several times.
   for (let r = 0; r < ROW_COUNT; r++) {
     const o = g + X_OUT + r * STATE_DIMS;
     const v =
@@ -1271,14 +982,8 @@ export function expressVector(
     const inv = 1 / sum;
     for (let r = 0; r < ROW_COUNT; r++) out[oo + r] *= inv;
   } else {
-    /*
-     * Nothing expressed. Flat rather than zero: a genome seeds every entry of
-     * `X` to zero, so the pre-activation is zero on every row and relu leaves
-     * nothing to normalise — and a body expressing *no* reaction at all would
-     * be inert from birth, which is not what "ships at the neutral value"
-     * means. An eighth each is the even division, and the rate constants
-     * decide the rest.
-     */
+    // Nothing expressed. Flat rather than zero: a zero-seeded `X` must not
+    // make a body inert from birth.
     const even = 1 / ROW_COUNT;
     for (let r = 0; r < ROW_COUNT; r++) out[oo + r] = even;
   }
@@ -1287,12 +992,9 @@ export function expressVector(
 
 
 /**
- * `store` defaults to a fresh, private, single-agent `AgentStore` when
- * omitted — every one of this project's ~386 test-side `createAgent` calls
- * (and the few production call sites that don't yet thread a shared store,
- * e.g. render.ts's ghosts) keeps working exactly as it did when `Agent` was
- * a plain object, just with one small typed-array table backing it instead
- * of none. `Sim` and `commitRewrite` pass their own shared store explicitly.
+ * A founder body, seeded from the sliders. `store` defaults to a fresh,
+ * private, single-agent `AgentStore`; `Sim` and `commitRewrite` pass their
+ * own shared store explicitly.
  */
 export function createAgent(
   id: number,
@@ -1318,15 +1020,10 @@ export function createAgent(
   agent.locked = false;
   agent.pinned = false;
   /*
-   * A nudge off the metabolic steady state, so a fresh body's pathway starts
-   * somewhere rather than sitting exactly on its own fixed point.
-   *
-   * A hash of the id and not a multiple of it. `id * goldenAngle` was the
-   * first try and it is not a scatter at all: consecutive ids land a constant
-   * angle apart, so a chain latched in id order was already a wave of a
-   * wavelength nothing chose. Mixed rather than drawn from `Math.random`, so
-   * where a body starts is a property of the body and not of how many bodies
-   * happened to be made before it.
+   * A nudge off the metabolic steady state, so a fresh body's pathway does
+   * not sit on its own fixed point. A hash of the id, not a multiple of it
+   * (consecutive ids would land a constant phase apart) and not
+   * `Math.random` (a body's start is a property of the body).
    */
   let mix = Math.imul(id, 2654435761) >>> 0;
   mix ^= mix >>> 15;
@@ -1336,13 +1033,10 @@ export function createAgent(
   mix ^= mix >>> 16;
   const pool = params.adenylate;
   store.adenylate[slot] = pool;
-  // Part charged, and not all of it: a pool that starts full has no ADP for
-  // the autocatalytic step to work on and the pathway never lights.
+  // Part charged, never all: a full pool has no ADP for the autocatalytic step.
   store.atp[slot] = pool * (0.25 + (mix / 4294967296) * 0.5);
   store.sub[slot] = 0.5;
-  // A body made outside a rewrite is a founder: generation zero of its own
-  // line. `autoSpawn` makes a great many of these, which is the point of
-  // being able to count them.
+  // A body made outside a rewrite is a founder: generation zero of its own line.
   agent.born = 0;
   agent.lineage = id;
   agent.bound = 0;
@@ -1359,11 +1053,8 @@ export function createAgent(
   agent.chem.set(seedChem(kind, params));
   agent.extra = 0;
   agent.request = 0;
-  // Phenotype, seeded so frame zero is right; `updateState` rewrites it from
-  // `F` and `f0` every frame after that. The locomotion head gets the same
-  // treatment: without it a body's first frame had a cruise of zero and a turn
-  // gain of zero, so a fresh soup stood still for one tick and a newborn could
-  // not steer until the state pass had run once.
+  // Phenotype, seeded so frame zero is right; `updateState` rewrites it every
+  // frame after that. Without the seed a newborn stands still for one tick.
   agent.flockAlign = params.flockAlign;
   agent.flockSep = params.flockSep;
   store.cruise[slot] = params.stepSpeed;
@@ -1513,20 +1204,9 @@ export function portWorld(agent: Agent, slot: PortSlot, w: number, h: number): V
 const portWorldScratch: Vec2 = { x: 0, y: 0 };
 
 /**
- * `portWorld` writing into `out`, and flattened for the same reason
- * `stemOffsetInto` is.
- *
- * The allocating chain is four objects a call: `stemRoot` makes one,
- * `portLocal` copies it into a second, `rotate` returns a third, and
- * `portWorld` builds the result. The GPU deposit pack walks every port of
- * every body, so on a pond of five thousand that is sixty thousand
- * short-lived objects a frame — measured at 5.95 ms, which was the largest
- * single piece of the field phase and none of it arithmetic.
- *
- * `wrap` is the identity — the world stopped being toroidal — so it is gone
- * here rather than sitting in the hot path hoping the JIT removes it. `w` and
- * `h` stay in the signature so the shape is obvious if wrapping comes back,
- * which is the convention `stemWorldInto` already set.
+ * `portWorld` writing into `out`, flattened like `stemOffsetInto`. `wrap` is
+ * the identity and is omitted; `w` and `h` stay in the signature so the
+ * shape is obvious if wrapping comes back.
  */
 export function portWorldInto(
   agent: Agent,
@@ -1551,20 +1231,10 @@ export function portWorldInto(
 }
 
 /**
- * Bring the store's memoised cosine and sine of a body's heading up to date.
- *
- * The caller then reads `csCos[slot]` and `csSin[slot]`. Passing the three
- * arrays rather than a store keeps this off the flyweight, since every caller
- * is a loop over every body that has already hoisted what it needs.
- *
- * `stemOffsetInto` has always kept this memo, through the accessors. The point
- * of sharing it is that a heading turns into a sine and a cosine once a frame
- * however many passes want it: the latch pass computes them for every free
- * port, and the GPU probe pack wants them again a few phases later for the
- * same bodies at the same headings.
- *
- * A body whose heading has moved since the memo was written simply misses and
- * recomputes, so the answer is never stale — that is what `csHeading` is for.
+ * Bring the store's memoised cosine and sine of a body's heading up to date;
+ * the caller then reads `csCos[slot]` and `csSin[slot]`. The same memo
+ * `stemOffsetInto` keeps through the accessors. A heading that has moved
+ * misses and recomputes, so the answer is never stale.
  */
 export function syncHeadingCosSin(
   csHeading: Float64Array,
@@ -1589,19 +1259,8 @@ export interface PortFrame {
 
 /**
  * `portWorldInto`'s position and the snap arc's outward axis at once, from a
- * heading the caller has already turned into a sine and a cosine.
- *
- * Both used to take a heading and call `Math.cos`/`Math.sin` on it: the
- * position once per free port, and the arc test (a deleted `inSnapArcAt`,
- * now inline in `Graph.snap`) twice per candidate pair, always on a body's
- * one heading. At fifty thousand bodies that came to about a hundred and
- * eighty thousand sine-cosine pairs a frame for fifty thousand distinct
- * angles, plus a flyweight property load each time to fetch the angle again.
- * The caller now turns each body's heading once and every port of that body
- * reads it.
- *
- * The axis is a unit vector because sine and cosine are, so the arc test
- * divides by the distance alone.
+ * heading the caller has already turned into a sine and a cosine. The axis
+ * is a unit vector, so the arc test divides by the distance alone.
  */
 export function portFrameInto(
   kind: AgentKind,
@@ -1632,22 +1291,9 @@ export function stemOffset(agent: Agent, slot: PortSlot): Vec2 {
 
 
 /**
- * `stemOffset` writing into `out`.
- *
- * The allocating form costs three objects a call — a stem root, a rotation,
- * and the result — and the FAR pack calls it twice per wire, which on a pond
- * of 14000 wires is most of a hundred thousand short-lived objects a frame.
- */
-/*
- * Flattened on purpose. This is the single hottest geometric routine in the
- * sim — every port position in every pass comes through it, twice per wire —
- * and it used to reach `stemRootInto`, which reaches `agentSize`, through a
- * scratch object, then two calls to `wrap`. Measured at pond scale that chain
- * cost 71ns a call with the trigonometry already memoized away, which is call
- * overhead rather than arithmetic: about 4.2ms a frame in the wall-mask pass
- * alone. The bodies of `stemRootInto` and `agentSize` are inlined here; the
- * originals stay for everyone else. Same operations in the same order, so the
- * result is bit-for-bit what the chain produced.
+ * `stemOffset` writing into `out`. The hottest geometric routine in the sim,
+ * so `stemRootInto` and `agentSize` are inlined here in the same order, and
+ * the result is bit-for-bit what that chain produces.
  */
 export function stemOffsetInto(agent: Agent, slot: PortSlot, out: Vec2): Vec2 {
   const kind = agent.kind;
@@ -1719,14 +1365,8 @@ export function stemWorldInto(
   h: number,
   out: { x: number; y: number },
 ): { x: number; y: number } {
-  // Through the into-form: the allocating `stemOffset` costs three objects a
-  // call, and this is called twice per wire by both the length refresh and the
-  // rope shape pass. On a pond of 14000 wires that was six figures of garbage
-  // a frame from the function whose entire point is not to make any.
   const o = stemOffsetInto(agent, slot, stemWorldScratch);
-  // `wrap` is the identity — the world stopped being toroidal — and the two
-  // calls did not always vanish in the JIT. Kept in the signature so the
-  // shape is obvious if wrapping ever comes back.
+  // `wrap` is the identity and is omitted; `w` and `h` stay in the signature.
   void w;
   void h;
   out.x = agent.x + o.x;
@@ -1735,10 +1375,9 @@ export function stemWorldInto(
 }
 
 /**
- * Control point along the port axis. Scaled to the wire's length when it is
- * known: a fixed handle longer than a third of the span makes the two handles
- * cross, and the cubic then doubles back on itself — which reads as a shorter
- * wire than the straight line between the ports.
+ * Control point along the port axis, scaled to the wire's length when known:
+ * a handle longer than a third of the span crosses its partner and the cubic
+ * doubles back on itself.
  */
 export function handleWorld(
   agent: Agent,
@@ -1776,9 +1415,7 @@ export function wireCubic(
   const rootB = stemWorld(B, bSlot, w, h);
   const spanVec = wrapDeltaVec(p0.x, p0.y, rootB.x, rootB.y, w, h);
   const span = Math.hypot(spanVec.x, spanVec.y);
-  // A handle longer than a third of the span crosses its partner and the cubic
-  // loops off-screen — which is exactly what a collision that shoves two ports
-  // together used to draw.
+  // A handle longer than a third of the span crosses its partner; see `handleWorld`.
   const cap = Math.max(4, span * 0.33);
   const hA = handleWorld(A, aSlot, w, h, restLen, cap);
   const hB = handleWorld(B, bSlot, w, h, restLen, cap);
