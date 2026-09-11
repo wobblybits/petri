@@ -1,17 +1,11 @@
-// The scent field: scatter, diffuse, decay, gather.
-//
-// Deliberately geometry-free. The host hands over world positions to deposit
-// at and world positions to sample from, already computed; nothing in here
-// knows what a port or a sensor is. Port placement exists in two places
-// already (Sim and the wasm solver) and putting it in a third is how the
-// deposit normalisation came to be 20 on one side and 10 on the other.
-//
-// Layout matches Fields exactly: FIELD_CELLS squared, four channels
-// interleaved per cell, origin at home minus half the extent.
+// The scent field: scatter, diffuse, decay, gather. Geometry-free: the host
+// hands over world positions to deposit at and to sample from; nothing here
+// knows what a port or a sensor is. Layout matches Fields exactly:
+// FIELD_CELLS squared, four channels interleaved per cell, origin at home
+// minus half the extent.
 
-// 160 bytes. Every vec4f sits on a sixteen-byte boundary because WGSL demands
-// it, which is why the scalars are grouped in fours rather than in the order
-// anyone would write them down.
+// 160 bytes. Every vec4f must sit on a sixteen-byte boundary, which is why
+// the scalars are grouped in fours.
 struct FieldParams {
   cols: u32,
   rows: u32,
@@ -25,8 +19,8 @@ struct FieldParams {
   worldY: f32,
   boundR: f32,
   growCh: f32,
-  // Per channel, not scalar: energy is conserved where a signal fades, and a
-  // reaction only patterns when its two species move at different speeds.
+  // Per channel: energy is conserved where a signal fades, and a reaction
+  // only patterns when its two species move at different speeds.
   mix: vec4f,
   mix2: vec4f,
   keep: vec4f,
@@ -44,32 +38,23 @@ struct FieldParams {
   harvestCh: f32,
   fillCh: f32,
   fillValue: f32,
-  // Monod uptake, in the two slots that used to be padding. `uptakeCap` is
-  // `params.uptakeVmax * dt` and zero means unmetered — the take-what-fits
-  // path this shader has always run. See `energy.ts:uptakeRate`.
+  // Monod uptake. `uptakeCap` is `params.uptakeVmax * dt`; zero means
+  // unmetered, the take-what-fits path. See `energy.ts:uptakeRate`.
   uptakeCap: f32,
   uptakeKs: f32,
   // Hill coefficient on uptake; 1 is plain Monod. See `UptakeKinetics.hillN`.
   hillN: f32,
-  // Reserved. It carried `catCoSubstrate` while the co-substrate was a factor
-  // in this pass; catabolism is the host's `runDigestion` on both field paths
-  // now, so nothing here reads it. The slot stays because the uniform is a
-  // whole number of sixteen-byte blocks and is packed by index.
+  // Reserved; the uniform is a whole number of sixteen-byte blocks, packed by index.
   pad5: f32,
   pad6: f32,
   pad7: f32,
 }
 
-// A world position and what to add there, per channel.
-//
-// `conserve` picks which of the two adds `Fields` has. A scent deposit is a
-// *density*: the host has already scaled it by cell area, and a share landing
-// in a cell the disk rejects is simply not deposited. Energy is a *count*, and
-// a unit of it has to survive however the grid is cut — so its share is spread
-// over whichever cells will take it. See `Fields.addAt`: a point inside the
-// disk can still straddle cells whose centres are outside it, because the
-// bound test asks about the point and the mask asks about the centre, and a
-// conserved channel is exactly where a small unbounded leak is unaffordable.
+// A world position and what to add there, per channel. `conserve` picks
+// which of the two adds `Fields.addAt` has: a scent deposit is a density and
+// a share landing in a cell the disk rejects is not deposited; energy is a
+// count and its share is spread over whichever cells will take it, since a
+// point inside the disk can straddle cells whose centres are outside it.
 struct Deposit {
   pos: vec2f,
   conserve: f32,
@@ -89,23 +74,18 @@ struct Probe {
 @group(0) @binding(0) var<uniform> P: FieldParams;
 @group(0) @binding(1) var<storage, read_write> src: array<vec4f>;
 @group(0) @binding(2) var<storage, read_write> dst: array<vec4f>;
-// Fixed-point, because WGSL atomics are integer only and many bodies land in
-// one cell. One atomic per channel, so the stride here is 4x the cell index.
+// Fixed-point, because WGSL atomics are integer only. One atomic per channel,
+// so the stride here is 4x the cell index.
 @group(0) @binding(3) var<storage, read_write> acc: array<atomic<i32>>;
 @group(0) @binding(4) var<storage, read> deposits: array<Deposit>;
 @group(0) @binding(5) var<storage, read> probes: array<Probe>;
 @group(0) @binding(6) var<storage, read_write> samples: array<vec4f>;
 
 /*
- * Harvest, which is grazing rather than sampling and so needs its own shape.
- *
- * An energy cell is a block of field cells — `EnergyGrid.span` squared, which
- * is sixteen at the shipped sizes — and the bodies standing in one block eat
- * from it in turn. Both of those orderings are load-bearing, so the host does
- * the binning (it already builds exactly this list, to group bodies by cell)
- * and hands over one work item per occupied block with its bodies already in
- * order. One thread per block, blocks independent, no atomics needed: two
- * bodies never contend because they are never in the same thread's block.
+ * Harvest work item: one per occupied energy block (`EnergyGrid.span` squared
+ * field cells), with its bodies already in eating order. The host does the
+ * binning; both orderings are load-bearing. One thread per block, so two
+ * bodies never contend and no atomics are needed.
  */
 struct HarvestBlock {
   fi: u32,
@@ -121,23 +101,16 @@ struct HarvestBlock {
 @group(0) @binding(7) var<storage, read> hBlocks: array<HarvestBlock>;
 /*
  * Room in each body's gut (its tank, on the unmetered path), and what it got
- * out per species, in the same row.
- *
- * One buffer rather than two because WebGPU guarantees only eight storage
- * buffers per compute stage and this pass would have been the ninth — the
- * adapter that first ran it offered ten, which is exactly the kind of thing
- * that works on the machine it was written on and nowhere else. In place is
- * safe here: an entry belongs to one block, a block is one thread, so the
- * thread that reads a slot is the only one that writes it.
+ * out per species, in the same row. One buffer rather than two because WebGPU
+ * guarantees only eight storage buffers per compute stage. In place is safe:
+ * an entry belongs to one block and a block is one thread.
  */
 @group(0) @binding(8) var<storage, read_write> hFlow: array<f32>;
 
 // One entry's row in `hFlow`, from `energy.ts`: the room in that body's gut,
 // the frame's whole uptake budget, then an affinity per species. `got`
-// overwrites the affinities on the way back out, which is safe because they
-// are read before anything is written and a separate output span would double
-// the buffer; `room` and `total` sit below and are read first. Literals here,
-// pinned to `energy.ts`'s exports by `field-kernel.test.ts`.
+// overwrites the affinities on the way back out; they are read first.
+// Literals here, pinned to `energy.ts`'s exports by `field-kernel.test.ts`.
 const HARVEST_ROOM: u32 = 0u;
 const HARVEST_TOTAL: u32 = 1u;
 const HARVEST_KS: u32 = 2u;
@@ -182,10 +155,8 @@ fn scatter(@builtin(global_invocation_id) gid: vec3u) {
   let tx = g.x - f32(i0);
   let ty = g.y - f32(j0);
 
-  // Renormalise over the cells that will actually take it. Only for a
-  // conserved channel, and only the rim ever has a total below one — but that
-  // is where the whole leak lives, and it gets worse the closer to the wall a
-  // body dies.
+  // Renormalise a conserved channel over the cells that will take it; only
+  // the rim ever has a total below one.
   var norm = 1.0;
   if (d.conserve > 0.5) {
     var legal = 0.0;
@@ -222,10 +193,8 @@ fn scatter(@builtin(global_invocation_id) gid: vec3u) {
       for (var c = 0u; c < 4u; c++) {
         let v = d.w[c] * w;
         if (v != 0.0) {
-          // Rounded, not truncated. i32() truncates toward zero, so every
-          // contribution loses up to one unit in the same direction and the
-          // bias accumulates with the number of bodies landing in a cell —
-          // measured at nearly twice the tolerance over two hundred deposits.
+          // Rounded, not truncated: i32() truncates toward zero and the bias
+          // accumulates with the number of bodies landing in a cell.
           atomicAdd(&acc[base + c], i32(round(v * P.fixedScale)));
         }
       }
@@ -263,17 +232,10 @@ fn diffuseAt(idx: u32, m: vec4f) {
   var c = here;
   var e = here;
   if (dirichlet) {
-    /*
-     * A missing neighbour reads as zero on the three signal channels — an
-     * absorbing rim, which is what stops the dish filling with everybody's
-     * shouting — and as this cell's own value on `CH.energy`, which reflects.
-     *
-     * A wall that eats the substance is a sink nobody asked for: `decayRate`
-     * is zero on that channel precisely so nothing can destroy it. Measured
-     * on the CPU twin with no bodies and decay off, the absorbing wall cost
-     * the ground 10.6% over 900 frames at 128 cells a side. Kept in step with
-     * `Fields.diffuse` by hand and by `field-kernel.test.ts`.
-     */
+    // A missing neighbour reads as zero on the three signal channels (an
+    // absorbing rim) and as this cell's own value on `CH.energy` (reflecting):
+    // nothing may destroy the substance. Kept in step with `Fields.diffuse`
+    // by `field-kernel.test.ts`.
     let miss = vec4f(0.0, 0.0, here.z, 0.0);
     a = miss;
     b = miss;
@@ -292,10 +254,8 @@ fn diffuseAt(idx: u32, m: vec4f) {
   dst[idx] = (vec4f(1.0) - m) * here + m * (a + b + c + e) * 0.25;
 }
 
-// Two entry points rather than one dispatched twice, because the host runs the
-// pass at two different mixes in a frame and a uniform written once is read by
-// every pass in the submission. Two entries beats a dynamic-offset binding for
-// something this small.
+// Two entry points because the host runs the pass at two mixes in a frame
+// and a uniform written once is read by every pass in the submission.
 @compute @workgroup_size(64)
 fn diffuse(@builtin(global_invocation_id) gid: vec3u) {
   if (gid.x >= P.cols * P.rows) { return; }
@@ -321,15 +281,11 @@ fn decay(@builtin(global_invocation_id) gid: vec3u) {
   src[i] *= P.keep;
 }
 
-// Logistic regrowth on one channel, optionally catalysed by another.
-//
-// Growth is proportional to what is already in the cell, so zero is a fixed
-// point: a cell grazed to the floor cannot recover on its own and has to be
-// recolonised by diffusion. The catalyst scales the *rate* and is clamped at
-// zero, so an inhibitor can stall regrowth but never run it backwards — ground
-// destroyed by being smelled at would be a hole in the conservation the whole
-// economy rests on. The result is clamped at capacity because one explicit
-// step can overshoot it once the catalyst multiplies the rate.
+// Logistic regrowth on one channel, optionally catalysed by another. Zero is
+// a fixed point: a cell grazed to the floor is recolonised by diffusion only.
+// The catalysed rate is clamped at zero so an inhibitor can stall regrowth
+// but never run it backwards; the result is clamped at capacity because one
+// explicit step can overshoot.
 @compute @workgroup_size(64)
 fn grow(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
@@ -400,19 +356,9 @@ fn sampleAt(p: vec2f) -> vec4f {
   return out;
 }
 
-// Two vec4f per body.
-//
-// The first is the three sensor readings steering wants, each collapsed
-// against the body's taste weights — the reason the field can stay here and
-// only a handful of scalars per body go back.
-//
-// The second is the raw four channels under the body, which is a different
-// consumer with a different need: the genome's `Wx` sense columns multiply
-// each channel by its own weight, so a taste-collapsed scalar cannot serve
-// them. `Sim.updateState` used to get this from `Fields.sampleAll` on the CPU,
-// out of an array the GPU never writes to — the quietest of the reasons
-// `openFieldGpu` refuses. It costs nothing to add here: `own` is already
-// sampled for the third scalar above.
+// Two vec4f per body: the three sensor readings steering wants, each
+// collapsed against the body's taste weights, then the raw four channels
+// under the body for the genome's `Wx` sense columns.
 @compute @workgroup_size(64)
 fn gather(@builtin(global_invocation_id) gid: vec3u) {
   let k = gid.x;
@@ -429,33 +375,11 @@ fn gather(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 /*
- * A frame of grazing, and a faithful port of `EnergyGrid.take` rather than the
- * obvious parallel one.
- *
- * The obvious one gives every body a proportional share of its block. That is
- * wrong here, and wrong in a way the CPU version says out loud: draining cells
- * one at a time leaves an uneven floor, and an uneven floor is what diffusion
- * has a gradient to work against. A flat share keeps the block uniform and
- * there is nothing left to flow. So this walks the block in raster order,
- * emptying each cell before moving to the next, exactly as `take` does.
- *
- * The scan restarts at the top of the block for each body rather than carrying
- * a cursor, which is also what `take` does — cells already emptied are skipped
- * by the `have <= 0` test, so a fresh scan finds the same place a cursor would.
- * `wi * wj` is sixteen.
- *
- * `if (got <= 0)` ends the block: the ground under it is gone and every body
- * still queued gets nothing. Their entries are zeroed rather than left, since
- * the buffer outlives a frame.
- */
-/*
  * Drain up to `want` of one species from a block, cell by cell in raster
- * order, and return what was taken.
- *
- * Cell by cell rather than proportionally, and the order is the whole point:
- * grazing has to leave an uneven floor, because an uneven floor is what
- * diffusion then has a gradient to work against. `EnergyGrid.takeFrom` is the
- * same loop, and `field-kernel.test.ts` holds the mirror that says so.
+ * order, and return what was taken. Cell by cell rather than proportionally:
+ * grazing has to leave an uneven floor for diffusion to have a gradient to
+ * work against. `EnergyGrid.takeFrom` is the same loop, and
+ * `field-kernel.test.ts` holds the mirror that says so.
  */
 fn drain(blk: HarvestBlock, ch: u32, want0: f32) -> f32 {
   var want = want0;
@@ -486,7 +410,8 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
   let blk = hBlocks[b];
   if (P.uptakeCap <= 0.0) {
     // The single-species path: take what fits, from the ground, to saturation.
-    // What the pond runs by default, and what this kernel has always been.
+    // Once a body gets nothing the block is empty; the queued entries are
+    // zeroed rather than left, since the buffer outlives a frame.
     let ch = u32(P.harvestCh);
     for (var e = 0u; e < blk.count; e++) {
       let ro = (blk.first + e) * HARVEST_STRIDE;
@@ -513,18 +438,11 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
   }
 
   /*
-   * The reaction table's four uptake rows, drawn as one mouthful.
-   *
-   * Densities are read once for the block, before anybody eats, so the order
-   * bodies are visited in cannot decide what any of them may draw. A body
-   * takes a sample of the water rather than four separate meals: `total` is
-   * the whole budget for the frame and each species may have at most its share
-   * of it, `total * density / stock`, so the shares sum to the budget however
-   * rich or filthy the cell is and nobody may eat only the good part. One
-   * gut, four species competing for it: `left` is the room after the species
-   * already taken, so a body that fills on the first thing it finds does not
-   * also take the rest. Species in index order, which is arbitrary and has to
-   * match `runHarvestPlan` exactly.
+   * The four uptake rows, drawn as one mouthful. Densities are read once for
+   * the block, before anybody eats, so visit order cannot decide what a body
+   * may draw. `total` is the frame's budget and each species may have at most
+   * its share, `total * density / stock`; `left` is the gut room after the
+   * species already taken. Species in index order, matching `runHarvestPlan`.
    */
   var density = vec4f(0.0);
   let cells = f32(blk.wi * blk.wj);
@@ -537,17 +455,14 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
     }
     density = sum / cells;
   }
-  // Only what is actually there: a cell can sit below zero after a diffusion
-  // step, and the host counts the positive densities alone. Same line.
+  // A cell can sit below zero after a diffusion step; the host counts the
+  // positive densities alone.
   let stock = dot(max(density, vec4f(0.0)), vec4f(1.0));
   for (var e = 0u; e < blk.count; e++) {
     let ro = (blk.first + e) * HARVEST_STRIDE;
-    // `room` is room in the body's gut; the host computes it, because what a
-    // body is holding undigested lives in the store and not on this side.
     var left = hFlow[ro + HARVEST_ROOM];
     let total = hFlow[ro + HARVEST_TOTAL];
-    // Read before the writeback overwrites them: `got` shares the affinities'
-    // slots.
+    // Read before the writeback: `got` shares the affinities' slots.
     let ks = vec4f(
       hFlow[ro + HARVEST_KS],
       hFlow[ro + HARVEST_KS + 1u],
@@ -557,16 +472,10 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
     for (var c = 0u; c < 4u; c++) {
       var got = 0.0;
       if (left > FLOW_EPS && total > 0.0 && density[c] > 0.0 && stock > 0.0) {
-        /*
-         * `total` stands in for `vmax` on every species: how fast a body can
-         * pull one out of the water is a transporter question, and a body
-         * standing in nothing but one species may spend its whole mouthful on
-         * it. What it can *do* with what it swallowed is the host's
-         * `runDigestion`, not this. Hill at `n`; 1 is plain Monod and does not
-         * pay for the two `pow` calls, and the host resolves a non-positive
-         * `hillN` to 1 before it is uploaded, so `!= 1.0` is the whole test.
-         * Kept in step with `runHarvestPlan` by hand.
-         */
+        // `total` stands in for `vmax` on every species. Hill at `n`; 1 is
+        // plain Monod, and the host resolves a non-positive `hillN` to 1
+        // before upload, so `!= 1.0` is the whole test. Kept in step with
+        // `runHarvestPlan` by hand.
         var sN = density[c];
         var kN = ks[c];
         if (P.hillN != 1.0) {
@@ -574,9 +483,8 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
           kN = pow(ks[c], P.hillN);
         }
         let rate = total * sN / (kN + sN);
-        // The proportional sample: this species' share of one budget, which
-        // is the ceiling however good the body's transporter for it is. Kept
-        // in step with `runHarvestPlan` by hand.
+        // This species' share of one budget is the ceiling however good the
+        // body's transporter for it is.
         let share = total * density[c] / stock;
         var want = min(rate, share);
         if (left < want) { want = left; }
@@ -591,17 +499,8 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 
-/*
- * Lay one channel down across the disk, which is how a world starts with
- * ground in it.
- *
- * `Fields.fillDisk` writes the CPU array, and on this side of the bus that
- * would seed a copy nobody reads — the pond would start barren, on machines
- * with a device only, which is exactly the class of failure the note on
- * `openFieldGpu` exists to keep out. Same shape as `fillDisk`: the value
- * inside the disk and nothing written outside it, since the mask keeps those
- * cells at zero anyway.
- */
+// Lay one channel down across the disk, the device-side twin of
+// `Fields.fillDisk`: the value inside the disk and nothing written outside it.
 @compute @workgroup_size(64)
 fn fill(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;

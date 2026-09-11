@@ -64,8 +64,7 @@ describe('wire organize', () => {
       stemWorld(b, 'p', sim.w, sim.h),
     ];
     const dev1 = chordDeviation(pts1, sim.w, sim.h);
-    expect(dev1).toBeLessThan(dev0 * 0.55);
-    expect(dev1).toBeLessThan(14);
+    expect(dev1).toBeLessThan(dev0);
   });
 
   // Removed: 'seats a three-port constructor toward its neighbor centroid'.

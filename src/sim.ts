@@ -2005,18 +2005,9 @@ export class Sim {
     const list = this.forceList();
     const n = list.length;
     if (n === 0) return null;
-    /*
-     * Its own wire array, not the shared `wirePack`.
-     *
-     * `wireListResolved` caches `wirePack` and stamps it valid against the
-     * graph and roster versions, with `wireEndA`/`wireEndB` and the endpoint
-     * indices resolved to match it position by position. This pass builds a
-     * *filtered* list — self-wires dropped, since a body wired to two of its
-     * own ports has no span to solve — so borrowing that array left the cache
-     * holding a different list under a stamp that still claimed to be
-     * current, and every later reader paired wire k with the endpoints of
-     * some other wire.
-     */
+    // Its own wire array, not the shared `wirePack`: this list drops
+    // self-wires, and a filtered list in the shared array would leave it
+    // stamped current while pairing wire k with another wire's endpoints.
     const all = this.wireListResolved();
     const ai = this.wireAI;
     const bi = this.wireBI;
@@ -2048,8 +2039,7 @@ export class Sim {
       data[o + FAR.heading] = a.heading;
       data[o + FAR.omega] = a.omega;
       data[o + FAR.invMass] = locked ? 0 : 1 / Math.max(0.08, a.mass);
-      // FAR never runs SAT, so the contact radius is the glyph-area disc and
-      // not the fatter bound the SAT broad phase needs.
+      // FAR never runs SAT, so the contact radius is the glyph-area disc.
       data[o + FAR.radius] = discRadius(a);
       data[o + FAR.locked] = locked ? 1 : 0;
     }
@@ -2091,12 +2081,9 @@ export class Sim {
   }
 
   /**
-   * FAR straight against the solver's own buffers.
-   *
-   * `packFar` writes into a scratch array that `stepFar` then copies into WASM
-   * and back out — the whole scene, twice each way. Writing where the solver
-   * already reads removes both copies, and when the force block is still open
-   * the pose is in there already and only the per-frame metadata is written.
+   * FAR straight against the solver's own buffers. When the force block is
+   * still open the pose is in there already and only the per-frame metadata
+   * is written.
    */
   private solveFarNative(params: Params, dt: number): boolean {
     if (!nativeSolver.ready || !this.canFarPacked()) return false;
@@ -2107,12 +2094,7 @@ export class Sim {
     const list = this.forceList();
     const n = list.length;
     if (n === 0) return true;
-    /*
-     * Its own array, not the cached `wirePack`: this list drops self-wires,
-     * which a body wired to two of its own ports genuinely is, and writing a
-     * filtered list into the shared one leaves it stamped current while
-     * every later reader pairs wire k with the endpoints of another.
-     */
+    // Its own array, not the cached `wirePack`; see `packFar`.
     const all = this.wireListResolved();
     const aiAll = this.wireAI;
     const biAll = this.wireBI;
@@ -2159,8 +2141,7 @@ export class Sim {
       const B = this.agents.get(w.b.id)!;
       stemOffsetInto(A, w.a.slot, this.tmpStemA);
       stemOffsetInto(B, w.b.slot, this.tmpStemB);
-      // Inlined rather than through stiffnessOf, which allocates a record per
-      // wire for two numbers, one of which does not vary across the pack.
+      // `stiffnessOf` inlined; must match it.
       const soft = scale * (1 + 6 * Math.exp(-Math.max(0, this.time - w.born) / 0.8));
       packFarWire(
         wires,
@@ -2181,7 +2162,6 @@ export class Sim {
     return true;
   }
 
-  /** Packed FAR pass on the GPU. True when the kernel ran. */
   /** Where the world grid is anchored. Set once, from the first centre of
    *  mass (or a preset), and fixed for the life of the sim. */
   private worldPinned = false;
@@ -2197,19 +2177,9 @@ export class Sim {
    */
   pinWorld(cx: number, cy: number, params?: Params): void {
     if (this.worldPinned) return;
-    /*
-     * `params` because pinning is when the ground gets laid down, and how much
-     * ground there is is a slider.
-     *
-     * `beginFrame` reads the sliders into `energyCell`/`energyAmbient` before
-     * it pins, so its own pin is covered. The other two callers — `loadPreset`
-     * and the designer — pin from outside a frame, where those fields still
-     * hold their construction fallbacks. That seeded the shipped soup at 6.4%
-     * of the stock it was supposed to have, and the fallback cell size of 48
-     * is not a whole multiple of `FIELD_CELL` either, so `index` and `block`
-     * disagreed about which cells they were addressing until the first frame
-     * corrected both.
-     */
+    // Pinning is when the ground gets laid down, and how much ground there is
+    // is a slider; callers outside a frame must pass `params` or the ground is
+    // seeded from the construction fallbacks.
     if (params) {
       this.energyCell = params.energyCell;
       this.energyAmbient = params.ambientEnergy;
@@ -2222,40 +2192,21 @@ export class Sim {
     this.worldR = worldBoundRadius(cx, cy, this.fields.originX, this.fields.originY, this.fields.worldW);
     this.fields.setWorldBound(cx, cy, this.worldR);
     this.energy.setBounds(cx, cy, this.worldR, this.fields.originX, this.fields.originY);
-    /*
-     * The ground moves onto the field, and gets laid down.
-     *
-     * Here rather than in the constructor because a disk is what makes the
-     * ground finite, and there is no disk until the world is pinned. Before
-     * this the grid answers out of its sparse map exactly as it always did,
-     * which lasts the one frame it takes a pond to acquire a home — and only
-     * ever that once. `bind` is not undone by `clear`, so a cleared sim keeps
-     * reading a zeroed field rather than falling back to the implicit ambient.
-     * That is the right behaviour (a cleared world has no ground until it is
-     * seeded again) but it does mean "before the first pin" is the only window
-     * in which the sparse path runs at all.
-     */
+    // The ground moves onto the field and gets laid down. Until the first
+    // pin the grid answers out of its sparse map; `bind` is not undone by
+    // `clear`, so a cleared world has no ground until it is seeded again.
     this.energy.bind(this.fields);
     this.energy.configure(this.energyCell, this.energyAmbient);
     this.energy.seedGround();
   }
 
-  /*
-   * Last configure, kept so `pinWorld` can seed the ground at the size and
-   * capacity the sliders are actually set to. `step` writes these every frame
-   * before it harvests; `pinWorld` can run before the first of those.
-   */
+  /** Last configure, so `pinWorld` can seed the ground at the slider values. */
   private energyCell = 40;
   private energyAmbient = 1;
 
   /**
-   * Tell the field what each channel is, from the sliders, every frame.
-   *
-   * Cheap — four numbers — and it has to be per frame because two of them are
-   * live sliders. Energy is the odd one: it never decays, because it is a
-   * quantity and the economy is supposed to conserve it, and it spreads at a
-   * fraction of the signal rate so that local scarcity survives long enough
-   * to forage against.
+   * Per-channel field rates from the sliders, every frame. Energy never
+   * decays: it is a conserved quantity.
    */
   private tuneChannels(params: Params): void {
     const f = this.fields;
@@ -2267,116 +2218,29 @@ export class Sim {
   private fieldOnGpu = false;
 
   /**
-   * Move the field to the GPU if there is one. Call once, at startup.
+   * Move the field to the GPU if there is one. Call once, at startup. One
+   * way for the session: the only path back to the CPU field is a device
+   * loss, which drops to it for good.
    *
-   * All or nothing for the session: a field that lived on the GPU on some
-   * frames and here on others would have to be copied between them, and the
-   * copy is 16 MB each way — several times what running it here costs in the
-   * first place.
-   */
-  /**
-   * Refuses while the ground lives on the field, which is always, so this
-   * currently cannot succeed.
-   *
-   * Not an oversight left in — a tripwire in front of one. The GPU holds the
-   * live field in its own buffers and only ever ships deposits and probes
-   * across; `fields.data` is a CPU copy nobody syncs back. Anything reading or
-   * writing that array is on the wrong side of the line.
-   *
-   * Two of the four hazards this note used to list are closed, and saying so
-   * matters: a stale list of blockers reads as a list of *reasons*, and two
-   * struck through make the rest look struck through too.
-   *
-   *   CLOSED (323e3c9) — the ground stopped regrowing, because `grow` had no
-   *   shader. `field.wgsl` has one now, fertiliser catalyst and capacity clamp
-   *   included, and `gpuFieldStep` feeds it.
-   *
-   *   CLOSED — channel 2 decayed at the scent rate, because per-channel rates
-   *   never reached the shader. The uniform carries `mix`/`mix2`/`keep` as
-   *   `vec4f` and `field-gpu.ts` resolves them the way `Fields` does. Note
-   *   what this took beyond the shader: `tuneChannels` writes those rates and
-   *   was itself inside `if (!this.fieldOnGpu)`, so the capacity existed while
-   *   nothing fed it. It is hoisted out of the branch now. A shader that can
-   *   express something is not a path that does.
-   *
-   *   OPEN — `EnergyGrid`'s `take` and `addAt` read and write `fields.data`
-   *   directly. This is the load-bearing one. Turn this on as it stands and
-   *   the pond mines a CPU array the GPU is not looking at down to nothing,
-   *   while farming, death yield and rewrite leftovers land in an array
-   *   nothing reads: the whole economy quietly detaches from the field it is
-   *   supposed to be an economy of. Harvest has to move to the shader with it.
-   *
-   *   CLOSED — `updateState` sampled the field on the CPU, through
-   *   `Fields.sampleAll` and so out of `fields.data`, which would have been a
-   *   stale copy: any body whose genome had evolved a non-zero `Wx` sense
-   *   weight read garbage, silently, only on machines with a device, and only
-   *   once evolution had moved a gene off its seed. `gather` now returns the
-   *   raw four channels under each body alongside the three taste-collapsed
-   *   scalars, and `gpuFieldStep` writes them into the store, so the state
-   *   pass takes its sense from wherever the field actually lives.
-   *
-   *   CLOSED — `EnergyGrid` wrote `fields.data` three ways and all three now
-   *   go through the shader. `take` is the `harvest` kernel, a faithful port
-   *   of the block drain rather than the proportional share a parallel
-   *   rewrite would reach for; `addAt` rides the existing scatter with a
-   *   conserve flag, because energy is a count and has to survive the rim
-   *   where a scent density need not; `seedGround` is the `fill` pass, without
-   *   which the pond would have started barren on exactly the machines this
-   *   is for.
-   *
-   * So it opens now. Two things about that are worth knowing rather than
-   * rediscovering.
-   *
-   * It is one way. There is no path back to the CPU field except a device
-   * loss, which drops to it for good — a field that lived on the GPU on some
-   * frames and here on others would have to be copied between them, and the
-   * copy is sixteen megabytes each way, several times what running it here
-   * costs in the first place.
-   *
-   * And `fields.data` is still the array the two debug overlays paint from.
-   * They get `wantFieldReadback`, which `render.ts` sets from its own options,
-   * so the copy is paid while somebody is looking and not otherwise. Anything
-   * else that comes to read that array on this path is reading a stale copy,
-   * and this is the fourth time that has been the bug.
-   *
-   * Nothing calls this today, which is why the whole thing was invisible. It
-   * wants either the growth pass in `field.wgsl` and the ground read back, or
-   * the ground moved off the shared field, before it is worth having.
+   * Once open, the GPU holds the live field and only deposits and probes
+   * cross; `fields.data` is a CPU copy that is refreshed only while
+   * `wantFieldReadback` is set for the debug overlays. Anything else reading
+   * or writing that array on this path is reading a stale copy.
    */
   async openFieldGpu(): Promise<boolean> {
     if (this.fieldOnGpu) return true;
     if (!(await fieldGpu.init(this.fields.cols))) return false;
-    /*
-     * Take the device's field as well as its arithmetic.
-     *
-     * `fieldGpu` is a module singleton and the buffers outlive whichever `Sim`
-     * last used them. `clear()` runs from `Sim.clear`, which only fires for a
-     * pond that was *already* on the device — so a second pond opening the
-     * device in the same process inherits the first one's scent, ground and
-     * accumulator, and starts life standing in somebody else's dish.
-     *
-     * The page never noticed because it has one `Sim` for the life of the tab.
-     * A sweep has one per trial: `pond/sweep.ts` runs a hundred ponds in a
-     * process, and every one after the first was reading the last one's field
-     * until this line. Found by a device parity test whose second pond
-     * excreted onto a channel the first had already filled.
-     */
+    // `fieldGpu` is a module singleton whose buffers outlive the last `Sim`
+    // that used them; a second pond in the same process must not inherit
+    // the first one's field.
     fieldGpu.clear();
-    /*
-     * Everything that writes the ground has to be told before the first frame,
-     * not on the frame it first tries: `seedGround` may already have run for
-     * this world, and a queued seed is only picked up by `gpuFieldStep`.
-     */
+    // Everything that writes the ground has to be told before the first
+    // frame: a queued seed is only picked up by `gpuFieldStep`.
     this.energy.deferAdds(true);
     this.energy.seedGround();
     this.fieldOnGpu = true;
-    /*
-     * And the genome, which is strictly downstream: it reads the probe's own
-     * output buffer for its sense inputs, so there is nothing for it to read
-     * until the field is here. If it declines, the field still runs and
-     * `updateState` keeps doing the arithmetic — the two are independent in
-     * that direction.
-     */
+    // The genome is strictly downstream: it reads the probe's output buffer
+    // for its sense inputs. If it declines, the field still runs.
     const dev = fieldGpu.gpuDevice;
     if (dev && (await genomeGpu.init(dev))) this.genomeOnGpu = true;
     return true;
@@ -2384,31 +2248,16 @@ export class Sim {
 
   /**
    * Hand the field a frame's worth of work and take back what steering needs.
-   *
-   * Everything geometric happens here rather than in the shader: the port
-   * positions to deposit at and the sensor positions to sample come from the
-   * same helpers the CPU path uses, so there is one place that knows where a
-   * port is rather than three. `field.wgsl` sees bare world coordinates.
-   *
-   * The samples that come back describe the pose this frame *started* with,
-   * and steering reads them at the top of the next one. A frame of latency in
-   * smell is invisible at 60fps and much cheaper than stalling the pipeline to
-   * map a buffer mid-frame.
+   * Port and sensor positions are computed here with the CPU path's helpers;
+   * `field.wgsl` sees bare world coordinates. The samples that come back
+   * describe the pose this frame started with, and steering reads them at
+   * the top of the next one.
    */
   private async gpuFieldStep(params: Params, dt: number): Promise<void> {
     const list = this.forceList();
     const n = list.length;
-    // Reserve before taking references, not after: `reserve` reallocates the
-    // staging arrays when it grows them, so a reference captured first points
-    // at the array they replaced. Done the wrong way round this writes every
-    // deposit and probe into a discarded buffer and the GPU reads zeros —
-    // silently, because nothing about it is an error.
-    /*
-     * Built here, at the end of the frame, and spent at the top of the next.
-     *
-     * The binning is a walk over bodies rather than over the field, so it is
-     * CPU work whichever side the field lives on; what crosses is the answer.
-     */
+    // The harvest plan is built here, at the end of the frame, and spent at
+    // the top of the next.
     const plan = this.harvestPlan;
     plan.build(this.agents.values(), this.agentStore, this.energy, {
       cap: params.uptakeVmax * dt,
@@ -2419,8 +2268,9 @@ export class Sim {
       gutSize: params.gutSize,
     });
     Sim.phase('gpu:plan');
-    // Three ports a body, plus whatever died, excreted, spilled or was refunded
-    // this frame and had nowhere to put it.
+    // Three ports a body, plus the frame's queued energy adds. Reserve before
+    // taking references: `reserve` reallocates the staging arrays when it
+    // grows them, and a stale reference writes into a discarded buffer.
     const nAdds = this.energy.pendingAdds;
     fieldGpu.reserve(n * 3 + nAdds, n, plan.nBlocks, plan.nEntries);
     const dep = fieldGpu.depositData;
@@ -2432,16 +2282,9 @@ export class Sim {
     const scale = this.fields.depositScale;
     const amt = params.deposit * scale;
     let nDep = 0;
-    /*
-     * Two shared constants rather than `slotsFor(a.kind)`, which builds a
-     * fresh array per body and then a fresh iterator to walk it. Five thousand
-     * bodies is ten thousand objects a frame for a value that has exactly two
-     * possible answers.
-     */
     const scratch = this.portScratch;
     // The minted voice, or nothing at all: under the reaction table a body's
-    // output leaves its tank through `runExcretion` and the conserving deposit
-    // instead. See `scentMints`.
+    // output leaves its tank through `runExcretion` instead. See `scentMints`.
     const mints = scentMints(params);
     for (let i = 0; mints && i < n; i++) {
       const a = list[i];
@@ -2476,16 +2319,10 @@ export class Sim {
 
     Sim.phase('gpu:packDeposit');
 
-    /*
-     * The frame's queued energy adds, on the same scatter as the voices.
-     *
-     * `conserve` is what separates them. A voice is a density and the host has
-     * already multiplied in `depositScale`; these are counts, handed over raw,
-     * and the shader spreads each over whichever of its four cells the disk
-     * will take rather than dropping the share that falls outside. That rim
-     * behaviour is the whole difference between `Fields.deposit` and
-     * `Fields.addAt`, and it is the one a conserved channel cannot do without.
-     */
+    // The frame's queued energy adds, on the same scatter as the voices but
+    // with the conserve flag: these are counts, handed over raw, and the
+    // shader spreads each over the cells the disk will take rather than
+    // dropping the share outside the rim (`Fields.addAt`, not `deposit`).
     const seed = this.energy.pendingSeed;
     this.energy.pendingSeed = null;
     const pend = this.energy.pendingData;
@@ -2496,8 +2333,7 @@ export class Sim {
       dep[o + 1] = pend[p + 1];
       dep[o + 2] = 1;
       // Every species, not just the ground: excretion moves all four out of a
-      // tank and each has to survive the rim the way a quantity does. The
-      // shader's `Deposit.w` has been a `vec4f` all along.
+      // tank and each has to survive the rim the way a quantity does.
       dep[o + 4] = pend[p + 2];
       dep[o + 5] = pend[p + 3];
       dep[o + 6] = pend[p + 4];
@@ -2510,24 +2346,8 @@ export class Sim {
 
     const arc = params.sensorAngle;
     const sd = params.sensorDist;
-    /*
-     * Out of the store, as `packPose` and the steer pack are.
-     *
-     * The two sensor directions come from the body's heading by the angle-sum
-     * identity rather than from four `Math.sin`/`Math.cos` a body, which was
-     * three of this pass's four and a half milliseconds at fifty thousand.
-     * The cosine and sine of the heading itself come from the store's memo,
-     * which the latch pass has usually already filled this frame for the same
-     * body at the same heading.
-     *
-     * This is **not** bit-identical, and it is the one change in this file
-     * that is not. Measured over four sensor angles and two million headings,
-     * the worst disagreement is 5.1e-16 in the unit vector — a couple of ulps
-     * — which is 1.3e-14 px of probe position against a field cell about
-     * forty px across. Physically nothing; the sampled cell is the same one.
-     * But the sim is chaotic, so the printed determinism hashes move, and
-     * that was a deliberate call rather than an oversight.
-     */
+    // The two sensor directions come from the store's memoised cos/sin of
+    // the heading by the angle-sum identity.
     const ca = Math.cos(arc);
     const sa = Math.sin(arc);
     const PX = this.agentStore.x;
