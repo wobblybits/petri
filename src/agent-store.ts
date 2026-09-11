@@ -4,17 +4,9 @@ import type { AgentKind } from './agents.ts';
 
 /*
  * Backing storage for Agent, as parallel typed arrays indexed by a dense
- * "slot" rather than one JS object per agent. See agents.ts's Agent class,
- * which is a thin (store, slot) flyweight over this.
- *
- * Reuses the WASM solver's own kind coding (KIND_ERA/DUP/CON) rather than
- * inventing a second one — the two are already the same concept, just for
- * different memory.
- *
- * `chem`'s width comes from `chem-layout.ts`, which exists so that it can.
- * It used to be hand-copied here, on the grounds that a structural fact is
- * safe to duplicate; it drifted twice in one session and the second time
- * shipped a `RangeError` out of every spawn.
+ * "slot"; agents.ts's Agent class is a thin (store, slot) flyweight over
+ * this. Kind coding is the WASM solver's own (KIND_ERA/DUP/CON). `chem`'s
+ * width comes from `chem-layout.ts` and is never written down here.
  */
 const SENSE_W = 4;
 
@@ -30,10 +22,9 @@ CODE_KIND[KIND_CON] = 'con';
 export class AgentStore {
   capacity = 0;
   /**
-   * Bumped every time the backing arrays are reallocated (growth). A cached
-   * view into `chemAll` (or any other array) taken before a grow points at
-   * an abandoned buffer afterward — callers that cache a view must check
-   * this first. See Agent.chem in agents.ts.
+   * Bumped every time the backing arrays are reallocated. A cached view into
+   * any array taken before a grow points at an abandoned buffer afterward;
+   * callers that cache a view must check this first. See Agent.chem.
    */
   generation = 0;
 
@@ -62,16 +53,8 @@ export class AgentStore {
   flockSep!: Float64Array;
   /**
    * `chem`, all agents': slot `i`'s `CHEM_LEN` floats live at
-   * `chemAll[i*CHEM_LEN .. (i+1)*CHEM_LEN)`. The width comes from
-   * `chem-layout.ts` and is not written down here — see the note above.
-   *
-   * Float32, not Float64 like every other field here: this matches the
-   * original plain-object `Agent`'s own `chem: Float32Array` (a deliberate
-   * memory tradeoff predating this store, when it was sixteen floats a body
-   * rather than the current 134). Storing it at full float64 precision would be
-   * a real, if tiny, behavior change from what Phase 1 promises to preserve
-   * exactly — confirmed by a stateHash before/after mismatch that traced
-   * back to exactly this.
+   * `chemAll[i*CHEM_LEN .. (i+1)*CHEM_LEN)`. Float32, not Float64: the
+   * genome's precision is part of the pond's behaviour and `stateHash` pins it.
    */
   chemAll!: Float32Array;
   recovering!: Uint8Array;
@@ -83,25 +66,13 @@ export class AgentStore {
   assort!: Float64Array;
   transportRecoil!: Float64Array;
   /**
-   * The gait, and the metabolism that is now its clock.
-   *
-   * `sub` is the pathway's upstream metabolite, bought out of the tank.
-   * `atp` is the charged part of a conserved adenylate pool of `adenylate`,
-   * so `adp` is `adenylate - atp` and is never stored — the pool is currency
-   * and cannot be minted, only cycled. `gaitAnchor` is the amplitude the `G`
-   * head reads off `h`, and `anchor` is what it comes to this frame:
-   * `gaitAnchor * gaitWave`, added to this body's drag rate.
-   *
-   * `gaitWave` is the bare `cos(phase)`, with no amplitude in it, and is what
-   * a wire's rest length rides on in `Graph.syncRest`.
-   *
-   * One actuator, not two. `rest` is what this engine already moves things
-   * with — `wireShrink` reels a latch in with it, `Wire.collapse` hauls a
-   * rewrite's ends together with it, `wireBreathe` makes tissue move with it
-   * — because the span constraint *serves* it rather than fighting it. The
-   * gait is the fourth thing that writes it. The travel is then whatever
-   * `anchor` and `grip` leave of the velocity that correction induces, which
-   * costs no second mechanism.
+   * The gait, and the metabolism that is its clock. `sub` is the pathway's
+   * upstream metabolite, bought out of the tank. `atp` is the charged part
+   * of a conserved adenylate pool of `adenylate`, so `adp` is
+   * `adenylate - atp` and is never stored: the pool is cycled, never minted.
+   * `gaitWave` is the bare `cos(phase)`, which a wire's rest length rides on
+   * in `Graph.syncRest`; `gaitAnchor` is the amplitude the `G` head reads
+   * off `h`, and `anchor` is `gaitAnchor * gaitWave`, added to the drag rate.
    */
   sub!: Float64Array;
   atp!: Float64Array;
@@ -114,73 +85,36 @@ export class AgentStore {
   /**
    * Which wire holds each of this body's three ports, or -1 for a free one.
    * Three entries a body: `slot * 3 + 0/1/2` for principal, left, right.
-   *
-   * The graph owns the meaning; the store owns the storage, because the
-   * question "is this port free" is asked of a *slot* tens of thousands of
-   * times a frame — the latch pass asks it of every port of every body, and
-   * both GPU packs ask it again for the free-port mask. It was a `Map` keyed
-   * on `agentId * 3 + slot`, and at thirty thousand bodies the latch pass
-   * alone spent 3.8 ms a frame hashing into it.
-   *
-   * Living here also closes a hazard rather than opening one: `clearSlot`
-   * runs when a slot is recycled, so a newborn cannot inherit a corpse's
-   * wires the way it could when the map was keyed on an id nobody cleared.
+   * The graph owns the meaning; the store owns the storage so `clearSlot`
+   * resets it and a newborn cannot inherit a corpse's wires.
    */
   portWire!: Int32Array;
   csHeading!: Float64Array;
   csCos!: Float64Array;
   csSin!: Float64Array;
   /**
-   * Ancestry, which nothing in the sim reads — it exists to be measured.
-   *
-   * Every heritable trait in this project drifts as well as adapts, and with
-   * `CHEM_MUTATE` across a genome this size the drift is not small. Nothing here
-   * could previously tell the two apart: a test could show a genome had moved
-   * away from its seed, which is what the scent-genome test does, and that is
-   * equally consistent with selection and with a random walk. `born` and
-   * `lineage` are what make the question answerable — how many rewrites deep a
-   * body is, and which founder it came from.
-   *
-   * `Int32Array` and never read per frame, so this is 8 bytes a body and no
-   * cost in the hot path.
+   * Ancestry, which nothing in the sim reads — it exists to be measured:
+   * how many rewrites deep a body is, and which founder it came from.
    */
   born!: Int32Array;
   lineage!: Int32Array;
   /**
    * Simulated seconds at which this slot's body arrived, or `-1` once it has
-   * latched at least once.
-   *
-   * The larval-window question — does a body reach a net before its tank runs
-   * out — needs the age of a body that has never joined anything, and nothing
-   * else here records when a body began. Written once by `allocate` from
-   * `now`, which the Sim sets at the top of a frame, so no creation path has
-   * to be found and threaded: `createAgent`, a rewrite's children and a
-   * planted net all go through `allocate`. Read only when a body latches or
-   * dies. See `src/larval.ts`.
+   * latched at least once. Written once by `allocate` from `now`, so every
+   * creation path stamps it. Read only when a body latches or dies. See
+   * `src/larval.ts`.
    */
   arrivedAt!: Float64Array;
-  /**
-   * The simulated time `allocate` stamps onto a new slot. The Sim owns the
-   * clock; this is the store's copy of it, set once a frame.
-   */
+  /** The simulated time `allocate` stamps onto a new slot; the Sim sets it once a frame. */
   now = 0;
   /**
-   * Fraction of this body's ports that are attached, 0 to 1.
-   *
-   * Derived from the graph, cached here because `updateState` reads it per
-   * body per frame as `IN_BOUND` and walking the wire adjacency that often
-   * would cost more than the state update itself. Refreshed by
-   * `Sim.refreshBound` only when the topology actually changes, which is what
-   * it depends on.
+   * Fraction of this body's ports that are attached, 0 to 1. Derived from
+   * the graph; refreshed by `Sim.refreshBound` only when the topology changes.
    */
   bound!: Float64Array;
   /**
-   * The recurrent internal state, `STATE_W` floats a body.
-   *
-   * State, not genome: it is not inherited and not mutated, it is what the
-   * genome's matrices compute from one frame to the next. Zero for a fresh
-   * body, which with zero-seeded matrices makes a newborn behave exactly as a
-   * bodiless one did.
+   * The recurrent internal state, `STATE_W` floats a body. State, not
+   * genome: not inherited, not mutated. Zero for a fresh body.
    */
   hAll!: Float64Array;
   /** Last frame's four raw channel readings at each body's position. */
@@ -188,82 +122,38 @@ export class AgentStore {
   /**
    * Last frame's three steering readings — left sensor, right sensor, own
    * position — each already collapsed against the body's taste, when the
-   * field lives on the GPU and the probe brings them back.
-   *
-   * By slot, like `senseAll`, and for a reason that bit: they used to go
-   * straight into the solver's array in *list* order, and the list is rebuilt
-   * whenever the roster moves. A body spawned or erased between the probe at
-   * the end of one frame and the steer at the top of the next shifted every
-   * body after it onto a neighbour's readings, and a body born past the old
-   * end of the list steered on whatever the buffer last held there.
+   * field lives on the GPU. By slot, not list order: the list is rebuilt
+   * whenever the roster moves between the probe and the steer.
    */
   steerAll!: Float64Array;
   /**
-   * This frame's realised emit and taste vectors, four channels each.
-   *
-   * Materialised once by `updateState` rather than recomputed by each
-   * consumer. The scent pass asked for emit four times a body and the steer
-   * pass asked for taste four times a body, each call walking the genome
-   * again — 13.8 ms a frame at 20k between them, for two vectors that are pure
-   * functions of `h` and could not have changed since it was computed.
-   *
-   * Emit here is the *normalised* vector: what the body actually says, summing
-   * to one unit across the four channels. That is the budget, and it is
-   * enforced here because here is the only place all four are known at once.
+   * This frame's realised emit and taste vectors, four channels each,
+   * materialised once by `updateState`. Emit is the normalised vector,
+   * summing to one unit across the four channels: that is the budget.
    */
   emitAll!: Float64Array;
   tasteAll!: Float64Array;
   /**
    * This frame's expression vector: how the body divides one unit of chemical
-   * effort across the reaction table's `ROW_COUNT` rows. See `expressVector`
-   * and `docs/history/energy-chemistry-plan.md` §3.
-   *
-   * Materialised here for the same reason `emitAll` is — two passes want it in
-   * the same frame, excretion and uptake, and recomputing thirty-two
-   * multiply-adds a body twice is the shape of cost this store exists to
-   * remove.
-   *
-   * Computed on the host on **both** field paths, because it is a pure
-   * function of `chem` and `h` and `unpackGenome` brings `h` back every frame.
-   * That is what keeps the whole reaction table off the genome shader: it
-   * needs no new binding and no new output slot, and the arithmetic is a
-   * rounding error beside the passes that already run here.
+   * effort across the reaction table's `ROW_COUNT` rows. See `expressVector`.
+   * Computed on the host on both field paths: it is a pure function of `chem`
+   * and `h`, and `unpackGenome` brings `h` back every frame.
    */
   expressAll!: Float64Array;
   /** What this body excreted this frame, per species. Absolute, not a rate. */
   excreteAll!: Float64Array;
   /**
-   * What this body has swallowed and not yet turned into anything, per species.
-   *
-   * The tank used to be the only thing inside a body, and it is one scalar: a
-   * body did not hold `conP` or `aux`, it held *extra*. So every species a
-   * body ate was laundered into one currency the instant it crossed the
-   * membrane, and excretion — mass action on that scalar, split by the
-   * excretion rows — could take in `aux` and put out `conP`. That is
-   * transmutation, and it is why waste meant nothing here: there was no such
-   * thing as an un-metabolised substance inside a body.
-   *
-   * This is that substance. The harvest swallows a sample of the water it
-   * cannot choose (see `runHarvestPlan`), so a body necessarily takes in
-   * species it may have no use for; `Sim.runDigestion` moves out what its
-   * recipe can convert, and `Sim.runExcretion` dumps the rest back as itself.
-   * Waste is therefore *defined* rather than declared — it is the gap between
-   * the sample and the recipe — and no gene has to nominate it.
-   *
-   * Not on the genome shader, and not in the net blob — unlike `h`, which
-   * `capture` carries. A net taken out of the pond and put back starts hungry
-   * rather than half-digested, because what it was holding was a property of
-   * the water it stood in and not of the net.
+   * What this body has swallowed and not yet turned into anything, per
+   * species. The harvest swallows a sample it cannot choose
+   * (`runHarvestPlan`), `Sim.runDigestion` converts what the recipe can, and
+   * `Sim.runExcretion` dumps the rest back as itself: waste is the gap
+   * between the sample and the recipe. Not on the genome shader and not in
+   * the net blob; a captured net starts hungry.
    */
   gut!: Float64Array;
   /**
-   * Whether this body's genome reads the scent field at all.
-   *
-   * `updateState` re-derived it every body every frame — sixteen `Float32`
-   * reads to answer a question whose answer cannot change, because a genome is
-   * fixed for a body's life. All three kinds seed with every `Wx` sense column
-   * at zero, so for a fresh pond the answer is always no and the whole gate was
-   * overhead. Set by `refreshReadsField` whenever `chem` is written.
+   * Whether this body's genome reads the scent field at all. Set by
+   * `refreshReadsField`, which must run whenever `chem` is written.
    */
   readsField!: Uint8Array;
   /** This frame's locomotion head: cruise speed and turn gain, per body. */
@@ -272,22 +162,14 @@ export class AgentStore {
   /**
    * What this body has learned since it was born: a delta on the state
    * matrices, `PLASTIC_LEN` floats laid out exactly as `chem` lays the same
-   * weights. The effective weight is `chem[k] + plastic[k]`.
-   *
-   * Separate from `chem` rather than written into it so that learned drift
-   * and inherited drift can be told apart by anything measuring the pond,
-   * and so inheritance has something to scale. **Nothing here ever decays.**
-   * A body carries what it learned into whatever net it latches into next,
-   * and that transfer is what lets one net's experience reach another.
+   * weights. The effective weight is `chem[k] + plastic[k]`. Separate from
+   * `chem` so learned and inherited drift can be told apart and inheritance
+   * has something to scale. Nothing here ever decays.
    */
   plasticAll!: Float32Array;
   /**
-   * The eligibility trace, same shape as `plastic`.
-   *
-   * This one does decay, at `params.learnTrace` a frame, and that is a
-   * different thing from forgetting: it is the credit window, about the time
-   * a transfer takes to show up in the tank, so that a weight is rewarded
-   * for what it was doing shortly before things improved.
+   * The eligibility trace, same shape as `plastic`. The one thing that
+   * decays, at `params.learnTrace` a frame: the credit window, not forgetting.
    */
   traceAll!: Float32Array;
   /** The critic's weights on `h`, and its bias. See `CRITIC_LEN`. */
@@ -295,30 +177,17 @@ export class AgentStore {
   /** Last frame's value estimate, for the temporal-difference error. */
   prevValue!: Float64Array;
   /**
-   * Whether this body has learned anything at all yet.
-   *
-   * Monotone: set the first time a learned weight goes non-zero and never
-   * cleared, which is exact precisely because nothing decays. A pond with
-   * learning switched off, or one whose bodies have not learned yet, reads
-   * its genome the way it always did and pays one branch a body for the
-   * privilege.
+   * Whether this body has learned anything at all yet. Monotone: set the
+   * first time a learned weight goes non-zero and never cleared, which is
+   * exact because nothing decays.
    */
   plasticOn!: Uint8Array;
 
   /**
-   * Which slots' genomes have changed since a consumer last looked.
-   *
-   * The GPU genome pass reads `chemAll` by slot and was uploading the whole
-   * table every frame — 2.7 MB at five thousand bodies, 27 MB at fifty — on
-   * the grounds that a missed invalidation would be a body silently running
-   * somebody else's genome. The invalidation has one choke point already:
-   * `refreshReadsField` must be called after anything writes `chem`, or the
-   * sense gate goes stale, so it is the right place to stamp this too.
-   *
-   * A dirty *range* rather than a flag, so a frame with one birth uploads one
-   * genome. `chemVersion` is a process-wide counter rather than a per-store
-   * one so a fresh store after `Sim.clear()` cannot collide with the version a
-   * consumer remembers from the store it replaced.
+   * Which slots' genomes have changed since a consumer last looked, as a
+   * dirty range. Stamped from `refreshReadsField`, which must run after
+   * anything writes `chem`. `chemVersion` is process-wide so a fresh store
+   * after `Sim.clear()` cannot collide with a version a consumer remembers.
    */
   chemVersion = nextChemVersion++;
   chemDirtyLo = 0;
@@ -343,31 +212,18 @@ export class AgentStore {
   }
 
   /**
-   * The same, for the learning state.
-   *
-   * On the GPU path the device owns this and the host only ever writes it to
-   * zero a slot — but that write matters more than most: a recycled slot
-   * whose learning was left on the device would hand the previous occupant's
-   * experience to whoever moved in.
+   * The same, for the learning state. On the GPU path the host only writes
+   * it to zero a recycled slot, and that write must reach the device or the
+   * previous occupant's experience goes to whoever moved in.
    */
   learnVersion = nextChemVersion++;
   learnDirtyLo = 0;
   learnDirtyHi = 0;
 
   /*
-   * Which slots' learning rows the host has written, as a list rather than a
-   * span.
-   *
-   * A span is the wrong shape for this. The host writes a learning row in one
-   * place — zeroing a slot that has just been recycled — so the dirty slots
-   * are wherever the free list happened to hand out, which is everywhere.
-   * Measured on a grown pond: **62 dirty slots a frame, in 62 separate runs,
-   * spanning 24,088 slots.** The span carried three hundred and eighty-nine
-   * times more than it needed to, and interleaving it into the upload buffer
-   * cost 11.9 ms a frame — most of the genome pack.
-   *
-   * The span is kept as the fallback for when the list overruns, which is the
-   * case a list is bad at and a span is fine at.
+   * Which slots' learning rows the host has written, as a list: recycled
+   * slots are scattered wherever the free list handed them out. The span is
+   * the fallback for when the list overruns.
    */
   private static readonly LEARN_DIRTY_CAP = 512;
   learnDirtySlots = new Int32Array(AgentStore.LEARN_DIRTY_CAP);
@@ -452,12 +308,7 @@ export class AgentStore {
     this.free.push(slot);
   }
 
-  /**
-   * Zeroed rather than left with the previous occupant's data — a reused
-   * slot must never leak state between two unrelated agents. `chemAll`'s
-   * slice is zeroed too, via `.fill(0, ...)` on the same span the getter
-   * views.
-   */
+  /** A reused slot must never leak state between two unrelated agents. */
   private clearSlot(slot: number): void {
     this.portWire[slot * 3] = -1;
     this.portWire[slot * 3 + 1] = -1;

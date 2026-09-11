@@ -15,25 +15,14 @@ import type { NetData } from './net-blob.ts';
 import type { PondDb } from './db.ts';
 
 /*
- * The headless pond: the same simulation the page runs, with nobody watching.
- *
- * `stepAsync` with the wasm solver on, and the field and genome shaders too
- * where Dawn gives Node a device — that is, the frame that ships, unmodified.
- * Nothing in `src/gpu/` knows this is not a browser; see `webgpu-node.ts`.
- *
- * The measurement is `sampleSim` from the experiment harness, not a second
- * one written here. A sweep's JSON and a run's timeline should be the same
- * numbers or one of them is lying.
+ * The headless pond: the frame that ships, unmodified (`stepAsync`, the wasm
+ * solver, and the field and genome shaders where Dawn gives Node a device;
+ * see `webgpu-node.ts`). The measurement is `sampleSim` from the experiment
+ * harness, so a sweep's JSON and a run's timeline are the same numbers.
  */
 
 /** A stored net to plant, and where it came from. */
-/**
- * A harness sample plus the structural measures.
- *
- * Kept as a wrapper rather than folded into `Sample` so the experiment
- * harness's own shape — which its JSON output and its two sweeps already
- * depend on — does not move. `db.addSample` reads `diversity` if it is there.
- */
+/** A harness sample plus the structural measures. `db.addSample` reads `diversity` if it is there. */
 export type PondSample = Sample & { diversity: Diversity };
 
 export interface SeedNet {
@@ -63,20 +52,10 @@ export interface PondRunSpec {
   minBodies: number;
   /** Store only the largest this-many components per harvest. */
   limit: number | null;
+  /** How the ground is arranged at the start, at the same total mass. See `ground.ts`. */
   /**
-   * How the ground is arranged at the start, at the same total mass.
-   *
-   * See `ground.ts`: the uniform dish every preset lays down is what §0 of the
-   * chemistry plan calls a puddle, and comparing it against a patchy one at
-   * *equal mass* is the only way to ask about structure rather than about how
-   * much food there is.
-   */
-  /**
-   * Whether to put the field and genome on the GPU.
-   *
-   * `auto` uses a device if Dawn can open one and runs on the CPU otherwise;
-   * `on` fails the run rather than quietly costing five times the wall clock;
-   * `off` never asks.
+   * Whether to put the field and genome on the GPU. `auto` uses a device if
+   * Dawn can open one; `on` fails the run without one; `off` never asks.
    */
   gpu: 'auto' | 'on' | 'off';
 }
@@ -97,13 +76,7 @@ export interface RunHooks {
   onHarvest?: (t: number, nets: CapturedNet[]) => void;
 }
 
-/**
- * Where to put `k` planted nets in a dish of radius `r`.
- *
- * A sunflower spiral: even coverage for any count without a grid's corners,
- * and the same points every time so a run seeded from the same nets starts
- * from the same arrangement.
- */
+/** Where to put `k` planted nets in a dish of radius `r`: a sunflower spiral, deterministic. */
 function spiral(cx: number, cy: number, r: number, k: number): { x: number; y: number }[] {
   const out: { x: number; y: number }[] = [];
   if (k === 1) return [{ x: cx, y: cy }];
@@ -116,11 +89,9 @@ function spiral(cx: number, cy: number, r: number, k: number): { x: number; y: n
 }
 
 /**
- * Run a pond and write it to the library.
- *
- * `Math.random` is replaced for the duration and restored in a `finally`, the
- * way the experiment harness does it — a run is a seeded, reproducible thing,
- * and a throw part-way through must not leave the process on a rigged stream.
+ * Run a pond and write it to the library. `Math.random` is replaced for the
+ * duration and restored in a `finally`, so a throw part-way through does not
+ * leave the process on a rigged stream.
  */
 export async function runPond(
   db: PondDb,
@@ -128,12 +99,8 @@ export async function runPond(
   spec: PondRunSpec,
   hooks: RunHooks = {},
 ): Promise<PondRunResult> {
-  /*
-   * The seeded stream spans every `await` below. Nothing else in this process
-   * runs between frames — the CLI does one run and exits — so a trial stays
-   * the reproducible thing the experiment harness makes it. A caller that ran
-   * two ponds concurrently would get neither.
-   */
+  // The seeded stream spans every `await` below; two ponds run concurrently
+  // in one process would get neither's stream.
   const realRandom = Math.random;
   Math.random = seededRandom(spec.seed);
   const t0 = performance.now();
@@ -141,8 +108,7 @@ export async function runPond(
     const params = spec.params;
     params.soupCount = spec.soupCount;
     const sim = new Sim(spec.world.w, spec.world.h, spec.fieldCells);
-    // Always through the preset, even for a soup of nothing: it is what pins
-    // the world bound, and a pond without one has no dish.
+    // Always through the preset: it is what pins the world bound.
     loadPreset(sim, 'soup', params);
 
     let adapter: string | null = null;
@@ -158,12 +124,8 @@ export async function runPond(
         throw new Error(`pond: --gpu on, but no device: ${open.error ?? fieldGpu.lastError}`);
       }
     }
-    /*
-     * After the device is open, not before. A non-uniform ground crosses as
-     * deferred conserved adds, and `deferAdds` is switched on by
-     * `openFieldGpu` — laid down earlier it would land in the host's mirror,
-     * which the shader does not read, and the GPU pond would start barren.
-     */
+    // After the device is open: a non-uniform ground crosses as deferred
+    // conserved adds, and `deferAdds` is switched on by `openFieldGpu`.
     layGround(sim, params.groundPatches);
 
     if (spec.seeds.length > 0) {
@@ -171,8 +133,7 @@ export async function runPond(
       const cy = sim.h * 0.5;
       const at = spiral(cx, cy, Math.max(0, sim.worldR - 120), spec.seeds.length);
       for (let i = 0; i < spec.seeds.length; i++) {
-        // Negative founder lines, one per planted net: ids are positive, so a
-        // negative line says "arrived from the database" and names the row it
+        // Negative founder lines, one per planted net, name the row it
         // arrived from. See `PlantOptions.lineage`.
         const lineage = -(i + 1);
         const ids = plantNet(sim, params, spec.seeds[i].data, at[i].x, at[i].y, {
@@ -192,13 +153,8 @@ export async function runPond(
     const take = (at: number): PondSample => ({ ...sampleSim(sim, at), diversity: measureDiversity(sim, params) });
     const harvests: PondRunResult['harvests'] = [];
     const harvest = async (t: number, frame: number): Promise<void> => {
-      /*
-       * The learning lives on the device on the GPU path, and the host's copy
-       * is fresh only for rewrite parents. `plastic` and `critic` are two of
-       * the things a stored net is *for*, so fetch them before reading them —
-       * otherwise the database fills with the zeros the host happened to hold,
-       * which is worse than an empty column because it looks like an answer.
-       */
+      // On the GPU path the host's copy of the learning is fresh only for
+      // rewrite parents; fetch it before storing `plastic` and `critic`.
       if (!(await sim.syncLearningToHost())) {
         throw new Error('pond: could not read the learning back off the device');
       }
@@ -218,14 +174,8 @@ export async function runPond(
       hooks.onHarvest?.(t, nets);
     };
 
-    /*
-     * Driven by frame count, with `t` derived from it.
-     *
-     * Accumulating `t += dt` drifts — at a sixtieth of a second, a minute of
-     * pond lands on 59.9999999999979 — and `t` is a primary key in `sample`
-     * and the value `--from-run` matches a harvest on. A schedule you can
-     * write down is worth the multiply.
-     */
+    // Driven by frame count, with `t` derived from it: accumulating `t += dt`
+    // drifts, and `t` is a primary key in `sample`.
     const total = Math.max(0, Math.round(spec.seconds / spec.dt));
     const everySample = Math.max(1, Math.round(spec.sampleEvery / spec.dt));
     const everyHarvest = spec.harvestEvery > 0 ? Math.max(1, Math.round(spec.harvestEvery / spec.dt)) : 0;
@@ -237,21 +187,11 @@ export async function runPond(
         db.addSample(runId, s as unknown as Record<string, unknown>);
         hooks.onSample?.(s);
       }
-      // Never at frame zero: a harvest of the opening soup is a harvest of
-      // the preset, and the close of the run stores everything anyway.
+      // Never at frame zero: a harvest of the opening soup is a harvest of the preset.
       if (everyHarvest > 0 && frame > 0 && frame % everyHarvest === 0) await harvest(t, frame);
-      /*
-       * On the GPU path `fields.data` is a stale copy — the field lives in
-       * device memory and only `wantFieldReadback` brings it back, at the end
-       * of the frame that asks. `sampleSim` reads it for `ground`, through
-       * `energy.storedTotal()`, so the frame *before* a sample is the one that
-       * has to ask. Without this every `ground` in the timeline is whatever
-       * the field held when it moved to the device, which is a plausible
-       * number and a false one.
-       *
-       * It is a 16 MB copy, paid once per sample rather than once per frame:
-       * at the default schedule, one frame in six hundred.
-       */
+      // On the GPU path `fields.data` is a stale copy and `wantFieldReadback`
+      // brings it back at the end of the frame that asks, so the frame before
+      // a sample asks; `sampleSim` reads it for `ground`.
       const next = frame + 1;
       sim.wantFieldReadback = next === total || next % everySample === 0;
       await sim.stepAsync(spec.dt, params);
@@ -263,8 +203,7 @@ export async function runPond(
     hooks.onSample?.(last);
     await harvest(end, total);
 
-    // What is left in the water at the close, per channel — the one summary
-    // of the field worth carrying, since the field itself is not stored.
+    // What is left in the water at the close, per channel; the field itself is not stored.
     const field = sim.fields.data;
     const channelTotals = new Array<number>(CHANNELS).fill(0);
     for (let k = 0; k < field.length; k += CHANNELS) {
@@ -278,9 +217,6 @@ export async function runPond(
       samples,
       harvests,
       census,
-      // Read off the singletons the sim uses rather than through new
-      // accessors on `Sim`: the headless runner should not be the reason the
-      // shipping class grows a getter.
       paths: {
         wasm: nativeSolver.ready,
         fieldGpu: onField,

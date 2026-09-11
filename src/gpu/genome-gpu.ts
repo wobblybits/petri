@@ -2,22 +2,11 @@ import shader from './genome.wgsl?raw';
 import { CHEM_LEN, HEAD_SCALE, LEARN_STRIDE } from '../chem-layout.ts';
 
 /**
- * WebGPU host for the genome pass.
- *
- * A separate pipeline from the field, sharing its device and its sample
- * buffer. Separate because of a hard limit rather than taste: WebGPU
- * guarantees only eight storage buffers per compute stage, counted across the
- * whole pipeline layout, and the field already uses all eight. Two pipelines
- * each count their own.
- *
- * What it reads is mostly already here. `samples` is the field probe's output,
- * so a body's four channel readings never cross the bus at all — the pass that
- * needs them runs on the same device that produced them. `chem` is a body's
- * genome, which changes only at birth, so it is uploaded when it changes and
- * not per frame.
- *
- * Everything is in list order, matching `WireAdjacency`, so the shader never
- * has to know what a slot is except to index the genome.
+ * WebGPU host for the genome pass: a separate pipeline from the field
+ * (WebGPU guarantees only eight storage buffers per compute stage and the
+ * field uses all eight), sharing its device and its sample buffer. `chem`
+ * changes only at birth, so it is uploaded when it changes and not per frame.
+ * Everything is in list order, matching `WireAdjacency`.
  */
 
 /** Floats written per body: h(4), emit(4), taste(4), six heads. */
@@ -80,16 +69,8 @@ export class GenomeGpu {
 
   /**
    * Build the pipeline on `device`, rebuilding if it is not the one we hold.
-   *
-   * The device check is the whole point of this signature. `FieldGpu.init`
-   * has no ready guard — every call requests a fresh adapter and device and
-   * rebuilds its buffers — and `Sim.openFieldGpu` calls it once per Sim, so a
-   * preset reload or a second Sim gives the field a new device while this
-   * kept the first. The bind group then mixes the two, and WebGPU rejects it
-   * with "[Buffer] is associated with [Device], and cannot be used with
-   * [Device]" — into the uncaptured-error scope, not into any try/catch here,
-   * so `run` returns true having dispatched nothing and every body reads a
-   * genome of zeros. Silent, and only after the second pond.
+   * A bind group mixing two devices is rejected in the uncaptured-error
+   * scope, so `run` would return true having dispatched nothing.
    */
   async init(device: GPUDevice): Promise<boolean> {
     if (this.ready && this.device === device) return true;
@@ -142,18 +123,9 @@ export class GenomeGpu {
   }
 
   /**
-   * Grow the buffers to fit, and report whether the genome table moved.
-   *
-   * `chem` is the big one — 134 floats a body — and it is the one that does
-   * not change from frame to frame, so the caller uploads it only when it has
-   * to. A reallocation is one of those times.
-   */
-  /**
-   * Grow to fit, and report whether the genome table moved.
-   *
-   * `learnSlots` sizes the resident learning state, which is indexed by slot
-   * like the genome. Growing that one loses every body's learning, so it is
-   * grown generously and the caller re-pushes what it has.
+   * Grow the buffers to fit, and report whether the genome table moved, in
+   * which case the caller re-uploads it. `learnSlots` sizes the resident
+   * learning state, indexed by slot like the genome.
    */
   reserve(n: number, nei: number, chemFloats: number, learnSlots = 0): boolean {
     const device = this.device;
@@ -168,13 +140,9 @@ export class GenomeGpu {
         size: this.learnCap * LEARN_STRIDE * 4,
         usage: st | GPUBufferUsage.COPY_SRC,
       });
-      /*
-       * Carried over rather than started again. This is the one buffer here
-       * whose contents are not recomputed every frame — it is what every
-       * body has learned — and a pond passes a thousand bodies in seconds,
-       * so a doubling that dropped it would wipe the pond's memory
-       * repeatedly and look like learning that does not stick.
-       */
+      // Carried over: this is the one buffer whose contents are not
+      // recomputed every frame, and dropping it would wipe what every body
+      // has learned.
       if (oldLearn && oldBytes > 0) {
         const enc = device.createCommandEncoder();
         enc.copyBufferToBuffer(oldLearn, 0, this.learn, 0, oldBytes);
@@ -229,10 +197,8 @@ export class GenomeGpu {
 
   /**
    * Push `count` learning rows starting at slot `lo`, from `learnUpData`.
-   *
-   * The host writes this only to zero a slot that has been recycled, which
-   * matters more than it sounds: a slot handed on with the device copy still
-   * in it would give a newborn the previous occupant's experience.
+   * The host writes this only to zero a recycled slot, so a newborn does not
+   * inherit the previous occupant's experience.
    */
   pushLearn(lo: number, count: number): void {
     const device = this.device;
@@ -247,13 +213,9 @@ export class GenomeGpu {
   }
 
   /**
-   * Ask for these slots' learning rows on the next `collect`.
-   *
-   * Only the two bodies of a rewrite need this, and only so the CPU can
-   * consolidate what they learned into their children's genome, where
-   * inheritance lives. `beginRewrite` gives about forty frames of notice,
-   * which is why a handful of small copies is enough and the whole buffer
-   * never has to come back.
+   * Ask for these slots' learning rows on the next `collect`. Only a
+   * rewrite's two bodies need this, so the CPU can consolidate what they
+   * learned into their children's genome; `beginRewrite` gives frames of notice.
    */
   readLearn(slots: ArrayLike<number>, count: number): number {
     const take = Math.min(count, LEARN_READ_CAP);
@@ -267,11 +229,7 @@ export class GenomeGpu {
     this.uploadChemRange(chem, 0, floats);
   }
 
-  /**
-   * Push the floats `[lo, hi)` of the genome table: the slots that changed
-   * since the last upload, which `AgentStore` tracks as a dirty range. A frame
-   * with one birth uploads one genome rather than every one in the pond.
-   */
+  /** Push the floats `[lo, hi)` of the genome table: `AgentStore`'s dirty range. */
   uploadChemRange(chem: Float32Array, lo: number, hi: number): void {
     const device = this.device;
     if (!device || !this.chem || hi <= lo) return;
@@ -285,10 +243,8 @@ export class GenomeGpu {
 
   /**
    * One frame of genome. `samples` is the field's probe buffer, borrowed.
-   *
-   * Returns false if the device has gone, in which case the caller keeps
-   * doing it on the CPU. `submit` and `collect` are separable so the dispatch
-   * can be queued behind the field's before either readback is waited on.
+   * Returns false if the device has gone. `submit` and `collect` are separable
+   * so the dispatch can be queued behind the field's before either readback.
    */
   async run(
     samples: GPUBuffer,
@@ -389,11 +345,8 @@ export class GenomeGpu {
       pass.end();
       const bytes = n * OUT_STRIDE * 4;
       enc.copyBufferToBuffer(this.out!, 0, this.read!, 0, bytes);
-      /*
-       * And a row apiece for whoever asked. `LEARN_STRIDE` floats is 536
-       * bytes, so every row starts on a four-byte boundary, which is all a
-       * buffer-to-buffer copy asks for.
-       */
+      // And a row apiece for whoever asked; every row starts on a four-byte
+      // boundary, which is all a buffer-to-buffer copy asks for.
       const rowBytes = LEARN_STRIDE * 4;
       for (let k = 0; k < this.learnWantN; k++) {
         enc.copyBufferToBuffer(
@@ -417,25 +370,11 @@ export class GenomeGpu {
 
   /** Wait for the last `submit`'s readbacks and unpack them. */
   /**
-   * Copy every resident learning row back to the host, in one go.
-   *
-   * The per-frame path (`readLearn`) is a trickle by design: only a rewrite's
-   * two parents need their learning on the CPU, `beginRewrite` gives forty
-   * frames of notice, and `LEARN_READ_CAP` is sized for that. Which means the
-   * host's copy of everybody else's learning is whatever it was when the pond
-   * moved to the device — usually zero.
-   *
-   * That is fine for the simulation and wrong for anything that *measures*
-   * it. `docs/history/plasticity-plan.md` phase 5 says as much: an instrument either
-   * reads this back deliberately or is quietly sampling rewrite parents. This
-   * is the deliberate read — the headless harvest uses it before storing a
-   * net, since a stored genome without what its bodies learned is a record of
-   * half the animal.
-   *
-   * One staging buffer per call, destroyed on the way out: this runs at a
-   * harvest and not in a frame, so a resident buffer the size of the whole
-   * learning table would be megabytes held for something that happens once a
-   * minute.
+   * Copy every resident learning row back to the host, in one go. The
+   * per-frame path (`readLearn`) only brings back rewrite parents, so the
+   * host's copy of everybody else's learning is stale; an instrument that
+   * measures learning reads this deliberately, as the headless harvest does
+   * before storing a net. One staging buffer per call, destroyed on the way out.
    */
   async drainLearn(slots: number): Promise<Float32Array | null> {
     const device = this.device;
@@ -471,8 +410,7 @@ export class GenomeGpu {
     if (!this.ready || !this.device) return false;
     if (bytes === 0 && rows === 0) return true;
     try {
-      // Both maps issued before either is awaited: they ride one submission
-      // and finish together.
+      // Both maps issued before either is awaited: they ride one submission.
       const waits: Promise<void>[] = [];
       if (bytes > 0) waits.push(this.read!.mapAsync(GPUMapMode.READ, 0, bytes));
       const learnBytes = rows * LEARN_STRIDE * 4;

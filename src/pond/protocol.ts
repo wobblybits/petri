@@ -20,32 +20,14 @@ import {
 import type { PondDb } from './db.ts';
 
 /*
- * An experiment written down before it runs.
- *
- * A sweep is a grid and a list of seeds. It does not know what question it is
- * asking, which constants it is holding that mean different things at
- * different points, whether the mechanism the question is about was switched
- * on in the ponds it ran, which measure the answer should be read off, how
- * many seeds that measure needs, or what a flat result would mean. Every one
- * of those was got wrong at least once in the first two days of sweeping —
- * `docs/experiments.md` §1 is the list — and every one of them is a thing
- * that can be decided in advance and checked by the machine.
- *
- * So a protocol is the sweep plus those decisions, as data. `preflight`
- * checks the parameter and metric names, the seed and duration minima, and
+ * An experiment written down before it runs: a sweep plus the question, the
+ * prediction, the gauges, the seed and duration minima and the null reading,
+ * as data (`docs/experiments.md` §1). `preflight` checks names, minima and
  * the couplings (`couplings.ts`) against what the protocol holds; a coupling
- * the author knowingly holds is listed in `accepts`, with the reason, and the
- * reason is what gets recorded. Each arm runs as its own sweep, named
- * `<protocol>/<arm>`, so it lands in the library like any other sweep and can
- * be read with `analyze --name`. `protocolReport` then reads the arms back
- * together — the arm is an axis — evaluates the preconditions per trial, and
- * reads each outcome against its prediction as resolved, unresolved or thin.
- * The null reading is printed whenever an outcome is not resolved, so the
- * story written before the run is the one that gets told after it.
- *
- * `PROTOCOLS` is the registry. `protocol.test.ts` runs every entry through
- * its own preflight, so a protocol that would trip a coupling or name a
- * missing metric cannot be committed.
+ * knowingly held is listed in `accepts` with its reason. Each arm runs as its
+ * own sweep named `<protocol>/<arm>`; `protocolReport` reads the arms back
+ * together with the arm as an axis. `PROTOCOLS` is the registry, and
+ * `protocol.test.ts` runs every entry through its own preflight.
  */
 
 export interface Arm {
@@ -118,13 +100,9 @@ export interface Protocol {
 export const ARM_AXIS = 'arm';
 
 /*
- * The two chemistry regimes as arms, because they are the canonical case of
- * constants that cannot be shared: `senseScale` is three orders apart between
- * them, `deposit` exists in only one, and `uptakeVmax` is the difference
- * between take-what-fits and one metered mouthful a frame. It is no longer the
- * difference between one species and four — uptake samples all four in both
- * arms now — but zero and six are still two mechanisms, which is why they are
- * arms and not levels. Shared by three protocols below.
+ * The two chemistry regimes as arms rather than levels: `senseScale` is three
+ * orders apart between them and `uptakeVmax` 0 and 6 are two mechanisms
+ * (take-what-fits and one metered mouthful a frame).
  */
 const MINTED: Arm = { name: 'minted', set: { excreteRate: 0, senseScale: 4.3, uptakeVmax: 0, catCoSubstrate: 0 } };
 const CONSERVED: Arm = {
@@ -151,15 +129,11 @@ const ACCEPT_GUT: Accepted[] = [
 
 export const PROTOCOLS: Protocol[] = [
   /*
-   * The precondition for every question about resource structure, asked on
-   * its own because it is cheap: a spatial statistic on one frame, CV ~0.18,
-   * against depth's 0.73. Measured 2026-09-08: uniform never exceeds 1
-   * (0.96 ± 0.05); eight patches peak at 1.95 ± 0.50; forty-eight at 1.36.
-   * The effect is a transient — bodies spawn empty, forage, fill, stop — so
-   * the outcome is the peak, and the run is short. `energyRegrow` is held at
-   * zero because it is the only clean control for a layout comparison: with
-   * growth on, a uniform dish at cap produces nothing and patches manufacture
-   * ground, and the two layouts end 50% apart in mass.
+   * The precondition for every question about resource structure. The effect
+   * is a transient (bodies spawn empty, forage, fill, stop), so the outcome is
+   * the peak and the run is short. `energyRegrow` is held at zero because it
+   * is the only clean control for a layout comparison: with growth on, patches
+   * manufacture ground.
    */
   {
     name: 'forage-engages',
@@ -174,17 +148,8 @@ export const PROTOCOLS: Protocol[] = [
       'before touching the genome.',
     arms: [{ name: 'default', set: {} }],
     axes: { groundPatches: [0, 8, 48] },
-    /*
-     * `learnRate` pinned off, not inherited.
-     *
-     * The couplings table says a learning horizon held across a layout axis
-     * is a confound: patch spacing sets the trip to the reward, and the
-     * horizon has to cover it. This protocol is not about learning — it asks
-     * whether hungry bodies find structured ground at all — so it holds the
-     * fixed-weight pond its prediction was written for, rather than accepting
-     * a confound it has no use for. `baldwin-hunger` is the one that turns
-     * learning on, and it chooses its horizon and accepts the hold in writing.
-     */
+    // `learnRate` pinned off: a learning horizon held across a layout axis is
+    // a confound (couplings table), and this protocol is not about learning.
     base: { energyRegrow: 0, learnRate: 0 },
     seeds: 5,
     seconds: 180,
@@ -205,15 +170,8 @@ export const PROTOCOLS: Protocol[] = [
     ],
   },
 
-  /*
-   * The question the structure sweeps were trying to ask and could not,
-   * because the bodies were never hungry (uptakeVmax 6 kept every tank at
-   * 1.20 of 1.25) and because depth was the outcome. `netFst` is the
-   * divergence number and its CV (~0.26) puts a 30% effect within reach of
-   * eight seeds. The forage precondition on the patchy level is protocol one's
-   * result made a gate: if the bodies never used the structure, the question
-   * was not asked.
-   */
+  // The forage precondition on the patchy level is a gate: if the bodies
+  // never used the structure, the question was not asked.
   {
     name: 'structure-shapes-nets',
     question: 'Does where the food is change how nets develop — do nets become more different from each other?',
@@ -252,15 +210,10 @@ export const PROTOCOLS: Protocol[] = [
   },
 
   /*
-   * The Baldwin question, put as a claim about three named genes rather than
-   * an aggregate. The learning horizon defaults to a third of a second and a
-   * foraging trip is five to twelve, so the horizon is raised to cover a trip
-   * (0.999 a frame is ~17 s); that is a knowing hold of the groundPatches
-   * coupling, accepted below, and the asymmetry it creates is the prediction.
-   * Within-life mastery is implausible — seven trips in an 83-second tank —
-   * so the mechanism is inheritance: `inheritLearned` writes a parent's
-   * learned bias into its children, and a lineage compounds it. That is why
-   * the outcomes are the inherited loci and why nets are kept.
+   * The Baldwin question as a claim about three named genes. The learning
+   * horizon is raised to cover a foraging trip, a knowing hold of the
+   * groundPatches coupling accepted below. The mechanism claimed is
+   * inheritance (`inheritLearned`), so the outcomes are the inherited loci.
    */
   {
     name: 'baldwin-hunger',
@@ -310,14 +263,8 @@ export const PROTOCOLS: Protocol[] = [
     ],
   },
 
-  /*
-   * The eighteen-fold claim from the params comment, measured properly. The
-   * shipped spacing forces were tuned for how a pond looks; the measurement
-   * that they cost reproduction was 45 seconds by hand. `canPay` is the gauge
-   * that separates a meeting problem from an economy problem: rich idle
-   * bodies that are not meeting is the mechanism claimed, so canPay has to be
-   * high for the claim to be about spacing at all.
-   */
+  // `canPay` separates a meeting problem from an economy problem: it has to
+  // be high for the claim to be about spacing at all.
   {
     name: 'spacing-costs-breeding',
     question: 'Do personal space and alignment cost reproduction at equal age, and only together?',
@@ -344,14 +291,8 @@ export const PROTOCOLS: Protocol[] = [
     ],
   },
 
-  /*
-   * What conserved signalling costs, at the regime the sweeps picked, with
-   * the thing the sweeps forgot to measure at first — whether anything is
-   * left in the water to hear. Depth is the outcome the author asked about so
-   * it stays, at a seed count that can only resolve a large gap; signal and
-   * netFst are the cheaper reads. `sense_read_p90` is the gauge that the two
-   * arms are each seeing their own signal at a scale phi can resolve.
-   */
+  // `sense_read_p90` is the gauge that both arms see their own signal at a
+  // scale phi can resolve.
   {
     name: 'conserved-signal-price',
     question: 'What does paying for what you say cost reproduction, and does it leave anything in the water to hear?',
@@ -387,15 +328,10 @@ export const PROTOCOLS: Protocol[] = [
   },
 
   /*
-   * Phase 7b of the chemistry plan: no sweep so far has produced a contested
-   * dish — 500 bodies dent an ungrowing default dish by 5% a minute and never
-   * bare a cell. Under strict conservation eating a signalling species cannot
-   * beat eating the ground unless the ground is locally scarce, so this is a
-   * change to the *conditions*: a thin, patchy, non-regrowing dish. The
-   * preconditions are that scarcity actually happened — the ground fell and
-   * somebody died — because a scarce arm in which nothing died is the puddle
-   * with a smaller number. `uptakeKs` is held across the ambient axis on
-   * purpose: slower uptake at low density is the scarcity under test.
+   * A thin, patchy, non-regrowing dish. The preconditions are that scarcity
+   * actually happened (the ground fell and somebody died). `uptakeKs` is held
+   * across the ambient axis on purpose: slower uptake at low density is the
+   * scarcity under test.
    */
   {
     name: 'contested-ground',
@@ -523,13 +459,9 @@ export function variedAcrossArms(p: Protocol): Set<string> {
 }
 
 /**
- * Everything that can be checked before a trial runs.
- *
- * Names first, because a typo in a parameter should fail before the first
- * trial and not after the twentieth. Then the budget: fewer than three seeds
- * is a smoke run whatever it is called, and under two simulated minutes is
- * warm-up. Then the couplings, per arm, against what that arm holds — which
- * is where a protocol most often needs to say something in `accepts`.
+ * Everything that can be checked before a trial runs: names, then the budget
+ * (fewer than three seeds is a smoke run, under two simulated minutes is
+ * warm-up), then the couplings per arm against what that arm holds.
  */
 export function preflight(p: Protocol, opts: PlanOptions = {}): Preflight {
   const errors: string[] = [];
@@ -583,11 +515,8 @@ export function preflight(p: Protocol, opts: PlanOptions = {}): Preflight {
     for (const k of Object.keys(c.where ?? {})) if (!(k in p.axes)) errors.push(`precondition ${c.metric}: where ${k} is not an axis`);
   }
 
-  /*
-   * Couplings, per arm. The moving set is the grid's axes plus whatever the
-   * arms set differently between them; what is held is the arm's whole
-   * parameter set, so a coupling made moot by a neutral setting is skipped.
-   */
+  // Couplings, per arm: the moving set is the grid's axes plus whatever the
+  // arms set differently; the held set is the arm's whole parameter set.
   const varied = variedAcrossArms(p);
   const axes = new Set([...Object.keys(p.axes), ...varied]);
   const fired = new Map<string, CouplingWarning>();
@@ -748,13 +677,9 @@ export function describeProtocol(p: Protocol): string {
 }
 
 /**
- * Read a protocol's runs back in its own terms.
- *
- * Preconditions first, per trial, because an outcome in an arm whose
- * mechanism never engaged is not an outcome. Then the point table and the
- * effect table with the arm as an axis. Then each outcome against its
- * prediction, and the null reading written before the run whenever an
- * outcome is not resolved.
+ * Read a protocol's runs back in its own terms: preconditions per trial, the
+ * point and effect tables with the arm as an axis, then each outcome against
+ * its prediction, with the null reading whenever an outcome is not resolved.
  */
 export function protocolReport(db: PondDb, p: Protocol, opts: { smoke?: boolean; warmup?: number } = {}): string {
   const smoke = opts.smoke === true;

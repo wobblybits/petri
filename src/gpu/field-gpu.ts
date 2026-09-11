@@ -3,27 +3,17 @@ import { HARVEST_STRIDE } from '../energy.ts';
 import { CHANNELS, type Fields } from '../fields.ts';
 
 /**
- * WebGPU host for the scent field.
- *
- * The field lives here for the whole session once a device exists — it is
- * never read back except to draw the overlay. That is the point: the two
- * diffusion passes and the decay are 13.7ms a frame on the CPU at a million
- * cells, which is the second largest fixed cost in the frame after the solve,
- * and they are a bandwidth-bound stencil, which is the one thing a GPU is
- * unambiguously for.
- *
- * What crosses each frame is small and goes both ways: a list of world
- * positions to deposit at, a list of world positions to sample, and the
- * handful of scalars per body that come back. The host owns all the geometry;
- * see the note at the top of field.wgsl for why.
+ * WebGPU host for the scent field. The field lives on the device for the
+ * whole session and is never read back except to draw the overlay; what
+ * crosses each frame is a list of world positions to deposit at, a list to
+ * sample, and the handful of scalars per body that come back. The host owns
+ * all the geometry.
  */
 
 /*
- * 160, and the layout is dictated by WGSL rather than by taste: a `vec4f` must
- * sit on a sixteen-byte boundary, so the scalars are grouped in fours. See
- * `FieldParams` in field.wgsl, which this has to match exactly — a field
- * written at the wrong offset reads as a plausible number rather than an
- * error, which is the whole hazard of hand-packing a uniform.
+ * Must match `FieldParams` in field.wgsl exactly: a `vec4f` sits on a
+ * sixteen-byte boundary, and a field written at the wrong offset reads as a
+ * plausible number rather than an error.
  */
 const UNIFORM_BYTES = 176;
 /** Floats per Deposit and per Probe in the shader's layout. */
@@ -32,17 +22,14 @@ const PROBE_FLOATS = 12;
 /**
  * Floats per body coming back: three taste-collapsed sensor readings for
  * steering, then the raw four channels under the body for the genome's sense
- * columns. See `gather` in field.wgsl for why both, and why the second is
- * free.
+ * columns. See `gather` in field.wgsl.
  */
 const SAMPLE_FLOATS = 8;
 /** u32 per HarvestBlock in the shader's layout. */
 const BLOCK_WORDS = 8;
 /**
- * Fixed point for the deposit accumulator. WGSL atomics are integer only, so
- * a scatter with collisions has to accumulate in integers. Scent values run to
- * a few tens, deposits to fractions of one, and an i32 has nine digits — 1e4
- * leaves four decimal places and five orders of headroom before overflow.
+ * Fixed point for the deposit accumulator: WGSL atomics are integer only.
+ * 1e4 leaves four decimal places and five orders of headroom in an i32.
  */
 const FIXED_SCALE = 1e4;
 
@@ -97,33 +84,21 @@ export class FieldGpu {
   gotData = new Float32Array(0);
 
   /**
-   * Build the field on a device, once.
-   *
-   * The guard is not an optimisation. Without it every call requested a fresh
-   * adapter and device — and `Sim.openFieldGpu` runs once per Sim, so a preset
-   * reload or a second pond got device B while every capacity counter here
-   * still said the buffers were big enough, so they were never rebuilt and the
-   * field went on using device A's memory. Worse, `GenomeGpu` then held a
-   * different device again, and WebGPU rejects a bind group that mixes two:
-   * "[Buffer] is associated with [Device], and cannot be used with [Device]".
-   * That lands in the uncaptured-error scope rather than any try/catch, so the
-   * dispatch quietly does nothing and every body reads a genome of zeros —
-   * on the second pond of a session and never the first.
-   *
-   * A device is also not free to abandon: the old one and all its buffers
-   * stayed alive, once per Sim, for the life of the tab.
+   * Build the field on a device, once. The guard is load-bearing: a second
+   * device would leave the capacity counters saying the buffers were big
+   * enough while they belonged to the old device, and `GenomeGpu` shares this
+   * device, so WebGPU would reject the mixed bind group in the
+   * uncaptured-error scope and every body would read a genome of zeros.
    */
   async init(cells: number): Promise<boolean> {
-    // `this.cells` is the total, `cells` the side; comparing them directly
-    // would rebuild every time on any grid but a 1x1.
+    // `this.cells` is the total, `cells` the side.
     if (this.ready && this.device && this.cells === cells * cells) return true;
     const nav = navigator as Navigator & { gpu?: GPU };
     if (!nav.gpu) {
       this.lastError = 'no navigator.gpu';
       return false;
     }
-    // A rebuild is a new device, so nothing allocated against the old one may
-    // be reused. Zeroing the caps is what forces `ensureLists` to notice.
+    // A rebuild is a new device; zeroing the caps forces `ensureLists` to reallocate.
     this.depositCap = 0;
     this.probeCap = 0;
     this.blockCap = 0;
@@ -146,11 +121,8 @@ export class FieldGpu {
         this.ready = false;
         this.device = null;
       });
-      /*
-       * WebGPU reports validation failures asynchronously and then silently
-       * drops the work. A bad binding therefore looks exactly like a shader
-       * that computed nothing, which is a bad way to spend an afternoon.
-       */
+      // WebGPU reports validation failures asynchronously and then silently
+      // drops the work, so a bad binding looks like a shader that computed nothing.
       device.addEventListener('uncapturederror', (e) => {
         const err = (e as GPUUncapturedErrorEvent).error;
         this.lastError = String(err.message ?? err);
@@ -277,12 +249,9 @@ export class FieldGpu {
   }
 
   /**
-   * Harvest lists. Separate from `ensureLists` because they are sized by
-   * occupied blocks and hungry bodies rather than by population — a full pond
-   * of sated bodies harvests nothing at all — and because they must exist at
-   * some non-zero size even then: the bind group is built once and every
-   * dispatch uses it, so a null binding would fail every pass and not just
-   * this one.
+   * Harvest lists, sized by occupied blocks and hungry bodies rather than by
+   * population. They must exist at some non-zero size even when empty: the
+   * bind group is built once, so a null binding would fail every pass.
    */
   private ensureHarvest(nBlocks: number, nEntries: number): void {
     const device = this.device!;
@@ -298,9 +267,7 @@ export class FieldGpu {
       this.hFlow?.destroy();
       this.hRead?.destroy();
       // `HARVEST_STRIDE` floats an entry: room in the gut, the frame's whole
-      // uptake budget, then an affinity per species. One buffer rather than
-      // two, because this pass binds eight storage buffers of a guaranteed
-      // eight. See `energy.ts`.
+      // uptake budget, then an affinity per species. See `energy.ts`.
       const floats = this.entryCap * HARVEST_STRIDE;
       this.hFlow = device.createBuffer({
         size: floats * 4,
@@ -317,11 +284,7 @@ export class FieldGpu {
 
   /**
    * Zero the field on the device: a new pond in the same session.
-   *
-   * `Fields.clear` only empties the CPU mirror, and on this path nothing
-   * reads that. Without this the old pond's scent was still in the buffers
-   * when the new one pinned its world, and its bodies were steering on trails
-   * nobody had laid.
+   * `Fields.clear` only empties the CPU mirror, which nothing on this path reads.
    */
   clear(): void {
     const device = this.device;
@@ -340,12 +303,9 @@ export class FieldGpu {
 
   /**
    * One frame of field: scatter the deposits, fold them in, diffuse twice,
-   * decay, and gather the probes. Returns false if the GPU is not available,
-   * in which case the caller keeps doing it on the CPU.
-   *
-   * `submit` and `collect` are separable so a second pipeline on the same
-   * device — the genome's — can be queued behind this one before either
-   * readback is waited on, which turns two round trips a frame into one.
+   * decay, and gather the probes. Returns false if the GPU is not available.
+   * `submit` and `collect` are separable so the genome pipeline can be queued
+   * behind this one before either readback is waited on.
    */
   async step(
     fields: Fields,
@@ -398,12 +358,8 @@ export class FieldGpu {
       f32[9] = fields.boundY;
       f32[10] = fields.boundR;
       f32[11] = grow.ch;
-      /*
-       * Per-channel rates, resolved the same way `Fields` does: the slider is
-       * one number for the world and each channel scales it. Clamped at one,
-       * because a diffusion mix above it is a cell overshooting its own
-       * neighbours, which oscillates and then blows up.
-       */
+      // Per-channel rates, resolved as `Fields` does. Clamped at one: a
+      // diffusion mix above it overshoots and blows up.
       for (let c = 0; c < 4; c++) {
         const dr = fields.diffuseRate[c] > 0 ? fields.diffuseRate[c] : 0;
         const kr = fields.decayRate[c] > 0 ? fields.decayRate[c] : 0;
@@ -427,12 +383,11 @@ export class FieldGpu {
       f32[35] = harvest.ch;
       f32[36] = fill ? fill.ch : 0;
       f32[37] = fill ? fill.value : 0;
-      // The two slots the struct used to pad with. See `harvest` in field.wgsl.
+      // See `harvest` in field.wgsl.
       f32[38] = harvest.uptakeCap;
       f32[39] = harvest.uptakeKs;
       f32[40] = harvest.hillN;
-      // Slot 41 is `pad5`: catabolism left this pass for the host. Zeroed
-      // rather than skipped so a reused buffer cannot carry a stale value.
+      // Slot 41 is `pad5`, zeroed so a reused buffer cannot carry a stale value.
       f32[41] = 0;
       device.queue.writeBuffer(this.uniform!, 0, u);
       if (nDeposit > 0) {
@@ -498,8 +453,7 @@ export class FieldGpu {
 
       let live = this.aLive ? this.fieldA : this.fieldB;
       let other = this.aLive ? this.fieldB : this.fieldA;
-      // Before everything: a seed is the world being laid down, not a thing
-      // that happens to it, so this frame's passes should act on the result.
+      // Before everything, so this frame's passes act on the seeded field.
       if (fill) run('fill', this.cells, live, other);
       if (nDeposit > 0) {
         run('scatter', nDeposit, live, other);
@@ -515,16 +469,9 @@ export class FieldGpu {
       run('react', this.cells, live, other);
       run('decay', this.cells, live, other);
       run('grow', this.cells, live, other);
-      /*
-       * Last, and after the field passes rather than before them.
-       *
-       * On the CPU harvest is the first thing in `endFrame` and the field
-       * passes are the last, so a frame's grazing sees the field as the
-       * previous frame's passes left it. This runs at the end of a frame and
-       * is credited at the top of the next, so putting it after the passes
-       * here lands on exactly the same field state — the pipelining is exact
-       * rather than approximate, which is the whole reason it is safe.
-       */
+      // After the field passes: on the CPU harvest is the first thing in
+      // `endFrame` and the passes are the last, and this is credited at the
+      // top of the next frame, so it lands on exactly the same field state.
       if (harvest.blocks > 0) run('harvest', harvest.blocks, live, other);
       if (nProbe > 0) run('gather', nProbe, live, other);
       // Two swaps, so the live buffer is back where it started.
@@ -581,15 +528,8 @@ export class FieldGpu {
 
   /**
    * Copy the live field into a `Fields`, for the CPU-side views that read it.
-   *
-   * Sixteen megabytes, so this is not something to do every frame — it exists
-   * because the scent overlay and the energy-grid overlay paint from
-   * `fields.data`, and both are opt-in. When nobody has them open nothing here
-   * runs, and when somebody does, one copy a frame is the price of looking.
-   *
-   * Allocates its own staging buffer rather than keeping one alive: holding
-   * sixteen megabytes of mapped memory for a debug view nobody has opened is
-   * the wrong default, and the allocation is nothing against the copy.
+   * Sixteen megabytes, so only while an overlay is open. Allocates its own
+   * staging buffer rather than holding one for a view nobody has opened.
    */
   async readInto(fields: Fields): Promise<boolean> {
     const device = this.device;
@@ -657,14 +597,7 @@ export class FieldGpu {
     return SAMPLE_FLOATS;
   }
 
-  /**
-   * The device and the probe's output buffer, for the genome pass.
-   *
-   * It is a second pipeline on the same device and it reads the raw channel
-   * readings `gather` leaves here — the whole point of that being a shared
-   * buffer rather than a readback is that the pass which needs it runs on the
-   * same side of the bus.
-   */
+  /** The device and the probe's output buffer, which the genome pass reads directly. */
   get gpuDevice(): GPUDevice | null {
     return this.device;
   }

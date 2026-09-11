@@ -6,67 +6,38 @@ import { KIND_ERA } from './native/solver.ts';
 import type { Rule } from './rewrite.ts';
 
 /**
- * `extra` is the one energy scalar a body carries: positive is stock it can
- * spend or pass on, negative is debt, and a whole unit of debt is death.
- * Upkeep decrements it directly — there is no second accumulator, so "how much
- * does this body need" is just how far below zero it has fallen.
+ * `extra` is the one energy scalar a body carries: positive is stock,
+ * negative is debt, and a whole unit of debt is death. Upkeep decrements it
+ * directly; there is no second accumulator.
  */
 
-/**
- * What one end of a rewrite pays. A Con–Dup commute turns two bodies into
- * four, so it costs two units, one from each side.
- */
+/** What one end of a rewrite pays; a Con–Dup commute costs one from each side. */
 export const REWRITE_SHARE = 1;
 
 /**
- * The most a body can hold — deliberately more than a rewrite share.
- *
- * These were the same number, and that made a commute a knife edge: a pair
- * could only afford one at the exact instant both ends were at the cap, and
- * since upkeep drains continuously they sat permanently a fraction below it.
- * The quarter-unit of headroom is what a body has spare *after* it can pay,
- * so at the default upkeep a full body stays able to commute for ten seconds
- * rather than for one frame.
- *
- * Transport obeys the cap too: a pump can never push a body past full, which
- * is most of why pumping is slow. This is the figure for a Con or a Dup; an
- * Era holds `ERA_CAP_RATIO` times it.
+ * The most a Con or Dup can hold; an Era holds `ERA_CAP_RATIO` times it.
+ * Strictly more than `REWRITE_SHARE`, so a full body keeps headroom to
+ * commute while upkeep drains it. Transport obeys the cap too.
  */
 export const EXTRA_CAP = 1.25;
 
 /**
- * How much more an Era holds than a Con or a Dup.
- *
- * An Era is the one body that cannot spend: it has a single port, it never
- * commutes, and it pays no rent — it produces (`ERA_UPKEEP_RATIO`). Everything
- * it earns is therefore for somebody else, and the one thing it can usefully
- * be is a battery. At the same cap as everyone else it filled and then sat
- * there wasting its income, so a net's leaves were its smallest reserve
- * instead of its largest.
- *
- * Doubling the tank does not double what an Era is worth dead — `BODY_VALUE`
- * is flat across kinds, and a rewrite still costs and yields the same — so
- * this buys storage, not a mint. What it does change is the shape of a net's
- * reserve: energy parked on the boundary rather than spread thin through the
- * middle, and a deeper buffer between a lean patch and a wave of starvation.
+ * How much more an Era holds than a Con or a Dup. An Era never spends, so
+ * it is a battery: a net's reserve parks on its boundary. `BODY_VALUE` is
+ * flat across kinds, so this buys storage, not a mint.
  */
 export const ERA_CAP_RATIO = 2;
 
 /**
- * What a fresh body of this kind can hold, before any breeding drifts it.
- *
- * A body's actual ceiling lives on it as `energyCap` — heritable, and
- * recombined from both parents across a Con+Dup commute's children rather
- * than reset to this — so this is only the seed `createAgent` gives a body
- * born outside a rewrite.
+ * Seed cap for a body born outside a rewrite. The live ceiling is the
+ * heritable `energyCap`, recombined from both parents across a commute.
  */
 export function extraCapFor(kind: AgentKind, eraRatio = ERA_CAP_RATIO): number {
   return kind === 'era' ? EXTRA_CAP * eraRatio : EXTRA_CAP;
 }
 /**
- * Default death floor: a whole unit of debt. A body's own `debtCap` takes
- * over once it is alive — this is only the seed, and the sign lock: a debt
- * cap is never allowed to reach break-even, or the rescue latch never fires.
+ * Seed death floor: a whole unit of debt. The live floor is the heritable
+ * `debtCap`, which must stay strictly negative or the rescue latch never fires.
  */
 export const EXTRA_FLOOR = -1;
 /** Closest to zero a heritable `debtCap` may sit. Strictly negative. */
@@ -75,33 +46,22 @@ export const EXTRA_FULL_EPS = 1e-6;
 
 /**
  * One deferred conserved add: a world position, then a weight per species.
- *
- * Deferred adds exist because the GPU owns the field, so anything the host
- * wants to put into it has to cross as a list rather than a write. `sim.ts`
- * packs these into the shader's `Deposit` records with `conserve` set, and the
- * shader's own struct has a `vec4f` of weights already — this is the host side
- * catching up with it.
+ * The GPU owns the field, so host adds cross as a list that `sim.ts` packs
+ * into the shader's `Deposit` records with `conserve` set.
  */
 export const PENDING_STRIDE = 2 + CHANNELS;
 
 /**
- * What a body's existence is worth: a full tank.
- *
- * Note this is more than the `REWRITE_SHARE` that built it, so a body is worth
- * more dead than it cost to make and the cycle commute-then-annihilate mints
- * `2 * (EXTRA_CAP − REWRITE_SHARE)` = 0.5. That is the metabolism, not an
- * accounting slip: upkeep drains continuously, so a net that keeps rewriting
- * feeds itself and a net that sits still starves. Set this to `REWRITE_SHARE`
- * for a strictly conserved pond.
+ * What a body's existence is worth: a full tank. More than the
+ * `REWRITE_SHARE` that built it, so commute-then-annihilate mints
+ * `2 * (EXTRA_CAP − REWRITE_SHARE)` and a net that keeps rewriting feeds
+ * itself. Set to `REWRITE_SHARE` for a strictly conserved pond.
  */
 export const BODY_VALUE = EXTRA_CAP;
 
 /**
  * Energy released by one death: the body's own worth plus what it held.
- *
- * `value` is `params.bodyValue`, which ships at `BODY_VALUE` and reduces to
- * what this always did. At `REWRITE_SHARE` the pond is strictly conserved
- * across the commute-then-annihilate cycle — see the note on `BODY_VALUE`.
+ * `value` is `params.bodyValue`; at `REWRITE_SHARE` the pond is conserved.
  */
 export function deathYield(a: { extra: number }, value = BODY_VALUE): number {
   return Math.max(0, value + a.extra);
@@ -115,98 +75,48 @@ export const AGENT_VALUE: Record<AgentKind, number> = {
 };
 
 /**
- * How much of a neighbour's need reaches you, per hop. The fallback for a
- * body with no `requestDecay` of its own, and what the `requestDecay` slider
- * seeds a fresh body's trait to; `spreadRequests` otherwise reads each
- * body's own value.
- *
- * The field is `max(own need, best neighbour's field x decay)`, so need spreads
- * as a decaying scent rather than a hop count. Two consequences matter. Need
- * competes by magnitude, so a starving body outpulls a redex that is nearly
- * paid for even from further away. And where two comparable needs face each
- * other across a net the fields meet at equal value, the local gradient there
- * is flat, and nothing crosses — the watershed sits wherever the needs happen
- * to balance instead of at a fixed hop count.
- *
- * The value sets how far a shortage is audible, against `REQUEST_FLOOR`: a
- * whole unit of need carries 20 hops at 0.8 and 43 at 0.9. It also sets how
- * much moves, because a transfer is capped by the field at the receiving end —
- * so raising it makes distant demand both visible and worth answering.
- *
- * Not 1. At 1 the field stops being a gradient: every body in a connected net
- * ends up holding the same largest need, no neighbour is ever strictly needier
- * than another, and transport stops entirely.
+ * How much of a neighbour's need reaches you, per hop: the fallback for a
+ * body with no `requestDecay` of its own, and the seed for a fresh body's
+ * trait. The field is `max(own need, best neighbour's field x decay)`, so
+ * need spreads as a decaying scent and two comparable needs meet at a flat
+ * watershed nothing crosses. Against `REQUEST_FLOOR` it sets how far a
+ * shortage is audible: a whole unit carries 20 hops at 0.8 and 43 at 0.9.
+ * Never 1: at 1 every body in a net holds the same need and transport stops.
  */
 export const REQUEST_DECAY = 0.9;
 
 /**
- * Field values below this are not worth carrying further. This bounds the
- * relaxation; it is deliberately *not* a minimum transfer size. A stalled
- * redex is often a fraction of a percent short — one frame of upkeep — and
- * refusing to move that much is refusing to let it ever fire.
+ * Field values below this are not carried further. Bounds the relaxation;
+ * not a minimum transfer size, since a stalled redex is often one frame of
+ * upkeep short.
  */
 export const REQUEST_FLOOR = 0.01;
 
 /** Smallest transfer worth doing. Guards against denormal churn, nothing more. */
 const FLOW_EPS = 1e-9;
 
-/**
- * Field value at which the request ring is drawn at full strength. One whole
- * extra of unmet need is as loud as the display needs to get.
- */
+/** Field value at which the request ring is drawn at full strength. */
 export const REQUEST_FULL = 1;
 
 /**
- * Era's upkeep as a fraction of everyone else's, negative because an Era pays
- * energy in rather than out.
- *
- * An Era is a sink for structure, not a machine that runs: it has one port, it
- * cannot commute, and the only thing it does is end a wire. Charging it rent
- * makes the cheapest body in the net the one most likely to starve, which
- * inverts what the glyph means. Producing instead makes a net's leaves its
- * income, so growing a boundary is worth something and a net that erases
- * itself down to Eras is quietly refuelling.
- *
- * Small on purpose: at the default upkeep an Era yields one extra every 200 s
- * against a Con or Dup spending one every 40 s, so a third-Era soup produces
- * about a tenth of what it burns. Set to 0 for Eras that are simply free.
+ * Era's upkeep as a fraction of everyone else's, negative because an Era
+ * produces rather than pays: a net's leaves are its income. Set to 0 for
+ * Eras that are simply free.
  */
 export const ERA_UPKEEP_RATIO = -0.2;
 
-/**
- * Upkeep per second for one body, given the global rate.
- *
- * `eraRatio` is `params.eraUpkeepRatio`, shipping at `ERA_UPKEEP_RATIO` and so
- * reducing to what this always did. At 1 an Era pays rent like everything
- * else, which is what §5 of the chemistry plan wants once an Era's income
- * comes from a high uptake yield instead of from a mint keyed on its glyph.
- */
+/** Upkeep per second for one body. `eraRatio` is `params.eraUpkeepRatio`; at 1 an Era pays rent. */
 export function upkeepRateFor(kind: AgentKind, rate: number, eraRatio = ERA_UPKEEP_RATIO): number {
   return kind === 'era' ? rate * eraRatio : rate;
 }
 
 /**
- * The same, keyed on what a body *expresses* rather than on its glyph.
- *
- * `ERA_UPKEEP_RATIO` was a mint conditional on nothing, keyed on a kind — one
- * of the glyph rules §9 says the economy should have none of (`yEra` and
- * `eraCapRatio` are the two that remain, both dials at the old value). What
- * it reached for is real: a body that spends its chemical budget making
- * ground is doing the pond a service and should be cheaper to run. That is a
- * property of the genome, and `seedProduction` put it there — an Era's whole
- * production half is the ground row, a Con's is none of it.
- *
- * So the discount interpolates on how far a body has gone toward what a
- * seeded Era expresses, against `ERA_GROUND_SHARE`. Exact at both ends, and
- * written so that it is: a seeded Era lands on `eraRatio` bit for bit and a
- * seeded Con on 1, which `1 + (eraRatio - 1) * t` does not manage in floating
- * point. What is new is everything between, and that it runs both ways — a
- * Con that breeds toward making ground earns the discount, an Era that
- * abandons it loses it, and whether they stay there is selection's business.
- *
- * Only meaningful when the expression vectors are live, which is the caller's
- * question (`UpkeepOptions.expressed`), not this function's: `expressVector`
- * always writes a unit-sum vector, so there is nothing here to detect.
+ * The same, keyed on what a body expresses rather than on its glyph: the
+ * discount interpolates on the ground share of the body's excretion row
+ * against `ERA_GROUND_SHARE`. Exact at both ends — a seeded Era lands on
+ * `eraRatio` bit for bit and a seeded Con on 1, which
+ * `1 + (eraRatio - 1) * t` does not manage in floating point. Only
+ * meaningful when the expression vectors are live (`UpkeepOptions.expressed`).
  */
 export function upkeepRateOf(express: Float64Array, slot: number, rate: number, eraRatio: number): number {
   const share = express[slot * ROW_COUNT + ROW_EXCRETE + CH.energy] / ERA_GROUND_SHARE;
@@ -226,25 +136,15 @@ export function atCap(a: { extra: number; energyCap: number }): boolean {
 }
 
 /**
- * What this end owes toward a rewrite that builds bodies.
- *
- * A heritable `energyCap` can sit below `REWRITE_SHARE` — breeding walks it
- * down to `EXTRA_CAP * 0.5`. Asking for a whole share then makes a full tank
- * still unable to commute, so leftover principal pairs sit idle after a few
- * copies. A body owes the share, or everything it can hold, whichever is
- * smaller — otherwise it carries a debt it is physically unable to settle.
+ * What this end owes toward a rewrite: the share, or everything it can hold,
+ * whichever is smaller. A heritable `energyCap` can sit below `REWRITE_SHARE`,
+ * and a body must never owe a debt it is physically unable to settle.
  */
 export function rewriteShareOf(a: { energyCap: number }): number {
   return Math.min(REWRITE_SHARE, a.energyCap);
 }
 
-/**
- * Has this end's stake been met?
- *
- * `paid` is what the escrow already holds for it. `canPayShare` is the same
- * question asked of a body's own tank, which is the special case of a pair
- * that pays outright rather than accumulating.
- */
+/** Has this end's stake been met? `paid` is what the escrow already holds for it. */
 export function stakeMet(a: { energyCap: number }, paid: number): boolean {
   return paid >= rewriteShareOf(a) - EXTRA_FULL_EPS;
 }
@@ -255,13 +155,9 @@ export function canPayShare(a: { extra: number; energyCap: number }): boolean {
 }
 
 /**
- * Move up to `want` out of a body and report what actually moved.
- *
- * Bounded by `spareEnergy`, which is the same rule transport uses: a body in
- * debt contributes nothing, and contributing never puts one into debt. That is
- * what keeps a pair from starving itself to fund a rewrite it may not live to
- * see — and why this cannot be written as `spendExtra`'s floor at zero, which
- * would let a body in debt pay anyway.
+ * Move up to `want` out of a body and report what actually moved. Bounded by
+ * `spareEnergy`: a body in debt contributes nothing, and contributing never
+ * puts one into debt.
  */
 export function payToward(a: SlotBody, want: number): number {
   if (!(want > 0)) return 0;
@@ -276,10 +172,7 @@ export function spendExtra(a: { extra: number }): void {
   a.extra = Math.max(0, a.extra - REWRITE_SHARE);
 }
 
-/**
- * Bodies destroyed minus bodies created. Annihilation and era–era take two
- * away; erase swaps two for two; a commute builds four from two.
- */
+/** Bodies destroyed minus bodies created. */
 export function bodyDelta(rule: Rule): number {
   switch (rule) {
     case 'era-era':
@@ -294,11 +187,8 @@ export function bodyDelta(rule: Rule): number {
 }
 
 /**
- * What the pair pays up front, in shares — one per end, so a commute costs
- * two. Charged at the share rather than at `BODY_VALUE` on purpose: pricing a
- * commute at the pair's entire full tank would mean it could only ever fire
- * with both ends exactly at the cap, which is the knife edge the headroom
- * exists to remove.
+ * What the pair pays up front: one share per end. Charged at the share
+ * rather than `BODY_VALUE` so a commute does not need both ends exactly at cap.
  */
 export function rewriteCost(rule: Rule): number {
   const d = bodyDelta(rule);
@@ -312,16 +202,9 @@ export function rewriteYield(rule: Rule, value = BODY_VALUE): number {
 }
 
 /*
- * Packed into one integer rather than a `"${i},${j}"` string. This runs once
- * per agent per frame in `harvestSlots` plus every render and every rewrite
- * settlement, and a template-literal string allocates and then costs a
- * string hash on every `Map` lookup; a number does neither. `CELL_KEY_OFFSET`
- * shifts i/j positive before packing (a `Map` key needs a total order, not a
- * sign), and `CELL_KEY_WIDTH` is `2 * CELL_KEY_OFFSET`, so the shifted value
- * fills it exactly with no overlap between rows. The product tops out under
- * 2^52, comfortably inside float64's 2^53 safe-integer range, and the offset
- * covers cell indices out past ±33 million — thousands of pond-widths in
- * either direction — so nothing this sim does can wrap it.
+ * Cell key packed into one integer: `CELL_KEY_OFFSET` shifts i/j positive
+ * and `CELL_KEY_WIDTH` is `2 * CELL_KEY_OFFSET`, so rows never overlap. The
+ * product stays under 2^52, inside float64's safe-integer range.
  */
 const CELL_KEY_OFFSET = 1 << 25;
 const CELL_KEY_WIDTH = CELL_KEY_OFFSET * 2;
@@ -331,12 +214,10 @@ function cellKey(i: number, j: number): number {
 }
 
 /**
- * Sparse world-space energy. Unvisited cells hold `ambient`; once a cell is
- * touched, whatever remains is stored explicitly (including 0).
- * No decay or diffusion — occupancy is the only transport.
- *
- * `inexhaustible` keeps every in-bounds cell at `ambient` and makes `take`
- * a read. The designer uses that so Play is never starved of extra.
+ * Sparse world-space energy. Unvisited cells hold `ambient`; once touched,
+ * whatever remains is stored explicitly (including 0). No decay or diffusion
+ * on the sparse path. `inexhaustible` keeps every in-bounds cell at
+ * `ambient` and makes `take` a read.
  */
 export class EnergyGrid {
   cellSize: number;
@@ -345,56 +226,28 @@ export class EnergyGrid {
   private readonly cells = new Map<number, number>();
 
   /*
-   * Where the energy actually lives.
-   *
-   * Bound to a field, a cell of this grid is a block of that field's cells on
-   * channel `CH.energy`, and this class becomes a coarse view onto them
-   * rather than a store of its own. Unbound it keeps the sparse map, which is
-   * what every test that builds an `EnergyGrid` by hand still gets.
-   *
-   * The point of moving is that the ground stops being inert. On the field it
-   * diffuses, so a grazed patch refills from its neighbours instead of being
-   * gone forever, and `grow` can put a carrying capacity on it — which is the
-   * whole difference between a resource and a seam of ore.
-   *
-   * The view stays coarse on purpose. `harvestSlots` groups bodies by cell so
-   * that everyone standing in the same place competes for the same stock, and
-   * that grouping is the economy's only crowding pressure. A field cell is
-   * ten units across and a body is bigger than that, so indexing straight to
-   * one would have quietly deleted the competition.
+   * Where the energy lives. Bound to a field, a cell of this grid is a block
+   * of field cells on `CH.energy` and this class is a coarse view onto them;
+   * unbound it keeps the sparse map. The view stays coarse because
+   * `harvestSlots` groups bodies by cell, and that grouping is the economy's
+   * only crowding pressure.
    */
   private fields: Fields | null = null;
 
   /*
    * The world bound, a disk tracked to `home`. Outside it there is no ground:
-   * nothing can be harvested and nothing deposited, so a body that drifts past
-   * the edge starves on whatever it was carrying. The same disk is the scent
-   * mask and the hard wall, so "off the map" means one thing rather than two.
-   *
-   * Stored cells outside the bound are kept rather than pruned. The bound
-   * used to move with home, and a cell that falls outside today can fall back
-   * inside tomorrow with its contents intact; dropping them would quietly
-   * destroy energy and the economy is supposed to conserve it.
+   * nothing can be harvested and nothing deposited. The same disk is the
+   * scent mask and the hard wall. Stored cells outside the bound are kept,
+   * not pruned; dropping them would destroy energy.
    */
   private boundX = 0;
   private boundY = 0;
   private boundHalf = Infinity;
   /*
-   * The lattice this grid is cut on, shared with the scent field.
-   *
-   * It used to index from the world origin while the field indexed from its
-   * own, so the two grids were offset by whatever fraction of a cell the pond
-   * happened to sit at — two rasters of the same world that never lined up.
-   * Taking the field's own (already cell-snapped) origin, rather than
-   * recomputing one from the raw pin point, makes an energy cell an exact
-   * block of scent cells, provided `energyCell` stays a whole multiple of
-   * `FIELD_CELL`. Deriving it independently from `cx - half` looked the same
-   * but wasn't: the field snaps its origin to a whole cell and this didn't,
-   * so the two lattices agreed only when the pin point happened to land on
-   * one already.
-   *
-   * Set once, when the world is pinned. Moving it later would re-key every
-   * stored cell, which is why `setBounds` is not called per frame any more.
+   * The lattice this grid is cut on, shared with the scent field: the field's
+   * own cell-snapped origin, so an energy cell is an exact block of scent
+   * cells provided `energyCell` stays a whole multiple of `FIELD_CELL`. Set
+   * once, when the world is pinned; moving it would re-key every stored cell.
    */
   private originX = 0;
   private originY = 0;
@@ -411,17 +264,9 @@ export class EnergyGrid {
   }
 
   /*
-   * Queued adds, for when the field is not ours to write.
-   *
-   * With the field on the GPU, `fields.data` is a stale copy, so an `addAt`
-   * done here would land where nothing reads it — a corpse, a farmer's
-   * deposit, a producer's spill and a rewrite's leftovers would all quietly
-   * stop existing. They are queued instead and handed to the shader's
-   * `scatter` at the end of the frame, which is the same bilinear
-   * renormalised add done on the right side of the bus.
-   *
-   * x, y, amount triples. Grown, never shrunk, and refilled from zero each
-   * frame: a pond kills a handful of bodies a frame, not thousands.
+   * Queued adds, for when the field is on the GPU and `fields.data` is a
+   * stale copy: handed to the shader's `scatter` at the end of the frame.
+   * Grown, never shrunk, and refilled from zero each frame.
    */
   private pending = new Float64Array(0);
   private nPending = 0;
@@ -437,11 +282,7 @@ export class EnergyGrid {
     return this.nPending;
   }
 
-  /**
-   * `pendingAdds` records of `PENDING_STRIDE`: x, y, then one weight per
-   * species. It was an `x, y, amount` triple while only the ground could be
-   * added to; excretion moves every species this way. See `addSpeciesAt`.
-   */
+  /** `pendingAdds` records of `PENDING_STRIDE`: x, y, then one weight per species. */
   get pendingData(): Float64Array {
     return this.pending;
   }
@@ -456,13 +297,8 @@ export class EnergyGrid {
   }
 
   /**
-   * What one *field* cell holds when the ground is full, so that a whole
+   * What one field cell holds when the ground is full, so that a whole
    * energy cell still holds `ambient`.
-   *
-   * This is the rescaling that keeps the economy where it was. An energy cell
-   * is 40 units and a field cell is 10, so sixteen field cells stand where
-   * one grid cell used to, and each holds a sixteenth as much. A body walking
-   * onto full ground finds the same meal it always did.
    */
   get cellCap(): number {
     const s = this.span;
@@ -470,11 +306,8 @@ export class EnergyGrid {
   }
 
   /**
-   * Lay down full ground across the disk. Field-backed only.
-   *
-   * Deferred like `addAt` and for the same reason: with the field on the GPU
-   * this would seed a copy nobody reads and the pond would start barren.
-   * `Sim.gpuFieldStep` picks the request up and dispatches `fill`.
+   * Lay down full ground across the disk. Field-backed only. Deferred like
+   * `addAt`; `Sim.gpuFieldStep` picks the request up and dispatches `fill`.
    */
   seedGround(): void {
     if (this.deferring) {
@@ -488,16 +321,9 @@ export class EnergyGrid {
   pendingSeed: number | null = null;
 
   /**
-   * The field cells under energy cell `(i, j)`: `[fi, fi + span)` squared,
-   * clipped to the grid. Empty when the block falls outside it.
-   */
-  /**
-   * The field cells one energy cell stands on, clipped to the grid.
-   *
-   * Public because the GPU harvest needs exactly this rect — the shader is
-   * handed `(fi, fj, wi, wj)` rather than deriving it, so there is one place
-   * that knows how an energy cell maps onto field cells instead of two that
-   * have to agree.
+   * The field cells under energy cell `(i, j)`, clipped to the grid; null
+   * when the block falls outside it. Public because the GPU harvest is
+   * handed this rect rather than deriving it.
    */
   blockRect(i: number, j: number): { fi: number; fj: number; wi: number; wj: number } | null {
     const b = this.rectScratch;
@@ -507,10 +333,7 @@ export class EnergyGrid {
 
   private readonly rectScratch = new Int32Array(4);
 
-  /**
-   * `blockRect` into a caller's four ints — `fi, fj, wi, wj` — so the two
-   * callers that run once a body a frame do not mint a record each.
-   */
+  /** `blockRect` into a caller's four ints — `fi, fj, wi, wj` — without allocating. */
   blockRectAt(i: number, j: number, out: Int32Array): boolean {
     const f = this.fields;
     if (!f) return false;
@@ -545,13 +368,7 @@ export class EnergyGrid {
 
   /**
    * Dense index of the energy cell under a point — `j * side + i` — or -1
-   * when the point is off the field. `side` is `cellsPerSide`, passed in so
-   * a loop over every body does not re-derive it each time.
-   *
-   * What `HarvestPlan` bins on. Every point inside the live disk lands in
-   * the field's rectangle, since the disk is inscribed in it with a margin,
-   * so for the pond this never returns -1; the check is for the grid's own
-   * sake when it is asked about somewhere else.
+   * off the field. `side` is `cellsPerSide`. What `HarvestPlan` bins on.
    */
   denseIndexAt(x: number, y: number, side: number): number {
     if (side <= 0) return -1;
@@ -566,11 +383,8 @@ export class EnergyGrid {
   }
 
   /**
-   * Centre and radius of the live disk, in world units, plus the shared
-   * lattice origin this grid's cells are cut against — pass the scent field's
-   * own `originX`/`originY` (already snapped to a whole field cell) so the two
-   * line up. Defaults to the unsnapped `cx - radius`/`cy - radius` for callers
-   * that only care about the bound, not alignment with the field.
+   * Centre and radius of the live disk, plus the shared lattice origin: pass
+   * the scent field's own snapped `originX`/`originY` so the two line up.
    */
   setBounds(cx: number, cy: number, radius: number, originX = cx - radius, originY = cy - radius): void {
     this.boundX = cx;
@@ -589,9 +403,7 @@ export class EnergyGrid {
 
   clear(): void {
     this.cells.clear();
-    // The deferred queue too. It is filled by deaths and spills, and a pond
-    // being thrown away has been killing bodies all frame; left here, that
-    // energy would land on the next pond's ground, out of nowhere.
+    // The deferred queue too, or this frame's deaths land on the next pond's ground.
     this.nPending = 0;
     this.pendingSeed = null;
     const f = this.fields;
@@ -606,12 +418,8 @@ export class EnergyGrid {
   }
 
   /*
-   * Anchored at the world origin, and the cell size is a whole multiple of the
-   * scent field's, so an energy cell is an exact block of scent cells rather
-   * than a grid at some unrelated offset and pitch. The field slides with home
-   * and this does not, which is fine precisely because both are anchored to
-   * world coordinates: a body at a given place always reads the same energy
-   * cell, however the field's window has scrolled.
+   * Anchored to world coordinates, so a body at a given place always reads
+   * the same energy cell however the field's window has scrolled.
    */
   index(x: number, y: number): { i: number; j: number; key: number } {
     const i = Math.floor((x - this.originX) / this.cellSize);
@@ -645,16 +453,8 @@ export class EnergyGrid {
 
   /**
    * Mean standing stock per cell across a key's block — the `S` a Monod rate
-   * reads. See `uptakeRate`.
-   *
-   * The *mean*, not the total, because a rate constant has to mean the same
-   * thing whatever the block's size, and because the shader's twin divides by
-   * the same cell count. Walks the same rect `take` walks, so the two cannot
-   * disagree about which cells a body is standing over.
-   *
-   * The map-backed grid has no block: one key is one cell, so its own stock is
-   * the density. An inexhaustible grid reads as `ambient` everywhere, which is
-   * what it means.
+   * reads. The mean, not the total, so a rate constant means the same at any
+   * block size and matches the shader's twin. Walks the same rect `take` walks.
    */
   density(key: number): number {
     return this.densityOf(key, CH.energy);
@@ -695,23 +495,15 @@ export class EnergyGrid {
     return this.takeFrom(key, CH.energy, n);
   }
 
-  /**
-   * The same for any species: the reaction table lets a body eat what another
-   * excreted, which is what makes four species a network rather than a
-   * substance and three decorations.
-   */
+  /** The same for any species. */
   takeFrom(key: number, ch: number, n: number): number {
     let want = Math.max(0, n);
     if (this.inexhaustible) return Math.min(this.ambient, want);
     const f = this.fields;
     if (f) {
       // Cell by cell across the block rather than proportionally: grazing
-      // leaves an uneven floor, and an uneven floor is what diffusion then
-      // has a gradient to work against. Taking a flat share off every cell
-      // would keep the block uniform and there would be nothing to flow.
-      //
-      // The key is decoded and the block clipped in place: this runs once a
-      // hungry body a frame on the CPU field, and both helpers allocate.
+      // leaves an uneven floor, which is what gives diffusion a gradient.
+      // Key decoded and block clipped in place; this runs once a body a frame.
       const i = Math.floor(key / CELL_KEY_WIDTH) - CELL_KEY_OFFSET;
       const j = key - (i + CELL_KEY_OFFSET) * CELL_KEY_WIDTH - CELL_KEY_OFFSET;
       const b = this.rectScratch;
@@ -744,15 +536,10 @@ export class EnergyGrid {
   }
 
   /**
-   * A conserved add across every species at once.
-   *
-   * `addAt` is this with a vector that is zero everywhere but `CH.energy`, and
-   * it stays because that is what a corpse, a rewrite's leftovers and upkeep's
-   * rent all are. What needs the vector is excretion: under the reaction table
-   * every channel is matter a body moves out of its tank, so the deposit that
-   * carries it has to be the *conserving* one on all four — a quantity that
-   * survives however the grid is cut — rather than the density the scent path
-   * lays down. See `docs/history/energy-chemistry-plan.md` §3 and `Fields.addAt`.
+   * A conserved add across every species at once. `addAt` is this with a
+   * vector that is zero everywhere but `CH.energy`. Excretion needs the
+   * vector, and the deposit must be the conserving one on all four channels
+   * rather than the density the scent path lays down. See `Fields.addAt`.
    */
   addSpeciesAt(x: number, y: number, w: ArrayLike<number>): void {
     let any = false;
@@ -777,8 +564,7 @@ export class EnergyGrid {
       for (let c = 0; c < CHANNELS; c++) if (w[c] !== 0) f.addAt(c, x, y, w[c]);
       return;
     }
-    // The map-backed grid has only the ground; the signal species have no
-    // home there and are simply not modelled on that path.
+    // The map-backed grid has only the ground.
     if (w[CH.energy] !== 0) this.addAt(x, y, w[CH.energy]);
   }
 
@@ -806,9 +592,8 @@ export class EnergyGrid {
     }
     const f = this.fields;
     if (f) {
-      // Into the one field cell it happened in, not spread across the block.
-      // A corpse is a point event, and letting it start as a point is what
-      // gives diffusion a plume to make out of it.
+      // Into the one field cell it happened in, not spread across the block:
+      // a corpse is a point event, and diffusion makes the plume.
       f.addAt(CH.energy, x, y, amount);
       return;
     }
@@ -848,14 +633,8 @@ export class EnergyGrid {
   }
 
   /**
-   * Touched cells only — the implicit ambient field is not stored.
-   *
-   * Sparse path only, and so dead in production: bound to a field there is no
-   * map to walk and this yields nothing, whatever the ground actually holds.
-   * The one caller left is a test on a hand-built grid. Kept because that test
-   * is the only remaining cover for the sparse path, which is still what an
-   * `EnergyGrid` built by hand gives you; anything wanting the real ground
-   * wants `getCell` over a range, the way `drawEnergyGrid` does it.
+   * Touched cells only. Sparse path only, so it yields nothing when bound to
+   * a field; kept as the one cover for the sparse path.
    */
   forEachStored(fn: (i: number, j: number, e: number) => void): void {
     for (const [key, e] of this.cells) {
@@ -884,19 +663,10 @@ export type SlotBody = Pick<
 >;
 
 /**
- * Who eats from which block, and in what order.
- *
- * Lifted out of `harvestSlotsFast` because the GPU needs the same answer and
- * must not compute it a second way. The binning is a walk over bodies rather
- * than over the field, so it stays on the CPU either way; what the shader
- * gets is this, already sorted.
- *
- * Both orderings here are load-bearing. Bodies within a block eat in id
- * order, and `EnergyGrid.take` empties the block's field cells one at a time
- * rather than taking a flat share — see the note there about the uneven floor
- * being what diffusion has a gradient to work against.
- *
- * Reused frame to frame; `build` overwrites rather than reallocating.
+ * Who eats from which block, and in what order. Shared by the CPU and GPU
+ * harvests so they cannot compute it two ways. Both orderings are
+ * load-bearing: bodies within a block eat in id order, and `EnergyGrid.take`
+ * empties cells one at a time. Reused frame to frame; `build` overwrites.
  */
 export class HarvestPlan {
   /** Six per block: fi, fj, wi, wj, first, count. */
@@ -904,85 +674,45 @@ export class HarvestPlan {
   /** Body slot per entry, in the order its block feeds them. */
   slots = new Int32Array(0);
   /**
-   * The agent id in that slot when the plan was built.
-   *
-   * Only the GPU path needs this, and it needs it because a plan built at the
-   * end of one frame is credited at the top of the next. Nothing between the
-   * two touches the roster today, but "nothing between them today" is the kind
-   * of invariant that a later reordering breaks silently and expensively —
-   * energy paid into whichever body inherited the slot.
+   * The agent id in that slot when the plan was built. The GPU path credits a
+   * plan a frame after building it, and the slot may have been reassigned.
    */
   ids = new Int32Array(0);
-  /**
-   * `HARVEST_STRIDE` floats an entry: the room in that body's tank, then its
-   * per-species uptake rate and affinity. See the constants above.
-   */
+  /** `HARVEST_STRIDE` floats an entry: room, then per-species uptake rate and affinity. */
   rooms = new Float64Array(0);
   /** The energy-cell key per block, which the CPU runner needs and the GPU does not. */
   keys = new Float64Array(0);
   nBlocks = 0;
   nEntries = 0;
   /**
-   * Whether the plan that was built is the metered one.
-   *
-   * The GPU path pays this plan out a frame later, in `Sim.creditHarvest`, and
-   * the two paths put a draw in different places — the gut, or straight into
-   * the tank — and `runHarvestPlan` drains by the same verdict the fill was
-   * built on. Recorded here rather than re-derived from a `Params` that may
-   * have been edited by a slider in between.
+   * Whether the plan that was built is the metered one. Recorded here rather
+   * than re-derived from `Params`, which a slider may edit between the fill
+   * and the drain a frame later; the two must agree.
    */
   metered = false;
   /*
-   * Binning as intrusive lists over a dense cell table.
-   *
-   * It was a `Map` from cell key to an array of slots, rebuilt from nothing
-   * every frame: one `index()` record per body, one array per occupied cell,
-   * a `decodeKey` and a `blockRect` record per block. At fifty thousand bodies
-   * that is on the order of a hundred thousand allocations a frame for a
-   * grouping the field's own lattice already defines.
-   *
-   * `head[c]` is the most recent body to land in cell `c` and `next[slot]` the
-   * one before it. A cell's chain is unwound when its block is written out —
-   * reversed back into arrival order, then sorted by id, which arrival order
-   * already is in practice — and `head` is cleared as it goes, so the table
-   * is all -1 between builds without a fill. The dense index is the field's
-   * own: `cellsPerSide` squared cells, sixty-five thousand at the shipped
-   * sizes, which is a quarter-megabyte table for a pond that touches a few
-   * thousand of them.
+   * Binning as intrusive lists over a dense cell table: `head[c]` is the most
+   * recent body to land in cell `c` and `next[slot]` the one before it. A
+   * cell's chain is unwound when its block is written out and `head` cleared
+   * as it goes, so the table is all -1 between builds without a fill.
    */
   private head = new Int32Array(0);
   private next = new Int32Array(0);
   private touched = new Int32Array(0);
   private readonly rect = new Int32Array(4);
-  /**
-   * Room in each body's gut, by slot, read once per body per build.
-   *
-   * The hungry filter needs it and the entry fill needs it again, and it is a
-   * four-float walk plus a multiply that cannot change between the two. The
-   * same class of cost as the `meter` guard below; a scratch by slot is what
-   * `next` already is.
-   */
+  /** Room in each body's gut, by slot, read once per body per build. */
   private room = new Float64Array(0);
 
   /**
-   * `kinetics` with `cap > 0` means the metered mouthful: every entry carries
-   * its gut room, its budget and its four affinities. Absent, or at `cap` 0,
-   * it is the single-species take-what-fits path, which is what the pond runs
-   * by default.
+   * `kinetics` with `cap > 0` means the metered mouthful; absent, or at `cap`
+   * 0, the single-species take-what-fits path the pond runs by default.
    */
   build(agents: Iterable<Agent>, store: AgentStore, grid: EnergyGrid, kinetics?: UptakeKinetics): void {
     /*
-     * Whether uptake is *metered*, not whether a kinetics object was handed
-     * over. `sim.ts` passes one every frame with `cap` set from `uptakeVmax`,
-     * which ships at zero — so guarding on the object's existence ran the
-     * per-species fill for every body every frame to write eight zeros and
-     * call `uptakeKsOf` four times for nothing. Measured at ten thousand
-     * bodies on the GPU path, that was 0.82 ms a frame, and it was the whole
-     * of the 2% the reaction table appeared to cost a pond not using it.
-     *
-     * The same condition `runHarvestPlan` uses, and it has to stay the same
-     * one: the fill and the drain have to agree about whether the rates in
-     * this buffer mean anything.
+     * Whether uptake is metered, not whether a kinetics object was handed
+     * over: `sim.ts` passes one every frame with `cap` from `uptakeVmax`,
+     * which ships at zero. Must stay the same condition `runHarvestPlan`
+     * uses, so the fill and the drain agree about whether the rates mean anything.
      */
     const meter = kinetics !== undefined && kinetics.cap > 0;
     this.metered = meter;
@@ -1016,9 +746,8 @@ export class HarvestPlan {
     for (const a of agents) {
       const s = a.slot;
       if (LOCKED[s]) continue;
-      // Metered, what bounds a mouthful is room in the gut: a body swallows
-      // before it converts anything, and a gut full of what it could not
-      // convert is exactly the state this is meant to be able to reach.
+      // Metered, a mouthful is bounded by room in the gut: a body swallows
+      // before it converts anything.
       if (meter) {
         const r = gutRoomOf(store, s, kinetics.gutSize);
         if (r <= EXTRA_FULL_EPS) continue;
@@ -1056,20 +785,10 @@ export class HarvestPlan {
       const first = this.nEntries;
       let k = first;
       /*
-       * Bounded, because an unbounded walk here cannot be debugged.
-       *
-       * The chain is `next[s] = head[c]; head[c] = s`, so a slot pushed onto
-       * the same cell twice gets `next[s] === s` and this never reaches -1.
-       * That can only happen if two live bodies claim one store slot, which
-       * is a roster bug — and it is one `lambda.ts` actually had: `injectTerm`
-       * let `createAgent` build a private one-slot store, so a whole injected
-       * term aliased slot 0. It presented as the default test suite hanging
-       * for half an hour with no output, because this is a synchronous loop
-       * inside `step` and a test timeout can never fire while it spins.
-       *
-       * `entries` is how many bodies were chained across all cells, so no
-       * single cell's chain can honestly be longer. Failing here says which
-       * invariant broke; spinning says nothing.
+       * Bounded: a slot pushed onto the same cell twice gets `next[s] === s`
+       * and the walk never reaches -1, which happens only if two live bodies
+       * claim one store slot. `entries` bounds every honest chain. Failing
+       * here names the broken invariant; spinning inside `step` says nothing.
        */
       const limit = first + entries;
       for (let s = head[c]; s >= 0; s = next[s]) {
@@ -1082,13 +801,11 @@ export class HarvestPlan {
         slots[k++] = s;
       }
       head[c] = -1;
-      // A block clipped away entirely feeds nobody; drop it rather than
-      // emitting a zero-sized rect for the shader to skip. Its slots were
-      // written past `nEntries` and are simply overwritten by the next block.
+      // A block clipped away entirely feeds nobody; its slots were written
+      // past `nEntries` and are overwritten by the next block.
       if (!grid.blockRectAt(i, j, rect)) continue;
-      // The chain is newest-first. Bodies eat in id order and ids arrive
-      // ascending, so reversing it is nearly the whole sort; the insertion
-      // pass after it is what makes that exact rather than usual.
+      // The chain is newest-first; reversing it is nearly the id sort, and
+      // the insertion pass makes it exact.
       for (let lo = first, hi = k - 1; lo < hi; lo++, hi--) {
         const tmp = slots[lo];
         slots[lo] = slots[hi];
@@ -1119,15 +836,9 @@ export class HarvestPlan {
         const ro = e * HARVEST_STRIDE;
         if (meter) {
           /*
-           * Per body, not per pond. `total` is one mouthful a frame, whatever
-           * it turns out to be made of, and `ks` is the body's own affinity
-           * gene per species — how readily it can pull that species out of the
-           * water, which is a transporter and not a recipe.
-           *
-           * What the body can *do* with a species is not asked here. That is
-           * the uptake row, and it is asked in `Sim.runDigestion`, after the
-           * swallowing: a body cannot decline the part of the mixture it has
-           * no use for, and that is the whole point of a sample.
+           * Per body: `total` is one mouthful a frame and `ks` the body's own
+           * affinity gene per species. What the body can do with a species is
+           * `Sim.runDigestion`'s question, after the swallowing.
            */
           const g = sl * CHEM_LEN;
           const yield_ = KIND[sl] === KIND_ERA ? kinetics.yEra : kinetics.yDirect;
@@ -1146,26 +857,12 @@ export class HarvestPlan {
 }
 
 /**
- * How fast a body may draw from a cell, given what is standing in it.
- *
- * Monod: `v = vmax * S / (Ks + S)`. See `docs/history/energy-chemistry-plan.md` §4.
- * `cap` is `params.uptakeVmax * dt` — the most a body could take this frame on
- * saturating ground — and **zero means the old path**, which is not the same
- * as no uptake: at zero a body takes whatever fits in its tank, instantly, as
- * it always has. `Infinity` is what says "unlimited", and `Math.min` against
- * it returns the room unchanged down to the bit, which is what keeps the
- * default bit-identical.
- *
- * The point of the `Ks` half is that `(vmax, Ks)` do not dominate each other:
- * high/high is a fast grazer that needs rich ground, low/low a scavenger that
- * lives on scraps, and neither wins everywhere. That is the precondition for
- * coexistence rather than takeover.
- *
- * Exported as the reference law: `field-kernel.test.ts` compares its
- * single-species mirror against it. The sampled path in `runHarvestPlan` and
- * `field.wgsl` inlines the same term rather than calling this, because it
- * also caps by share and means the opposite thing by a rate of zero — see the
- * note inside `runHarvestPlan`.
+ * How fast a body may draw from a cell: Monod, `v = vmax * S / (Ks + S)`.
+ * `cap` is `params.uptakeVmax * dt`; zero means the unmetered path — take
+ * what fits, instantly — and returns `Infinity`, which `Math.min` leaves
+ * bit-identical. Exported as the reference law `field-kernel.test.ts`
+ * checks against; `runHarvestPlan` and `field.wgsl` inline the same term
+ * because they cap by share and mean the opposite thing by a rate of zero.
  */
 export function uptakeRate(density: number, cap: number, ks: number): number {
   if (!(cap > 0)) return Infinity;
@@ -1174,105 +871,47 @@ export function uptakeRate(density: number, cap: number, ks: number): number {
 }
 
 /**
- * `uptakeVmax * dt` and `uptakeKs`, as the harvest wants them.
- *
- * `cap` is the whole mouthful, not a per-species rate. Uptake is free to every
- * body, needs no free port and no machinery to reach the water, and always
- * samples all four species — what it cannot do is choose the sample. The
- * shares of `cap` go by what is standing in the cell, so they sum to `cap`
- * however rich or filthy the cell is.
- *
- * What is swallowed lands in the gut as itself. Nothing here asks whether a
- * body can use a species: that is `Sim.runDigestion`, and keeping the two
- * apart is what lets waste exist at all. A body that could decline the part of
- * the mixture it has no recipe for would never be holding anything it had to
- * get rid of.
- *
- * That shared ceiling is what used to be bought by switching the species rows
- * off below `excreteRate`. Four independent rates meant four times the cap,
- * and with `params.deposit` minting five times a body's voice into three
- * channels out of nothing, a body could eat its own scent back for a profit:
- * measured, that ran the pond at twice the rate cap and filled every tank.
- * With one budget the mint buys nothing — it only dilutes what the minter is
- * standing in — so the rows no longer follow the excretion dial, and
- * `uptakeVmax` means the same mechanism in both regimes.
+ * `uptakeVmax * dt` and `uptakeKs`, as the harvest wants them. `cap` is the
+ * whole mouthful, not a per-species rate: uptake always samples all four
+ * species by what is standing in the cell, and the shares sum to `cap`.
+ * What is swallowed lands in the gut as itself; whether a body can use it
+ * is `Sim.runDigestion`'s question, which is what lets waste exist.
  */
 export interface UptakeKinetics {
   cap: number;
   ks: number;
   /**
-   * Yield on what a body takes up directly, and on what an Era does.
-   *
-   * Applied to the *rate*, which is what makes it conservative without a
-   * second grid write: at `yDirect` 0 a body draws nothing and the ground it
-   * is standing on is untouched, which is exactly "obligate trophic
-   * dependency" — it has to be fed by its net or die. At 1, today.
-   *
-   * `yEra` above 1 is §5's replacement for `ERA_UPKEEP_RATIO`: an Era's income
-   * comes from the ground under it rather than from a mint keyed on its glyph,
-   * so `#Eras` is a net's boundary size against an upkeep charged per body,
-   * and surface-to-volume becomes a real constraint on how big a net can get.
-   *
-   * Before moving `yDirect` far, check the larval window: a fresh spawn has
-   * about `EXTRA_CAP / upkeep` seconds of tank, and if mean time-to-encounter
-   * with a net is not well under that, obligate dependency kills the soup
-   * rather than structuring it.
+   * Yield on what a body takes up directly, and on what an Era does. Applied
+   * to the rate, so at `yDirect` 0 a body draws nothing and the ground is
+   * untouched: obligate trophic dependency. `yEra` above 1 makes an Era's
+   * income come from the ground under it rather than a mint keyed on its
+   * glyph. A fresh spawn has about `EXTRA_CAP / upkeep` seconds of tank,
+   * which bounds how far `yDirect` can drop before the soup dies.
    */
   yDirect: number;
   yEra: number;
   /**
-   * Hill coefficient on uptake: `v = vmax * S^n / (ks^n + S^n)`.
-   *
-   * One of §3's two ways to buy superadditivity, which division of labour
-   * needs and a linear budget cannot supply. With a linear constraint and
-   * *concave* payoffs — and Monod at `n = 1` is concave — the optimum is
-   * interior and everyone becomes a generalist; specialising beats splitting
-   * only when `f(1) > 2 f(1/2)`, which concavity forbids. Above 1 the response
-   * is convex at low density, which is the shape that makes committing to one
-   * species pay. At 1, plain Monod.
+   * Hill coefficient on uptake: `v = vmax * S^n / (ks^n + S^n)`. Above 1 the
+   * response is convex at low density, which is what makes committing to one
+   * species pay; at 1, plain Monod, and everyone is a generalist.
    */
   hillN: number;
   /**
    * `params.gutSize`: how much a body may hold undigested, as a multiple of
-   * its own `energyCap`. This is what bounds a mouthful — room in the gut, not
-   * room in the tank. See `gutRoomOf`.
+   * its own `energyCap`. Bounds a mouthful. See `gutRoomOf`.
    */
   gutSize: number;
 }
 
 /**
- * One entry's row in the harvest's flow buffer.
- *
- * The buffer used to be one float an entry — the room in that body's tank —
- * because uptake was one species taken to saturation. The sampled mouthful
- * makes it a room, a budget and four affinities, and those are per-body: the
- * room is in this body's gut, the budget is `uptakeVmax` scaled by its kind's
- * trophic yield and `ks` comes off a gene, so they cannot be uniforms the way
- * phase 1's globals were.
- *
- * Widened rather than given a buffer of its own, because `field.wgsl` binds
- * eight storage buffers of a guaranteed eight and has none to spare. A wider
- * stride costs memory and no bindings, which is the trade this file has to
- * keep making.
- *
- * `total` is the number that makes the four affinities a *sample* rather than
- * four independent meals: it is the whole budget for the frame, and the
- * species spend it in proportion to what the water is made of. Per body rather
- * than a uniform because the trophic yield is per kind.
- *
- * `room` is room in the *gut*, not the tank. What a body swallows and what it
- * can use are two different questions now, and only the first one belongs
- * here: the expression rows and the co-substrate — a reagent spent from the
- * gut — moved to `Sim.runDigestion`, which is what paid for `total` and then
- * some: the stride is narrower than it was before either existed.
- *
- * `got` overwrites `ks` on the way back out: the affinities are consumed
- * before anything is written, the two are the same shape, and a separate
- * output span would double the buffer to carry four floats that are only read
- * once. `room` and `total` sit below it and are both read before the first
- * write. Derived on both sides from here — the shader's copies are literals,
- * and `field-kernel.test.ts` reads them out of the source and pins them to
- * these.
+ * One entry's row in the harvest's flow buffer: gut room, the frame's whole
+ * budget `total`, then four affinities. Per body rather than uniforms because
+ * the budget is scaled by the kind's trophic yield and `ks` comes off a gene.
+ * Widened rather than given its own buffer because `field.wgsl` has no
+ * bindings to spare. `got` overwrites `ks` on the way back out: the
+ * affinities are consumed before anything is written, and `room` and `total`
+ * sit below it. The shader's copies are literals; `field-kernel.test.ts`
+ * pins them to these.
  */
 export const HARVEST_ROOM = 0;
 export const HARVEST_TOTAL = 1;
@@ -1281,16 +920,10 @@ export const HARVEST_GOT = HARVEST_KS;
 export const HARVEST_STRIDE = HARVEST_KS + CHANNELS;
 
 /**
- * Run a plan against the CPU field, crediting as it goes.
- *
- * The shader's `harvest` is a line-for-line port of this loop; keep them in
- * step. `field-kernel.test.ts` holds the mirror that checks they are.
- *
- * Which path runs is the plan's own verdict, `metered`, decided when it was
- * built; `uptake` only supplies the Hill coefficient here. Metered, every
- * body in a block is bounded by the block's own composition, read once before
- * anybody eats, which is what makes uptake a phenotype rather than a race.
- * Unmetered, the loop is what it always was.
+ * Run a plan against the CPU field, crediting as it goes. The shader's
+ * `harvest` is a line-for-line port of this loop; `field-kernel.test.ts`
+ * holds the mirror. Which path runs is the plan's own `metered` verdict;
+ * `uptake` only supplies the Hill coefficient here.
  */
 export function runHarvestPlan(
   plan: HarvestPlan,
@@ -1310,11 +943,7 @@ export function runHarvestPlan(
     const count = B[b * 6 + 5];
     const key = plan.keys[b];
     if (!metered) {
-      /*
-       * The single-species path: take what fits, from the ground, to
-       * saturation. What the pond runs by default, and bit for bit what it ran
-       * before any of the reaction table existed.
-       */
+      // The single-species path: take what fits, from the ground, to saturation.
       for (let e = 0; e < count; e++) {
         const s = plan.slots[first + e];
         const cap = CAP[s];
@@ -1327,35 +956,15 @@ export function runHarvestPlan(
       continue;
     }
     /*
-     * The reaction table's four uptake rows, drawn as one mouthful.
-     *
-     * Densities are read once for the block, before anybody eats, so the order
-     * bodies are visited in cannot change what any of them is allowed to draw
-     * — which is half of what the plan's §4 is fixing. The other half is that
-     * every draw is bounded by a rate, so a block that cannot satisfy everyone
-     * shares out by exhaustion rather than by who was born first.
-     *
-     * A body takes a *sample of the water*, not four separate meals: `total`
-     * is the whole budget for the frame and each species may have at most its
-     * share of it, `total * density / stock`. Nobody may decline the rest of
-     * the mixture and eat only the good part, which is what makes ground that
-     * is mostly scent poor ground: on pure ground the ground's share is the
-     * whole budget, and every part of the mixture that is not ground is a part
-     * of the budget spent on something that needs machinery — the uptake row,
-     * and the ground it has to be paired with, both asked in
-     * `Sim.runDigestion` — before it is worth anything. That is also what
-     * closes the fountain the species rows used to be switched off to avoid:
-     * `params.deposit` mints scent into three channels, and a body eating its
-     * own scent back now displaces its income rather than adding to it,
-     * because the shares sum to `total` however rich the cell is.
-     *
-     * One gut, four species competing for it: `left` is the room remaining
-     * after the species already taken, read off the plan so both field paths
-     * bound a mouthful by the same number, so a body that fills on the first
-     * thing it finds does not also take the rest. Species are visited in index
-     * order, which is arbitrary and has to be identical here and in the
-     * shader; `Sim.runDigestion` visits them in a different order for a
-     * reason of its own, see `DIGEST_ORDER`.
+     * The four uptake rows, drawn as one mouthful. Densities are read once
+     * for the block, before anybody eats, so visit order cannot change what
+     * any body may draw. Each species may have at most its share of `total`,
+     * `total * density / stock`, so a body cannot decline the rest of the
+     * mixture: scent-rich ground is poor ground, and a body eating its own
+     * scent back displaces its income rather than adding to it. `left` is
+     * gut room read off the plan, so both field paths bound a mouthful by
+     * the same number. Species are visited in index order, which must be
+     * identical here and in the shader; `Sim.runDigestion` uses `DIGEST_ORDER`.
      */
     let stock = 0;
     for (let c = 0; c < CHANNELS; c++) {
@@ -1363,8 +972,7 @@ export function runHarvestPlan(
       SPECIES_DENSITY[c] = d;
       if (d > 0) stock += d;
     }
-    // Nothing in the water at all: no shares to divide, and `stock` is about
-    // to be a denominator.
+    // Nothing in the water: `stock` is about to be a denominator.
     if (stock <= 0) continue;
     const GUT = store.gut;
     for (let e = 0; e < count; e++) {
@@ -1375,43 +983,30 @@ export function runHarvestPlan(
       const total = R[ro + HARVEST_TOTAL];
       if (!(total > 0)) continue;
       const go = s * CHEM_SPECIES;
-      // `FLOW_EPS` between species, as the shader has it: the body-level
-      // floor above is the build's, and the two sides must stop on the same
-      // crumb or the mirror is a mirror only until the fourth decimal.
+      // `FLOW_EPS` between species, as the shader has it; the two sides must
+      // stop on the same crumb.
       for (let c = 0; c < CHANNELS && left > FLOW_EPS; c++) {
         const density = SPECIES_DENSITY[c];
         if (!(density > 0)) continue;
         /*
-         * Monod inline rather than through `uptakeRate`, because the two mean
-         * opposite things by a rate of zero. There, `cap <= 0` is the sentinel
-         * for *unmetered* — take what fits — which is what the whole
-         * single-species path above rests on; here a `total` of zero is a
-         * kind with no trophic yield, and it takes nothing.
-         *
-         * `total` stands in for `vmax` on every species: how fast a body can
-         * pull a species out of the water is a transporter question, and a
-         * body that is standing in nothing but one species may spend its whole
-         * mouthful on it. Hill at `n`, which is plain Monod at 1 and does not
-         * pay for the two `pow` calls there. See `UptakeKinetics.hillN`.
+         * Monod inline rather than through `uptakeRate`: there `cap <= 0`
+         * means unmetered, here a `total` of zero is a kind with no trophic
+         * yield. `total` stands in for `vmax` on every species. Hill at `n`
+         * is plain Monod at 1 and skips the two `pow` calls.
          */
         const ks = R[ro + HARVEST_KS + c];
         const sN = hill === 1 ? density : Math.pow(density, hill);
         const kN = hill === 1 ? ks : Math.pow(ks, hill);
         const rate = (total * sN) / (kN + sN);
-        // The proportional sample: this species' share of one budget, which is
-        // the ceiling however good the body's transporter for it is.
+        // The proportional sample: this species' share of one budget.
         const share = total * (density / stock);
         let want = rate < share ? rate : share;
         if (want > left) want = left;
         if (!(want > 0)) continue;
         const got = grid.takeFrom(key, c, want);
         if (got <= 0) continue;
-        /*
-         * Into the gut as itself, not into the tank as money. Whether any of
-         * this is food to this body is `Sim.runDigestion`'s question, and a
-         * species it cannot convert stays here taking up the room that bounds
-         * the next mouthful until `Sim.runExcretion` puts it back.
-         */
+        // Into the gut as itself, not into the tank as money; a species the
+        // body cannot convert takes up room until `Sim.runExcretion` puts it back.
         GUT[go + c] += got;
         left -= got;
       }
@@ -1420,15 +1015,8 @@ export function runHarvestPlan(
 }
 
 /**
- * Room left in one body's gut.
- *
- * `gutSize` multiples of the body's own `energyCap` rather than a trait of its
- * own: `energyCap` is heritable and already means "how much can this body
- * hold", so a lineage that breeds a bigger tank breeds a bigger gut with it
- * and selection has one number to move rather than two it would have to move
- * together. Never negative — a gut can be handed more than it has room for by
- * a rate change mid-run, and that is a body that cannot eat, not a body with
- * negative room.
+ * Room left in one body's gut: `gutSize` multiples of its heritable
+ * `energyCap`, so one gene moves tank and gut together. Never negative.
  */
 export function gutRoomOf(store: AgentStore, slot: number, gutSize: number): number {
   const gutCap = store.energyCap[slot] * gutSize;
@@ -1440,13 +1028,9 @@ export function gutRoomOf(store: AgentStore, slot: number, gutSize: number): num
 const SPECIES_DENSITY = new Float64Array(CHANNELS);
 
 /**
- * The harvest the pond runs: bin, then drain, on the store's arrays.
- *
- * At `cap` 0 it is `harvestSlots` on a store — take what fits, ground alone,
- * straight into the tank, bit for bit. Above it, it is the sampled mouthful
- * into the gut that `harvestSlots` does not have; the two are twins only on
- * the unmetered path, and `harvestSlots` exists so that `energy.test.ts` can
- * pin that path on plain literals with no store to hand.
+ * The harvest the pond runs: bin, then drain, on the store's arrays. At
+ * `cap` 0 it is `harvestSlots` on a store, bit for bit; `harvestSlots`
+ * exists so `energy.test.ts` can pin that path on plain literals.
  */
 export function harvestSlotsFast(
   agents: Iterable<Agent>,
@@ -1462,40 +1046,25 @@ export function harvestSlotsFast(
 export interface UpkeepOptions {
   /**
    * Fraction of ordinary upkeep put back into the field rather than
-   * destroyed, `params.upkeepExcrete`.
-   *
-   * 0 is what upkeep has always done: rent vanishes. 1 makes a body
-   * conservative — nothing it runs creates or destroys matter — which is the
-   * invariant that makes selection honest. See
-   * `docs/history/energy-chemistry-plan.md` §5. It leaves as the body's own excretion
-   * mix through `payOut`, which is why the store path also wants `expressed`;
-   * the `SlotBody` path has no genome to read and lays it down as ground.
-   *
-   * Named apart from `params.excreteRate` on purpose: that is the reaction
-   * table's dial and this is a fraction of rent, and the two were confused
-   * once, at a cost of a third of the pond.
+   * destroyed, `params.upkeepExcrete`. 0: rent vanishes. 1: a body creates
+   * and destroys nothing. Leaves as the body's own excretion mix through
+   * `payOut`, which is why the store path also wants `expressed`. Not
+   * `params.excreteRate`, which is the reaction table's dial.
    */
   rentBack?: number;
   /** `params.eraUpkeepRatio`; see `upkeepRateFor` and `upkeepRateOf`. */
   eraRatio?: number;
   /**
    * Whether `refreshExpression` ran this frame, so the vectors mean something.
-   *
-   * Passed rather than derived, for the reason `HarvestPlan.build` guards on
-   * `meter`: reading eight floats a body to discover they are all zero is
-   * still a pass over the roster, and in the shipped default they always are.
+   * Passed rather than derived so the default pays no pass over the roster.
    */
   expressed?: boolean;
 }
 
 /**
- * The upkeep the pond runs, on the store's arrays.
- *
- * `tickUpkeep` on a store when nothing is expressed, which is the shipped
- * default. When the vectors are live (`opts.expressed`) it bills by
- * `upkeepRateOf` — the producer's discount for what a body makes rather than
- * what glyph it wears — and pays `rentBack` out through `payOut` as the
- * body's own excretion mix.
+ * The upkeep the pond runs, on the store's arrays. Bills by `upkeepRateOf`
+ * when the vectors are live (`opts.expressed`), by glyph otherwise, and pays
+ * `rentBack` out through `payOut` as the body's own excretion mix.
  */
 export function tickUpkeepFast(
   agents: Iterable<Agent>,
@@ -1522,8 +1091,6 @@ export function tickUpkeepFast(
   for (const a of agents) {
     const s = a.slot;
     if (LOCKED[s]) continue;
-    // By what the body expresses when the vectors are live, by its glyph when
-    // they are not — a pond running no chemistry, which is the shipped default.
     const r = expressed ? upkeepRateOf(EXPRESS, s, rate, eraRatio) : upkeepRateFor(CODE_KIND[KIND_CODE[s]], rate, eraRatio);
     if (r === 0) continue;
     const was = EXTRA[s];
@@ -1531,15 +1098,13 @@ export function tickUpkeepFast(
     const cap = CAP[s];
     const floor = FLOOR[s];
     if (next > cap) {
-      // See tickUpkeep's own comment: a full producer spills onto the
-      // ground rather than into nothing.
+      // A full producer spills onto the ground rather than into nothing.
       if (grid) grid.addAt(X[s], Y[s], next - cap);
       EXTRA[s] = cap;
     } else {
       EXTRA[s] = Math.max(floor, next);
     }
-    // See `tickUpkeep`: the ground gets what left the tank, not what was
-    // billed — a body in debt is not excreting anything.
+    // The ground gets what left the tank, not what was billed: a body in debt excretes nothing.
     if (grid && back > 0) {
       const paid = Math.max(0, was) - Math.max(0, EXTRA[s]);
       if (paid > 0) payOut(grid, EXPRESS, s, X[s], Y[s], paid * back);
@@ -1553,28 +1118,11 @@ export function tickUpkeepFast(
 const PAYOUT = new Float64Array(CHANNELS);
 
 /**
- * Put `amount` that left this body's tank back into the field, as whatever
- * its metabolism makes.
- *
- * The one road out for every tank-to-dish spender — rent, the row cost, the
- * gait's pathway — so that they leave as the same mix. Upkeep is the negative
- * half of a body's stoichiometry, charged in the one currency, and this is
- * the positive half: what a body is a *source* of is its excretion rows, so
- * what leaves through spending leaves as that mix. A Con lays down `conP` and
- * `aux`, a Dup `dupP` and `aux`, an Era ground — which is what an Era's rent
- * has always done, and used to be all any body's rent could do.
- *
- * Two things follow, and both were already mechanisms rather than new ones. A
- * body fouls the cell it is standing in, and after §4 the harvest is a sample
- * of the water — so its own output dilutes its next mouthful and it has to
- * move or eat its own exhaust. And what it lays down is another body's
- * substrate, which is §1's claim about four species finally being paid for by
- * something a body does whether it wants to or not.
- *
- * Ground when the body expresses no excretion row at all — a pure consumer,
- * or a body born since `refreshExpression` last ran, whose vector is the zero
- * it was cleared to. Its rent still has to land somewhere, and ground is the
- * one species every body is allowed to make.
+ * Put `amount` that left this body's tank back into the field as its
+ * excretion mix. The one road out for every tank-to-dish spender — rent,
+ * the row cost, the gait's pathway — so they all leave as the same mix, and
+ * a body fouls the cell it is standing in. Ground when the body expresses
+ * no excretion row at all: rent still has to land somewhere.
  */
 export function payOut(grid: EnergyGrid, express: Float64Array, slot: number, x: number, y: number, amount: number): void {
   const eo = slot * ROW_COUNT + ROW_EXCRETE;
@@ -1589,18 +1137,14 @@ export function payOut(grid: EnergyGrid, express: Float64Array, slot: number, x:
   grid.addSpeciesAt(x, y, PAYOUT);
 }
 
-/**
- * How much energy this body is in debt by, and therefore how badly it wants
- * some. Zero at break-even; at the point of death this is `-debtCap`.
- */
+/** Debt as a need: zero at break-even, `-debtCap` at the point of death. */
 export function hungerNeed(a: SlotBody): number {
   return a.extra < 0 ? -a.extra : 0;
 }
 
 /**
  * Where on this body's own tank a rescue aims, from `debtCap` at 0 to
- * `energyCap` at 1. Always between the two, so a small tank cannot ask past
- * full and a deep-debt body cannot set a target above its ceiling.
+ * `energyCap` at 1. Always between the two.
  */
 export function rescueTarget(a: {
   debtCap: number;
@@ -1617,21 +1161,11 @@ export function rescueTarget(a: {
 }
 
 /**
- * How much a body asks for once it has been in debt, and until it is standing
- * again. Returns what it is short of `rescueTarget`, and latches `recovering`
- * on the way past zero in both directions.
- *
- * `hungerNeed` alone is an ambulance that stops at the kerb: it goes silent
- * the instant `extra` reaches 0, so a rescued body sat at exactly break-even
- * with a full neighbour beside it and no way to ask for more. It could not
- * afford a rewrite (that costs a whole share), and one frame of upkeep put it
- * back in debt — so the same body was rescued over and over while the surplus
- * two hops away stayed untouched. The latch keeps the ask alive across the
- * zero crossing, which is what turns a rescue into a refill.
- *
- * Only bodies that actually went under ask this way. A body that is merely
- * poor stays quiet, so a well-fed net does not turn into a diffusion pond
- * where every stock levels out and nobody can concentrate enough to act.
+ * How much a body asks for once it has been in debt, until it is standing
+ * again: what it is short of `rescueTarget`, with `recovering` latched on
+ * the way past zero in both directions. Without the latch the ask goes
+ * silent at exactly 0 and the same body is rescued every frame. Only bodies
+ * that went under ask this way, so a merely poor net does not level out.
  */
 export function rescueNeed(a: SlotBody): number {
   const target = rescueTarget(a);
@@ -1644,17 +1178,10 @@ export function rescueNeed(a: SlotBody): number {
 }
 
 /**
- * How much more this end of a stalled redex needs before the pair can fire.
- *
- * Measured against the share it has to pay, not against the storage cap — it
- * is asking for enough to commute, not for a full tank. Per end rather than
- * per pair: an end holding 0.8 is short 0.2 no matter what its partner holds.
- *
- * `banked` is what a redex escrow already holds against this end, so an ask
- * shrinks as the stake fills instead of restating the whole share every frame
- * and out-pulling redexes that have got nowhere. A body in debt still asks for
- * enough to clear it *and* pay, which is why this reads `extra` rather than
- * `spareEnergy`.
+ * How much more this end of a stalled redex needs before the pair can fire,
+ * against the share it has to pay, not the cap. `banked` is what the escrow
+ * already holds against this end. Reads `extra` rather than `spareEnergy`:
+ * a body in debt asks for enough to clear it and pay.
  */
 export function redexNeed(a: SlotBody, banked = 0): number {
   const gap = rewriteShareOf(a) - banked - a.extra;
@@ -1662,28 +1189,18 @@ export function redexNeed(a: SlotBody, banked = 0): number {
 }
 
 /**
- * What this body can pass on: its stock above break-even, and nothing more.
- *
- * A body in debt has none, so energy arriving at one settles that debt first
- * and only what is left over travels further. That falls out of `extra` being
- * a single signed scalar rather than needing a rule of its own.
+ * What this body can pass on: its stock above break-even. A body in debt
+ * has none, so energy arriving settles the debt first.
  */
 export function spareEnergy(a: SlotBody): number {
   return a.extra > 0 ? a.extra : 0;
 }
 
 /**
- * Flat neighbour lists for the wire graph, in the caller's index space.
- *
- * A Map of arrays cost one array per body per frame — some ten thousand
- * short-lived objects on a grown pond — for a structure that is rebuilt from
- * scratch every time anyway. This fills two reusable typed arrays instead:
+ * Flat neighbour lists for the wire graph, in the caller's index space:
  * `off[i]..off[i+1]` are body `i`'s neighbours in `nei`. Built by counting
- * sort, so neighbours arrive in wire order exactly as appending would give.
- *
- * Self-wires and ends outside the index are dropped; a duplicate wire between
- * the same pair is not, which matches the graph — two ports can join the same
- * two bodies and both should conduct.
+ * sort, so neighbours arrive in wire order. Self-wires and ends outside the
+ * index are dropped; duplicate wires between one pair are kept and both conduct.
  */
 export class WireAdjacency {
   off = new Int32Array(1);
@@ -1693,8 +1210,7 @@ export class WireAdjacency {
 
   /**
    * Scratch for a relaxation over the graph. Sized generously: a body can be
-   * re-queued each time a bigger need reaches it, and the decay bounds how
-   * often that can happen.
+   * re-queued each time a bigger need reaches it.
    */
   queue(n: number): Int32Array {
     const want = Math.max(64, n * 8);
@@ -1703,22 +1219,11 @@ export class WireAdjacency {
   }
 
   /**
-   * Builds the CSR from an id-keyed index. **Only the tests call this.**
-   *
-   * The frame does not: `Sim.refreshWakeGraph` lays one CSR from the shared
-   * roster and the wire list's cached endpoint indices, and every pass that
-   * wants neighbours — the two LOD tiers, flocking, and the need field —
-   * reads that same pair of arrays. This stays because the energy tests need
-   * to hand `spreadRequests` a graph they wrote by hand, and an id-keyed
-   * builder is the honest way to write one. It is not a fast path.
-   *
-   * `index` maps agent id to its slot in the caller's dense list.
-   *
-   * `wires` is a factory, not an iterable, because the counting sort walks the
-   * set twice and the obvious thing to hand in — `graph.wires.values()` — is a
-   * one-shot iterator. Passing it directly leaves the second pass empty and
-   * every neighbour reading as body 0, which is wrong quietly rather than
-   * loudly: the field still spreads, just through a graph nobody built.
+   * Builds the CSR from an id-keyed index. Only the tests call this; the
+   * frame reads `Sim.refreshWakeGraph`'s CSR. `index` maps agent id to its
+   * slot in the caller's dense list. `wires` is a factory, not an iterable:
+   * the counting sort walks the set twice, and a one-shot iterator would
+   * leave the second pass empty with every neighbour reading as body 0.
    */
   build(
     n: number,
@@ -1760,18 +1265,10 @@ export function seedRequest(agent: SlotBody, amount: number): void {
 }
 
 /**
- * Relax the need field to its fixpoint, inside this frame.
- *
- * The reach-0 path, and the pond's default. Queue-driven, so it costs one
- * visit per body whose value actually improved rather than one sweep per hop
- * — `O(n + wires)` against the `O(hops * (n + wires))` that iterating
- * `spreadRequests` to the same answer would cost. That difference is not
- * academic: iterating it `n` times to be sure of the fixpoint is quadratic in
- * the roster, and at a few hundred founders it is already the frame.
- *
- * The answer is identical to what `spreadRequests` converges to. What this
- * cannot do is take *time*: the field it leaves has no history, so nothing
- * can propagate. That is what `params.requestReach` buys and what it costs.
+ * Relax the need field to its fixpoint, inside this frame: the reach-0 path
+ * and the pond's default. Queue-driven, `O(n + wires)`, and identical to
+ * what iterating `spreadRequests` converges to. What it cannot do is take
+ * time: the field has no history, so nothing propagates.
  */
 export function relaxRequestsFast(
   list: Agent[],
@@ -1835,56 +1332,20 @@ export function spreadRequestsFast(
 }
 
 /**
- * One hop of flow down the field, per frame. Returns the energy moved.
- *
- * A body gives to its neediest neighbour, and only to one that is needier
- * than itself, so energy climbs the gradient one wire at a time and a surplus
- * at one end of a net reaches a shortage at the other end over several frames.
- * It gives what it can spare against its own need, capped by what the
- * recipient is actually short of — so nothing is over-delivered and a donor
- * about to be billed itself keeps enough to pay.
- *
- * Where two comparable needs face each other, the fields meet at equal value
- * in the middle, `n.request > d.request` is false on both sides, and nothing
- * crosses. That flat spot is the intended behaviour, not a stall.
- *
- * `onMoved` is called for each transfer, in the order they happen. The sim
- * uses it to recoil the two bodies against each other; nothing about the
- * energy accounting depends on it.
- */
-/**
- * How a transfer is sized, for both `flowCharges` and its fast twin.
- *
- * `quantum` 0 is the continuous law: a body gives whatever the gradient asks
- * for, which at steady state is about 4e-4 a frame. Above zero a transfer is
- * one whole packet or nothing, and only a body holding at least a packet can
- * send one — so a donor accumulates, fires, and accumulates again.
- *
- * The point is not the discreteness for its own sake. `transportRecoil`
- * scales the kick with the amount moved, so a continuous pond kicks at 0.04
- * against ambient speeds of 20-60 px/s and the whole momentum machinery sits
- * three orders under its own noise — measured, twice, in `docs/experiments.md`.
- * A packet is what puts the impulse above it.
- *
- * `grid` is where a receiver's overflow goes, and is required once `quantum`
- * is on: a whole packet is sent whether or not the far end has room, so the
- * remainder has to land somewhere or the pond quietly mints a hole in its own
- * conservation. Same destination a rewrite's leftovers take.
+ * How one hop of flow is sized. A body gives to its neediest neighbour, only
+ * one needier than itself, capped by what the recipient is short of; two
+ * comparable needs meet at a flat spot and nothing crosses, which is
+ * intended. `quantum` 0 is the continuous law. Above zero a transfer is one
+ * whole packet or nothing, and only a body holding at least a packet can
+ * send one, which is what puts `transportRecoil`'s impulse above the pond's
+ * noise. `grid` is required once `quantum` is on: a whole packet is sent
+ * whether or not the far end has room, and the remainder must land somewhere.
  */
 export interface FlowOptions {
   /**
-   * Override every body's own quantum with this one. Omit — which is what the
-   * simulation does — and each sender uses its own `transportQuantum`, seeded
-   * from the parameter at birth exactly as `transportRecoil` is.
-   *
-   * A per-body quantum is what lets a net's *structure* set its rhythm. A
-   * body accumulates until it holds a packet and then fires, which is a
-   * relaxation oscillator whose period is its quantum over its income; give
-   * neighbouring bodies different quanta and the chain is a row of coupled
-   * oscillators at different natural frequencies, which is the standard model
-   * for how gut peristalsis comes to travel in one direction. Nothing here
-   * makes a kind special: two bodies differ because they were seeded or bred
-   * differently, not because of what they are.
+   * Override every body's own quantum. Omit — as the simulation does — and
+   * each sender uses its own heritable `transportQuantum`, so a chain of
+   * bodies with different quanta is a row of coupled relaxation oscillators.
    */
   quantum?: number;
   /** Where a full receiver's overflow is deposited. Required with `quantum`. */
@@ -1893,10 +1354,7 @@ export interface FlowOptions {
 
 /**
  * The packet the two flow laws share: send, spill what will not fit, report.
- *
- * The recoil is billed on the whole packet rather than on what the receiver
- * kept, because the impulse is the sender ejecting it — what happens at the
- * far end cannot reach back and make the push smaller.
+ * Recoil is billed on the whole packet, since the impulse is the sender's.
  */
 function deliver(
   give: number,
@@ -1919,14 +1377,8 @@ function deliver(
 }
 
 /*
- * Scratch for `flowChargesFast`, which ran three allocations a frame: the
- * donor list, a `Set` of who had already been given to, and the closure the
- * sort compares with. At twenty thousand bodies most of them are donors, so
- * that is a twenty-thousand-element array and a `Set` of the same order,
- * rebuilt sixty times a second and thrown away.
- *
- * Grown, never shrunk, and shared — there is one pond per `Sim` and this pass
- * is not reentrant.
+ * Scratch for `flowChargesFast`: grown, never shrunk, and shared — one pond
+ * per `Sim`, and this pass is not reentrant.
  */
 let flowDonors = new Int32Array(0);
 let flowSlot = new Int32Array(0);
@@ -1957,12 +1409,7 @@ export function flowChargesFast(
     flowTaken = new Uint8Array(n);
   }
   const donors = flowDonors;
-  /*
-   * Slots resolved once, up front, because the sort comparator ran twice per
-   * comparison and each `list[i].slot` is a property access through the
-   * flyweight. At twenty thousand donors that is a few hundred thousand
-   * comparisons and four such accesses in each.
-   */
+  // Slots resolved once, up front; the sort comparator reads them.
   const slotOf = flowSlot;
   const taken = flowTaken;
   taken.fill(0, 0, n);
@@ -1971,9 +1418,7 @@ export function flowChargesFast(
     const s = list[i].slot;
     slotOf[i] = s;
     if (LOCKED[s]) continue;
-    // spareEnergy(a) > FLOW_EPS, inlined: spareEnergy is `extra > 0 ? extra
-    // : 0`, and FLOW_EPS > 0, so the comparison is equivalent to extra
-    // itself exceeding FLOW_EPS.
+    // `spareEnergy(a) > FLOW_EPS`, inlined.
     const q = forced !== undefined ? forced : QUANT[s];
     if (EXTRA[s] > FLOW_EPS && EXTRA[s] >= (q > 0 ? q : FLOW_EPS)) donors[count++] = i;
   }
@@ -2023,14 +1468,9 @@ export function flowChargesFast(
 }
 
 /**
- * Put a rewrite's released energy back into the net, neediest first.
- *
- * The leftovers and the newborns are where the energy comes out, so it enters
- * the graph there and the ordinary gradient carries it onward over the next
- * few frames. Each body can only take what it has room for — that per-body
- * cap is the bandwidth limit — and an annihilation in a well-fed net releases
- * more than the survivors can hold, so the remainder drops to the ground at
- * the rewrite's midpoint for whoever forages over it later.
+ * Put a rewrite's released energy back into the net, neediest first. Each
+ * body takes only what it has room for; the remainder drops to the ground
+ * at the rewrite's midpoint.
  */
 export function settlePool(
   pool: number,

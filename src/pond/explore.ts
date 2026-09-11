@@ -1,34 +1,11 @@
 /*
- * Reading a library of runs: what varies, what moves together, what regimes
- * the thing has, and which effects are conditional.
- *
- * Four passes, because no one of them answers the question on its own.
- *
- *   1. **Joint PCA** over standardised `[params | outcomes]`. Descriptive, and
- *      its virtue is that it looks at every outcome at once — the productivity
- *      confound in the ground sweeps went unnoticed for two rounds because
- *      only the outcomes expected to move were being read. A method that puts
- *      them all in one picture shows a total diverging without anyone having
- *      to suspect it.
- *   2. **PLS**, which is the tool for the job PCA is usually asked to do here.
- *      PCA maximises *total* variance and can spend its leading components on
- *      within-outcome structure that no parameter drives; PLS maximises the
- *      *cross-block* covariance, which is the actual question.
- *   3. **Clustering on the outcomes**, because ponds do not vary continuously.
- *      There is a sterile regime and a fertile one with a sharp transition,
- *      and "which region of parameter space gives which kind of pond" is a far
- *      more useful artefact than a best-parameters vector — the objectives
- *      trade off, so there is no single best.
- *   4. **Conditional effects**, because the other three are linear and additive
- *      and the interesting couplings here are none of those things.
- *      `senseScale` is not correlated with `excreteRate`; it *means* something
- *      different depending on it. A linear method reports such a parameter as
- *      weak and says nothing about the conditionality, which is exactly the
- *      wrong conclusion and exactly the mistake this pipeline exists to stop.
- *
- * No dependencies, so the arithmetic is here. It is tested against cases with
- * known answers, because an analysis tool that is subtly wrong does not fail —
- * it produces a plausible number and someone believes it.
+ * Reading a library of runs: joint PCA over standardised `[params | outcomes]`
+ * (every outcome in one picture), PLS (cross-block covariance, the actual
+ * question), k-means on the outcomes (ponds fall into regimes, and the
+ * objectives trade off), and conditional effects (the couplings here are not
+ * linear or additive: a dial can mean something different depending on
+ * another). No dependencies, so the arithmetic is here, tested against cases
+ * with known answers.
  */
 
 export interface Matrix {
@@ -48,33 +25,15 @@ export function matrix(rows: number[][], names: string[]): Matrix {
 }
 
 /**
- * Centre and scale every column to unit variance, dropping the ones that do
- * not vary.
- *
- * Dropping matters more than it looks: a library holds 80 parameters of which
- * a handful were ever moved, and a constant column has no correlation with
- * anything — kept in, it contributes a zero row to every loading and an
- * eigenvalue of zero, and it makes the output long enough that the six things
- * that did vary are hard to find in it.
- */
-/**
  * Whether a column carries a real spread, or only floating-point dust.
- *
- * Relative, because an absolute floor is wrong at both ends. A constant
- * column is rarely exactly constant: nine identical doubles summed and
- * divided by nine need not give the double back, and the residue scales with
- * the magnitude — dust on `maxAgents` at 100000 is around 1e-11, which any
- * fixed 1e-12 floor waves through as signal.
- *
- * This project has now produced three confident numbers from that residue:
- * an eta-squared of 1.0 for a metric defined as a constant, a "the dropped
- * runs differ" warning naming three parameters that had not moved, and a
- * standardised column of pure noise waiting to happen on the wide dials.
+ * Relative, not an absolute floor: the residue of a constant column scales
+ * with its magnitude, and standardising it would make a column of pure noise.
  */
 export function varies(mean: number, sd: number): boolean {
   return sd > Math.max(Math.abs(mean), 1) * 1e-12;
 }
 
+/** Centre and scale every column to unit variance, dropping the ones that do not vary. */
 export function standardise(m: Matrix): Matrix {
   const keep: number[] = [];
   const mean: number[] = [];
@@ -174,11 +133,7 @@ export interface CrossComponent {
   correlation: number;
 }
 
-/**
- * PLS2, which finds the directions in each block that covary most with the
- * other — the thing joint PCA is usually being asked for and does not
- * optimise. Both blocks must already be standardised.
- */
+/** PLS2: the directions in each block that covary most with the other. Both blocks must already be standardised. */
 export function pls(x: Matrix, y: Matrix, want: number): CrossComponent[] {
   const X = Float64Array.from(x.data);
   const Y = Float64Array.from(y.data);
@@ -388,19 +343,10 @@ export interface Conditional {
 }
 
 /**
- * Where does one parameter's effect *depend* on another's setting?
- *
- * The screen for the failure mode a linear model cannot express: an effect
- * that exists in half the parameter space and not the other half. Split the
+ * Where does one parameter's effect depend on another's setting? Split the
  * runs at the median of the condition, correlate the driver with the outcome
- * within each half, and report the difference. A large swing is an
- * interaction, and it is exactly the shape of `senseScale` mattering only
- * where `excreteRate` has switched the minting off.
- *
- * A median split rather than a fitted product term because it needs no
- * assumption about the shape of the dependence — a threshold, a switch and a
- * smooth ramp all show up — and because with per-run noise this large, a
- * two-bin estimate is about as much resolution as the data can carry.
+ * within each half, and report the difference. A median split rather than a
+ * fitted product term needs no assumption about the shape of the dependence.
  */
 export function conditionalEffects(
   params: Matrix,

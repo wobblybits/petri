@@ -14,20 +14,11 @@ import {
 } from './explore.ts';
 
 /*
- * Four passes over whatever the library holds.
- *
- *   joint PCA   what moves together at all, parameters and outcomes in one
- *               column space, which is the pass that catches the unexpected
- *   PLS         the same question asked across the blocks, so a direction has
- *               to link parameters TO outcomes to score
- *   k-means     clustering the outcomes, then reading back what made them:
- *               the regimes, not the dials
- *   conditional where one dial changes what another means — the only pass
- *               that sees interactions, and interactions are where this
- *               simulation keeps hiding things
- *
- * None of it is causal. It is a map of a library that was not designed as an
- * experiment, and its job is to say which experiment to run.
+ * Four passes over whatever the library holds: joint PCA (what moves
+ * together at all), PLS (directions that link parameters to outcomes),
+ * k-means on the outcomes (the regimes, read back to the dials), and
+ * conditional effects (where one dial changes what another means). None of
+ * it is causal; its job is to say which experiment to run.
  */
 
 export interface Loading {
@@ -65,12 +56,8 @@ export interface ExploreOptions {
   drop?: string[];
 }
 
-/*
- * `analyze`'s defaults, minus the ones that are each other. A joint PCA over
- * duplicated columns finds the duplication and reports it as structure, which
- * is true and useless: `nets` and `nets_effective`, `lines` and
- * `lines_effective`, would take a whole component to say so.
- */
+// `analyze`'s defaults, minus the ones that are each other: a joint PCA over
+// duplicated columns spends a component reporting the duplication.
 export const EXPLORE_METRICS: readonly string[] = [
   'bodies',
   'wires',
@@ -113,19 +100,10 @@ export function exploreLibrary(db: PondDb, opts: ExploreOptions = {}): ExploreRe
   const trials = libraryTrials(db, { sweep: opts.sweep ?? null, metrics, warmup: opts.warmup });
   const notes: string[] = [];
 
-  /*
-   * A run is usable when every metric folded to a number. Dropping the rest
-   * whole is the honest move: a matrix with holes patched to the column mean
-   * has correlations that were put there by the patching.
-   */
+  // A run is usable when every metric folded to a number; holes patched to
+  // the column mean would put correlations there.
   const has = (t: TrialRow, k: string): boolean => t.values[k] !== null && t.values[k] !== undefined;
-  /*
-   * A library accumulates columns. `measureDiversity` gained `fullMean` after
-   * most of these runs were made, and requiring every metric of every run
-   * would let the newest column silently veto the entire history — which it
-   * did, the first time this was pointed at a real database. So a metric that
-   * most of the library lacks is dropped instead of the library, out loud.
-   */
+  // A metric most of the library lacks is dropped instead of the library, out loud.
   const missing = metrics.map((k) => ({ k, n: trials.filter((t) => !has(t, k)).length }));
   const gone = missing.filter((e) => e.n > trials.length / 2);
   const live = metrics.filter((k) => !gone.some((e) => e.k === k));
@@ -142,17 +120,9 @@ export function exploreLibrary(db: PondDb, opts: ExploreOptions = {}): ExploreRe
       `${trials.length - keep.length} of ${trials.length} runs dropped for missing metrics: ` +
         cost.map((e) => `${e.k} (${e.n})`).join(', '),
     );
-    /*
-     * And say whether they were a random third. A null is usually a pond that
-     * did not do the thing — `commutes_per_latch` is null when nothing
-     * latched in the window — so the runs a metric costs are exactly the ones
-     * where some parameter pushed the pond into silence. Dropping them
-     * quietly restricts the sample to ponds that worked, and every loading
-     * below is then conditional on that.
-     *
-     * Measured once, on `phys1`: one metric cost 36 per cent of the runs, and
-     * the first principal component came back with its signs reversed.
-     */
+    // And say whether they were a random subset: a null is usually a pond
+    // that did not do the thing, so dropping them restricts the sample to
+    // ponds that worked and every loading below is conditional on that.
     const lost = trials.filter((t) => !live.every((k) => has(t, k)));
     for (const b of biases(keep, lost)) {
       notes.push(
@@ -185,10 +155,7 @@ export function exploreLibrary(db: PondDb, opts: ExploreOptions = {}): ExploreRe
     return { ...empty, paramNames: P.names };
   }
 
-  /*
-   * Fold the confounded sets away before anything reads the matrix, so a
-   * finding is never printed once per member of a set that moved as one.
-   */
+  // Fold the confounded sets away before anything reads the matrix.
   const collapsed = groupConfounds(P);
   const X = collapsed.matrix;
   for (const g of collapsed.groups) {
@@ -222,16 +189,9 @@ export function exploreLibrary(db: PondDb, opts: ExploreOptions = {}): ExploreRe
   for (let c = 0; c < k; c++) {
     const rows = label.map((l, i) => (l === c ? i : -1)).filter((i) => i >= 0);
     if (rows.length === 0) continue;
-    /*
-     * A regime described only in standard deviations is a description. The
-     * median of each defining dial, in its own units, is a configuration --
-     * something to put behind `--set` and run at several seeds, which is the
-     * only way any of this becomes a finding rather than a picture.
-     *
-     * Median rather than mean: these are the parameters of a cluster found in
-     * outcome space, so their distribution has no reason to be symmetric, and
-     * one extreme draw should not move the recipe.
-     */
+    // The median of each defining dial, in its own units, is a configuration
+    // to put behind `--set`. Median rather than mean: a cluster found in
+    // outcome space has no reason to be symmetric in parameter space.
     const params = top(X.names, X.names.map((_, j) => columnMean(X, rows, j)), 6, REGIME_FLOOR);
     const recipe = params.map((e) => {
       const vs = rows.map((i) => keep[i].params?.[e.name] ?? 0).sort((a, b) => a - b);
@@ -250,11 +210,8 @@ export function exploreLibrary(db: PondDb, opts: ExploreOptions = {}): ExploreRe
   const minSwing = opts.minSwing ?? 0.3;
   const conditionals = conditionalEffects(X, Y).filter((e) => e.swing >= minSwing).slice(0, 12);
 
-  /*
-   * The floor below which a loading is a coin. With p columns and n runs a
-   * correlation of about 1/sqrt(n) arises from nothing at all, and a library
-   * this thin will hand you a confident-looking component made of noise.
-   */
+  // The floor below which a loading is a coin: a correlation of about
+  // 1/sqrt(n) arises from nothing at all.
   const noise = 1 / Math.sqrt(keep.length);
   if (noise > LOADING_FLOOR) {
     notes.push(`${keep.length} runs: loadings under ${noise.toFixed(2)} are sampling noise, which is most of what is printed below`);
@@ -262,14 +219,9 @@ export function exploreLibrary(db: PondDb, opts: ExploreOptions = {}): ExploreRe
   if (X.cols > keep.length / 4) {
     notes.push(`${X.cols} parameters varying across ${keep.length} runs — too few runs to separate them; expect confounded loadings`);
   }
-  /*
-   * A parameter that never varied *within* a sweep, only between sweeps, is
-   * not a parameter here — it is a label for which sweep a run came from, and
-   * every other thing that differed between those runs loads onto it. It
-   * happened immediately: `survey2` capped `maxAgents` at 8000 as a fuse
-   * against a runaway config, the fuse never blew (peak population 3788), and
-   * pooled with `survey1` the constant showed up carrying interactions.
-   */
+  // A parameter that never varied within a sweep, only between sweeps, is a
+  // label for which sweep a run came from, and everything else that differed
+  // between those sweeps loads onto it.
   const bySweep = new Map<string, TrialRow[]>();
   for (const t of keep) {
     const k = t.sweep ?? '';
@@ -297,10 +249,7 @@ export function exploreLibrary(db: PondDb, opts: ExploreOptions = {}): ExploreRe
   return { runs: keep.length, paramNames: X.names, outcomeNames: Y.names, components, cross, regimes, conditionals, notes };
 }
 
-/**
- * Parameters on which the dropped runs differ from the kept ones by half a
- * standard deviation or more — the shape of a sample that is no longer random.
- */
+/** Parameters on which the dropped runs differ from the kept ones by half a standard deviation or more. */
 function biases(
   kept: TrialRow[],
   lost: TrialRow[],
@@ -322,15 +271,9 @@ function biases(
 }
 
 /**
- * Collapse parameters that never moved independently into one column.
- *
- * A sweep that sets three dials together at every point makes them one dial
- * as far as any of this is concerned, and leaving them separate does not just
- * fail to say so — it prints every finding three times and splits the loading
- * three ways. The group keeps the first member's column and is named for all
- * of them, with a `-` on the ones that ran backwards, so nothing downstream
- * can attribute an effect to a single member of a set that never varied
- * apart.
+ * Collapse parameters that never moved independently into one column. The
+ * group keeps the first member's column and is named for all of them, with a
+ * `-` on the ones that ran backwards.
  */
 export function groupConfounds(P: Matrix): { matrix: Matrix; groups: string[][] } {
   const r = (a: number, b: number): number => {

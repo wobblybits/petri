@@ -3,45 +3,16 @@ import { CHEM_LEN, CRITIC_LEN, PLASTIC_LEN, STATE_DIMS } from '../chem-layout.ts
 import type { AgentKind, PortSlot } from '../agents.ts';
 
 /*
- * One net, on disk: the topology, and every number each of its bodies carries
- * that is not recomputable from those two things.
+ * One net, on disk: a JSON header describing a binary payload of the store's
+ * own arrays copied out flat. The header carries the genome's dimensions and
+ * every section's name, type, offset and per-body stride, so a reader need
+ * not be this module, and `decodeNet` refuses a blob whose dimensions differ
+ * from this build's rather than cutting every genome at the wrong offsets.
  *
- * The shape of the problem is that a net is mostly typed arrays — a genome is
- * 134 floats and a learned delta is 64 more, times however many bodies — and
- * mostly *not* JSON. So this is a JSON header describing a binary payload,
- * which gives both halves what they want: the header is readable with `.dump`
- * in `sqlite3` and tells you what you are looking at, and the payload is the
- * store's own arrays copied out flat.
- *
- * ## Why it is self-describing
- *
- * The header carries the genome's dimensions and every section's name, type,
- * offset and per-body stride. That is not decoration. `chem-layout.ts` exists
- * because a hand-copied `CHEM_LEN` drifted twice in one session, and the
- * second time shipped; a blob written before such a drift and read after it
- * would not crash, it would silently hand every body a genome cut at the
- * wrong offsets — a lineage's evolved behaviour quietly replaced by garbage
- * that still runs. `decodeNet` compares the header's dimensions against the
- * ones this build was compiled with and refuses the blob if they differ,
- * naming both. A stored pond is a long-lived artifact and the layout is not.
- *
- * It also means a reader does not have to be this module. The lab page can
- * walk `sections` with a `DataView` and render `energyCap` by name without
- * importing anything from the simulation.
- *
- * ## What is not in here
- *
- * Agent ids: they are handed out per pond and mean nothing in another one, so
- * wires address bodies by their index in this blob. Mass, scale and alpha:
- * derived from kind and params at birth. Velocity, drive, stun, trail, the
- * rope node positions: a planted net is a net dropped into different water,
- * and none of that survives the move in any meaningful sense.
- *
- * `trace` and `h` *are* in here, though neither is inherited and both are
- * gone within a second of simulated time. They cost 68 floats a body and
- * they are the difference between reloading a net and reloading the net that
- * was actually running — worth having for the one case where a run is
- * continued immediately rather than crossed into a new pond.
+ * Not in here: agent ids (wires address bodies by index in this blob), mass,
+ * scale and alpha (derived at birth), velocity, drive, stun, trail and rope
+ * node positions (none survive a move into different water). `trace` and `h`
+ * are in here so a run can be continued rather than only crossed.
  */
 
 /** Bumped when the payload's meaning changes in a way a reader must notice. */
@@ -55,13 +26,9 @@ export const CODE_SLOT: PortSlot[] = ['p', 'l', 'r'];
 
 /**
  * The heritable scalars, in the order the `scalar` section stores them.
- *
- * Deliberately written out rather than imported from `TRAIT_KEYS`: that list
- * is a live thing the simulation reorders when a trait becomes an output head
- * (four of them already have), and a stored blob's field order must not move
- * underneath it. The suite asserts the two still cover the same set, so the
- * day a trait is added the test says so rather than the pond quietly losing
- * it.
+ * Written out rather than imported from `TRAIT_KEYS`, which the simulation
+ * reorders; a stored blob's field order must not move. The suite asserts the
+ * two cover the same set.
  */
 export const SCALAR_FIELDS = [
   'extra',
@@ -70,10 +37,8 @@ export const SCALAR_FIELDS = [
   'debtCap',
   'rescueTo',
   'assort',
-  // Appended, never inserted: a stored blob's field order is its layout, and
-  // moving one would make every net in the library decode as something else.
-  // `NET_FORMAT` goes up with it so an older blob is refused rather than
-  // silently read one scalar short.
+  // Appended, never inserted, and `NET_FORMAT` goes up with it so an older
+  // blob is refused rather than read one scalar short.
   'adenylate',
 ] as const;
 export type ScalarField = (typeof SCALAR_FIELDS)[number];
@@ -170,11 +135,8 @@ function align8(n: number): number {
 }
 
 /**
- * Pack a net into one buffer.
- *
- * Sections are laid out largest-alignment-first so every one lands on its own
- * natural boundary without padding between them, which is what lets `decodeNet`
- * hand back typed-array views straight onto the blob instead of copying it.
+ * Pack a net into one buffer. Sections are laid out largest-alignment-first
+ * so each lands on its natural boundary and `decodeNet` can hand back views.
  */
 export function encodeNet(net: NetData): Uint8Array {
   const n = net.bodies.length;
@@ -265,12 +227,7 @@ export function encodeNet(net: NetData): Uint8Array {
   return buf;
 }
 
-/**
- * Read the header without touching the payload.
- *
- * Cheap enough to run over every row of a query — the lab page listing a
- * hundred nets wants their sizes, not their genomes.
- */
+/** Read the header without touching the payload. Cheap enough to run over every row of a query. */
 export function readHeader(blob: Uint8Array): NetHeader {
   if (blob.byteLength < 4) throw new Error('pond: net blob is truncated');
   const len = new DataView(blob.buffer, blob.byteOffset, blob.byteLength).getUint32(0, true);
@@ -280,13 +237,7 @@ export function readHeader(blob: Uint8Array): NetHeader {
   return header;
 }
 
-/**
- * Whether this build can read a blob at all, and why not when it cannot.
- *
- * Returns the complaint rather than throwing, so a caller listing a database
- * written by an older build can show which rows it cannot open instead of
- * dying on the first one.
- */
+/** Whether this build can read a blob at all, and why not when it cannot. Returns the complaint rather than throwing. */
 export function layoutComplaint(header: NetHeader): string | null {
   if (header.format > NET_FORMAT) {
     return `net format ${header.format} is newer than this build's ${NET_FORMAT}`;
@@ -302,13 +253,9 @@ export function layoutComplaint(header: NetHeader): string | null {
 }
 
 /**
- * Unpack a blob. The returned genome and matrix views alias it, so a caller
- * that plants a net and then keeps the arrays is looking at the blob, not at
- * the pond.
- *
- * A blob whose start is not eight-byte aligned is copied first: `sqlite3`
- * hands back a view into a shared read buffer at whatever offset the row
- * happened to land on, and a `Float64Array` cannot be built over an odd one.
+ * Unpack a blob. The returned genome and matrix views alias it. A blob whose
+ * start is not eight-byte aligned is copied first, since `sqlite3` hands back
+ * a view at whatever offset the row landed on.
  */
 export function decodeNet(input: Uint8Array): NetData {
   const blob = input.byteOffset % 8 === 0 ? input : new Uint8Array(input);

@@ -6,14 +6,10 @@
 //     taste = T.h + t0                                             in R^4
 //     [cruise,turn] = L.h + l0, and the same shape for F and P
 //
-// A line-for-line port of `Sim.updateState`, and it has to stay one: the CPU
-// version is the reference, `genome-kernel.test.ts` mirrors this against it,
-// and the layout constants below are `chem-layout.ts` transcribed. Changing
-// the genome's shape means changing all three.
-//
-// Everything is in *list order*, not slot order — the host packs `hPrev` and
-// the adjacency the same way it builds them, so nothing here has to know what
-// a slot is except to find the genome, which is why `slot` is an input.
+// A line-for-line port of `Sim.updateState`, which is the reference;
+// `genome-kernel.test.ts` mirrors this against it, and the layout constants
+// below are `chem-layout.ts` transcribed. Everything is in list order, not
+// slot order; `slot` is an input only to find the genome.
 
 const STATE_DIMS: u32 = 4u;
 const IN_DIMS: u32 = 7u;
@@ -41,8 +37,7 @@ const GAIT_ANCHOR_MAX: f32 = 8.0;
 
 // The learning row, from `chem-layout.ts`: learned deltas on the state
 // matrices, then their eligibility traces, then the critic, then last
-// frame's value estimate. Indexed by slot, like the genome, because it is
-// state a body keeps rather than something the host packs each frame.
+// frame's value estimate. Indexed by slot, like the genome.
 const PLASTIC_LEN: u32 = 64u;
 const LEARN_TRACE: u32 = 64u;
 const LEARN_CRITIC: u32 = 128u;
@@ -64,8 +59,7 @@ struct GenomeParams {
   sSep: f32,
   sRecoil: f32,
   energyCh: f32,
-  // Learning. `learnRate` at zero is the whole thing switched off, and the
-  // block at the end of `state` is then never entered.
+  // Learning. `learnRate` at zero switches the block at the end of `state` off.
   learnRate: f32,
   learnCritic: f32,
   learnTrace: f32,
@@ -91,20 +85,12 @@ struct GenomeParams {
 @group(0) @binding(5) var<storage, read> adjOff: array<u32>;
 @group(0) @binding(6) var<storage, read> adjNei: array<u32>;
 @group(0) @binding(7) var<storage, read_write> outv: array<f32>;
-/*
- * What each body has learned, and is learning.
- *
- * The eighth storage buffer, against a per-stage guarantee of eight — the
- * field pass next door is the one that had to merge two bindings to fit, and
- * this one had a slot free. Read-write and *resident*: the host writes it
- * only to zero a recycled slot, and reads it only for the two bodies of a
- * rewrite about to commit, which need their learning consolidated into their
- * children's genome on the CPU where inheritance lives.
- */
+// What each body has learned, and is learning. Resident: the host writes it
+// only to zero a recycled slot, and reads it only for the two bodies of a
+// rewrite about to commit.
 @group(0) @binding(8) var<storage, read_write> learn: array<f32>;
 
-// Bounded, signed, and no reflecting barrier at zero. Chosen over tanh on
-// measurement: 0.373ms against 0.581 for 80k calls.
+// Bounded, signed, and no reflecting barrier at zero.
 fn phi(v: f32) -> f32 {
   return v / (1.0 + abs(v));
 }
@@ -130,26 +116,11 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
   let g = slot * G.chemLen;
 
   /*
-   * The sense columns, or zero.
-   *
-   * `readsField` is the same gate the CPU uses, and it means the same thing
-   * here even though the sample is already computed: the inputs are *zeroed*
-   * rather than left holding a stale reading, so behaviour never depends on
-   * when a body last happened to sample. The two scales bring the four onto
-   * the range the other three inputs already occupy — without them a sense
-   * gene has seven times the mutation leverage of every other input gene.
-   */
-  /*
-   * No sense gate here, unlike the CPU pass.
-   *
-   * There it saves a bilinear sample into a sixteen-megabyte array for the
-   * many genomes that multiply the result by zero. Here `gather` has already
-   * taken that sample for every body — it is sitting in `samples` either way
-   * — so the gate would save nothing at all. It would also go stale: it is
-   * settled at birth from the genome's sense columns, and a body that
-   * *learns* a sense weight would still be told it cannot see. The two paths
-   * agree wherever the gate is right, because a gate of zero means every
-   * weight multiplying the reading is zero.
+   * The sense columns, scaled onto the range the other three inputs occupy.
+   * No sense gate here, unlike the CPU pass: `gather` has already sampled
+   * every body, and a gate settled at birth would go stale once a body learns
+   * a sense weight. The paths agree wherever the gate is right, because a
+   * gate of zero means every weight multiplying the reading is zero.
    */
   let raw = samples[i * 2u + 1u];
   var s = raw * G.senseScale;
@@ -168,15 +139,8 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
   // `var`, not `let`: the learning block indexes it by a loop variable.
   var p = vec4f(hPrev[po], hPrev[po + 1u], hPrev[po + 2u], hPrev[po + 3u]);
 
-  /*
-   * The neighbour mean, gathered once for the body rather than once per
-   * output dimension — the obvious way round costs four times as much,
-   * because each of the four dimensions re-walks the whole adjacency.
-   *
-   * Mean and not sum: a sum scales with degree, so a hub saturates `phi` and
-   * a leaf barely moves for a reason that is not about position. `BOUND`
-   * carries degree already, bounded and on purpose.
-   */
+  // The neighbour mean, gathered once for the body. Mean and not sum: a sum
+  // scales with degree, and `BOUND` carries degree already.
   var m = vec4f(0.0);
   let lo = adjOff[i];
   let hi = adjOff[i + 1u];
@@ -189,15 +153,8 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
     m = m / f32(deg);
   }
 
-  /*
-   * The state matrices as the body actually has them: its genome plus what
-   * it has learned. Added unconditionally rather than behind the CPU's
-   * `plasticOn` branch — sixty-four more loads a body is nothing here, and a
-   * body that has learned nothing is adding zeros.
-   *
-   * `vv` keeps the pre-activations, which the learning block needs for
-   * `phi'`.
-   */
+  // The state matrices as the body has them: its genome plus what it has
+  // learned, added unconditionally. `vv` keeps the pre-activations for `phi'`.
   let lb = slot * LEARN_STRIDE;
   var h = vec4f(0.0);
   var vv = vec4f(0.0);
@@ -229,10 +186,8 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
     h[d] = phi(v);
   }
 
-  // Emit: relu, then normalised to a unit budget. That budget is the honesty
-  // mechanism — feeding the dish and being heard come out of the same purse —
-  // and this is the only place all four channels are known at once, so it is
-  // the only place it can be enforced.
+  // Emit: relu, then normalised to a unit budget, which is the honesty
+  // mechanism; this is the only place all four channels are known at once.
   var emit = vec4f(0.0);
   var sum = 0.0;
   for (var c = 0u; c < 4u; c++) {
@@ -279,18 +234,11 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
   outv[o + 17u] = clampf(headAt(g, G_OUT, G_BASE, 0u, h) * G.sAnchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
 
   /*
-   * What this body learns from the frame it has just had. A line-for-line
-   * port of the block at the end of `Sim.updateState`, which is the
-   * reference; `genome-kernel.test.ts` is what holds the two together.
-   *
-   * Three factors, all local to the body: an eligibility trace per weight,
-   * `phi'` for how much the state would have moved had that weight been
-   * different, and one temporal-difference error from the body's own critic
-   * saying whether things went better than predicted. The cost is the body's
-   * own tank, which is `x4`.
-   *
-   * Nothing decays but the trace. A learned weight stays with the body and
-   * goes with it into the next net it latches into.
+   * What this body learns from the frame it has just had: a line-for-line
+   * port of the block at the end of `Sim.updateState`, held together by
+   * `genome-kernel.test.ts`. Three factors, all local: an eligibility trace
+   * per weight, `phi'`, and one temporal-difference error from the body's own
+   * critic. Nothing decays but the trace.
    */
   if (G.learnRate > 0.0) {
     let cr = lb + LEARN_CRITIC;
@@ -312,8 +260,7 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
     var post = q * q;
     var xs = array<f32, 7>(x0, x1, x2, x3, x4, x5, x6);
     let step = G.learnRate * dlt;
-    // Wx, Wh, Wn, then b — the order the genome lays them in, so one running
-    // index serves the trace, the learned delta and the gene it adds to.
+    // Wx, Wh, Wn, then b, the order the genome lays them in.
     var at = 0u;
     for (var d = 0u; d < STATE_DIMS; d++) {
       let pd = post[d];

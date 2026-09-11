@@ -188,7 +188,7 @@ export class NativeSolver {
   /** Per-body flocking temperament; a pair uses the mean. */
   flockAlign: Float32Array | null = null;
   flockSep: Float32Array | null = null;
-  /** Per-body locomotion, the `L` head's two rows. Was a pair of sparams. */
+  /** Per-body locomotion, the `L` head's two rows. */
   bodyCruise: Float32Array | null = null;
   bodyTurn: Float32Array | null = null;
   /** Per-body chemistry, mirroring Agent.chem. Four weights each. */
@@ -344,37 +344,20 @@ export class NativeSolver {
     this.exp?.solver_port_torques(n, nWires, gain, splay, dt);
   }
 
-  /**
-   * Copy the live scent window in and tell the solver where it sits in the
-   * world, so steering can sample it. Returns false when it will not fit.
-   */
-  /*
-   * Only the live box crosses, not the whole grid.
-   *
-   * At 1024 squared the field is 16 MB, and copying it in and back out every
-   * frame is 2 GB/s of memcpy at 60 fps — more than everything else in the
-   * frame put together. The box is where the scent is, so the rows outside it
-   * are zeros being copied back and forth.
-   */
   /** Which field the resident scent buffer currently mirrors. */
   private scentOwner: Fields | null = null;
 
+  /**
+   * Copy the live scent window in and tell the solver where it sits in the
+   * world, so steering can sample it. Returns false when it will not fit.
+   * Only the live box crosses, not the whole grid.
+   */
   loadScent(fields: Fields): boolean {
     if (!this.ready || !this.exp || !this.scent) return false;
     const n = fields.cols * fields.rows;
     if (n * 4 > this.scentCap) return false;
-    /*
-     * Only the box crosses, so everything outside it has to already agree —
-     * and for a field the module has not seen before, it does not: the buffer
-     * still holds whatever the last Sim left there, and `solver_deposit` and
-     * the steering samples read the whole array. That made a scenario depend
-     * on which sim ran before it, which the determinism harness caught as a
-     * run failing to reproduce itself.
-     *
-     * Zeroing on handover restores the invariant the box copy needs: outside
-     * the box both sides are zero. It costs one memset per owner change, and
-     * the owner changes when a Sim is constructed, not when a frame runs.
-     */
+    // Only the box crosses, so outside it both sides must already be zero;
+    // a field the module has not seen before gets the buffer zeroed first.
     if (this.scentOwner !== fields) {
       this.scent.fill(0);
       this.scentOwner = fields;
@@ -476,43 +459,27 @@ export class NativeSolver {
     return this.ready && n <= this.bodyCap && nAdj <= this.adjCap;
   }
 
-  /*
-   * Owner of the flocking neighbourhood cache inside the wasm module.
-   *
-   * The module is a singleton and a process can hold several Sims — the test
-   * suite routinely does. The cached pair list is indices into whichever Sim
-   * packed the adjacency last, so replaying it against a different Sim's
-   * bodies would be quietly, thoroughly wrong. Tracking the owner here rather
-   * than in C keeps one authority: a caller whose key does not match has to
-   * repack the adjacency, and the repack and the rebuild then happen together.
-   */
+  // Owner of the flocking neighbourhood cache inside the wasm module. The
+  // module is a singleton shared by every Sim in the process; a caller whose
+  // key does not match must repack the adjacency.
   private fkSim = -1;
   private fkGraph = -1;
   private fkRoster = -1;
   private fkN = -1;
   private fkHops = -1;
 
-  /*
-   * Owner of the per-body scratch arrays that the force passes read —
-   * steerFlags, steerPwire, declComp, declSat. Same problem and same shape as
-   * the flocking cache above: all of it is derived from the topology and the
-   * roster, none of it from the pose, and all of it lives in wasm memory that
-   * every Sim in the process shares.
-   */
+  // Owner of the per-body scratch arrays the force passes read (steerFlags,
+  // steerPwire, declComp, declSat): derived from topology and roster, shared
+  // by every Sim in the process like the flocking cache.
   private skSim = -1;
   private skGraph = -1;
   private skRoster = -1;
   private skN = -1;
 
   /**
-   * Forget every cache and every mode a Sim left behind.
-   *
-   * The module is one instance per process and the test suite runs hundreds
-   * of Sims through it. Each cache is keyed on a Sim id, so a stale one is
-   * never *used* by the wrong Sim — but a fresh Sim inherits the scent buffer's
-   * contents and the sampling mode from whoever ran last, and which file ran
-   * last is up to the scheduler. That was the order dependence in the
-   * determinism tests. `test-setup` calls this before every test.
+   * Forget every cache and every mode a Sim left behind, so a fresh Sim does
+   * not inherit the scent buffer or sampling mode from whoever ran last.
+   * `test-setup` calls this before every test.
    */
   resetCaches(): void {
     this.fkSim = -1;
@@ -600,10 +567,7 @@ export class NativeSolver {
     this.exp?.solver_use_samples(on ? 1 : 0);
   }
 
-  /**
-   * Pairs held in the flocking neighbourhood cache, or -1 when it is not
-   * valid — which means the pair list overran and every frame is searching.
-   */
+  /** Pairs held in the flocking neighbourhood cache, or -1 when the pair list overran. */
   flockPairs(): number {
     return this.exp?.solver_flock_pairs() ?? -1;
   }

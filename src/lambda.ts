@@ -31,16 +31,14 @@ import { wrapAngle } from './wrap.ts';
  *   abstraction λx.b   Con: p = its value, l = the binder x, r = the body
  *   application (f a)  Con: p = the function, l = the result, r = the argument
  *
- * Beta reduction is then exactly `annihilate-con`. Note that rule reconnects
- * *crossed* — `l1↔r2, r1↔l2` — which is why an application keeps its result on
- * `l` and its argument on `r`. Straight through, an application would hand its
- * argument to the body and its result to the binder, which is nonsense.
+ * Beta reduction is then exactly `annihilate-con`, which reconnects crossed
+ * (`l1↔r2, r1↔l2`); that is why an application keeps its result on `l` and
+ * its argument on `r`.
  *
- * A variable used more than once becomes a Dup tree; an unused one gets an Era.
- * This is the standard encoding and it is *not* sound for every lambda term —
- * general duplication of higher-order terms needs bookkeeping this does not
- * have. It is sound for the arithmetic here, and `normalize` reports when a
- * term fails to reach a normal form rather than pretending it did.
+ * A variable used more than once becomes a Dup tree; an unused one gets an
+ * Era. This encoding is not sound for every lambda term (general duplication
+ * of higher-order terms needs bookkeeping this lacks); it is sound for the
+ * arithmetic here, and `normalize` reports a term that fails to normalise.
  */
 
 export type Term =
@@ -99,21 +97,16 @@ function port(id: number, slot: PortSlot): PortRef {
 export interface Compiled {
   net: NetSnapshot;
   /**
-   * Aux port of an inert marker node wired to the term's value. The value port
-   * itself cannot be the handle: rewrites consume the nodes it sits on, and a
-   * *free* port is not propagated by the rules — `leftoverOf` returns null for
-   * it and the connection is simply dropped. Anchoring to a marker's aux port
-   * keeps a stable handle, and because the marker's principal stays free it can
-   * never be half of a redex, so it never reduces.
+   * Aux port of an inert marker node wired to the term's value. The value
+   * port itself cannot be the handle: rewrites consume the nodes it sits on
+   * and a free port is dropped. The marker's principal stays free, so it can
+   * never be half of a redex.
    */
   root: PortRef;
   nextId: number;
 }
 
-/**
- * Compile a closed term. Free variables are an error rather than a silent
- * dangling wire, since a dangling wire would latch onto whatever is nearby.
- */
+/** Compile a closed term. Free variables are an error: a dangling wire would latch onto whatever is nearby. */
 export function compile(term: Term, startId = 1): Compiled {
   const b: Build = { agents: [], links: [], bind: new Map(), next: startId };
   let fresh = 0;
@@ -236,10 +229,8 @@ export function normalize(start: Compiled, maxSteps = 20000): Normalized {
 // ------------------------------------------------------------------ decoding
 
 /**
- * Read a normal form back as a Church numeral, or null if it is not one.
- *
- * Walks λf.λx. then counts applications down the spine, checking each one is
- * applied to f and that the spine ends at x.
+ * Read a normal form back as a Church numeral, or null if it is not one:
+ * walks λf.λx. then counts applications down the spine.
  */
 export function decodeChurch(net: NetSnapshot, root: PortRef): number | null {
   const kind = (id: number): AgentKind | undefined =>
@@ -253,10 +244,8 @@ export function decodeChurch(net: NetSnapshot, root: PortRef): number | null {
   const fBinder = port(outer.id, 'l');
   const xBinder = port(inner.id, 'l');
 
-  // Which ports can legitimately supply f to an application. That is the binder
-  // itself when f is used once, or the aux ports of the Dup tree fanning out of
-  // it when f is used several times. An application reaches its function by
-  // following its own principal, so this is the set that end must land in.
+  // Which ports can supply f to an application: the binder itself when f is
+  // used once, or the aux ports of the Dup tree fanning out of it.
   const supply = new Set<string>();
   const visit = (from: PortRef): void => {
     const key = `${from.id}.${from.slot}`;
@@ -317,13 +306,9 @@ interface TermNode {
 }
 
 /**
- * Straight-line drawing of a compiled net.
- *
- * Abstractions and applications form a tree (body / function / argument). That
- * tree is packed with a tidy downward layout, which does not cross itself.
- * Dup/Era trees hang off binders and sit in a side gutter aligned with their
- * use sites, so the extra binder wires run beside the tree rather than through
- * it. A short untangle pass then walks any leftover crossings off the drawing.
+ * Straight-line drawing of a compiled net: the term tree packed downward,
+ * Dup/Era trees in a side gutter aligned with their use sites, then a short
+ * untangle pass over any leftover crossings.
  */
 export function layoutNet(net: NetSnapshot, root: PortRef, cx: number, cy: number): NetPose[] {
   const kindOf = new Map(net.agents.map((a) => [a.id, a.kind]));
@@ -900,34 +885,16 @@ function centerPoses(poses: NetPose[], cx: number, cy: number): void {
 // ------------------------------------------------------------------ injecting
 
 /**
- * Drop a compiled term into a running simulation.
- *
- * Agents land in a planar drawing of the net — the term tree packed downward,
- * sharing nodes in a gutter beside their uses — so wires start uncrossed and
- * the joint solver only has to settle port facing. Every port the term does
- * not use is sealed, because a free port would otherwise latch onto whatever
- * drifts past and quietly turn the term into something else.
+ * Drop a compiled term into a running simulation, in a planar drawing so
+ * wires start uncrossed. Every port the term does not use is sealed, because
+ * a free port would latch onto whatever drifts past.
  */
 export function injectTerm(
   sim: {
     agents: Map<number, Agent>;
-    /*
-     * The sim's own store, and it has to be the sim's own.
-     *
-     * `createAgent` will make a private one-slot store if you let it, and this
-     * used to let it: every agent of an injected term came back sitting in
-     * slot 0 of a store nothing else could see. A body's slot is how every
-     * per-frame pass finds its data — the packs, the genome, the harvest — so
-     * the whole term aliased slot 0 of the sim's store, which belongs to some
-     * other body entirely.
-     *
-     * It read as a hang rather than as wrong numbers. `HarvestPlan.build`
-     * chains bodies by slot, `next[s] = head[c]; head[c] = s`, so inserting
-     * one slot twice makes `next[s] === s` and the walk that unwinds the chain
-     * never reaches -1. It is a synchronous loop inside `step`, so vitest's
-     * timeout could never fire either: the whole default suite sat on it for
-     * half an hour and reported nothing.
-     */
+    // The sim's own store, never the private one-slot store `createAgent`
+    // makes by default: a body's slot is how every per-frame pass finds its
+    // data, and two bodies on one slot make `HarvestPlan.build`'s chain loop forever.
     agentStore: AgentStore;
     graph: Graph;
     nextId: number;
