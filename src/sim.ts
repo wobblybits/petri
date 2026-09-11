@@ -1199,12 +1199,12 @@ export class Sim {
     if (this.adjGraphVersion === this.graph.version && this.adjRosterVersion === this.rosterVersion) {
       return this.wireAdj;
     }
-    // The wake graph's CSR, aliased rather than copied; the energy passes
+    // The wire graph's CSR, aliased rather than copied; the energy passes
     // only read it. The queue scratch stays this object's own, since the
     // relaxation writes that.
-    this.refreshWakeGraph();
-    this.wireAdj.off = this.wakeOff;
-    this.wireAdj.nei = this.wakeNei;
+    this.refreshWireGraph();
+    this.wireAdj.off = this.wireOff;
+    this.wireAdj.nei = this.wireNei;
     this.adjGraphVersion = this.graph.version;
     this.adjRosterVersion = this.rosterVersion;
     return this.wireAdj;
@@ -1327,30 +1327,30 @@ export class Sim {
   }
 
 
-  private wakeGraphVersion = -1;
-  private wakeGraphRoster = -1;
-  private readonly wakeList: Agent[] = [];
-  private wakeOff = new Int32Array(1);
-  private wakeNei = new Int32Array(0);
-  private wakeQ = new Int32Array(0);
+  private wireGraphVersion = -1;
+  private wireGraphRoster = -1;
+  private readonly wireList: Agent[] = [];
+  private wireOff = new Int32Array(1);
+  private wireNei = new Int32Array(0);
+  private wireCursor = new Int32Array(0);
 
   /** Bodies and their wire adjacency in CSR, rebuilt only when topology moves. */
-  private refreshWakeGraph(): number {
-    const list = this.wakeList;
+  private refreshWireGraph(): number {
+    const list = this.wireList;
     if (
-      this.wakeGraphVersion === this.graph.version &&
-      this.wakeGraphRoster === this.rosterVersion
+      this.wireGraphVersion === this.graph.version &&
+      this.wireGraphRoster === this.rosterVersion
     ) {
       return list.length;
     }
-    // The shared list, so the wake graph uses the order every pass indexes by.
+    // The shared list, so the wire graph uses the order every pass indexes by.
     const src = this.forceList();
     list.length = 0;
     for (let i = 0; i < src.length; i++) list.push(src[i]);
     const n = list.length;
-    if (this.wakeOff.length < n + 2) this.wakeOff = new Int32Array(n * 2 + 4);
-    if (this.wakeQ.length < n) this.wakeQ = new Int32Array(n * 2);
-    const off = this.wakeOff;
+    if (this.wireOff.length < n + 2) this.wireOff = new Int32Array(n * 2 + 4);
+    if (this.wireCursor.length < n) this.wireCursor = new Int32Array(n * 2);
+    const off = this.wireOff;
     off.fill(0, 0, n + 2);
     // Counting sort into CSR: one pass to count degrees, one to place.
     const wires = this.wireListResolved();
@@ -1366,9 +1366,9 @@ export class Sim {
       edges += 2;
     }
     for (let i = 0; i < n; i++) off[i + 1] += off[i];
-    if (this.wakeNei.length < edges) this.wakeNei = new Int32Array(edges * 2);
-    const nei = this.wakeNei;
-    const cursor = this.wakeQ;
+    if (this.wireNei.length < edges) this.wireNei = new Int32Array(edges * 2);
+    const nei = this.wireNei;
+    const cursor = this.wireCursor;
     for (let i = 0; i < n; i++) cursor[i] = off[i];
     for (let k = 0; k < wires.length; k++) {
       const ia = wai[k];
@@ -1377,8 +1377,8 @@ export class Sim {
       nei[cursor[ia]++] = ib;
       nei[cursor[ib]++] = ia;
     }
-    this.wakeGraphVersion = this.graph.version;
-    this.wakeGraphRoster = this.rosterVersion;
+    this.wireGraphVersion = this.graph.version;
+    this.wireGraphRoster = this.rosterVersion;
     return n;
   }
 
@@ -1448,12 +1448,12 @@ export class Sim {
       return;
     }
 
-    // BFS over the wake graph's CSR, `PHYS_HOPS` deep from the seeds.
-    const n = this.refreshWakeGraph();
-    const list = this.wakeList;
+    // BFS over the wire graph's CSR, `PHYS_HOPS` deep from the seeds.
+    const n = this.refreshWireGraph();
+    const list = this.wireList;
     const at = this.slotIndex;
-    const off = this.wakeOff;
-    const nei = this.wakeNei;
+    const off = this.wireOff;
+    const nei = this.wireNei;
     if (this.flockDist.length < n) {
       const cap = Math.max(n * 2, 16);
       this.flockDist = new Int32Array(cap);
@@ -2383,11 +2383,8 @@ export class Sim {
 
     Sim.phase('gpu:packProbe');
 
-    /*
-     * Six per block here, eight per block there: the shader's `HarvestBlock`
-     * carries two words of padding so a block is a round 32 bytes, which is
-     * the only reason this is a transcode rather than a `set`.
-     */
+    // Six per block here, eight there: the shader's `HarvestBlock` carries
+    // two words of padding.
     if (plan.nBlocks > 0) {
       const blk = fieldGpu.blockData;
       const bStride = fieldGpu.blockStride;
@@ -2402,20 +2399,17 @@ export class Sim {
         blk[bo + 4] = src[so + 4];
         blk[bo + 5] = src[so + 5];
       }
-      // `HARVEST_STRIDE` floats an entry now, not one: the gut room, the
-      // mouthful and the four affinities are per body and cannot be uniforms.
+      // `HARVEST_STRIDE` floats an entry: gut room, mouthful and the four
+      // affinities are per body.
       const rooms = fieldGpu.roomData;
       const span = plan.nEntries * HARVEST_STRIDE;
       for (let e = 0; e < span; e++) rooms[e] = plan.rooms[e];
       this.harvestPending = true;
     }
 
-    /*
-     * The same five passes `Sim.step` runs on the CPU, in the same order, with
-     * the same numbers. `decay` is handed the *rate* rather than the keep
-     * factor, because the shader resolves per-channel rates itself — one place
-     * that knows how a slider becomes four numbers, not two.
-     */
+    // The same passes `Sim.step` runs on the CPU, in the same order, with the
+    // same numbers. `decay` is handed the rate, not the keep factor: the
+    // shader resolves per-channel rates itself.
     Sim.phase('gpu:packBlocks');
 
     const submitted = fieldGpu.submit(
@@ -2455,14 +2449,9 @@ export class Sim {
     }
     Sim.phase('gpu:dispatch');
 
-    /*
-     * The genome's dispatch goes on the queue now, behind the field's, before
-     * either readback is waited on. Its inputs are the store and the wire
-     * graph, none of which the field's readback touches; its one dependency —
-     * the probe's output buffer — is on the device, where submission order is
-     * the ordering. Waiting on the field first and dispatching after was two
-     * full round trips a frame where one will do.
-     */
+    // The genome's dispatch goes on the queue behind the field's, before
+    // either readback is waited on: its one dependency, the probe's output
+    // buffer, is on the device, where submission order is the ordering.
     const genomeSubmitted = this.genomeOnGpu && this.submitGenome(list, n, params);
 
     if (!(await fieldGpu.collect())) {
@@ -2476,31 +2465,15 @@ export class Sim {
 
     const got = fieldGpu.sampleData;
     const sStride = fieldGpu.sampleStride;
-    /*
-     * Two consumers, one readback.
-     *
-     * The first three floats are the taste-collapsed sensor readings the
-     * solver steers on. The next four are the raw channels under the body,
-     * which is what `updateState`'s `Wx` sense columns want — it used to get
-     * them from `Fields.sampleAll`, out of a CPU array the GPU never writes,
-     * and that was the quietest of the reasons `openFieldGpu` refuses.
-     *
-     * Both are written straight into the store by slot rather than kept in
-     * list order, because that is how everything downstream indexes and
-     * because the list can move before they are read — see `steerAll`.
-     *
-     * A frame late, like the steering samples and for the same reason: this
-     * runs after `endFrame`, so what lands here is read at the top of the next
-     * frame. A body born in between finds its slot holding whatever the last
-     * occupant left, which is why `createAgent` zeroes it — one frame of no
-     * smell for a newborn, against a stall every frame for everyone.
-     */
+    // The first three floats are the taste-collapsed sensor readings the
+    // solver steers on; the next four are the raw channels under the body for
+    // `updateState`'s `Wx` sense columns. Written into the store by slot,
+    // because the list can move before they are read a frame later; a body
+    // born in between reads what `createAgent` zeroed.
     const SENSE = this.agentStore.senseAll;
     const STEER = this.agentStore.steerAll;
-    // Scaled on the way in, the same way `updateState` scales its own
-    // sample, so `senseAll` means one thing on both paths. Channel 2 is the
-    // ground and reads against a full cell; the others against a strong
-    // local signal.
+    // Scaled the same way `updateState` scales its own sample, so `senseAll`
+    // means one thing on both paths. Channel 2 is the ground.
     const sScale = 1 / params.senseScale;
     const gScale = this.groundScale;
     for (let i = 0; i < n; i++) {
@@ -2524,8 +2497,7 @@ export class Sim {
         this.scatterLearn();
         this.genomePending = true;
       } else {
-        // Back to the CPU pass for good; nothing is owed, since `updateState`
-        // recomputes from the store either way.
+        // Back to the CPU pass for good; `updateState` recomputes from the store.
         this.genomeOnGpu = false;
         this.genomePending = false;
       }
@@ -2534,11 +2506,10 @@ export class Sim {
   }
 
   /**
-   * The device went away mid-session. Fall back for good rather than leaving
-   * the field frozen on whatever the GPU last held. Nothing grazed, so
-   * nothing is owed: drop the pending credit or the next frame pays out of a
-   * buffer the GPU never wrote. The genome goes with it, since its sense
-   * inputs were the probe's.
+   * The device went away mid-session: fall back for good. Nothing grazed, so
+   * the pending credit is dropped, or the next frame pays out of a buffer the
+   * GPU never wrote. The genome goes with it, since its sense inputs were
+   * the probe's.
    */
   private dropFieldGpu(): void {
     this.harvestPending = false;
@@ -2552,20 +2523,11 @@ export class Sim {
   }
 
   /**
-   * Hand the genome pass a frame, in the same list order everything else uses.
-   *
-   * Queued after the field's dispatch, and has to be: its sense inputs are
-   * the raw channel readings `gather` writes, in a buffer it borrows rather
-   * than a readback it waits for. The four numbers that would have been the
-   * most expensive thing to ship never cross the bus.
-   *
-   * Like the field's samples, what comes back is spent at the top of the next
-   * frame — `updateState` unpacks it where it used to compute it. So `h`
-   * advances exactly one step per frame either way, and the inputs are a
-   * frame older than the CPU pass would have read, which is the same bargain
-   * steering and smell already take.
-   *
-   * True when the dispatch was queued; `gpuFieldStep` collects it.
+   * Hand the genome pass a frame, in the same list order everything else
+   * uses. Must be queued after the field's dispatch: its sense inputs are the
+   * probe buffer. What comes back is spent by `updateState` at the top of the
+   * next frame, so `h` advances one step per frame either way. True when the
+   * dispatch was queued; `gpuFieldStep` collects it.
    */
   private submitGenome(list: Agent[], n: number, params: Params): boolean {
     const samples = fieldGpu.sampleBuffer;
@@ -2579,15 +2541,9 @@ export class Sim {
     }
 
     const chemFloats = (maxSlot + 1) * CHEM_LEN;
-    /*
-     * The genome table crosses only when it changed. A genome is written at
-     * birth and nowhere else, and every path that writes one has to call
-     * `refreshReadsField` or the sense gate goes stale — so that is the one
-     * place the store learns a slot is dirty, and this is what spends the
-     * mark. Uploading everything every frame was 2.7 MB at five thousand
-     * bodies and would have been 27 MB at fifty; a frame with one birth now
-     * pushes one genome. A moved buffer starts over from nothing.
-     */
+    // The genome table crosses only when it changed. Every path that writes
+    // a genome has to call `refreshReadsField`, which marks the slot dirty;
+    // this spends the mark. A moved buffer starts over from nothing.
     const chemMoved = genomeGpu.reserve(n, nNei, chemFloats, maxSlot + 1);
     this.syncLearn(store, maxSlot + 1);
     if (chemMoved || this.genomeChemVersion !== store.chemVersion) {
@@ -2650,13 +2606,9 @@ export class Sim {
 
   /**
    * Hand the device the learning rows the host has changed, and ask for the
-   * ones the host is about to need.
-   *
-   * The host writes this state in one place only — `AgentStore.clearSlot`,
-   * zeroing a slot that has been recycled — and that write has to land or a
-   * newborn inherits the last occupant's experience through a buffer nobody
-   * cleared. The three CPU arrays are transcoded into the one row the shader
-   * indexes; a frame with one birth moves one row.
+   * ones the host is about to need. The host writes this state only in
+   * `AgentStore.clearSlot`, and that write has to land or a newborn inherits
+   * the last occupant's experience.
    */
   private syncLearn(store: AgentStore, learnSlots: number): void {
     if (this.genomeLearnVersion !== store.learnVersion) {
@@ -2685,12 +2637,7 @@ export class Sim {
         for (let s = lo; s < hi; s++) fill(s, s - lo);
         if (hi > lo) genomeGpu.pushLearn(lo, hi - lo);
       } else {
-        /*
-         * A row per dirty slot. The host only writes these to zero a recycled
-         * slot, so they are scattered wherever the free list handed out: on a
-         * grown pond, 62 slots a frame spanning 24,000. Carrying the span cost
-         * 11.9 ms; carrying the slots costs one small write each.
-         */
+        // A row per dirty slot: recycled slots are scattered across the store.
         const slots = store.learnDirtySlots;
         const count = store.learnDirtyCount;
         for (let i = 0; i < count; i++) {
@@ -2712,23 +2659,11 @@ export class Sim {
   }
 
   /**
-   * Bring every body's learning back from the device.
-   *
-   * On the GPU path the learning row is device-resident and the host's copy
-   * is fresh only for rewrite parents — `syncLearn` reads back a handful a
-   * frame because a handful a frame is all the simulation needs. Anything
-   * that *measures* what the pond has learned has to ask for the rest, and
-   * `docs/history/plasticity-plan.md` phase 5 says so in as many words.
-   *
-   * This is that ask. The headless harvest calls it before storing a net,
-   * because `plasticAll` and `criticAll` are two of the things a stored net
-   * is for, and writing the zeros the host happened to be holding would make
-   * the database quietly wrong rather than loudly empty.
-   *
-   * A no-op returning true off the GPU path, where the host's copy is the
-   * only copy. Deliberately does not mark the rows dirty: this is the device
-   * telling the host what it worked out, and echoing it back would push it
-   * out again next frame.
+   * Bring every body's learning back from the device. On the GPU path the
+   * host's copy is fresh only for rewrite parents, so anything that measures
+   * what the pond has learned (the headless harvest, before storing a net)
+   * must call this first. A no-op returning true off the GPU path. Does not
+   * mark the rows dirty: echoing them back would push them out again.
    */
   async syncLearningToHost(): Promise<boolean> {
     if (!this.genomeOnGpu) return true;
@@ -2764,11 +2699,8 @@ export class Sim {
   }
 
   /**
-   * Put the rows that came back where the CPU keeps them.
-   *
-   * Deliberately does not mark them dirty: this is the device telling the
-   * host what it worked out, and echoing it straight back would push it out
-   * again every frame a rewrite is pending.
+   * Put the rows that came back where the CPU keeps them. Does not mark them
+   * dirty: echoing them back would push them out again.
    */
   private scatterLearn(): void {
     const rows = genomeGpu.learnCount;
@@ -2801,11 +2733,9 @@ export class Sim {
 
   /**
    * Remember which body each list position was, for the unpack a frame later.
-   *
-   * Slot *and* id, because `AgentStore.release` does not clear a freed slot's
-   * id — it drops the mapping and puts the slot on the free list. So a stale
-   * slot still reads as whatever died there, and only the id says whether the
-   * body that earned these results is still the one standing in that slot.
+   * Slot *and* id: `AgentStore.release` does not clear a freed slot's id, so
+   * only the id says whether the body that earned these results still stands
+   * in that slot.
    */
   private genomeSlots(list: Agent[], n: number): void {
     if (this.genomeSlotBuf.length < n * 2) this.genomeSlotBuf = new Int32Array(n * 4);
@@ -2818,25 +2748,10 @@ export class Sim {
   }
 
   /**
-   * Take the frame on the GPU.
-   *
-   * The first thing this has to do is close the force block, and not doing so
-   * is what made the GPU path unusable. `beginFrame` leaves the block open on
-   * purpose so the wasm solve can inherit the packed bodies — steer, port
-   * torques, declutter, flocking and gravity all wrote their velocities into
-   * that buffer and *not* into the agents. `solveFarNative` reads the buffer,
-   * so it sees them. This packs from the agents, so it did not: it integrated
-   * a frame using last frame's velocities, and then `endFrame`'s `syncForces`
-   * unpacked the force-pass velocities straight over the top of the result.
-   *
-   * Positions from the GPU, velocities from before the solve — which is to say
-   * the velocity feedback XPBD uses to hold a constraint was thrown away every
-   * frame. That is an energy source. Wires grow without bound and the view
-   * shakes, and it only happens at the zoom where the LOD lets the GPU take
-   * the frame at all.
-   *
-   * `syncForces` hands the velocities to the agents and closes the block, so
-   * the pack below sees this frame's forces and nothing overwrites the result.
+   * Take the frame on the GPU. `syncForces` first: `beginFrame` leaves the
+   * force block open for the wasm solve, and this packs from the agents, so
+   * without the sync it would integrate on last frame's velocities and have
+   * the result overwritten in `endFrame`, an energy source.
    */
   private async solveFarGpu(params: Params, dt: number): Promise<boolean> {
     this.syncForces();
@@ -2845,9 +2760,8 @@ export class Sim {
       this.lastFarPath = 'none';
       return true;
     }
-    // False means the device was lost or a pass threw and `farGpu` quietly ran
-    // its own twin, which is a different solver at a very different speed. Say
-    // which one actually took the frame rather than which one was asked.
+    // False means the device was lost or a pass threw and `farGpu` ran its
+    // JS twin; report which one actually took the frame.
     const onGpu = await farGpu.step(
       packed.data,
       packed.list.length,
@@ -2877,11 +2791,7 @@ export class Sim {
     const n = list.length;
     if (n === 0) return true;
 
-    /*
-     * The cached list itself, unfiltered: every wire's endpoints are in the
-     * roster, so nothing here can drop one, and the endpoint indices come
-     * with it.
-     */
+    // The cached list itself, unfiltered: nothing here drops a wire.
     const wireList = this.wireListResolved();
     const wai = this.wireAI;
     const wbi = this.wireBI;
@@ -3020,7 +2930,7 @@ export class Sim {
   private packNearState(list: Agent[], wireList: Wire[]): void {
     const bodies = nativeSolver.bodies!;
     // The force block leaves the pose here already; only the previous-frame
-    // fields, which it never touches, still have to come across.
+    // fields still have to come across.
     const inherited = this.forceBlock;
     if (inherited && Sim.auditForceBlock) this.auditPack(list, bodies, 'NEAR');
     for (let i = 0; i < list.length; i++) {
@@ -3145,11 +3055,7 @@ export class Sim {
     this.contacts.set(key, { agentA: lo, agentB: hi, overlap, vT: signed });
   }
 
-  /**
-   * Energy that leaves as sound has to leave the bodies too. Without this the
-   * audio is a passive read-out; with it, a collision that rings loudly is
-   * measurably less bouncy than one that does not.
-   */
+  /** Energy that leaves as sound has to leave the bodies too. */
   private noteRadiation(A: Agent, B: Agent, hit: Hit, effMass: number, vN: number): void {
     const j = effMass * Math.abs(vN) * Sim.RADIATION;
     if (j <= 0) return;
@@ -3164,10 +3070,7 @@ export class Sim {
     add(B, -hit.nx * j, -hit.ny * j);
   }
 
-  /**
-   * Rebuild the body broad-phase from current positions. Cheap enough to redo
-   * every substep, which keeps it exact rather than relying on a motion margin.
-   */
+  /** Rebuild the body broad-phase from current positions; exact, no motion margin. */
   private rebuildBodyGrid(cellSize: number): Agent[] {
     const list = this.forceList();
     const n = list.length;
@@ -3192,8 +3095,8 @@ export class Sim {
       const B = list[j];
       if (poseHeld(A) && poseHeld(B)) return;
       const detailed = this.agentDetailed(A.id) || this.agentDetailed(B.id);
-      // Bound discs are fatter than SAT triangles. A wired pair is already
-      // held by the chord; colliding them shoves the net apart of the rest.
+      // Bound discs are fatter than SAT triangles; a wired pair is already
+      // held by the chord.
       if (!detailed && this.graph.sharesWire(A.id, B.id)) return;
       const hit = detailed
         ? queryHit(A, B, this.w, this.h)
@@ -3225,14 +3128,9 @@ export class Sim {
   }
 
   /**
-   * Wires that have been stretched past `wireSnap` tear loose.
-   *
-   * Measured against the same live-length-over-rest ratio the rope coarsening
-   * uses, so a wire that is merely taut is left alone and one that is being
-   * pulled apart is not. A wire either end of which is mid-rewrite is spared:
-   * the rewrite is about to rebuild that neighbourhood anyway, and cutting one
-   * of its wires out from under it leaves the graph in a shape it did not
-   * expect.
+   * Wires stretched past `wireSnap` (live length over rest) tear loose. A
+   * wire with an end mid-rewrite is spared: the rewrite is about to rebuild
+   * that neighbourhood and expects its wires to still be there.
    */
   private readonly snapping: number[] = [];
 
@@ -3278,17 +3176,8 @@ export class Sim {
   }
 
   /**
-   * Laying scent, in the solver.
-   *
-   * The field goes across once, the deposit writes it in place, and it comes
-   * back once — arithmetic over a grid the solver already holds a mirror of.
-   *
-   * This used to stamp a wall mask alongside the deposit, rasterizing every
-   * wire so scent could not diffuse across it. That went when the field became
-   * world-fixed: a cell is 160 world units and a wire is 40, so a dense net put
-   * a wire in nearly every cell it occupied and scent stopped moving through
-   * tissue at all. Packing the polylines to achieve that was also the single
-   * most expensive piece of host work left in the frame.
+   * Laying scent, in the solver: the field goes across once, the deposit
+   * writes it in place, and it comes back once.
    */
   private scentWriteNative(params: Params): boolean {
     if (!Sim.nativeForces || !nativeSolver.ready) return false;
@@ -3302,32 +3191,24 @@ export class Sim {
     const list = this.forceList();
     const n = list.length;
     if (!nativeSolver.canNear(n, 0, 0)) return false;
-    /*
-     * Grow the live box to cover the bodies before anything crosses. The
-     * solver deposits and samples inside wasm, so `Fields.deposit` is never
-     * called on this path and the box would never learn where the pond is —
-     * and the box is what decides which rows get copied across.
-     */
+    // Grow the live box to cover the bodies before anything crosses:
+    // `Fields.deposit` is never called on this path, and the box decides
+    // which rows get copied across.
     for (let i = 0; i < n; i++) this.fields.touchWorld(list[i].x, list[i].y);
     if (!nativeSolver.loadScent(this.fields)) return false;
     Sim.phase('scent:load');
 
     const bodies = nativeSolver.bodies;
     if (!bodies) return false;
-    /*
-     * This runs in endFrame, after rewrites and upkeep have had their turn at
-     * the roster, so the flag computed back in beginFrame cannot be trusted
-     * here — the key is asked again.
-     */
+    // Runs in endFrame, after rewrites and upkeep have changed the roster,
+    // so the beginFrame flag cannot be trusted; ask the key again.
     const freeFresh = nativeSolver.scratchHolds(
       this.simId,
       this.graph.version,
       this.rosterVersion,
       n,
     );
-    // Out of the store, for the reason `packPose` gives: these accessors all
-    // reach through the same two properties to the same arrays, and the kind
-    // is already the integer the solver wants.
+    // Out of the store, as in `packPose`.
     const st = this.agentStore;
     const X = st.x;
     const Y = st.y;
@@ -3345,9 +3226,9 @@ export class Sim {
       bodies[o + FAR.locked] = LK[sl] !== 0 ? 1 : 0;
       kinds[i] = KC[sl];
       sc[i] = SC[sl];
-      // Materialised by `updateState`; `CH.energy` is masked here rather than
-      // in the vector, because the vector is the budget and the deposit path
-      // is the thing that must never see the ground. See `effEmit`.
+      // Materialised by `updateState`; `CH.energy` is masked here, not in the
+      // vector, because the vector is the budget and the deposit path must
+      // never see the ground. See `effEmit`.
       const eo = sl * 4;
       for (let c = 0; c < 4; c++) emit[i * 4 + c] = c === CH.energy ? 0 : EMITS[eo + c];
       if (!freeFresh) free[i] = this.freePortMask(a);
@@ -3362,37 +3243,10 @@ export class Sim {
   }
 
   /*
-   * A body says what it is; a free port says that it is free. Those were one
-   * thing and are now two.
-   *
-   * Every port used to be skipped unless it was unattached, which meant a
-   * fully wired body emitted nothing whatever — so a net was mute, and its
-   * voice was not its own but its periphery's. A net of forty bodies with
-   * four free ports spoke exactly as loudly as four loose ones. That is the
-   * wrong shape for the thing this world is supposed to be about: a net is
-   * the organism, and it could not be heard.
-   *
-   * So the principal lays this body's voice whether or not it is attached.
-   * Volume is per body, not per free port, so a net's carrying distance now
-   * scales with how much of it there is — which is what makes "there is
-   * something large over there" a thing a stranger can smell at all.
-   *
-   * The aux marker keeps its gate, because it is not a voice. `CH.aux` means
-   * "there is somewhere to attach here", and that has to stay false when
-   * there is not, or the one kind-independent signal in the field stops being
-   * true. Emitting it from a filled port would advertise a socket that is not
-   * there and every latch-seeking body in range would come and find nothing.
-   *
-   * Its magnitude is still the hardcoded 0.7, and the plan was to make that a
-   * gene — `E[aux][BOUND]`, so a body advertises its sockets as loudly as its
-   * lineage has learned to. It is not done here because the clean version is
-   * not obvious: a body's ch3 voice is already emitted from its principal, so
-   * a second genetic ch3 term at the port positions is either double-counting
-   * or a separate gene, and "separate gene" is not the subsumption it was
-   * billed as. The position genuinely cannot be folded in — "the socket is
-   * *here*" is information a body-centred voice cannot carry — so what is left
-   * to move is one scalar, and it can wait for a reason to be a particular
-   * shape rather than being changed because it was on a list.
+   * The principal lays this body's voice whether or not it is attached, so a
+   * net's carrying distance scales with its size. The aux marker keeps its
+   * gate: `CH.aux` means "there is somewhere to attach here" and must stay
+   * false when there is not.
    */
   private deposit(params: Params): void {
     const EMITS = this.agentStore.emitAll;
@@ -3419,11 +3273,8 @@ export class Sim {
   }
 
   /**
-   * Dotted against the materialised taste vector rather than through
-   * `mixScent`, which rebuilds it from the genome on every call — and this is
-   * called three times a body a frame, once per sensor and once for the trail.
-   * `mixScent` stays as the readable statement of what the dot product is, and
-   * is what the tests exercise.
+   * Dotted against the materialised taste vector; `mixScent` is the readable
+   * statement of the same dot product and must agree with this.
    */
   private scentAt(agent: Agent, x: number, y: number, _params: Params): number {
     const t = this.agentStore.tasteAll;
@@ -3437,11 +3288,8 @@ export class Sim {
   }
 
   /**
-   * What a full cell of ground reads as, once scaled: 1.
-   *
-   * Zero when there is no ground to speak of — an `ambientEnergy` of 0, which
-   * is how most of the energy tests set up a barren world. A body cannot
-   * smell what is not there, and this keeps that from being a division by it.
+   * What a full cell of ground reads as, once scaled: 1. Zero when
+   * `ambientEnergy` is 0, so a barren world is not a division by zero.
    */
   private get groundScale(): number {
     const cap = this.energy.cellCap;
@@ -3475,17 +3323,10 @@ export class Sim {
     const n = list.length;
     if (n === 0) return true;
     if (!nativeSolver.canNear(n, 0, 0)) return false;
-    /*
-     * The field crosses only when the solver is going to sample it. On the
-     * GPU path the three readings a body steers on came back with last
-     * frame's probe and sit in the store by slot; the box copy used to happen
-     * regardless, which with the field on the GPU is the whole disk — a
-     * twelve-megabyte memcpy into wasm every frame that nothing then read.
-     *
-     * Packed by slot into list order here, rather than written into the
-     * solver's array in list order when they arrived, because the list can
-     * move between the two — see `AgentStore.steerAll`.
-     */
+    // The field crosses only when the solver is going to sample it; on the
+    // GPU path the readings came back with last frame's probe and sit in the
+    // store by slot. Packed into list order here, because the list can move
+    // between their arrival and now.
     if (this.steerFromSamples) {
       const out = nativeSolver.steerSamples;
       if (!out) return false;
@@ -3503,23 +3344,9 @@ export class Sim {
     }
     if (!this.forceBlock && !this.packPose(list)) return false;
 
-    /*
-     * Bit 0 of `flags` and the whole of `pwire` come from the topology, so
-     * refreshForceScratch has already written them and they survive until a
-     * wire changes. What is left here is genuinely per-frame: the stun bit,
-     * the drive level, and three fresh random numbers.
-     */
-    /*
-     * The per-body pack, straight out of the store.
-     *
-     * It was fourteen accessor calls and a method call a body: `tasteOf` was
-     * four of those, each one a call that re-read `a.slot` to index an array
-     * this can hold directly, and the ground scale it applies is a constant
-     * for the frame on one known channel. Measured over fifty thousand
-     * bodies, back to back on the same list: **6.88 ms as written, 1.98 ms
-     * from the store**, of which 1.07 ms is the three random numbers, which
-     * have to be drawn host-side so a seeded run stays reproducible.
-     */
+    // Bit 0 of `flags` and the whole of `pwire` come from the topology, so
+    // when the scratch is fresh only the per-frame part is written: the stun
+    // bit, the drive level, and three random numbers.
     const TASTE_OF = this.agentStore.tasteAll;
     const DRIVE_OF = this.agentStore.drive;
     const TRAIL_OF = this.agentStore.trail;
@@ -3532,8 +3359,7 @@ export class Sim {
       for (let i = 0; i < n; i++) {
         const sl = list[i].slot;
         flags[i] = (flags[i] & 1) | (STUN_OF[sl] > 0 ? 4 : 0);
-        // Under a force block packPose has already written these; without one
-        // nothing else does, and scale moves every frame as bodies grow.
+        // Under a force block packPose has already written these.
         if (packed) {
           kinds[i] = KIND_OF[sl];
           sc[i] = SCALE_OF[sl];
@@ -3544,8 +3370,7 @@ export class Sim {
           cruiseArr[i] = CRUISE_OF[sl];
           turnArr[i] = TURN_OF[sl];
         }
-        // Drawn host-side so a seeded run stays reproducible; the solver only
-        // consumes them.
+        // Drawn host-side so a seeded run stays reproducible.
         noise[i * 3] = Math.random();
         noise[i * 3 + 1] = Math.random();
         noise[i * 3 + 2] = Math.random();
@@ -3595,12 +3420,9 @@ export class Sim {
     sp[9] = params.stepSpeed;
     sp[10] = params.swimTau;
     sp[11] = params.swimNoise;
-    // 12 and 13 are dead: they carried `attractStrong`/`attractMedium`, which
-    // are seeds read once by `seedChem` and by nothing in the solver. The slots
-    // stay reserved; see the note in solver.c.
+    // 12 and 13 are reserved and unread; see solver.c.
     sp[14] = SENSE_SPAN;
     nativeSolver.steer(n, dt);
-    // Back the same way: two setter calls a body wrote these two arrays.
     for (let i = 0; i < n; i++) {
       const sl = list[i].slot;
       DRIVE_OF[sl] = drive[i];
@@ -3613,16 +3435,10 @@ export class Sim {
   private steer(params: Params, dt: number): void {
     if (this.steerNative(params, dt)) return;
     const { w, h } = this;
-    // Face-attraction and the snap well both cut off at faceRadius, so this only
-    // ever needed nearby agents; it used to walk the whole population per agent.
     const near = Math.max(params.faceRadius, params.snapRadius);
     const list = this.rebuildBodyGrid(Math.max(1, near));
 
-    // Every direct field touch below goes through the store instead of
-    // Agent's accessors — measured the single hottest pass in the sim at
-    // scale (profiled ~32% of a frame). `agent` itself is still threaded
-    // through to portWorld/scentAt/inSnapArc/graph.*, which need the
-    // Agent shape (kind, chem) and are out of scope here.
+    // Store arrays by slot, not Agent accessors: the hottest JS pass.
     const store = this.agentStore;
     const X = store.x;
     const Y = store.y;
@@ -3737,10 +3553,8 @@ export class Sim {
       }
       const bodyCruise = CRUISE_JS[s];
       if (principalFree && bodyCruise > 0) {
-        // Active Ornstein-Uhlenbeck propulsion: the drive decays toward cruise
-        // with a persistence time while coloured noise kicks it. A swimmer
-        // surges and eases the way a crawling cell does, where the servo this
-        // replaces — drive velocity straight at a setpoint — reads mechanical.
+        // Ornstein-Uhlenbeck propulsion: the drive decays toward cruise with
+        // a persistence time while coloured noise kicks it.
         const cruise = bodyCruise * slow;
         const tau = Math.max(0.05, params.swimTau);
         const kick =
@@ -3817,12 +3631,11 @@ export class Sim {
     const sw = nativeSolver.swim;
     if (!bodies || !adjOff || !adjNei || !ids || !mass || !sw || !fa || !fs) return false;
 
-    // On a reuse frame the solver never reads the adjacency — it replays the
-    // pair list it already built from it — so neither the fit check nor the
-    // copy has anything to do.
+    // On a reuse frame the solver replays the pair list it already built,
+    // so the adjacency need not cross.
     if (!reuse) {
-      const off = this.wakeOff;
-      const nei = this.wakeNei;
+      const off = this.wireOff;
+      const nei = this.wireNei;
       const nAdj = off[n];
       if (!nativeSolver.canFlock(n, nAdj)) return false;
       // Straight across: both sides are the same CSR, in the same order.
@@ -3868,13 +3681,9 @@ export class Sim {
    * toward neighbor centroids so wires straighten.
    */
   private flock(params: Params, dt: number): void {
-    /*
-     * The gains are per body now, so the params are only a gate: a pond whose
-     * sliders are both zero still has bodies carrying whatever their lineage
-     * bred, and the largest of those decides whether the pass runs at all.
-     * The values passed down are the maxima, used for nothing but that test —
-     * the force itself reads each pair's own mean.
-     */
+    // The gains are per body, so the params are only a gate: the largest
+    // gain in the pond decides whether the pass runs at all, and the force
+    // itself reads each pair's own mean.
     let align = params.flockAlign;
     let sep = params.flockSep;
     {
@@ -3893,13 +3702,8 @@ export class Sim {
     if (n === 0) return;
 
     const maxHops = Sim.FLOCK_HOPS;
-    /*
-     * Adjacency, the index map and the swim flags are all functions of the
-     * topology and the roster, so on a frame where neither moved they are
-     * already correct from last time — as is the neighbourhood cache inside
-     * the solver, which is keyed on exactly the same thing. Rebuilding them
-     * anyway was most of what this pass cost at scale.
-     */
+    // Adjacency and the swim flags are functions of the topology and the
+    // roster, as is the neighbourhood cache inside the solver.
     const reuse = nativeSolver.flockCacheHolds(
       this.simId,
       this.graph.version,
@@ -3907,16 +3711,9 @@ export class Sim {
       n,
       maxHops,
     );
-    /*
-     * The wake graph's CSR, which is the same wires in the same order on the
-     * same key. This pass used to build an array-of-arrays and then flatten
-     * it into exactly this shape to hand to wasm — a push per wire end and
-     * then a copy of the lot — for a structure two other passes were already
-     * keeping.
-     */
-    this.refreshWakeGraph();
-    const off = this.wakeOff;
-    const nei = this.wakeNei;
+    this.refreshWireGraph();
+    const off = this.wireOff;
+    const nei = this.wireNei;
 
     if (this.flockDist.length < n) {
       const cap = Math.max(n * 2, 16);
@@ -4024,11 +3821,8 @@ export class Sim {
 
   /**
    * Ease the home point toward the live centre of mass, until the world is
-   * pinned. After that, home is the fixed anchor the scent field, the energy
-   * grid, and the pull back home are all cut against — letting it keep
-   * easing toward the crowd would slide the pond off its own grid, one
-   * easing step at a time, which is exactly the drift pinning was meant to
-   * end.
+   * pinned. After that home is the fixed anchor the field, the energy grid
+   * and the pull home are cut against, and must not move.
    */
   private trackHome(dt: number): void {
     if (this.worldPinned) return;
@@ -4038,9 +3832,8 @@ export class Sim {
       this.home = { x: com.x, y: com.y };
       return;
     }
-    // A rewrite can delete two agents at once, which moves the true centre of
-    // mass discontinuously; pulling toward that unsmoothed would kick the
-    // survivors. Half a second of lag makes home a place, not an instant value.
+    // A rewrite moves the true centre of mass discontinuously; half a second
+    // of lag keeps that from kicking the survivors.
     const k = 1 - Math.exp(-2 * dt);
     this.home.x += (com.x - this.home.x) * k;
     this.home.y += (com.y - this.home.y) * k;
@@ -4081,20 +3874,13 @@ export class Sim {
   }
 
   /**
-   * Which solver actually took the last frame. There are four ways a frame
-   * can be integrated and no way to tell from the outside which one ran,
-   * which matters most for the GPU path: it is gated on the whole pond
-   * being FAR tier, so forcing `farGpuMode` on while zoomed in changes
-   * nothing and looks identical to a path that is broken.
+   * Which solver actually took the last frame. The GPU path is gated on the
+   * whole pond being FAR tier, so forcing `farGpuMode` on while zoomed in
+   * changes nothing; this says so.
    */
   lastFarPath: 'gpu' | 'wasm' | 'js' | 'none' = 'none';
 
-  /**
-   * Fastest body in the pond. A health signal rather than a statistic: the
-   * failure the GPU FAR path showed the one time it ran was bodies being
-   * flung apart, and that shows up here long before it is legible on
-   * screen at a zoom far enough out for the path to engage at all.
-   */
+  /** Fastest body in the pond. A health signal: a blown solve shows here first. */
   peakSpeed(): number {
     const store = this.agentStore;
     const VX = store.vx;
@@ -4115,11 +3901,8 @@ export class Sim {
   }
 
   /**
-   * Everything swallowed and not yet digested, across the pond.
-   *
-   * Anything totalling the pond has to add this or it will read a mouthful in
-   * transit as matter that went missing — the same reason `escrowTotal` is
-   * here. It is in neither the ground nor a tank, and it is not nothing.
+   * Everything swallowed and not yet digested, across the pond. Anything
+   * totalling the pond has to add this, as with `escrowTotal`.
    */
   totalGut(): number {
     const store = this.agentStore;
@@ -4135,14 +3918,9 @@ export class Sim {
   }
 
   /**
-   * A rewrite is a principal-port meeting, not a fully dressed net.
-   *
-   * Waiting until both agents are saturated, the shrink curve has finished,
-   * and the rope has settled onto `wireMinRest` meant the solver did the
-   * haul that the rewrite animation is for, and Dup/Con almost never fired
-   * because their aux ports were still free. Leftovers may be null; that is
-   * a legal net. We only wait until shrink has *started* so a latch is
-   * visible for a beat, and so tests that stretch `wireShrink` still hold.
+   * A rewrite is a principal-port meeting, not a fully dressed net: leftovers
+   * may be null. Wait only until shrink has started, so a latch is visible
+   * for a beat and tests that stretch `wireShrink` still hold.
    */
   private static readonly REWRITE_SHRINK_READY = 0.45;
 
@@ -4154,40 +3932,20 @@ export class Sim {
       ? this.graph.curveLength(wire, this.agents, this.w, this.h)
       : this.graph.stemSpan(wire, this.agents, this.w, this.h);
     // Not the rest-length sit: the collapse hauls them the rest of the way.
-    // Still skip a cable that has barely started to take, so the pull is a
-    // close and not a fling.
+    // Still skip a cable that has barely started to take.
     return len <= params.wireMinRest * 1.3;
   }
 
   /**
-   * Bank what a ready redex can afford now, so meeting poor is not the same as
-   * never meeting.
-   *
-   * Affordability used to be an instantaneous gate. A pair became ready, was
-   * asked for both shares in that one frame, and if it could not pay, the
-   * meeting was lost — the need it had posted evaporated with it and the two
-   * drifted on. That made "rich at the right instant" the selected trait
-   * rather than "able to get rich", which is a much less interesting thing for
-   * a soup to be good at.
-   *
-   * Two facts make an escrow the natural fix. `shrinkProgress` is monotone in
-   * the wire's age, so a ready redex does not become unready by getting older;
-   * and `pulseRequests` is already pumping energy toward exactly these ends.
-   * What the pair lacked was somewhere to put it as it arrived.
-   *
-   * The pot belongs to the *wire*, not to the moment. It survives a lapse in
-   * readiness — ends jostled apart by declutter, a stun — because the wire
-   * surviving is what still makes the two a redex. It is refunded when the
-   * wire goes, which `kill` triggers through `detachAgent`, so a partner dying
-   * mid-accrual returns the stake instead of burning it.
-   *
-   * Runs after `pulseRequests` and before `startRewrites`, which keeps the
-   * invariant the phase order was chosen for: energy that arrives to complete
-   * a redex is spent on the frame it lands.
+   * Bank what a ready redex can afford now, so meeting poor is not the same
+   * as never meeting. The pot belongs to the wire: it survives a lapse in
+   * readiness and is refunded when the wire goes (`kill` via `detachAgent`),
+   * so a partner dying mid-accrual returns the stake. Runs after
+   * `pulseRequests` and before `startRewrites`, so energy that arrives to
+   * complete a redex is spent on the frame it lands.
    */
   private accrueRedexes(params: Params): void {
-    // Turned off mid-run: hand back what is held rather than freezing it in a
-    // pot nothing will ever spend.
+    // Turned off mid-run: hand back what is held.
     if (params.rewriteDuration <= 0) {
       this.refundEscrows();
       return;
@@ -4213,17 +3971,9 @@ export class Sim {
       // Where to put a refund if both ends are gone by the time it lapses.
       e.x = A.x;
       e.y = A.y;
-      /*
-       * A body clawing its way out of debt keeps what reaches it.
-       *
-       * Without this the pot swallows rescue energy on the frame it lands —
-       * `pulseRequests` runs first, so `flowCharges` has just delivered it —
-       * and the body can never climb back out. It would ask louder, be fed,
-       * be emptied again, and starve with a full stake to its name. The
-       * `recovering` latch is already exactly this question, held across the
-       * zero crossing by `rescueNeed`, so paying is simply suspended until it
-       * is back on its feet.
-       */
+      // A body clawing its way out of debt keeps what reaches it: otherwise
+      // the pot swallows rescue energy the frame `flowCharges` delivers it
+      // and the body starves with a full stake to its name.
       if (!A.recovering) e.paidA += payToward(A, rewriteShareOf(A) - e.paidA);
       if (!B.recovering) e.paidB += payToward(B, rewriteShareOf(B) - e.paidB);
     }
@@ -4254,12 +4004,8 @@ export class Sim {
 
   /**
    * Give a stake back to the body that put it up, or to the ground where the
-   * redex stood if that body is gone.
-   *
-   * Overfill spills onto the ground rather than evaporating, for the reason
-   * `tickUpkeep` gives at the only other site that can push a body past its
-   * cap: a hole in the conservation the rest of the economy is careful about
-   * is exactly how a mechanism quietly stops being worth anything.
+   * redex stood if that body is gone. Overfill spills onto the ground rather
+   * than evaporating: energy is conserved.
    */
   private repay(id: number, amount: number, x: number, y: number): void {
     if (!(amount > 0)) return;
@@ -4275,22 +4021,11 @@ export class Sim {
   }
 
   /**
-   * Pay out the grazing the shader did at the end of the last frame.
-   *
-   * The plan was built then, from the gut (metered) or `extra` (unmetered)
-   * as they stood at the end of that frame, and nothing between there and
-   * here touches either — digestion, excretion and a corpse's spill all run
-   * before the plan is built, and this is the first thing in `endFrame` that
-   * writes to a gut. So the room each body was credited against is exactly
-   * the room it would have had if the take had happened now: the pipelining
-   * is exact, not an approximation anyone has to budget error for, and a gut
-   * cannot be credited past `gutSize` times its cap.
-   *
-   * The id check is not currently reachable and is here because the invariant
-   * it guards is a scheduling one. A plan spans a frame boundary, and if a
-   * body ever comes to die or be born between the dispatch and this, the slot
-   * it vacated would be paid its meal. Silent, and it would look like a
-   * conservation leak somewhere else entirely.
+   * Pay out the grazing the shader did at the end of the last frame. Nothing
+   * between the plan's build and here writes a gut or `extra`, so the room
+   * each body was credited against is exact and a gut cannot be credited
+   * past `gutSize` times its cap. The id check guards a slot recycled across
+   * the frame boundary being paid the old occupant's meal.
    */
   private creditHarvest(): void {
     if (!this.harvestPending) return;
@@ -4307,9 +4042,8 @@ export class Sim {
       const slot = plan.slots[e];
       if (IDS[slot] !== plan.ids[e]) continue;
       // One row per entry, one `got` per species. Metered, each lands in the
-      // gut as itself and `runDigestion` decides what any of it is worth;
-      // unmetered, only the ground's is ever non-zero and it is money the
-      // moment it is swallowed, which is what this has always done.
+      // gut as itself for `runDigestion`; unmetered, only the ground's is
+      // non-zero and it is money the moment it is swallowed.
       const ro = e * HARVEST_STRIDE + HARVEST_GOT;
       if (metered) {
         const go = slot * CHEM_SPECIES;
@@ -4332,10 +4066,8 @@ export class Sim {
   }
 
   /**
-   * Energy held in redex escrows, which is in neither a body nor the ground.
-   *
-   * Anything totalling the pond has to add this or it will read a pair saving
-   * up for a commute as a leak.
+   * Energy held in redex escrows, in neither a body nor the ground. Anything
+   * totalling the pond has to add this.
    */
   escrowTotal(): number {
     let total = 0;
@@ -4344,47 +4076,12 @@ export class Sim {
   }
 
   /**
-   * The net's demand for energy, as one field, and one hop of flow along it.
-   *
-   * Two things want energy and they compete on the same scale. A body that has
-   * fallen into debt asks until it is back on its feet — up to its own
-   * rescue fill, not merely up to zero, which is the difference between an
-   * ambulance and a refill and the reason a surplus at one end of a net drains
-   * toward a starving end at all. A stalled redex needs whatever each end is
-   * short of a full extra.
-   *
-   * Both are magnitudes in the same units, so nothing has to be ranked by
-   * policy: a body two hops away and 0.9 short outpulls a redex next door
-   * that is 0.1 short, and a surplus at one end of a net finds a shortage at
-   * the other end by following the gradient a wire at a time.
-   */
-  /**
    * A snapshot of who is alive and how they differ, for telling drift from
-   * selection.
-   *
-   * Deliberately not called by anything per frame. It walks the whole roster
-   * and allocates, and it exists for a bench or a console to ask occasionally
-   * — the cost of answering "is this evolving or wandering?" belongs to
-   * whoever asks the question, not to every frame that does not.
-   *
-   * `lines` is the count of distinct surviving founders, which is the number
-   * that actually distinguishes the two. A population under selection loses
-   * lines: some founders leave descendants and most do not. A population under
-   * pure drift with a steady stream of fresh immigrants keeps roughly as many
-   * lines as have arrived, however far the mean of any trait has wandered.
-   *
-   * **Give it a warm-up before believing any of it.** A preset drops its whole
-   * population in at once as founders, so `bornMean` and `bornMax` start at
-   * exactly zero by construction and every early reading is measuring the
-   * seeding rather than the dynamics — `lines / bodies` starts at 1 for the
-   * same reason. Under a minute of simulated time these say almost nothing
-   * about a steady state, and it is very easy to read "has not got going yet"
-   * as "does not work". Trait means and standard deviations are only slightly
-   * better off: they begin as the spread `seedChem` and the sliders put there.
-   *
-   * What *is* fair early is a comparison between two runs at the same age and
-   * the same seed, which is what the numbers on `declutter` are. An absolute
-   * claim about whether a pond sustains evolution needs it run out properly.
+   * selection. Not called per frame: it walks the roster and allocates.
+   * `lines` is the count of distinct surviving founders; selection loses
+   * lines, drift with immigration keeps them. A preset seeds its whole
+   * population as founders, so nothing here means much under a couple of
+   * simulated minutes.
    */
   census(): {
     bodies: number;
@@ -4392,29 +4089,11 @@ export class Sim {
     bornMax: number;
     bornMean: number;
     /**
-     * Commutes per latch, cumulative — the tripwire on whether polluting the
-     * two principal channels is cheap.
-     *
-     * `docs/history/energy-chemistry-plan.md` §8. Latching is proximity plus an arc
-     * test and scent never gates it, and net reduction is confluent, so a net
-     * is a fixed budget of evolutionary events spent down: scent cannot touch
-     * that budget, only how nets acquire new structure. Well above 1 means
-     * nets are doing real internal computation and chemistry on species 0 and
-     * 1 costs little. At or below 1 every commute is roughly paid for by a
-     * fresh latch and encounter rate is load-bearing after all.
-     *
-     * **Cumulative, and therefore unreadable on its own.** `tally` counts from
-     * the last `clear`, and a soup's opening is a latch storm — measured over
-     * an 18-trial sweep, 6,775 latches against 1,095 commutes in the first
-     * thirty seconds. That start drags the cumulative ratio below 1 for
-     * minutes whatever the pond then does. Difference two samples: over the
-     * same sweep the windowed ratio ran 0.16, 0.52, 1.02, 1.43, 1.67, 2.06
-     * across six thirty-second windows and was still climbing. Same shape, and
-     * the same trap, as `rewriteMix`'s U — see its note, which says so at
-     * length about the number next door.
-     *
-     * Null before anything has latched, because a ratio over nothing is not
-     * zero — it is undecided, and reporting zero would read as the bad case.
+     * Commutes per latch, cumulative since the last `clear`, so difference
+     * two samples for a window: the opening latch storm drags the cumulative
+     * ratio down for minutes. Well above 1 means nets do real internal
+     * computation; at or below 1 encounter rate is load-bearing. Null before
+     * anything has latched: undecided, not zero.
      */
     commutesPerLatch: number | null;
     trait: Record<string, { mean: number; sd: number }>;
@@ -4458,32 +4137,11 @@ export class Sim {
   }
 
   /**
-   * How selective latching currently is, measured against chance.
-   *
-   * The three rewrite rules do very different things to a population: a
-   * commute makes four bodies out of two, an annihilation takes two away, an
-   * erase takes what it meets. So the *mix* of rules is what decides whether a
-   * pond grows or consumes itself, and the mix is decided by which kinds end
-   * up principal-to-principal.
-   *
-   * The number that matters is not the commute share on its own but the share
-   * against what proximity alone would give. If bodies latch with whoever is
-   * adjacent, the mix is the one you would get by drawing two bodies at random
-   * from the current kind census — that is `chance` here, computed by running
-   * `detectRule` over the nine kind pairs weighted by the census and bucketed
-   * exactly as `tally` buckets them. If bodies steer, face and choose before
-   * they latch, the share rises above it.
-   *
-   * Measured at thirty thousand, this traces the pond's opening as a clean U:
-   * 0.224 during the initial latch storm (chance is 0.22 — the dish is so
-   * crowded that latching is pure proximity), down to 0.103 as the net works
-   * through the destructive pairs it made, then back up through the chance
-   * line to 0.251 as the cull opens space and sensing starts to decide who
-   * meets whom. `selectivity` is that distance from chance, and it going
-   * positive is the moment the pond stops being a soup.
-   *
-   * Counts are cumulative since the last `clear`, as the rest of `tally` is;
-   * difference two samples to get a window.
+   * How selective latching currently is, measured against chance. `chance`
+   * is the commute share two bodies drawn at random from the current kind
+   * census would give, bucketed as `tally` buckets; `selectivity` is the
+   * observed share's distance from it. Counts are cumulative since the last
+   * `clear`; difference two samples to get a window.
    */
   rewriteMix(): {
     commutes: number;
@@ -4525,28 +4183,15 @@ export class Sim {
   }
 
   private pulseRequests(params: Params): void {
-    /*
-     * Three claims are made on a body here, and the largest wins. That used to
-     * be collected in a `Map` from agent id to the running maximum, cleared
-     * and refilled every frame, and then drained with a roster lookup per
-     * entry — at fifty thousand bodies, some fifty thousand map writes, a map
-     * iteration and fifty thousand `agents.get` a frame.
-     *
-     * None of it was needed. `seedRequest` is itself a maximum into a field
-     * that had just been zeroed, so taking the largest of three claims and
-     * seeding once is the same number as seeding three times in any order. The
-     * map is gone and each claim writes where it is made.
-     *
-     * The zeroing is folded in for the same reason: it was its own walk of
-     * every body to write a zero, and this walks every body immediately after
-     * and knows what the value should be. Locked bodies make no claim, so they
-     * get the zero that walk would have given them.
-     */
+    // The net's demand for energy as one field, and flow along it. Rescue
+    // need and redex need are magnitudes in the same units; each claim is a
+    // maximum into the field, so order does not matter. Locked bodies make
+    // no claim.
     const list = this.forceList();
     const REQUEST = this.agentStore.request;
     const LOCKED = this.agentStore.locked;
-    // Before the claims overwrite it: this frame's relay is off last frame's
-    // field, which is what makes demand travel a hop at a time.
+    // Snapshot before the claims overwrite it: this frame's relay is off
+    // last frame's field, which is what makes demand travel a hop at a time.
     if (this.requestPrev.length < list.length) {
       this.requestPrev = new Float64Array(Math.max(64, list.length * 2));
     }
@@ -4572,9 +4217,8 @@ export class Sim {
         const B = this.agents.get(wire.b.id);
         if (!A || !B) continue;
         if (rewriteCost(detectRule(A.kind, B.kind)) <= 0) continue;
-        // Per end against its own stake, not the old pair-wide share count:
-        // an end that has already banked its half should stop asking while its
-        // partner keeps on, which is the whole point of accumulating.
+        // Per end against its own stake: an end that has banked its half
+        // stops asking while its partner keeps on.
         const e = this.escrow.get(wire.id);
         const paidA = e ? e.paidA : 0;
         const paidB = e ? e.paidB : 0;
@@ -4586,39 +4230,22 @@ export class Sim {
 
     const adj = this.wireAdjacency();
     Sim.phase('pulse:seed');
-    /*
-     * How far demand gets this frame. `requestReach` 0 means as far as it
-     * goes: iterating the one-hop step past the longest possible path is the
-     * fixpoint the old in-frame relaxation solved, so the field settles
-     * exactly where it used to. Above 0 it advances that many hops and stops,
-     * and the rest of the journey happens on later frames — which is what
-     * gives demand a front to travel on. The parameter has the trade.
-     *
-     * Re-snapshotting between hops is what keeps each one a *step*: without
-     * it a value would race down the list in whatever order the roster
-     * happens to be in, and the reach would depend on the sort.
-     */
+    // How far demand gets this frame. `requestReach` 0 means to the fixpoint
+    // (queue-driven, one visit per body that improved); above 0 it advances
+    // that many hops and the rest of the journey happens on later frames.
     const reach = params.requestReach;
     if (reach <= 0) {
-      // The default, and a different algorithm rather than this one run to
-      // convergence: queue-driven, one visit per body that actually improved.
-      // Iterating the one-hop step until it is certainly settled costs a
-      // sweep per hop and is quadratic in the roster — measured as the frame
-      // at a few hundred founders, which is how it was found.
       relaxRequestsFast(list, this.agentStore, adj);
     } else {
       for (let h = 0; h < reach; h++) {
-        // Re-snapshot between hops so each is a *step*: reading the live
-        // array would let one body's need race down the list in whatever
-        // order the roster happens to be in.
+        // Re-snapshot between hops so each is a step: reading the live array
+        // would let need race down the list in roster order.
         if (h > 0) for (let i = 0; i < list.length; i++) prev[i] = REQUEST[list[i].slot];
         spreadRequestsFast(list, this.agentStore, adj, prev);
       }
     }
     Sim.phase('pulse:spread');
-    // No `quantum` here: each sender uses its own, seeded from the parameter
-    // at birth exactly as `transportRecoil` is, so a net's rhythm can be a
-    // property of the net rather than of the dish.
+    // No `quantum` here: each sender uses its own, seeded at birth.
     flowChargesFast(list, this.agentStore, adj, (from, to, amount) => this.recoil(from, to, amount), {
       grid: this.energy,
     });
@@ -4639,18 +4266,10 @@ export class Sim {
 
 
   /**
-   * Spend the genome pass the shader ran at the end of the last frame.
-   *
-   * The store fields written here are exactly the ones `updateState` writes,
-   * so every consumer downstream — the flock packing, the pair force,
-   * `recoil`, the scent deposit, `state-hash` — reads what it always read and
-   * has no idea the arithmetic moved.
-   *
-   * Slots are checked against the list the dispatch was packed from, not the
-   * list now: a body that died between the two would otherwise have its
-   * results paid to whichever body inherited its slot. That is the same
-   * hazard `creditHarvest` guards, and here it is reachable rather than
-   * theoretical, because rewrites settle between the dispatch and this.
+   * Spend the genome pass the shader ran at the end of the last frame. Writes
+   * exactly the store fields `updateState` writes. Slots are checked against
+   * the ids the dispatch was packed from: rewrites settle between the two,
+   * and a recycled slot must not be paid the old occupant's results.
    */
   private unpackGenome(): void {
     if (!this.genomePending) return;
@@ -4690,14 +4309,7 @@ export class Sim {
     }
   }
 
-  /**
-   * The sender's own `transportRecoil` is the kick's size — it is the one
-   * doing the pumping — and the receiver's own `transportThrust` decides how
-   * much of that kick it keeps versus hands back down the wire. Both are
-   * heritable, so a lineage of strong, low-thrust pumps feeding a lineage of
-   * high-thrust receivers drifts a net's swimming stroke somewhere neither
-   * parent species swims alone.
-   */
+  /** The sender's own heritable `transportRecoil` is the kick's size. */
   private recoil(from: { id: number }, to: { id: number }, amount: number): void {
     const A = this.agents.get(from.id);
     const B = this.agents.get(to.id);
@@ -4716,18 +4328,14 @@ export class Sim {
       if (!A || !B) continue;
       const rule = detectRule(A.kind, B.kind);
       if (rewriteCost(rule) > 0) {
-        // Already paid, or not yet. `accrueRedexes` ran this frame and took
-        // whatever the two could spare, so the pot is as full as it can be —
-        // a pair rich enough to cover both shares outright filled it on the
-        // frame it became ready and fires here exactly as it always did.
+        // `accrueRedexes` ran this frame, so the pot is as full as it can be.
         const e = this.escrow.get(wire.id);
         if (!e || !stakeMet(A, e.paidA) || !stakeMet(B, e.paidB)) continue;
         // Spent: the stake becomes the new bodies, so it must not be refunded.
         this.escrow.delete(wire.id);
       }
-      // Cancel only what the two are doing relative to each other. Zeroing
-      // both outright pinned a collapsing pair to the world for the whole
-      // rewrite while the rest of the soup drifted past it.
+      // Cancel only what the two are doing relative to each other, so the
+      // pair keeps drifting with the soup.
       const cx = (A.vx + B.vx) * 0.5;
       const cy = (A.vy + B.vy) * 0.5;
       A.vx = cx;
@@ -4746,12 +4354,9 @@ export class Sim {
         params.rewriteDuration,
         wire.id,
       );
-      /*
-       * With learning on the device, these two bodies' learned weights are
-       * there and not here, and `commitRewrite` is about to consolidate them
-       * into four children's genomes on this side. Asking now gives the round
-       * trip the whole length of the rewrite to complete.
-       */
+      // With learning on the device, `commitRewrite` needs these two bodies'
+      // learned weights on this side; asking now gives the round trip the
+      // length of the rewrite to complete.
       if (this.genomeOnGpu && params.learnRate > 0) {
         this.learnWanted.push(A.slot, B.slot);
       }
@@ -4761,14 +4366,9 @@ export class Sim {
   }
 
   /**
-   * Draw a collapsing wire's rope onto the chord between its two bodies.
-   *
-   * The bodies are moved kinematically during a rewrite, so the solver never
-   * sees the motion that ought to be dragging the rope along with them. Left
-   * to itself the rope is whipped by a shrinking rest length against nodes
-   * that are still where they were, and its arc length climbs to 80 px
-   * between two bodies touching each other — a knot, and a wire that sounds
-   * lower the closer they get.
+   * Draw a collapsing wire's rope onto the chord between its two bodies. The
+   * bodies move kinematically during a rewrite, so the solver never drags the
+   * rope along with them and it would knot.
    */
   private reelRope(wire: Wire, pull: number): void {
     const A = this.agents.get(wire.a.id);
@@ -4816,11 +4416,9 @@ export class Sim {
   }
 
   /**
-   * Leftover ropes on a rewriting pair are not the collapsing principal, but
-   * they share a kinematic end. Unreeled they freeze in world space while the
-   * stem slams, and the polyline grows into a several-hundred-pixel knot.
-   * Snap them onto the handoff chord (leftover ↔ ghost, or leftover ↔ leftover
-   * mate) so commit does not jump the endpoint.
+   * Leftover ropes on a rewriting pair share a kinematic end. Snap them onto
+   * the handoff chord (leftover to ghost, or leftover to leftover mate) so
+   * they do not knot and commit does not jump the endpoint.
    */
   private reelRewriteLeftovers(rw: Rewrite): void {
     const seen = new Set<number>();
@@ -4841,13 +4439,9 @@ export class Sim {
   }
 
   /**
-   * The knock of two bodies meeting at the end of a rewrite's pull.
-   *
-   * The pair is locked and moved kinematically, so the ordinary contact path
-   * never sees them touch — but they visibly do, and an annihilation that
-   * ends in silence at the moment of impact reads as a glitch. The closing
-   * speed is the one the animation actually produces: the gap closes as
-   * gap0*(1 - (t/PULL_END)^2), so at contact it is shutting at
+   * The knock of two bodies meeting at the end of a rewrite's pull; the
+   * ordinary contact path never sees a kinematic pair touch. The gap closes
+   * as gap0*(1 - (t/PULL_END)^2), so at contact it is shutting at
    * 2*gap0/(PULL_END*duration).
    */
   private emitRewriteContact(rw: Rewrite): void {
@@ -4870,8 +4464,8 @@ export class Sim {
         kindB: B.kind,
         impact: vN,
         overlap: boundRadius(A) + boundRadius(B),
-        // Head-on and central: no lever arm, so the reduced mass is the whole
-        // of the generalized effective mass.
+        // Head-on and central: no lever arm, so the reduced mass is the
+        // effective mass.
         effMass: (mA * mB) / (mA + mB),
         vN,
         vT: 0,
@@ -4887,20 +4481,16 @@ export class Sim {
   }
 
   /**
-   * Whether the last `refreshExpression` filled the vectors, which is the one
-   * predicate for "is anything expressed". Passed to whoever reads the rows
-   * outside this pass (`tickUpkeepFast`) rather than re-derived from eight
-   * floats a body: `expressVector` always writes a unit-sum vector, so the
-   * rows themselves cannot say whether they were written this frame.
+   * Whether the last `refreshExpression` filled the vectors: the one predicate
+   * for "is anything expressed", since the rows themselves are always
+   * unit-sum and cannot say whether they were written this frame.
    */
   private expressed = false;
   /**
-   * Whether anything in the pond is holding something undigested.
-   *
-   * Set where a mouthful lands and cleared by the pass that finds every gut
-   * empty. It is a hint, not a fact: over-setting it costs one pass over the
-   * roster, and the only thing that must never happen — a gut nothing drains
-   * — needs it to be under-set, which nothing here does.
+   * Whether anything in the pond is holding something undigested. Set where
+   * a mouthful lands, cleared by the pass that finds every gut empty. A hint:
+   * over-setting costs one pass; under-setting would leave a gut nothing
+   * drains, so nothing may do that.
    */
   private gutLive = false;
 
@@ -4909,9 +4499,7 @@ export class Sim {
     for (const rw of this.rewrites) {
       if (advanceRewrite(rw, this.agents, this.w, this.h, dt)) done.push(rw);
       // The wire is what pulls them together, so shorten it in step with the
-      // pull. It retracts into the pair and is gone by the time they touch,
-      // and because it stays taut on the way its pitch rises instead of
-      // sagging the way a slackening rope's does.
+      // pull; it is gone by the time they touch.
       const pull = clamp(rw.t / PULL_END, 0, 1);
       if (rw.wireId >= 0) {
         const wire = this.graph.wires.get(rw.wireId);
@@ -4934,16 +4522,13 @@ export class Sim {
       );
       const dyingA = this.agents.get(rw.a);
       const dyingB = this.agents.get(rw.b);
-      // Signed: a pair that annihilates while in debt releases less than a
-      // well-fed one, and their debt dies with them rather than being minted
-      // away. `rewriteYield` has already counted the bodies themselves.
+      // Signed: a pair that annihilates in debt releases less, and their
+      // debt dies with them. `rewriteYield` has already counted the bodies.
       let pool = rewriteYield(rw.rule, this.bodyValue);
       if (dyingA) pool += dyingA.extra;
       if (dyingB) pool += dyingB.extra;
-      // And what either had swallowed and not yet turned into anything goes
-      // back as itself, the way `kill` does it: `commitRewrite` clears the
-      // slots, and a rewrite that kept the guts would leak a mouthful on every
-      // commute in a metered pond.
+      // Undigested gut goes back as itself, as in `kill`: `commitRewrite`
+      // clears the slots, and keeping the guts would leak a mouthful.
       if (dyingA) this.spillGut(dyingA.slot, dyingA.x, dyingA.y);
       if (dyingB) this.spillGut(dyingB.slot, dyingB.x, dyingB.y);
       pool = Math.max(0, pool);
@@ -4961,9 +4546,8 @@ export class Sim {
         this.agentStore,
         this.breed,
       );
-      // It writes into the agents Map itself, so nothing else knows the roster
-      // moved. Anything keyed on it — the body list, the flocking pair list,
-      // the force scratch — is stale until this line.
+      // `commitRewrite` writes the agents Map itself; everything keyed on the
+      // roster is stale until this line.
       this.noteRosterChange();
       this.tally.born += this.nextId - beforeId;
       if (rw.rule === 'commute') this.tally.commutes++;
@@ -4985,35 +4569,9 @@ export class Sim {
 }
 
 /**
- * Pumping energy along a wire shoves the two bodies apart along it.
- *
- * A body that ejects energy east recoils west, and the body that absorbs it is
- * pushed east, as an impulse, so a light Era twitches where a Con barely stirs.
- *
- * `thrust` is how much of the receiver's kick is withheld. At 0 the pair is
- * equal and opposite and the flock's centre of mass never moves. Above 0 the
- * pair keeps a net impulse of `thrust * gain * amount` pointing back down the
- * wire, *against* the direction the energy travelled — so a net with a standing
- * gradient, surplus at one end and shortage at the other, swims away from its
- * own supply. That is a momentum pump on purpose: it is the one force in here
- * that a net can only generate by moving energy through itself, which makes
- * transport something a body does rather than something that happens to it.
- * Nothing runs away, because fluid drag turns a sustained pump into a terminal
- * drift rather than an acceleration.
- *
- * What it buys, at the default gain, is a twitch on the *events*: a fresh
- * latch beside a charged body, a rescue, a pair refilling after a commute —
- * transfers of most of a unit, which nudge an Era about 56 px/s against
- * settled speeds around 50. It does not show up in steady state, and the
- * reason is the economy rather than the constant: with everyone nearly topped
- * up, a frame's transfer is about 4e-4, three orders of magnitude below a
- * one-off. Measured over a seeded 30 s soup, net openness at gains 0 / 6 / 12 /
- * 25 is 80 / 86 / 79 / 89 px, which is seed noise. Moving more energy per
- * frame is what would make the tissue breathe; raising this alone will not.
- * The same arithmetic bounds the swimming: a steady-state transfer of ~4e-4 a
- * frame at gain 20 and full thrust is under 1 px/s of drift, so the stroke
- * shows up on the events — a rescue, a refill after a commute — and on a net
- * held under a real gradient, not on a soup that is already topped up.
+ * Pumping energy along a wire shoves the two bodies apart along it, as an
+ * equal and opposite impulse of `gain * amount`: the sender recoils, the
+ * receiver is pushed on. The centre of mass never moves.
  */
 export function applyTransportRecoil(
   A: { x: number; y: number; vx: number; vy: number; mass: number; locked: boolean },
