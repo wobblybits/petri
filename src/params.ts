@@ -1,7 +1,4 @@
 import { FIELD_CELL } from './fields.ts';
-// Derived, not copied. These three are the values the pond has always run at,
-// and they live where the economy that uses them lives; writing the numbers
-// again here is exactly the duplication `chem-layout.ts` exists to warn about.
 import { BODY_VALUE, ERA_CAP_RATIO, ERA_UPKEEP_RATIO } from './energy.ts';
 import { SENSE_SCALE } from './chem-layout.ts';
 
@@ -9,17 +6,8 @@ export interface Params {
   deposit: number;
   diffuse: number;
   decay: number;
-  /**
-   * Global gain on how strongly anything smelled moves a body.
-   *
-   * Stays global, and stays. It looks redundant with the magnitude of a body's
-   * own taste weights — two knobs for one quantity — but they are not the same
-   * kind of knob. This is a property of the *world*, like `diffuse` or
-   * `deposit`: how much chemotaxis drives anything at all here. Taste is a
-   * property of a body: what it cares about, relative to what its neighbours
-   * care about. Folding this into the seeds would make "smell matters less in
-   * this pond" unexpressible without editing every genome in it.
-   */
+  /** Global gain on how strongly anything smelled moves a body. A property of
+   *  the world, like `diffuse`; a body's taste weights say what it cares about. */
   sense: number;
   attractStrong: number;
   attractMedium: number;
@@ -33,111 +21,38 @@ export interface Params {
   springDamp: number;
   /** How far an aux port aims off its neighbour, toward its own side. 1 = 20 degrees. */
   auxSpread: number;
-  /**
-   * Strength of the soft inverse-square push a fully wired agent exerts on
-   * agents from *other* nets. Flocking separation only ever applied within a
-   * net, so before this nothing pushed separate nets apart at all.
-   */
-  /**
-   * Personal space: a local force holding bodies off each other.
-   *
-   * Measured to cost reproduction, together with `flockAlign`, and neither
-   * alone. Over 45s of a 250-body soup, counting how deep the average lineage
-   * gets (`Sim.census().bornMean`):
-   *
-   *     declutter 1.4, flockAlign 5.5   ->  0.36    (as shipped)
-   *     declutter 0,   flockAlign 5.5   ->  0.29
-   *     declutter 1.4, flockAlign 0     ->  0.42
-   *     declutter 0,   flockAlign 0     ->  6.54
-   *
-   * Eighteen times the generation depth with both off, and almost nothing from
-   * turning off either one. Read as a comparison at equal age, which is what
-   * it is — 45 s is mostly warm-up for a preset that drops its whole
-   * population in at once as founders, so the absolute figures are far too
-   * early to say what any of these settles at. See `Sim.census`. The mechanism is visible in the wire counts: at the
-   * shipped values only 2 of 93 wires are principal-to-principal and none are
-   * Con-Dup, while 98% of bodies can afford a rewrite and the ground is still
-   * at capacity. Bodies are rich and idle — they are not meeting. Personal
-   * space holds them apart and alignment turns a head-on approach into a shoal
-   * swimming the same way, and a commute needs two principals nose to nose.
-   *
-   * Left as they are, because these are what make a settled net look settled
-   * and a pond look like a pond, and that is a real thing to want. But it is a
-   * direct trade against evolution and it should be a decision rather than a
-   * surprise.
-   */
+  /** Personal space: a local force holding bodies off each other. With
+   *  `flockAlign` it keeps principals apart and costs reproduction
+   *  (`Sim.census().bornMean`); neither alone does. */
   declutter: number;
-  /**
-   * How hard a rope pushes off other ropes and off bodies it is not attached
-   * to. Segment-based and one-way — a rope never moves an agent — so this
-   * cannot feed back into the joint solver.
-   */
+  /** How hard a rope pushes off other ropes and bodies it is not attached to.
+   *  One-way — a rope never moves an agent — so it cannot feed back into the
+   *  joint solver. */
   wireClear: number;
   /** Port-axis stiffness multiplier. Higher = wires hug their port axis harder. */
   portStiff: number;
   /** Rest-length breathing amplitude, as a fraction. 0 = a settled net freezes. */
   wireBreathe: number;
-  /**
-   * Seconds a taut wire keeps its rest-shape constraint. 0 = never drop it.
-   * Shape only matters while slack is degenerate; a taut rope does not need it.
-   */
+  /** Seconds a taut wire keeps its rest-shape constraint. 0 = never drop it. */
   wireShapeAge: number;
-  /**
-   * Seconds before a taut wire becomes span-only (joint, no rope nodes).
-   * 0 = never. A leftover that goes slack again gets the full rope back.
-   */
+  /** Seconds before a taut wire becomes span-only (joint, no rope nodes). 0 = never. */
   wireSpanAge: number;
-  /**
-   * Live length / rest at or below which a wire counts as taut for aging.
-   * A coarsened wire stays coarsened until it exceeds this by a small band.
-   */
+  /** Live length / rest at or below which a wire counts as taut for aging. A
+   *  coarsened wire stays coarsened until it exceeds this by a small band. */
   wireTaut: number;
-  /**
-   * Live length / rest at which a wire tears loose. 0 = wires never break.
-   *
-   * Well above `wireTaut`, because the span constraint is compliant and a
-   * loaded wire legitimately stretches — a threshold near the taut ratio
-   * shreds a working net rather than relieving it. Measured over thirty
-   * seconds of a 400-body soup, against snapping switched off entirely:
-   *
-   *   off   281 wires, 340 bodies
-   *   4.0   283 wires, 344 bodies   never fires
-   *   3.0   277 wires, 338 bodies   fires, costs nothing in aggregate
-   *   2.2   205 wires, 260 bodies   a quarter of the pond gone
-   *   1.5   126 wires, 220 bodies   shredded
-   *
-   * 3.0 is the setting that relieves a strained net without dismantling a
-   * working one. Below about 2.5 this stops being a safety valve and becomes
-   * a second death rate.
-   *
-   * It closes a loop that already existed with nothing at the end of it:
-   * `wireShrink` pulls wired bodies together, and in a crowded net they cannot
-   * close the distance, so tension builds and simply stays. Now the most
-   * strained link lets go, the ports come free to latch elsewhere, and an
-   * over-packed net reconfigures instead of straining forever.
-   */
+  /** Live length / rest at which a wire tears loose. 0 = wires never break.
+   *  Keep it well above `wireTaut`: a loaded wire legitimately stretches, and
+   *  a threshold near the taut ratio shreds a working net. */
   wireSnap: number;
   wireMinRest: number;
   wireShrink: number;
   eraMass: number;
   nodeMass: number;
   turnRate: number;
-  /**
-   * How strongly a fresh body is drawn to full ground, against a reading of 1
-   * for a cell at capacity.
-   *
-   * The seed only. Like `attractStrong` and `attractMedium` this sets where a
-   * population starts and is never read again — breeding takes it from there,
-   * and a lineage is free to drift to indifference or to outright avoidance,
-   * which for food would be a strange thing to become but is not this
-   * parameter's business to prevent.
-   *
-   * Seeds the taste *slope* against `request`, not the flat weight, so a fed
-   * body ignores food and a hungry one turns toward it. A flat attraction
-   * seems safe — untouched ground is uniform, and a uniform field steers
-   * nothing — but a body eats a dip under itself within a frame or two and
-   * then chases the dip. See `seedChem`, which has the measurement.
-   */
+  /** How strongly a fresh body is drawn to full ground, against a reading of 1
+   *  for a cell at capacity. Seed only, read once by `seedChem`. Seeds the
+   *  taste slope against `request`, so a fed body ignores food and a hungry
+   *  one turns toward it. */
   attractFood: number;
   sensorAngle: number;
   sensorDist: number;
@@ -148,826 +63,189 @@ export interface Params {
   swimNoise: number;
   drag: number;
   angDrag: number;
-  /**
-   * How much a full tank drags: added to `drag`, in proportion to how full a
-   * body is. 0 = one drag law for every body, which is the pond as it was.
-   *
-   * Locomotion had a hole in it. `drag` is one rate applied to every body
-   * alike, and the rope shares its corrections by mass, so no arrangement of
-   * internal forces can move a net's centre of mass. `applyTransportRecoil`
-   * says as much outright: at `transportThrust` 0 the pair is equal and
-   * opposite and the flock's centre never moves. A net therefore travelled
-   * only because thrust *withheld* part of the receiver's kick — a
-   * reactionless drive, minting momentum wherever energy flows.
-   *
-   * Friction that differs body to body is the way out, and the one every
-   * crawler takes. Gray and Hancock's flagellum swims because a slender
-   * segment drags about twice as hard sideways as lengthwise, and a snake's
-   * belly does the same against sand; an earthworm and a crawling cell
-   * instead *modulate* their grip, anchoring one end while the other slides.
-   * The pond's stroke is longitudinal — a kick runs along a wire — so the
-   * anisotropic version buys it nothing: a straight chain has no transverse
-   * wave, and Purcell's scallop still cannot swim. Modulated grip is the one
-   * that fits, and the pond already carries the state to modulate on.
-   *
-   * So a transfer does two things at once. It kicks the pair apart along the
-   * wire, and it changes which of the two is anchored: the sender is lighter
-   * on its feet by exactly what it just sent, the receiver heavier by the
-   * same. An impulse `p` into a body of mass `m` at rate `k` carries it
-   * `p / (m k)` before it stops, so the pair's centre ends up
-   *
-   *     |p| * (1/k_sender - 1/k_receiver) / (m_sender + m_receiver)
-   *
-   * along the sender's recoil. Mass cancels out of the *direction*: which way
-   * a net goes is decided only by which end is grippier. The rope cannot undo
-   * it either, because a mass-weighted position correction moves the two
-   * bodies and not their centre.
-   *
-   * The sign is left open, because the pond should settle it rather than this
-   * file. Transport runs down the demand gradient, so a sender is usually the
-   * fuller of the two:
-   *
-   *   - **Positive** — full grips, empty slides. The receiver is the one that
-   *     slides, so a net holding a gradient walks toward its hungry end,
-   *     *with* the flow: it carries itself toward whatever it is feeding.
-   *   - **Negative** — full slides, empty grips. The sender slides, so the net
-   *     walks back toward its supply, *against* the flow, which is the
-   *     direction `transportThrust` already drifts it.
-   *
-   * The sum is clamped at zero, so a rate can be cancelled but never
-   * inverted: negative drag is an energy source and the soup comes apart in
-   * seconds. Angular drag is left alone, so this does one thing.
-   *
-   * Negative is worth reading carefully, because it looks like more life and
-   * is mostly less. Nothing about mass is involved — the rate multiplies
-   * velocity directly, so a heavy body and a light one damp alike. What a
-   * negative value does is make a *full* body slippery: at -2 against a
-   * `drag` of 0.55 the sum reaches zero at 27% of a tank, and every body
-   * fuller than that is frictionless and coasts until something hits it.
-   * The pond fills with motion, and none of it is anybody's doing.
-   *
-   * It also quietly kills the gait. A stroke travels on the *difference*
-   * between a wire's two ends, and once both ends are past the clamp they are
-   * both at exactly zero — identical, however hard the wires pull. So
-   * negative grip buys drift at the cost of the one term that made drift
-   * directed.
-   *
-   * Two jobs at once even so, which `docs/concepts.md` asks to be visible. It
-   * sets a net's stroke, and it sets how far a *loner* coasts — a hungry body
-   * and a fed one no longer swim alike.
-   *
-   * Nothing happens in a pond that is topped up: a stroke needs a difference
-   * in fullness across a wire, and `full_mean` at 1.0 says there is none.
-   * Read `demand_mean` before reading `net_drift`.
-   *
-   * With `transportRecoil` this is now the whole of locomotion, and the two
-   * together need no phase. A recoil is an impulse pair; grip makes the two
-   * ends coast different distances from it, so the pair's centre ends up
-   * `|p| * (1/k_sender - 1/k_receiver) / (m_sender + m_receiver)` along the
-   * sender's recoil — first order in the impulse, and settled per transfer
-   * rather than per cycle.
-   *
-   * A contracting wire was built beside it and withdrawn. `wireTug` shortened
-   * the wire a transfer had just crossed and `wireTugTau` relaxed it again,
-   * which reads like an inchworm and is not one: both the pull and the grip
-   * were driven by the same packet at the same instant and then decayed, so
-   * the loop they traced in (length, grip) closed on a line and its area was
-   * only whatever the difference between two relaxation times left behind.
-   * A gait needs two degrees of freedom with a phase between them that
-   * something can *set*; a packet clock plus two exponentials is one degree
-   * of freedom and a race. It also spent the wire's rest length, which is
-   * what decides whether two bodies ever meet — turned up far enough to swim
-   * it held every pair too tight to rewrite. See `docs/concepts.md`.
-   *
-   * Global for now, unlike `transportThrust` and `transportRecoil` beside it,
-   * which are heritable. Making a lineage's own grip heritable is the obvious
-   * next move and costs a genome head; it is worth spending once a sign is
-   * known to carry a net at all.
-   */
+  /** Drag added to `drag` in proportion to how full a body is, per second.
+   *  0 = one drag law for every body. Positive: full grips, empty slides, so a
+   *  net walks toward its hungry end; negative: the reverse. The sum is clamped
+   *  at zero, so a rate can be cancelled but never inverted. A stroke needs a
+   *  difference in fullness across a wire, so a topped-up pond does not move. */
   grip: number;
-  /**
-   * How fast the pathway runs, as a plain multiple. 0 = no metabolism, so no
-   * gait, and no pathway spend either — which is what it ships at.
-   *
-   * Multiplying every reaction rescales time and nothing else, so this moves
-   * the period without moving where the pathway oscillates.
-   *
-   * The master switch for the whole gait, and the one dial that has to be
-   * moved to see any of it: at zero `advanceGait` returns with `gaitWave` and
-   * `anchor` at zero, so the stroke is exactly 1 and `grip` reads what it read
-   * before the pathway existed. The pond is bit-for-bit yesterday's.
-   *
-   * It ships there because the pond at 6 is not yesterday's and the amount by
-   * which is not small. The suite, which is only a change detector, still says
-   * it plainly: a fresh era-era latch peaks at 239 rad/s of spin against a
-   * bound of 20, and a body standing still loses a sixth of a full tank inside
-   * a couple of seconds to substrate it buys and cannot help buying. Neither
-   * is a gait; both are a stroke amplitude and a period picked to be seen
-   * rather than measured, driving a span constraint stiff enough to answer
-   * every one of them.
-   *
-   * Finding the value it should ship at is a `npm run pond` job — minutes of
-   * pond, the seed budget its measure needs — and not a thing the suite can
-   * answer. Until that sweep has run this is the honest place for it, and the
-   * slider is right there for anyone who wants to watch it move.
-   */
+  /** How fast the pathway runs, as a plain multiple. 0 = no metabolism, no
+   *  gait, no pathway spend (`advanceGait` returns with `gaitWave` and `anchor`
+   *  at zero). Rescales time only: moves the period, not where it oscillates. */
   metabolicRate: number;
-  /**
-   * How hard a discharged body pulls substrate out of its own tank, per
-   * second at full discharge.
-   *
-   * This is the join to the economy, and the reason the pathway is not a
-   * shadow of it. A body buys substrate with `extra` in proportion to how
-   * *discharged* it is, which is how a real cell regulates glycolytic flux —
-   * not by how much it is holding but by how little of its charge is left.
-   * So a net that is working draws on its tank, and a tank drawn down is what
-   * `spreadRequests` carries and `flowCharges` answers.
-   *
-   * What leaves the tank lands on the ground through the same `excreteRate`
-   * path upkeep already uses, so nothing is destroyed. A body that
-   * metabolises hard is a body that fertilises the cell it is standing in.
-   */
+  /** Substrate a discharged body pulls out of its own tank, per second at full
+   *  discharge. It lands on the ground through the `excreteRate` path. */
   metabolicSupply: number;
-  /**
-   * The pathway's basal rate — what it runs at with no ADP to activate it.
-   *
-   * Without it zero is an absorbing state: the autocatalytic step is
-   * `sub * adp^2`, which is zero when the pool is fully charged, so a body
-   * that ever reaches full charge stops metabolising forever. That is not a
-   * subtlety, it is the reason Selkov's own equations flatlined here. A basal
-   * rate is also what real phosphofructokinase has — the ADP activation is a
-   * multiplier on an enzyme that already turns over.
-   */
+  /** The pathway's basal rate, with no ADP to activate it. Must be non-zero:
+   *  the autocatalytic step is `sub * adp^2`, so a fully charged body would
+   *  otherwise stop metabolising forever. */
   metabolicBase: number;
-  /**
-   * How fast ADP is recharged to ATP, per second. The payoff phase.
-   *
-   * Against `metabolicBase` and the pool this sets whether the pathway
-   * oscillates or settles: recharge much faster than the autocatalytic burn
-   * and the pool sits full and still, much slower and it sits empty.
-   *
-   * How much slower is not a matter of taste. Write `u` for ADP and the four
-   * reactions of `advanceGait` are:
-   *
-   *     sub' = supply·(1 − charge) − sub·(base + u²)
-   *     u'   = sub·(base + u²) + work − regen·u
-   *
-   * and `1 − charge` is `u/pool`, because a cell pulls on its fuel when it is
-   * discharged rather than when it is holding a lot. That is the departure
-   * from Selkov that matters here: his influx is a constant `v`, and this one
-   * is proportional to `u`. Add the two rows and the shared autocatalytic term
-   * cancels, leaving a balance that is *linear* in `u`:
-   *
-   *     u* · (metabolicRegen − metabolicSupply/pool) = work(u*)
-   *
-   * `u` is ADP, so `u*` has to land inside the body's own `adenylate` pool.
-   * Below `supply/pool` the left side is negative and the right side is not,
-   * so there is no steady state at all and every body runs to the discharged
-   * clamp and stays: at the values this shipped with — supply 3, regen 1, a
-   * seeded pool of 1.5 — the wave sat at exactly −1 forever and the gait never
-   * moved. Far above it, `u*` is driven to nearly zero and the pathway sits
-   * fully charged and just as still. 4 was that second mistake.
-   *
-   * The oscillation lives in the narrow band just above `supply/pool`, which
-   * is 2 at the shipped supply and seeded pool. Integrating the four
-   * reactions across it, `regen` from 2.15 to 2.50 gives a limit cycle that
-   * swings 1.85 of a possible 2.0, and the period goes exactly as
-   * `1/metabolicRate` — 7.3 s at a rate of 6, so a stroke of a couple of
-   * seconds wants a rate around 15 to 20. It ships mid-band.
-   *
-   * Two things that band depends on, and both are worth knowing before moving
-   * anything near it. `work` is what makes `u*` nonzero at all — take
-   * `gaitSwell` to zero and the balance above forces `u* = 0`, so the stroke's
-   * own cost is what drives the clock that drives the stroke. And `adenylate`
-   * is heritable, so the band is per body: a lineage that breeds a bigger pool
-   * lowers its own `supply/pool` and slides out of it. Neither has been
-   * measured in a pond, which is why `metabolicRate` is still at zero.
-   */
+  /** How fast ADP is recharged to ATP, per second. Oscillates only in a narrow
+   *  band just above `metabolicSupply / adenylate`: below it every body sits at
+   *  the discharged clamp, far above it the pool sits full and still. Needs
+   *  `metabolicWork` non-zero, and `adenylate` is heritable, so it is per body. */
   metabolicRegen: number;
-  /**
-   * ATP spent per unit of stroke, per second.
-   *
-   * What makes moving cost something. The stroke discharges the pool in
-   * proportion to how far it is actually swinging a wire, so a net that
-   * undulates hard runs its charge down, pulls harder on its tank, and has to
-   * eat — and one that cannot eat goes still. That is the loop `swimCost` was
-   * reaching for by charging on speed, arriving through the mechanism instead
-   * of beside it.
-   */
+  /** ATP spent per unit of stroke, per second. What makes moving cost something. */
   metabolicWork: number;
-  /**
-   * Energy debited from the tank per unit of substrate the pathway buys.
-   * 0 = metabolism is free, which is the pond before this.
-   *
-   * A yield, and the reason the reaction's own scale and the economy's can
-   * differ by two orders without either being wrong. A pathway turns its pool
-   * over many times per unit of matter consumed — that is what a *currency*
-   * is — so `metabolicSupply` is in reaction units and this is what converts
-   * them to tank units. At the shipped values a body at half charge spends
-   * about 0.015/s, which is the rent it already pays to exist: metabolising
-   * costs about as much as being alive.
-   */
+  /** Energy debited from the tank per unit of substrate the pathway buys.
+   *  0 = metabolism is free. Converts reaction units to tank units. */
   metabolicCost: number;
-  /**
-   * How fast the upstream metabolite crosses a wire, per second. 0 = every
-   * body's pathway is its own.
-   *
-   * The fast coupling. The slow one is already there and costs nothing: two
-   * wired bodies both buy substrate out of tanks that `flowCharges` moves
-   * energy between, so their pathways are coupled through the economy
-   * whether this is set or not.
-   */
+  /** How fast the upstream metabolite crosses a wire, per second. 0 = every
+   *  body's pathway is its own. */
   metabolicDiffuse: number;
   /** What a fresh body's adenylate pool starts at. Heritable from there. */
   adenylate: number;
-  /**
-   * How far the gait swings a wire's rest length, as a fraction of it.
-   * 0 = the wire ignores the clock, which is the pond before this.
-   *
-   * The visible half of the stroke, and it is a separate mechanism from the
-   * impulse on purpose because this engine will only give one thing each.
-   * `Sim.strokeWires` is what moves a net: an impulse is the only actuator a
-   * centre of mass responds to, since `grip` works on the coast afterwards.
-   * But a wire's span constraint is near-rigid, so it puts the two ends back
-   * where `rest` says inside the same frame — the net walks and its shape
-   * never changes, which is why the gait has been invisible.
-   *
-   * Driving `rest` is the exact reverse: the constraint serves it, so it
-   * reads at once, and it is worth no travel at all. So both, off one phase
-   * and agreeing — the ends pull together as the muscle pulls, and a chain
-   * with a phase lag along it shows a wave running down its length.
-   *
-   * Sized to be seen rather than to be safe: 0.3 swings a 48 px wire between
-   * about 34 and 62. `wireBreathe`, which this rides on top of, is 0.04 —
-   * two pixels, and never meant as a gait.
-   */
+  /** How far the gait swings a wire's rest length, as a fraction, on top of
+   *  `wireBreathe`. 0 = the wire ignores the clock. Shape only: the impulse in
+   *  `Sim.strokeWires` is what moves a net's centre of mass. */
   gaitSwell: number;
-  /** Shoaling. See `declutter` for what this costs reproduction, and why the
-   *  two only matter together. */
+  /** Shoaling. See `declutter` for what the two together cost reproduction. */
   flockAlign: number;
   flockSep: number;
   maxAgents: number;
   soupCount: number;
   /** Seconds between automatic free-agent spawns (0 = off). */
   spawnInterval: number;
-  /**
-   * World-space size of one energy cell. Kept a whole multiple of the scent
-   * field's cell (10 units) so the two grids line up — an energy cell is a
-   * 4x4 block of scent cells rather than a lattice at an unrelated pitch.
-   */
+  /** World-space size of one energy cell. Must stay a whole multiple of the
+   *  scent field's cell (`FIELD_CELL`) so the two grids line up. */
   energyCell: number;
-  /**
-   * Free energy in an unvisited cell. A cell holds a whole extra, so an agent
-   * arriving on untouched ground fills in one step and the grid, not the
-   * charging rate, is what the net is competing over.
-   */
+  /** Free energy in an unvisited cell. A cell holds a whole extra. */
   ambientEnergy: number;
-  /**
-   * How fast the ground spreads, as a multiple of the scent `diffuse` slider.
-   *
-   * Small, because energy is not a smell. A signal wants to reach across the
-   * dish inside a second — that is what makes a trail worth following. Ground
-   * that did the same would be a single shared pool with no local scarcity in
-   * it, and nothing to forage toward. This is the number that decides how far
-   * a grazed patch can draw on its neighbours, and so how big a dead zone a
-   * net can make before it has to move.
-   */
-  /**
-   * Gray-Scott feed and kill, between the two signal channels. Both 0 = off.
-   *
-   * `u + 2v -> 3v` run on `CH.conP` (substrate) and `CH.dupP` (activator).
-   * Without it every channel is a decaying hill around whoever is emitting, so
-   * what a body smells is always *who is there* — the field carries information
-   * but holds none of its own. A reaction puts maxima where nobody is standing,
-   * fronts that travel, and regions just used up and briefly unusable, so
-   * "over there" can start to mean something no emitter is saying.
-   *
-   * The ground is deliberately not one of the two. `CH.energy` is a conserved
-   * quantity the economy balances, and a reaction that converts it would create
-   * and destroy food as a side effect of signalling.
-   *
-   * Two things have to be arranged before this does anything but wash flat, and
-   * both are yours. The species must diffuse at different rates — Gray-Scott
-   * wants the substrate at roughly twice the activator, and `diffuseRate` is
-   * where that lives; equal rates have no instability to find. And the pair
-   * sits in a thin sliver of its own plane, roughly F in [0.01, 0.09] against
-   * k in [0.045, 0.07], with anything worth looking at inside a fraction of
-   * that. A default picked without a screen in front of it would be a uniform
-   * wash that looked like the code not working, which is why both ship at zero.
-   *
-   * Note `decay` still acts on both channels, so the effective kill is
-   * `decay + reactKill` rather than `reactKill` alone.
-   */
+  /** Gray-Scott feed and kill, `u + 2v -> 3v` on `CH.conP` (substrate) and
+   *  `CH.dupP` (activator). Both 0 = off. `CH.energy` is never a reactant.
+   *  Washes flat unless the substrate diffuses at about twice the activator's
+   *  rate (`diffuseRate`) and the pair sits roughly in F [0.01, 0.09] against
+   *  k [0.045, 0.07]. `decay` still acts, so effective kill is `decay + reactKill`. */
   reactFeed: number;
   reactKill: number;
+  /** How fast the ground spreads, as a multiple of the scent `diffuse` slider.
+   *  Small: ground that reached across the dish would have no local scarcity. */
   energyDiffuse: number;
-  /**
-   * Logistic regrowth rate, per second, toward `ambientEnergy` per cell.
-   *
-   * Not a refill timer. Growth is proportional to what is already in the cell,
-   * so a cell taken to exactly zero never comes back on its own and has to be
-   * recolonised from a neighbour — grazing to the floor makes a scar that
-   * heals from its rim at the speed `energyDiffuse` sets. 0 turns the ground
-   * back into the seam of ore it used to be.
-   */
+  /** Logistic regrowth rate, per second, toward `ambientEnergy` per cell.
+   *  Proportional to what is there, so a cell at exactly zero never comes back
+   *  on its own and must be recolonised via `energyDiffuse`. 0 = no regrowth. */
   energyRegrow: number;
-  /**
-   * How much the fertiliser channel accelerates regrowth, per unit of it.
-   *
-   * Growth becomes `r * (1 + fertilise * C) * E * (1 - E/K)`, where `C` is
-   * `FERTILISE_CH`. What this buys that the ground's excretion row does not
-   * is a *reason for
-   * two lineages to need each other*.
-   *
-   * Farming moves stock from a tank onto the dish: one body's investment, and
-   * the returner is the same body. This is catalysis — a lineage that emits on
-   * the fertiliser channel creates no energy at all, it makes the ground
-   * recover faster wherever it happens to be. It cannot feed itself that way
-   * any more than it already could, because the growth it accelerates is
-   * bounded by the same carrying capacity. What it can do is make the patch it
-   * stands in worth more to *somebody else*, and a grazer that stays near a
-   * fertiliser does better than one that does not. That is mutualism out of
-   * two genes and no new machinery.
-   *
-   * Negative is an inhibitor, which a lineage should be able to become — a
-   * body that poisons the ground around it denies a competitor more than it
-   * costs itself. The effective rate is clamped at zero, so an inhibitor can
-   * stall regrowth but never run it backwards; ground destroyed by being
-   * smelled at would be a hole in the conservation the economy depends on.
-   *
-   * Off by default, like every dial that changes what energy does. This one
-   * needs `energyRegrow` non-zero to mean anything at all — it scales a rate,
-   * and scaling zero is zero.
-   */
+  /** How much the fertiliser channel (`FERTILISE_CH`, `C`) accelerates regrowth,
+   *  per unit: growth is `r * (1 + fertilise * C) * E * (1 - E/K)`. Negative
+   *  inhibits; the rate is clamped at zero, so ground is never destroyed.
+   *  0 = off, and it scales `energyRegrow`, so does nothing while that is 0. */
   fertilise: number;
   /** Extra drained per second. 0 = off. Hitting −1 kills the agent. */
   upkeep: number;
-  /**
-   * Fraction of this body's own tank a rescue fills, from `debtCap` at 0 to
-   * `energyCap` at 1. The absolute extra it asks up to is
-   * `debtCap + rescueTo * (energyCap - debtCap)`, so it cannot land outside
-   * the tank.
-   *
-   * 0 is the old ambulance that stops at break-even once extra is no longer
-   * negative. 1 strips the neighbourhood to top the patient off. The seed is
-   * a little under a full tank, so a default Con comes out of rescue able to
-   * pay a rewrite share without emptying every reservoir it can reach.
-   *
-   * Heritable: this slider only seeds a fresh body. A commute recombines the
-   * two parents' fills; an erase clones the Era's fill with a mutation nudge.
-   */
+  /** Fraction of this body's own tank a rescue fills, from `debtCap` at 0 to
+   *  `energyCap` at 1, so it cannot land outside the tank. Heritable; seed only. */
   rescueTo: number;
-  /**
-   * What a fresh body's `assort` starts at: how likely each gene of its
-   * children is copied whole from one parent rather than blended.
-   *
-   * 0.5 and not by accident. `assortChance` offsets by the child's kind, so at
-   * 0.5 a Con child blends every gene and a Dup child assorts every gene —
-   * exactly the absolute rule this replaces. Nothing changes until the trait
-   * drifts, and then both kinds move together.
-   *
-   * A seed like the other heritable traits: read once by `createAgent`, never
-   * again.
-   */
+  /** What a fresh body's `assort` starts at: how likely each gene of its
+   *  children is copied whole from one parent rather than blended.
+   *  `assortChance` offsets by kind, so at 0.5 a Con child blends every gene
+   *  and a Dup child assorts every gene. Seed only, read once by `createAgent`. */
   assortBias: number;
-  /**
-   * Extra at which a fresh body dies. Always negative — a debt depth, never
-   * a second positive cap. The live value lives on the body as `debtCap` and
-   * drifts by breeding; this is only the seed.
-   *
-   * Deeper debt is more time for a rescue and a louder hunger, and a corpse
-   * that can leave nothing. Shallower debt dies sooner and leaves more on
-   * the ground.
-   */
+  /** Extra at which a fresh body dies. Always negative — a debt depth, never a
+   *  second positive cap. Seed only; the live `debtCap` drifts by breeding. */
   debtCap: number;
-  /**
-   * How much of a body's demand its neighbour hears, per wire. 1 = no decay.
-   *
-   * Sets how far a shortage is audible — against the field's floor, a whole
-   * unit of need carries 20 hops at 0.8 and 43 at 0.9 — and how much crosses,
-   * since a transfer is capped by the field at the receiving end. Turn it down
-   * for a net of local pools that each look after their own; turn it up for one
-   * that answers a shortage anywhere on it.
-   *
-   * The slider stops short of 1 because an undecayed field is a flat one: every
-   * body holds the same need, no neighbour is strictly needier, and transport
-   * stops dead.
-   *
-   * Heritable: this only seeds a fresh body's own `requestDecay`. Once alive,
-   * a body relays demand at its own rate, and a Con+Dup commute recombines
-   * the two parents' rates into each child (blended for a Con child, one
-   * whole parent's rate for a Dup child) — this slider just sets where a new
-   * population starts and what a mutation is centred near.
-   */
+  /** How much of a body's demand its neighbour hears, per wire. Must stay
+   *  below 1: an undecayed field is flat, no neighbour is strictly needier, and
+   *  transport stops dead. Heritable; seeds a fresh body's own `requestDecay`. */
   requestDecay: number;
-  /**
-   * Hops the need field carries in one frame. 0 = as far as it goes, which is
-   * the pond as it was.
-   *
-   * The field is a potential: every body holds the largest need it can see,
-   * attenuated per hop by whoever relays it. At 0 that potential is solved to
-   * a fixpoint every frame, so a shortage anywhere is *known* everywhere on
-   * the frame it arises — demand has no front, nothing propagates, and the
-   * whole net answers at once. That is most of why a net pulses rather than
-   * walks, and it is why nothing in here can carry a wave.
-   *
-   * Above 0 the field advances that many hops a frame off the previous
-   * frame's values, so a need takes a frame per wire to travel and drains
-   * behind itself when it stops. The fixpoint is unchanged — `request_i =
-   * max(claim_i, max_j request_j * keep_j)` is the same equation either way —
-   * so a settled field settles where it always did. What changes is that
-   * getting there takes time, and that time is what a travelling wave is made
-   * of.
-   *
-   * It also changes what the economy *is*, which is why it ships off. A
-   * global relaxation is global triage: every donor compares its neighbour
-   * against the worst case anywhere on the net, so the dying body outranks
-   * the merely empty one however far away it is. One hop a frame is local
-   * equalisation: a body can only weigh what it can see, and a corridor of
-   * empty bodies absorbs a reservoir on its way past rather than relaying it.
-   * Measured on `energy.test.ts`'s corridor — twelve bodies, a reservoir at
-   * one end and a body in debt at the other — at 1 the reservoir is empty
-   * inside twenty frames and the patient ends on exactly zero, having been
-   * filled and then drained back into the corridor. At 0 it is fed to its
-   * rescue target and stays there.
-   *
-   * So this is not a free improvement, it is a trade, and the thing that
-   * would pay for it is a need field that tells dying from empty by more than
-   * the difference between `rescueNeed`'s two branches. That is the next
-   * question and it is not settled here.
-   */
+  /** Hops the need field advances per frame. 0 = solved to a fixpoint every
+   *  frame, so a shortage is known everywhere the frame it arises. Above 0 a
+   *  need takes a frame per wire. Same fixpoint, but triage turns local: a
+   *  corridor of empty bodies absorbs a reservoir before it reaches the dying
+   *  body (see the corridor in `energy.test.ts`). */
   requestReach: number;
-  /**
-   * Momentum a body recoils with per unit of energy it pumps to a neighbour.
-   * 0 = off.
-   *
-   * Stable well past the slider's range — a seeded soup is still calm at 800
-   * and only comes apart near 3000. The ceiling is low because the visible
-   * events are one-off transfers of most of a unit, and 20 makes one of those
-   * a ~56 px/s nudge on an Era against settled speeds around 50.
-   *
-   * Heritable, like `requestDecay` above: a pump's actual kick is its own
-   * `transportRecoil`, seeded from this slider and free to drift by breeding.
-   */
+  /** Momentum a body recoils with per unit of energy it pumps to a neighbour.
+   *  0 = off. Heritable; seed only. */
   transportRecoil: number;
-  /**
-   * Whole units a transfer moves along a wire. 0 = the continuous law, which
-   * is the pond as it was.
-   *
-   * Transport has always been a trickle. A body gives whatever the demand
-   * gradient asks for that frame, and at steady state that is about 4e-4 —
-   * so `transportRecoil` at its default of 100 delivers an impulse of 0.04
-   * against settled speeds of 20 to 60 px/s. Two thirty-trial sweeps found
-   * neither `transportRecoil` nor `transportThrust` registering a resolved
-   * effect on anything at all, and `grip` turned out to be damping the dish
-   * rather than swimming it: its effect on `net_drift` was the same size with
-   * the kicks switched off. The momentum machinery is not wrong, it is three
-   * orders under its own noise.
-   *
-   * A packet is what puts it above. Above zero a transfer is one whole unit
-   * or nothing, and only a body already holding a whole unit can send one, so
-   * a donor accumulates, fires, and accumulates again. At 0.5 against a tank
-   * of 1.25 that is a kick of 50 rather than 0.04.
-   *
-   * It also gives `grip` the clock it was missing. A net under a standing
-   * gradient has a nearly static fullness pattern, so grip anchors one end
-   * and the other pivots — which is what a pond at grip 100 visibly does.
-   * Packets make the pattern *travel*: the sender drops a whole unit, the
-   * receiver gains one, and the packet hops along the chain. A moving anchor
-   * is what a crawler has and a static one does not.
-   *
-   * Neither the receiver's demand nor its room bounds the amount any more.
-   * Demand still decides *whether* to send — a transfer needs a neighbour
-   * strictly needier than the donor — but a whole packet crosses either way,
-   * and what will not fit is deposited on the ground under the receiver, the
-   * same place a rewrite's leftovers go. This is the second path that can
-   * overfill a body; `payUpkeep` was the first.
-   *
-   * Heritable, like `transportRecoil` and `transportThrust` beside it: this
-   * only seeds a fresh body's own quantum, and the flow law reads whichever
-   * body is *sending*. Moving the slider does nothing to anything already
-   * alive.
-   *
-   * That is the interesting half. A body accumulates until it holds a packet
-   * and then fires, which makes it a relaxation oscillator whose period is its
-   * quantum over its income — so bodies with *different* quanta are coupled
-   * oscillators at different natural frequencies, which is the standard
-   * account of how gut peristalsis comes to travel one way rather than pulse
-   * in place. Measured on the worm bench with a source at one end and a sink
-   * at the other and nothing else imposed: uniform quanta swim at 0.115 px/s,
-   * which is the bench's noise floor, and quanta varying along the body swim
-   * at 0.93 to 1.27. The wave does not have to be tidy — a scattered mix with
-   * barely a consistent direction still swims — but it does have to vary
-   * *along* the line of travel. Varying it across the body buys nothing.
-   *
-   * Two things to watch. A chain of bodies all holding less than a packet
-   * cannot feed each other at all, where the continuous law would have shared
-   * out thin — so read `died` and `can_pay`, and keep this well under
-   * `REWRITE_SHARE`. And the throughput the bench needed for those speeds was
-   * tens of thousands of units in thirty seconds, which is a pair swapping a
-   * packet back and forth near frame rate rather than anything a pond's
-   * income could pay for.
-   */
+  /** Whole units a transfer moves along a wire. 0 = the continuous law. Above
+   *  zero a transfer is a whole unit or nothing, only a body holding one can
+   *  send, and what will not fit in the receiver lands on the ground under it
+   *  (the second path that can overfill a body, after `payUpkeep`). Heritable;
+   *  seed only, read off the sender. Keep it well under `REWRITE_SHARE`: bodies
+   *  all holding less than a packet cannot feed each other at all. */
   transportQuantum: number;
-  /**
-   * How fast a body's state matrices change while it is alive. 0 = off, and
-   * off is exactly the simulation as it was.
-   *
-   * A body is a small recurrent network whose weights have until now been
-   * fixed from birth: everything it knows, it inherited. This is the other
-   * way information can get into one. Each weight keeps an eligibility trace
-   * of what it was lately doing, and a temporal-difference error from the
-   * body's own critic says whether that was better or worse than expected;
-   * the product is the update. Three factors, all local to the body, no
-   * error signal handed down from anywhere.
-   *
-   * What is learned is kept for life and goes with the body when it detaches
-   * and latches somewhere else. That is the point rather than a side effect:
-   * it makes an agent that has been through a net different from one that
-   * has not, and it is how one net's experience reaches another.
-   *
-   * See `docs/history/plasticity-plan.md`.
-   */
+  /** How fast a body's state matrices change while it is alive. 0 = off.
+   *  Three-factor: eligibility trace times the body's own critic's TD error,
+   *  all local. What is learned is kept for life and travels with the body. */
   learnRate: number;
   /** How fast the critic itself learns to predict. Its own delta rule. */
   learnCritic: number;
-  /**
-   * Eligibility trace decay, per frame. Not weight decay — nothing here
-   * forgets. This is the credit window: how far back a weight is still
-   * held responsible for what the body's tank is doing now. 0.95 is about
-   * twenty frames, which is roughly how long a transfer takes to land.
-   */
+  /** Eligibility trace decay, per frame. Not weight decay — nothing here forgets.
+   *  The credit window: how far back a weight is held responsible for the tank. */
   learnTrace: number;
   /** Discount on the critic's own prediction, per frame. */
   learnDiscount: number;
-  /**
-   * How much of what a parent learned is consolidated into its children's
-   * genome, 0 to 1.
-   *
-   * At 1 a lineage compounds what it learned: a commute's children start
-   * from `chem + plastic`, so the worm keeps the experience of the bodies it
-   * grew from. At 0 learning is somatic and dies with the body. The children
-   * always start with an empty slate of their own; what this scales is how
-   * much of their parents' arrived already written into the genome.
-   */
+  /** How much of what a parent learned is consolidated into its children's
+   *  genome, 0 to 1. At 1 a commute's children start from `chem + plastic`; at
+   *  0 learning dies with the body. Children always start with an empty slate. */
   inheritLearned: number;
 
-  /*
-   * Chemistry. See `docs/history/energy-chemistry-plan.md`; every one of these ships
-   * at the value that reduces to the behaviour before it existed, which is
-   * the same discipline `fertilise` and `reactFeed` follow.
-   */
+  /* Chemistry. */
 
-  /**
-   * The whole mouthful a body may swallow per second, at saturation: one
-   * budget shared across all four species in proportion to what is standing
-   * in the cell (see `UptakeKinetics`), landing in the gut, where
-   * `digestRate` and the uptake rows decide what any of it is worth.
-   *
-   * **Zero is the old path**, and that is not the same as "no uptake": at
-   * zero, `runHarvestPlan` takes what fits in the tank instantaneously, as it
-   * always has, ground alone and straight into the tank. Anything above zero
-   * makes uptake a *rate* and a *sample*, which is what gives it a phenotype
-   * for selection to grip and what dissolves the id-order artifact — older
-   * bodies systematically eating first in a contested cell, a fitness
-   * gradient on age that nobody chose.
-   */
+  /** The whole mouthful a body may swallow per second, at saturation: one
+   *  budget across all four species in proportion to what stands in the cell
+   *  (`UptakeKinetics`), landing in the gut. 0 is a different path, not "no
+   *  uptake": `runHarvestPlan` takes what fits, ground alone, straight into the tank. */
   uptakeVmax: number;
-  /**
-   * Half-saturation constant: the ground density at which uptake runs at half
-   * `uptakeVmax`.
-   *
-   * With `uptakeVmax` this is the non-dominating trade-off the plan is after.
-   * High/high is a fast grazer that needs rich ground; low/low is a scavenger
-   * living on scraps; neither wins everywhere, which is the precondition for
-   * coexistence rather than takeover.
-   */
+  /** Half-saturation constant: the ground density at which uptake runs at half `uptakeVmax`. */
   uptakeKs: number;
-  /**
-   * Fixed cost, per second, of expressing a reaction row at all.
-   *
-   * One of the two dials that decide whether nets differentiate. A linear
-   * budget with concave payoffs — and Monod saturation is concave — puts the
-   * optimum in the interior and makes everyone a generalist; specialisation
-   * needs `f(1) > 2 f(1/2)`, which concavity forbids. A fixed cost per row
-   * supplies the superadditivity: two rows cost `2c`, one costs `c`.
-   */
+  /** Fixed cost, per second, of expressing a reaction row at all. Two rows cost
+   *  `2c`: the superadditivity that lets specialising beat splitting under Monod. */
   rowCost: number;
-  /**
-   * Hill coefficient on uptake. The other superadditivity dial.
-   *
-   * At 1 this is plain Monod. Above 1 the response is convex at low
-   * expression, which is the other way to make specialising beat splitting.
-   */
+  /** Hill coefficient on uptake. 1 = plain Monod; above 1 the response is
+   *  convex at low expression, the other superadditivity dial. */
   hillN: number;
-  /**
-   * Yield on energy a body takes up directly from the ground, 0 to 1.
-   *
-   * 1 is today. Moving it toward 0 makes bodies obligately dependent on what
-   * a net's Eras bring in — but check the larval window first: a fresh spawn
-   * has about `EXTRA_CAP / upkeep` seconds of tank, and if mean
-   * time-to-encounter with a net is not well under that, obligate dependency
-   * kills the soup rather than structuring it.
-   */
+  /** Yield on energy a body takes up directly from the ground, 0 to 1. Toward
+   *  0 a fresh spawn has about `EXTRA_CAP / upkeep` seconds to meet a net, or
+   *  obligate dependency kills the soup rather than structuring it. */
   yDirect: number;
-  /**
-   * Yield on energy an Era takes up, 0 to 1 and normally above `yDirect`.
-   *
-   * An Era is exactly a terminated port, so the count of them is a net's
-   * boundary size while upkeep is charged per body: income scales with the
-   * boundary and cost with the volume. Surface-to-volume becomes a real
-   * constraint on net size and the only way to get bigger is to get
-   * branchier — a morphological pressure the simulation has no other source
-   * of. 1 is today, where an Era is no better a grazer than anything else.
-   */
+  /** Yield on energy an Era takes up, 0 to 1, normally above `yDirect`. Eras
+   *  are a net's boundary and upkeep is per body: surface-to-volume. */
   yEra: number;
-  /**
-   * How much of ordinary upkeep is put back into the field rather than
-   * destroyed, 0 to 1 — as the body's own excretion mix, through `payOut`,
-   * so a Con pays its rent in `conP` and `aux` and only an Era pays in ground.
-   * The gait's pathway and the row cost leave by the same road.
-   *
-   * 0 is today: rent vanishes. 1 makes bodies conservative — no reaction a
-   * body runs creates or destroys matter — which is the invariant that makes
-   * selection honest. It is a dial rather than a constant because turning it
-   * on changes the pond's standing stock, and the plan's discipline is that
-   * nothing changes behaviour until somebody has looked. Above zero it also
-   * turns `refreshExpression` on, because the mix is read off the rows.
-   */
+  /** Fraction of ordinary upkeep put back into the field rather than destroyed,
+   *  0 to 1, as the body's own excretion mix through `payOut`; the pathway and
+   *  the row cost leave the same way. At 1 no reaction creates or destroys
+   *  matter. Above zero it also turns `refreshExpression` on. */
   upkeepExcrete: number;
-  /**
-   * What a body's existence is worth when it dies, `EXTRA_CAP` today.
-   *
-   * At `REWRITE_SHARE` (1) the commute-then-annihilate cycle stops minting:
-   * today it makes `2 * (EXTRA_CAP - REWRITE_SHARE)` = 0.5 out of nothing,
-   * which the comment on `BODY_VALUE` has always described as the metabolism
-   * rather than a slip. With uptake rate-limited, a net's income no longer
-   * has to be proportional to its rewrite rate, which is the argument for
-   * taking it — but taking it moves the pond, so it is a dial and not an edit.
-   */
+  /** What a body's existence is worth when it dies. At `REWRITE_SHARE` the
+   *  commute-then-annihilate cycle stops minting `2 * (bodyValue - REWRITE_SHARE)`. */
   bodyValue: number;
-  /**
-   * How much more an Era holds than a Con or a Dup. 2 today; 1 drops the rule.
-   *
-   * `energyCap` is already heritable and recombined across a commute's
-   * children, so storage is an evolvable axis available to every kind. The
-   * kind rule duplicates it with a wall instead of a gradient — and while it
-   * is in place nobody can learn whether big tanks actually belong on the
-   * boundary.
-   */
+  /** How much more an Era holds than a Con or a Dup. 1 drops the rule;
+   *  `energyCap` is heritable, so storage is evolvable without it. */
   eraCapRatio: number;
-  /**
-   * A *producer's* upkeep as a multiple of everyone else's. Negative today,
-   * which means a producer earns rather than pays.
-   *
-   * No longer keyed on the glyph: `upkeepRateOf` interpolates it on how much
-   * of a body's chemical budget goes on the ground's excretion row, against
-   * what a seeded Era expresses. A seeded Era still lands on this value
-   * exactly and a seeded Con on 1 exactly, so nothing about a fresh pond
-   * moved; what is new is that a Con breeding toward making ground earns the
-   * discount and an Era abandoning it loses one.
-   *
-   * At 1 nobody is discounted and income has to come from the ground under a
-   * body — which is what makes `#Eras` a net's boundary size against an upkeep
-   * charged per body, and surface-to-volume a real constraint on how big a net
-   * can get.
-   */
+  /** A producer's upkeep as a multiple of everyone else's; negative means it
+   *  earns. `upkeepRateOf` interpolates on how much of a body's chemical budget
+   *  goes on the ground row, so a seeded Era lands here and a seeded Con on 1. */
   eraUpkeepRatio: number;
-  /**
-   * Rate at which a body puts out its excretion rows, per second per unit it
-   * holds in gut and tank together, for a row at an eighth. What the gut holds
-   * of a species leaves first and is free; the shortfall is synthesised from
-   * the tank. This is also the farming dial: an Era's whole production half
-   * is the ground row, so at this rate it lays ground, which is what
-   * `farmRate` used to be.
-   *
-   * **Zero is today, and turning it on is a switch rather than a slider.**
-   * Today a body's voice is *minted*: `effEmit` is multiplied by
-   * `params.deposit`, which is five, and nothing is taken out of the tank —
-   * with `CH.energy` firewalled out of that path precisely because five units
-   * of food a frame out of nothing would be absurd. Above zero, all four
-   * species leave the body conserved and the minted deposit stops: the
-   * firewall becomes a stoichiometry rather than a special case, and a poor
-   * body physically cannot shout.
-   *
-   * `docs/history/energy-chemistry-plan.md` §3 and §8. Expect the measured signalling
-   * constants to move with it — signal amplitude drops by about the deposit
-   * multiplier, so `SENSE_SCALE` and the steering dead zone were measured
-   * against a world that no longer exists. Remeasure rather than rescale.
-   */
+  /** Rate at which a body puts out its excretion rows, per second per unit held
+   *  in gut and tank, for a row at an eighth; gut contents leave first and free,
+   *  the shortfall is synthesised from the tank. An Era's ground row makes this
+   *  the farming dial too. 0 = the minted path: `effEmit` times `params.deposit`,
+   *  nothing out of the tank, `CH.energy` firewalled out. Above zero the mint
+   *  stops and all four species leave conserved; signal amplitude drops by about
+   *  the deposit multiplier, so `senseScale` must be remeasured, not rescaled. */
   excreteRate: number;
-  /**
-   * What one unit of a signal reading is worth on the way into `x`.
-   *
-   * A `Params` field rather than the `SENSE_SCALE` constant it defaults to,
-   * because the number is a property of *how signal reaches the field*, and
-   * `excreteRate` changes that completely. `SENSE_SCALE` was measured as the
-   * p90 reading at a body's own position — 4.16, 4.24 and 4.53 over soups of
-   * 60, 400 and 2000 — and remeasured on this build it still reads 4.26, 4.60
-   * and 5.19, so the constant is right for the pond it was measured in.
-   *
-   * **Under conserved excretion it reads about 0.002**, measured the same way
-   * at the same three sizes: 0.0016, 0.0017, 0.0024. Not the ~5x the plan's §8
-   * predicted, and the extra three orders are worth understanding rather than
-   * absorbing. Two things compound. The minted deposit is unbounded in time —
-   * nothing is taken out of a tank to pay for it — so the field accumulates to
-   * whatever decay allows, while excretion is bounded by what the bodies
-   * actually hold. And the scent path lays a *density*, scaled by cell area,
-   * where a conserved add lays a *quantity*; a unit of matter spread over a
-   * million-cell dish simply does not read like a unit of shouting.
-   *
-   * Left at the minted value, because moving it would move the pond that
-   * ships. A run with `excreteRate` on wants this near 0.002 or its sense
-   * genes are reading a signal three orders below the range `phi` can resolve.
-   */
+  /** What one unit of a signal reading is worth on the way into `x`. Defaults
+   *  to `SENSE_SCALE`, the p90 field reading at a body's own position in the
+   *  minted-deposit pond; under `excreteRate` > 0 that reading is orders of
+   *  magnitude smaller and the sense genes are below what `phi` can resolve. */
   senseScale: number;
-  /**
-   * How many units of ground one unit of a signalling species is converted
-   * *with*, spent out of the body's own gut. See `docs/history/energy-chemistry-plan.md`
-   * §6b and `Sim.runDigestion`.
-   *
-   * 0 is what phase 3 shipped: an uptake row eats its species raw, which is
-   * "eating scent" and is the thing §6b calls wrong. Above it the ground is a
-   * reagent, not a catalyst — a body converts species 0, 1 and 3 into energy
-   * only by pairing them with ground it has swallowed, one budget across the
-   * three, so a body with a little ground must choose what to spend it on and
-   * one unit cannot unlock everything. Energy is the co-substrate everyone
-   * can already use, and the others are mass nobody can touch without it.
-   *
-   * A dial and continuous, because that is what keeps the gradient: every
-   * unit of ground a body swallows unlocks a proportional unit of something
-   * else, so a body with a little capability for a species does a little
-   * better than one with none and selection has a slope to climb. Forcing a
-   * hard requirement is what makes machinery worthless until complete, which
-   * is the trap §6b is written around.
-   *
-   * It buys access, never amplification — conservation still holds, the
-   * ground spent lands in the tank alongside what it unlocked. What a
-   * catabolist gains is a pool its competitors cannot reach, and the pool is
-   * largest exactly where other bodies are dense and the ground is grazed out.
-   * The slider stops at 1, which is a choice about how expensive scent should
-   * be and not a bound in the mechanism.
-   */
+  /** Units of ground one unit of a signalling species is converted with, out of
+   *  the body's own gut (`Sim.runDigestion`). 0 = an uptake row eats its species
+   *  raw. Above it species 0, 1 and 3 convert only paired with swallowed ground,
+   *  one budget across the three. Access, never amplification: the ground spent
+   *  lands in the tank alongside what it unlocked. */
   catCoSubstrate: number;
-  /**
-   * How fast the gut turns into the tank, per second, per species.
-   *
-   * Mass action on what a body is holding, so a gut empties on an exponential
-   * and never overshoots; the last crumb snaps to zero so that it does empty.
-   * The ground converts at this rate flat — it is the thing everyone can use
-   * raw, which is what makes it the ground — and the other three convert at
-   * this rate scaled by the body's uptake row for that species, and only as
-   * far as the ground in its gut will pair with them (`catCoSubstrate`). A
-   * body whose recipe cannot touch a species converts none of it, and it
-   * stays in the gut occupying the room that bounds the next mouthful until
-   * excretion clears it.
-   *
-   * Bounded by room in the tank, because a full body has nowhere to put what
-   * it digests, and matter that had nowhere to go would have to be destroyed.
-   * So a fed body stops digesting, its gut fills, and it stops eating — which
-   * is what satiety is here, and it is three mechanisms deep rather than a
-   * clamp.
-   *
-   * Inert until something fills a gut, and only the metered harvest does, so
-   * this dial does nothing at `uptakeVmax` 0.
-   */
+  /** How fast the gut turns into the tank, per second, per species. Ground
+   *  converts flat; the other three scaled by the body's uptake row and paired
+   *  via `catCoSubstrate`. Bounded by room in the tank, so a fed body stops
+   *  digesting, its gut fills and it stops eating. Inert at `uptakeVmax` 0. */
   digestRate: number;
-  /**
-   * How much a body can hold undigested, as a multiple of its `energyCap`.
-   *
-   * Not a trait of its own: `energyCap` is already heritable and already means
-   * "how much can this body hold", so a lineage that breeds a bigger tank
-   * breeds a bigger gut with it and there is one number to select on rather
-   * than two that must be selected together.
-   *
-   * This is the number that makes a filthy cell expensive twice over. The
-   * first cost is the sample — ground that is a quarter of what is standing in
-   * a cell is a quarter of the mouthful. The second is that the other three
-   * quarters have to *go* somewhere, and if the body cannot convert them they
-   * sit here, and the next mouthful is smaller for it.
-   */
+  /** How much a body can hold undigested, as a multiple of its `energyCap`.
+   *  What a body cannot convert sits here and shrinks the next mouthful. */
   gutSize: number;
-  /**
-   * How many patches the ground is laid down in, at the same total mass.
-   * 0 spreads it over the whole disk, which is what every preset does.
-   *
-   * A `Params` field rather than a runner flag so that it can be a *sweep
-   * axis*: "does the pond develop differently when food is somewhere rather
-   * than everywhere" is a question about a grid point, not about an
-   * invocation. `soupCount` is setup-time and lives here for the same reason.
-   *
-   * The mass is held constant across every setting on purpose. A patchy dish
-   * against a thinner one compares how much food there is, which is not the
-   * question; against a uniform one at the same total it compares structure,
-   * which is. For less food, move `ambientEnergy`.
-   *
-   * Read once, at setup, by `pond/ground.ts` — and note what the pond already
-   * does with it: `Fields.grow` skips a cell at zero, so a patch grazed bare
-   * only comes back by diffusion from a living neighbour, and a region cleared
-   * outright stays dead. That is regeneration with a history rather than a
-   * refill timer, which is most of what §6 wants from a reaction-diffusion
-   * ground, for free.
-   */
+  /** How many patches the ground is laid down in, at the same total mass.
+   *  0 = the whole disk. Read once at setup by `pond/ground.ts`; a `Params`
+   *  field so it can be a sweep axis. For less food, move `ambientEnergy`. */
   groundPatches: number;
 }
 
@@ -1076,10 +354,8 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'diffuse', label: 'Diffuse', min: 0, max: 1, step: 0.01 },
   { key: 'decay', label: 'Decay', min: 0, max: 0.08, step: 0.001 },
   { key: 'sense', label: 'Sense', min: 0, max: 1200, step: 10 },
-  // Seeds, not settings. These are read once by `seedChem` and never
-  // again — they decide what a *newly spawned* body starts as, and moving them
-  // does nothing to anything already alive. Everything above and below changes
-  // the world continuously.
+  // Seeds, not settings: read once by `seedChem` for a newly spawned body;
+  // moving them does nothing to anything already alive.
   { key: 'attractStrong', label: 'Strong attract (seed)', min: 0, max: 3, step: 0.05 },
   { key: 'attractMedium', label: 'Medium attract (seed)', min: 0, max: 2, step: 0.05 },
   { key: 'attractFood', label: 'Food attract (seed)', min: -2, max: 4, step: 0.05 },
@@ -1120,7 +396,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'nodeMass', label: 'Con/Dup mass', min: 0.3, max: 4, step: 0.05 },
   { key: 'maxAgents', label: 'Max agents', min: 8, max: 8000, step: 1 },
   { key: 'spawnInterval', label: 'Auto spawn (s)', min: 0, max: 30, step: 0.5 },
-  // Step is a whole FIELD_CELL: an energy cell has to stay a multiple of the
+  // Step is a whole FIELD_CELL: an energy cell must stay a multiple of the
   // scent field's cell for the two grids to line up (see EnergyGrid).
   { key: 'energyCell', label: 'Energy cell', min: FIELD_CELL, max: 160, step: FIELD_CELL },
   { key: 'ambientEnergy', label: 'Ambient energy', min: 0, max: 2, step: 0.05 },

@@ -37,22 +37,10 @@ const stemScratchB = { x: 0, y: 0 };
 
 export interface Wire {
   id: number;
-  /**
-   * How far through a rewrite's pull this wire is, 0..1.
-   *
-   * A rewrite hauls its two bodies together, and it is the wire that does the
-   * hauling — so the wire has to shorten, not go slack. Left alone the rope
-   * keeps its material length while the chord closes, which bows it out and
-   * sags its pitch; driving the rest length down instead keeps it taut, and
-   * it retracts into the pair as they meet.
-   */
+  /** How far through a rewrite's pull this wire is, 0..1. Drives the rest length down so the
+   *  hauling wire stays taut rather than bowing as the chord closes. */
   collapse: number;
-  /**
-   * Shortest sounding length this wire will report, half its uncollapsed
-   * rest. A rope squeezed below half its rest has buckled rather than
-   * tightened, and letting the pitch keep climbing turns a wire retracting
-   * into a rewrite into a three-octave squeal.
-   */
+  /** Shortest sounding length this wire will report: half its uncollapsed rest, below which a rope has buckled rather than tightened. */
   pitchFloor: number;
   a: PortRef;
   b: PortRef;
@@ -65,29 +53,16 @@ export interface Wire {
   shape: Vec2[];
   born: number;
   nodes: ChainNode[];
-  /**
-   * Solver path last applied. Young / slack wires stay `'full'`; a taut
-   * latch drops shape, then the rope, and comes back if it goes slack.
-   */
+  /** Solver path last applied. Young / slack wires stay `'full'`; a taut latch drops shape, then the rope. */
   ropePath: RopePath;
 }
 
 export type RopePath = 'full' | 'no-shape' | 'span';
 
-/**
- * Extra lastLen/rest a coarsened wire may grow before the rope comes back.
- * The taut threshold itself is `params.wireTaut`.
- */
+/** Extra lastLen/rest a coarsened wire may grow before the rope comes back; the taut threshold is `params.wireTaut`. */
 export const ROPE_TAUT_HYSTERESIS = 0.08;
 
-/**
- * Drop a wire's shape samples without replacing the array.
- *
- * `wire.shape = []` reads as free and is not: the coarsened branch runs for
- * every wire every frame, so at pond scale it minted fourteen thousand empty
- * arrays a frame purely to say "nothing here". Truncating in place says the
- * same thing to every reader — they all test `length`.
- */
+/** Drop a wire's shape samples in place; every reader tests `length`, and this runs for every wire every frame. */
 function clearShape(wire: Wire): void {
   if (wire.shape.length > 0) wire.shape.length = 0;
 }
@@ -143,37 +118,18 @@ function orientRebind(
 }
 
 export class Graph {
-  /**
-   * Ports that must never latch on their own. A compiled lambda term has an
-   * interface — the handle on its result — and leaving that free would let it
-   * grab the first passing agent and corrupt the term.
-   */
+  /** Ports that must never latch on their own: a compiled term's interface, which a stray latch would corrupt. */
   sealed = new Set<number>();
 
   /** Broad phase for latching: ports only ever pair up within snapRadius. */
   private portGrid = new PairGrid();
-  /**
-   * The free ports of the pond, as parallel arrays reused frame to frame:
-   * the body, its id, the slot as a small integer, and the tip.
-   *
-   * This was an array of objects each carrying a fresh `PortRef`, rebuilt
-   * every frame, with a second array of candidate objects on top of it — on
-   * the order of a hundred thousand short-lived objects a frame at fifty
-   * thousand bodies, for a pass whose inputs are a body, a slot and a point.
-   * The greedy pass at the end needs a real `PortRef` only for the handful of
-   * latches it actually makes.
-   */
+  /** The free ports of the pond, as parallel arrays reused frame to frame: body, id, slot code, tip. */
   private snapAgents: Agent[] = [];
   private portId = new Int32Array(0);
   private snapSlot = new Uint8Array(0);
   private portX = new Float64Array(0);
   private portY = new Float64Array(0);
-  /*
-   * The outward axis of each port, unit length. Parallel to `portX`/`portY`
-   * and written by the same pass, because both come out of one sine and one
-   * cosine of the body's heading and the arc test would otherwise take that
-   * heading apart again for every candidate pair the port appears in.
-   */
+  /** Outward unit axis of each port, parallel to `portX`/`portY` and written by the same pass. */
   private portAX = new Float64Array(0);
   private portAY = new Float64Array(0);
   /** Candidate pairs, by port-table index, and an index array to sort them. */
@@ -238,16 +194,7 @@ export class Graph {
     this.store = store;
   }
 
-  /**
-   * Follow the sim onto a new store.
-   *
-   * `Sim.clear` builds a fresh `AgentStore` rather than emptying the old one,
-   * and deliberately: an `Agent` is a flyweight over a slot, so anything still
-   * holding one from the old pond — a selection, a test comparing before with
-   * after — keeps reading the old pond's numbers instead of silently aliasing
-   * whichever body lands in that slot next. Port occupancy lives in the store,
-   * so the graph has to be told.
-   */
+  /** Follow the sim onto a new store; port occupancy lives in the store, so the graph has to be told. */
   useStore(store: AgentStore): void {
     this.store = store;
   }
@@ -257,16 +204,10 @@ export class Graph {
 
   wires = new Map<number, Wire>();
   /**
-   * Where port occupancy lives: `store.portWire`, three entries a body, -1
-   * for a free port. See the note on that field for why it is stored by slot
-   * and not by agent id.
-   *
-   * The methods below come in two forms on purpose. `isFree(port)` and
-   * friends take an id, resolve it through the store's `idToSlot`, and are
-   * for the paths that mutate the graph — a latch, a detach, a rewrite — of
-   * which there are hundreds a frame. `isFreeAtSlot` and `portWireAtSlot`
-   * take a slot the caller already has, and are for the loops that ask about
-   * every port of every body, of which there are hundreds of thousands.
+   * Port occupancy lives in `store.portWire`: three entries a body, -1 for free.
+   * `isFree(port)` and friends resolve an id through `idToSlot` and serve the
+   * mutating paths; `isFreeAtSlot` / `portWireAtSlot` take a slot and serve the
+   * loops over every port of every body.
    */
   private store: AgentStore;
   nextWireId = 1;
@@ -278,12 +219,8 @@ export class Graph {
   private compsAgents = -1;
   private latchPts: { x: number; y: number }[] = [];
 
-  /**
-   * Wire bounding boxes for the latch crossing test, rebuilt for each `snap`
-   * because every endpoint moves every frame. `latchIndexed` says whether it
-   * describes the wires as they are right now: outside the greedy pass it does
-   * not, and `nearbyWires` falls back to the whole map.
-   */
+  /** Wire bounding boxes for the latch crossing test, rebuilt each `snap`. Valid only while
+   *  `latchIndexed`; otherwise `nearbyWires` falls back to the whole map. */
   private latchGrid = new BoxGrid();
   private latchWires: Wire[] = [];
   private latchMinX = new Float64Array(0);
@@ -294,20 +231,9 @@ export class Graph {
   private latchHits: Wire[] = [];
 
   /**
-   * Bin every wire by the box its polyline occupies. Paid once per `snap`,
-   * against the `O(candidates x wires)` it replaces -- and it hoists the two
-   * `stemWorldInto` calls per wire out of the candidate loop as well, which is
-   * most of what the scan cost even before the segment tests.
-   *
-   * `wires` and its two endpoint lists are the caller's, resolved once a frame
-   * and cached on the graph and roster versions. This used to answer
-   * `wire.a.id -> body` itself, with two map lookups per wire: at fifty
-   * thousand bodies, fifty thousand lookups a frame, measured at 3.7 ms of the
-   * latch pass's 11, rebuilding a resolution the caller already kept on
-   * exactly the keys that decide when it goes stale. The roster it is cut
-   * against is `agents.values()`, so the two agree body for body; an endpoint
-   * the caller could not resolve arrives as `undefined`, which is the same
-   * wire this used to skip.
+   * Bin every wire by the box its polyline occupies, once per `snap`. `wires`, `endA`
+   * and `endB` are the caller's resolved list, cut against `agents.values()`; an
+   * unresolved endpoint arrives as `undefined` and the wire is skipped.
    */
   private buildLatchIndex(
     wires: Wire[],
@@ -481,11 +407,8 @@ export class Graph {
     return wire;
   }
 
-  /**
-   * Move a live wire onto new ports without minting an id. The delay line
-   * keeps ringing; `restitchChord` then sits the rope on the new stems.
-   * Surviving ends stay on the same side of the delay line.
-   */
+  /** Move a live wire onto new ports without minting an id; surviving ends stay on the same
+   *  delay-line side. `restitchChord` then sits the rope on the new stems. */
   rebind(id: number, a: PortRef, b: PortRef): boolean {
     const w = this.wires.get(id);
     if (!w) return false;
@@ -507,13 +430,8 @@ export class Graph {
   }
 
   /**
-   * Rotate which wire (or vacancy) sits on which of an agent's ports.
-   *
-   * The occupancy of `p, l, r` — including empty slots — shifts one step so a
-   * designer can try every attachment without tearing the ropes down and
-   * rebuilding them. Era has only a principal, so there is nothing to turn.
-   * Returns false when the agent has fewer than two slots or every slot is
-   * already empty.
+   * Rotate which wire (or vacancy) sits on which of an agent's ports, one step.
+   * Returns false when the agent has fewer than two slots or every slot is empty.
    */
   cycleSlots(agentId: number, kind: AgentKind, dir: 1 | -1 = 1): boolean {
     const slots = slotsFor(kind);
@@ -541,10 +459,7 @@ export class Graph {
     return true;
   }
 
-  /**
-   * Drop the rope onto the current stem chord. Used after `rebind` so a
-   * leftover does not keep a polyline that belonged to the dying ports.
-   */
+  /** Drop the rope onto the current stem chord; used after `rebind`. */
   restitchChord(
     id: number,
     agents: Map<number, Agent>,
@@ -580,9 +495,7 @@ export class Graph {
     );
     wire.lastLen = span;
     wire.ropeLen = span;
-    // The relaxed length, for the same reason `connect` seeds one: a rebind
-    // re-seats the ramp at the new stem chord, and `syncRest` will multiply
-    // that by the stroke. See `strokeOf`.
+    // Seed the relaxed length: `syncRest` multiplies `latchLen` by the stroke. See `strokeOf`.
     const stroke = this.strokeOf(wire.a, wire.b, agents, this.store.gaitWave, params);
     wire.latchLen = stroke === 1 ? span : Math.min(REST_CAP, span / stroke);
     wire.rest = span;
@@ -606,20 +519,14 @@ export class Graph {
     const A = agents.get(a.id);
     const B = agents.get(b.id);
     if (!A || !B) return null;
-    // No heading assignment here. Snapping used to rotate both bodies into
-    // alignment on the spot, which moves their stems, which hands the solver a
-    // fresh violation and a body overlap to resolve in one substep. The port
-    // torques turn them instead, and the wire is born slack enough to allow it.
+    // No heading assignment here: the port torques turn the bodies, and the wire is born slack enough to allow it.
     const sa = stemWorldInto(A, a.slot, w, h, stemScratchA);
     const sax = sa.x;
     const say = sa.y;
     const sb = stemWorldInto(B, b.slot, w, h, stemScratchB);
     const sbx = sb.x;
     const sby = sb.y;
-    // Born at the length it actually latched at, so the wire starts satisfied
-    // and `restLength` ramps it to wireMinRest over `wireShrink`. Clamping this
-    // up to wireMinRest skips the ramp and hands the solver a 30 px violation
-    // to resolve in one substep, which reads as a kick.
+    // Born at the length it latched at, so the wire starts satisfied and `restLength` ramps it toward wireMinRest.
     const stemDx = sbx - sax;
     const stemDy = sby - say;
     const span = Math.hypot(stemDx, stemDy);
@@ -634,10 +541,7 @@ export class Graph {
       : wireCubic(A, a.slot, B, b.slot, w, h, len);
     const wire = this.attach(a, b, len, time);
     if (wire) {
-      // `len` is the span the wire is observed to have, which is the
-      // contracted length while its bodies are mid-stroke. `latchLen` starts
-      // the shrink ramp that `syncRest` then multiplies by the stroke, so the
-      // relaxed length is what belongs in it. See `strokeOf`.
+      // `len` is the contracted span mid-stroke; `latchLen` holds the relaxed length. See `strokeOf`.
       const stroke = this.strokeOf(a, b, agents, this.store.gaitWave, params);
       if (stroke !== 1) wire.latchLen = Math.min(REST_CAP, len / stroke);
       wire.nodes = sampleChain(c, desiredLinks(len), w, h);
@@ -661,8 +565,7 @@ export class Graph {
 
   /** Cheap degree test: a few port lookups rather than a scan of every wire. */
   isWired(agent: Agent): boolean {
-    // The shared slot lists rather than `slotsFor`, which allocates: this is
-    // asked once a body a frame by the activity LOD.
+    // Shared slot lists rather than `slotsFor`, which allocates; asked once a body a frame.
     const slots = agent.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
     for (let i = 0; i < slots.length; i++) {
       if (!this.isFreeAt(agent.id, slots[i])) return true;
@@ -712,29 +615,11 @@ export class Graph {
   }
 
   /**
-   * Rest length on the shrink curve. The duration stretches with how much wire
-   * there is to reel in, so a long latch closes at roughly the same speed as a
-   * short one instead of yanking its agents together.
-   */
-  /**
-   * The gait's stroke on a wire: what its two ends' metabolism multiplies its
-   * rest length by, this instant.
-   *
-   * The mean of the two ends, so a wire is one muscle rather than two arguing,
-   * and so a phase difference across it shortens the stroke rather than
-   * tearing it in half.
-   *
-   * One definition, read in three places, because the three have to agree.
-   * `syncRest` applies it; `connect` and `restitchChord` divide it back out of
-   * the length they seed a wire at. A wire is seeded at the span it is
-   * observed to have, and a body mid-stroke holds its wires off their relaxed
-   * length — so the observed span is the *contracted* one. Storing it as
-   * `latchLen` and then multiplying by the stroke again asks for a length
-   * nothing is at: a step of up to `gaitSwell` in `rest` on the frame after
-   * every latch and every restitch, handed to a span constraint stiff enough
-   * to answer it as a kick. Divided out, the wire is born satisfied exactly as
-   * `connect` intends, and what moves it afterwards is the stroke *changing*,
-   * which is what a muscle is.
+   * The gait's stroke on a wire: what its two ends' metabolism multiplies its rest
+   * length by, this instant. The mean of the two ends, so a wire is one muscle.
+   * One definition read in three places: `syncRest` applies it; `connect` and
+   * `restitchChord` divide it back out of the observed (contracted) span they seed a
+   * wire at, so the wire is born satisfied and only a *change* of stroke moves it.
    */
   strokeOf(
     a: PortRef,
@@ -749,11 +634,11 @@ export class Graph {
     const B = agents.get(b.id);
     const w = ((A ? wave[A.slot] : 0) + (B ? wave[B.slot] : 0)) * 0.5;
     const stroke = 1 + swell * w;
-    // Floored well above nothing: a wire hauling its ends into contact is a
-    // rewrite, and this is not one.
+    // Floored: a wire hauling its ends into contact is a rewrite, and this is not one.
     return stroke < 0.4 ? 0.4 : stroke;
   }
 
+  /** Rest length on the shrink curve; the duration scales with the travel, so a long latch closes at the same speed as a short one. */
   restLength(wire: Wire, time: number, params: Params): number {
     const travel = Math.abs(wire.latchLen - params.wireMinRest);
     const span = Math.max(1, params.wireMinRest);
@@ -781,18 +666,8 @@ export class Graph {
     this.bump();
   }
 
-  /**
-   * Drop every wire touching `agentId`.
-   *
-   * Through the port map, not a scan. This used to copy the whole wire map
-   * into an array and walk it — once per death and twice per rewrite — which
-   * is nothing at a hundred wires and is most of a frame at seventy thousand:
-   * a churning pond kills tens of bodies a frame, and each one paid for every
-   * wire in the pond. A body has three ports and a port holds at most one
-   * wire, so three lookups find everything the scan did. A self-wire is
-   * reached through either of its ends and detached once, since the second
-   * lookup finds the port empty.
-   */
+  /** Drop every wire touching `agentId`, through the port map: three lookups. A self-wire is
+   *  reached through either end and detached once. */
   detachAgent(agentId: number): void {
     const wp = this.wireAtSlot(agentId, 'p');
     if (wp) this.detach(wp.id);
@@ -802,11 +677,8 @@ export class Graph {
     if (wr) this.detach(wr.id);
   }
 
-  /**
-   * `wires`, `endA` and `endB` are the caller's resolved wire list; see
-   * `buildLatchIndex`. `Sim.latchPass` is the only thing that should call
-   * this, because it is what keeps them.
-   */
+  /** `wires`, `endA` and `endB` are the caller's resolved wire list (see `buildLatchIndex`);
+   *  `Sim.latchPass` is the only caller, because it is what keeps them. */
   snap(
     agents: Map<number, Agent>,
     w: number,
@@ -820,8 +692,7 @@ export class Graph {
     if (params.snapRadius <= 0) return;
     const list = this.snapAgents;
     const frame = this.snapFrame;
-    // Sealing is rare and usually nothing is sealed at all, in which case the
-    // second lookup for every port of every body answers no by definition.
+    // Usually nothing is sealed, and then the per-port lookup is skipped.
     const anySealed = this.sealed.size > 0;
     const PORTWIRE = this.store.portWire;
     let n = 0;
@@ -832,10 +703,7 @@ export class Graph {
       const id = agent.id;
       const kind = agent.kind;
       const slots = kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
-      // One turn of the heading for all of this body's ports, and for the arc
-      // test on every pair they later land in. Through the store's memo, so
-      // the GPU probe pack a few phases later gets it for nothing — it wants
-      // the same bodies at the same headings.
+      // One heading turn per body, through the store's memo so the GPU probe pack later reuses it.
       const heading = store.heading[s];
       syncHeadingCosSin(store.csHeading, store.csCos, store.csSin, s, heading);
       const cos = store.csCos[s];
@@ -844,8 +712,6 @@ export class Graph {
       const ay = agent.y;
       const scale = agent.scale;
       // The slot is in hand, so occupancy is an array read rather than a hash.
-      // This loop runs for every port of every body: at thirty thousand it was
-      // seventy thousand map lookups a frame, and 3.8 ms of the pass.
       const pw = s * 3;
       for (let k = 0; k < slots.length; k++) {
         const slot = slots[k];
@@ -871,9 +737,7 @@ export class Graph {
     const touchR = 5.5;
     const touchR2 = touchR * touchR;
     const arcCos = Math.cos(Math.min(params.snapArc, Math.PI * 0.49));
-    // Ports only ever latch within snapRadius, so testing every pair against
-    // every other was work the radius check threw away immediately — millions
-    // of rejections a frame at a few thousand agents.
+    // Ports only ever latch within snapRadius, so that is the grid's cell size.
     this.portGrid.build(this.portX, this.portY, n, Math.max(1, r));
     this.nCands = 0;
     const PID = this.portId;
@@ -896,19 +760,8 @@ export class Graph {
       const sa = SLOT[i];
       const sb = SLOT[j];
       if (!touching) {
-        /*
-         * The deleted `inSnapArcAt`, inlined for both ends, with the two
-         * things it recomputed lifted out: the separation, which it measured once per end from
-         * coordinates this already has, and each port's outward axis, which
-         * it rebuilt from the body's heading with a sine and a cosine. Thirty
-         * thousand pairs survive the radius at fifty thousand bodies, so that
-         * was sixty thousand hypotenuses and as many sine-cosine pairs.
-         *
-         * Arithmetic is unchanged on purpose — same `Math.hypot`, same
-         * divide, same comparison — so the same pairs latch in the same order
-         * and the determinism hashes hold. The second end's vector is the
-         * first's negated, and IEEE negation is exact.
-         */
+        // Arc test at both ends. The hypot-then-divide form is what the determinism hashes
+        // were taken on; the second end's vector is the first's negated, and IEEE negation is exact.
         const dist = Math.hypot(dx, dy);
         if (dist > r || dist < 1e-6) return;
         if ((dx * AX[i] + dy * AY[i]) / dist < arcCos) return;
@@ -924,10 +777,8 @@ export class Graph {
       list.length = 0;
       return;
     }
-    // Total order, so the greedy pass below cannot depend on the order
-    // candidates happened to be generated in. Rank and distance alone leave
-    // exact ties — which mirror-symmetric presets produce — to be broken by
-    // the sort's stability, i.e. by Map iteration order.
+    // Total order, so the greedy pass cannot depend on generation order: rank and distance
+    // alone leave exact ties (mirror-symmetric presets) to Map iteration order.
     const order = this.candOrder;
     for (let k = 0; k < nc; k++) order[k] = k;
     const CA = this.candA;
@@ -943,8 +794,7 @@ export class Graph {
         PID[CB[x]] - PID[CB[y]] ||
         SLOT[CB[x]] - SLOT[CB[y]],
     );
-    // Index the wires once here rather than rescanning them for every
-    // candidate. Only valid while the pass runs: endpoints move next frame.
+    // Index the wires once for this pass; endpoints move next frame.
     this.buildLatchIndex(wires, endA, endB, w, h);
     const refA = this.snapRefA;
     const refB = this.snapRefB;
@@ -956,9 +806,7 @@ export class Graph {
       const ib = PID[j];
       const sla = SLOT_NAME[SLOT[i]];
       const slb = SLOT_NAME[SLOT[j]];
-      // A port latched earlier in this pass is no longer free, which is the
-      // whole of what the old `taken` set recorded. Hundreds of candidates a
-      // frame rather than tens of thousands of ports, so the id form is fine.
+      // A port latched earlier in this pass is no longer free.
       if (this.wireIdAt(ia, sla) >= 0 || this.wireIdAt(ib, slb) >= 0) continue;
       refA.id = ia;
       refA.slot = sla;
@@ -974,32 +822,10 @@ export class Graph {
   }
 
   /**
-   * Whether a proposed latch chord would cut across an existing wire.
-   *
-   * Costly, and the cost curve runs backwards to the value. The loop is over
-   * every wire in the graph, so this is `O(candidates x wires)`: measured at
-   * ~6,000 agents and 7,000 wires it was 70% of what `snap` costs, and in a
-   * churning 9,000-body soup 9.35ms of snap's 9.72, off four calls a frame.
-   *
-   * And in a soup that size it is not visibly buying anything -- disabling it
-   * for 1,400 frames left the crossing rate flat, 0.94 to 1.03 per thousand
-   * wire pairs against 0.96 with it on. Crossings there come from bodies
-   * drifting after they latch rather than from the latch, and nothing catches
-   * those: `uncrossPrincipals` returns immediately, `params.uncross` being 0.
-   *
-   * It is still not removable. Where it is cheap is exactly where it matters:
-   * a preset or a hand-built term has few enough wires that the loop is
-   * nothing, and one latch reaching across a chord there is structural rather
-   * than cosmetic. Removing it was tried and `does not latch through an
-   * intervening wire` in sim.test.ts caught it immediately -- two bodies at
-   * either side of a wall wired straight through it.
-   *
-   * So it is indexed rather than switched off. `snap` bins every wire's bounding
-   * box before the greedy pass and this walks only the boxes the chord reaches,
-   * which is a handful. The per-wire geometry below is untouched -- the index
-   * decides which wires are examined, never whether one crosses -- and when no
-   * index has been built, as when a test calls this directly, it falls back to
-   * the whole map and behaves exactly as it always did.
+   * Whether a proposed latch chord would cut across an existing wire. Structural in
+   * presets and hand-built terms (`does not latch through an intervening wire` in
+   * sim.test.ts). Walks only the boxes the chord reaches when `snap` has built the
+   * index, and the whole map otherwise, as when a test calls this directly.
    */
   latchCrosses(
     agents: Map<number, Agent>,
@@ -1065,13 +891,8 @@ export class Graph {
   }
 
   /**
-   * Root id of each agent's connected component.
-   *
-   * Cached on the graph version and on `roster`, which a caller that tracks
-   * one should pass: keyed on the agent count alone, a death and a birth in
-   * the same frame kept the size and handed back a map holding the dead id
-   * and missing the live one. The count is the fallback for callers without
-   * a version to hand.
+   * Root id of each agent's connected component. Cached on the graph version and on
+   * `roster`; the agent count alone misses a death and a birth in the same frame.
    */
   componentIds(agents: Map<number, Agent>, roster = agents.size): Map<number, number> {
     if (this.comps && this.compsVersion === this.version && this.compsAgents === roster) {
@@ -1105,32 +926,12 @@ export class Graph {
   }
 
   /**
-   * Rest length for a wire this frame: the shrink curve toward `wireMinRest`,
-   * the gait's swell, and a slow per-wire breath under both.
-   *
-   * The swell is the gait, and it is the only actuator it has.
-   *
-   * `rest` is what this engine already moves things with: `wireShrink` reels
-   * a latch in through it, `Wire.collapse` hauls a rewrite's ends together
-   * with it, `wireBreathe` makes tissue move with it. All three read on
-   * screen, because the span constraint *serves* `rest` rather than fighting
-   * it. The gait is the fourth thing that writes it.
-   *
-   * A correction shared by inverse mass moves both bodies and not their
-   * centre, so the swing itself carries nothing. What carries is the velocity
-   * it induces, which decays at each body's own rate — so a wire whose two
-   * ends grip differently keeps a step out of every cycle, and one whose ends
-   * match keeps nothing. `grip * fullness` is one such difference and the
-   * `G` head's `anchor` is the other, and the anchor rides the same cosine as
-   * this does, so a body grips exactly while its wires pull.
-   *
-   * This is `wireTug` with a better clock rather than a new mechanism. The
-   * tug was driven by whichever packet last crossed, which is why it could
-   * only twitch; this is driven by a phase the net owns and couples along its
-   * own wires, so what runs down a chain is a wave.
-   *
-   * Floored well above nothing: a wire hauling its ends into contact is a
-   * rewrite, and this is not one.
+   * Rest length for a wire this frame: the shrink curve toward `wireMinRest`, the
+   * gait's stroke, and a slow per-wire breath. The stroke is the gait's only actuator:
+   * a span correction shared by inverse mass moves no centre of mass, so what carries
+   * is the induced velocity, which decays at each body's own grip — a wire whose ends
+   * grip differently keeps a step out of every cycle. `grip * fullness` and the `G`
+   * head's `anchor` are those differences, and the anchor rides the same cosine.
    */
   syncRest(
     time: number,
@@ -1148,8 +949,7 @@ export class Graph {
       const raw = quiet * this.strokeOf(wire.a, wire.b, agents, wave, params);
       wire.rest = Number.isFinite(raw) ? clamp(raw, 4, REST_CAP) : params.wireMinRest;
       wire.pitchFloor = wire.rest * 0.5;
-      // Applied under the floor on purpose: a collapsing wire has to be able
-      // to reach nothing, and 4 px is still a visible thread.
+      // Under the floor on purpose: a collapsing wire has to be able to reach nothing.
       if (wire.collapse > 0) {
         wire.rest = Math.max(0.5, wire.rest * (1 - wire.collapse));
       }
@@ -1159,11 +959,8 @@ export class Graph {
     }
   }
 
-  /**
-   * Age + tautness → solver path. Crossing into span-only leaves the nodes
-   * in place (draw uses the port-axis cubic); coming back resamples them so
-   * a leftover that goes slack does not teleport.
-   */
+  /** Age + tautness → solver path. Coming back from span resamples the nodes so a leftover
+   *  that goes slack does not teleport. */
   applyRopePaths(
     agents: Map<number, Agent>,
     w: number,
@@ -1194,11 +991,8 @@ export class Graph {
     clearShape(wire);
   }
 
-  /**
-   * Drop a coarsened rope onto the live stem chord without touching rest.
-   * FAR skips XPBD, so leftover nodes otherwise freeze in world space and
-   * become a several-hundred-pixel fossil — and a whip on the way back.
-   */
+  /** Drop a coarsened rope onto the live stem chord without touching rest; FAR skips XPBD,
+   *  so leftover nodes would otherwise freeze in world space. */
   private sitNodesOnChord(
     wire: Wire,
     agents: Map<number, Agent>,
@@ -1228,12 +1022,8 @@ export class Graph {
     }
   }
 
-  /**
-   * The wire's rest shape: the cubic that leaves both ports along their axes —
-   * the same curve the renderer draws. Sampling it gives every rope node a
-   * target, which is what makes a slack rope well-posed, and its arc length is
-   * the rope's length, so links, bending and shape all agree.
-   */
+  /** The wire's rest shape: the cubic leaving both ports along their axes, the curve the
+   *  renderer draws. Its samples are the rope nodes' targets and its arc length is `ropeLen`. */
   syncRopeShape(
     agents: Map<number, Agent>,
     w: number,
@@ -1292,11 +1082,7 @@ export class Graph {
     }
   }
 
-  /**
-   * Compliance for one wire. A fresh latch is slack — it reaches and settles;
-   * an aged latch is firm. This replaces the old shrink/align/organize phase
-   * machine with a single continuous parameter.
-   */
+  /** Compliance for one wire: a fresh latch is slack, an aged latch is firm. */
   private stiffness(wire: Wire, time: number, params: Params): WireStiffness {
     const age = Math.max(0, time - wire.born);
     return {

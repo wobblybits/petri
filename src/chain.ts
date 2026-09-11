@@ -18,24 +18,12 @@ export interface ChainNode {
 }
 
 /**
- * XPBD compliance, in (length² / force) units. Smaller is stiffer. These are the
- * only stiffness numbers in the joint solver; everything else follows from them.
- *
- *   span — the joint: holds two wired ports at the wire's rest length
- *   link — near-rigid against stretch, weak against compression: a rope, not a
- *          rod. Slack has to hang harmlessly, otherwise surplus rope pushes its
- *          own anchors around and the length feedback loop goes unstable.
- *   bend — soft, so the rope curves smoothly rather than kinking
- *   contact — stiff but not rigid. Resolving a deep overlap in a single
- *          substep turns into an enormous derived angular velocity, because
- *          velocity here is a position delta divided by h.
- *   shape — pulls the rope toward the curve that leaves both ports along their
- *          axes. Without it a slack rope is neutrally stable: nothing decides
- *          which of its many slack shapes it should take, so it wanders, and
- *          every wander is amplified into velocity by 1/h.
- *
- * Port-axis alignment is deliberately not here — it is an actuator, not a
- * material property. See Sim.portTorques.
+ * XPBD compliance, in (length² / force) units; smaller is stiffer. `link` is near-rigid
+ * against stretch and weak against compression (a rope, not a rod). `contact` is stiff
+ * but not rigid: a deep overlap resolved in one substep becomes a huge velocity (delta / h).
+ * `shape` pulls the rope toward the curve leaving both ports along their axes; without it
+ * a slack rope wanders. Port-axis alignment is an actuator, not a material property:
+ * see Sim.portTorques.
  */
 export const COMPLIANCE: Record<"span" | "link" | "bend" | "contact" | "shape", number> = {
   span: 3.0e-6,
@@ -154,11 +142,7 @@ export function portAxisWorld(agent: Agent, slot: PortSlot): Vec2 {
   return { x: r.x / len, y: r.y / len };
 }
 
-/**
- * Generalized inverse mass of a body at attachment `r` along direction `n`:
- * `1/m + (r × n)² / I`. This is what makes a rope hanging off an off-centre
- * port torque the body instead of only dragging it.
- */
+/** Generalized inverse mass at attachment `r` along `n`: `1/m + (r × n)² / I`. */
 function genInvMass(agent: Agent, r: Vec2, nx: number, ny: number): number {
   const rxn = r.x * ny - r.y * nx;
   return invMass(agent) + invInertia(agent) * rxn * rxn;
@@ -177,16 +161,8 @@ function applyImpulse(agent: Agent, r: Vec2, nx: number, ny: number, lambda: num
 
 // --------------------------------------------------------------- constraints
 
-/**
- * Anchors the end of a rope at a port stem. One-way: the stem moves the node,
- * never the reverse.
- *
- * Bodies drive the rope; the rope never drives the bodies. Spacing belongs to
- * the span joint and orientation to the port torques, so letting rope tension
- * also push its own anchors adds nothing but a feedback path — and it is the
- * path that made every earlier version blow up, because a rope's slack shape is
- * the least constrained thing in the system.
- */
+/** Anchors the end of a rope at a port stem. One-way: the stem moves the node, never the
+ *  reverse — rope tension driving its own anchors is a feedback path that goes unstable. */
 function solveBodyNodeLink(
   agent: Agent,
   slot: PortSlot,
@@ -208,11 +184,7 @@ function solveBodyNodeLink(
   node.y += (wNode * lambda * dy) / dist;
 }
 
-/**
- * The joint proper: holds the two port stems `rest` apart. The rope alone
- * cannot do this — it only constrains arc length, so slack lets the bodies
- * drift together and the rope buckle back through its own port.
- */
+/** The joint proper: holds the two port stems `rest` apart. The rope only constrains arc length. */
 function solveSpan(
   A: Agent,
   aSlot: PortSlot,
@@ -277,11 +249,8 @@ function solveBend(a: Vec2, b: ChainNode, c: Vec2, wA: number, wC: number, alpha
   b.y += 2 * wB * (Cy / denom);
 }
 
-/**
- * One XPBD iteration over a single wire: rope links, bending, and the port-axis
- * preference at each end. Mutates agents and nodes in place so that wires
- * sharing an agent see each other's corrections within the same substep.
- */
+/** One XPBD iteration over a single wire. Mutates agents and nodes in place so wires
+ *  sharing an agent see each other's corrections within the same substep. */
 export function solveWire(
   A: Agent,
   aSlot: PortSlot,
@@ -341,15 +310,8 @@ export function solveWireSpan(
   solveSpan(A, aSlot, B, bSlot, rest, COMPLIANCE.span * stiff.scale * stiff.slack * invH2);
 }
 
-/**
- * The mechanics the audio needs from a contact, taken from the same quantities
- * the solver uses rather than re-guessed from positions.
- *
- * `effMass` is the generalized effective mass at the contact point along the
- * normal — it already includes the lever arm, so an off-centre hit on a
- * triangle correctly transfers less linear momentum and more spin than a
- * square one.
- */
+/** Contact mechanics for the audio, from the solver's own quantities. `effMass` is the
+ *  generalized effective mass along the normal at the contact point, lever arm included. */
 export interface ContactMechanics {
   effMass: number;
   /** Closing speed along the normal. Positive means approaching. */

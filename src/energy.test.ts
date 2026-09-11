@@ -12,8 +12,8 @@ import {
   EXTRA_CAP,
   EXTRA_FLOOR,
   extraCapFor,
-  flowCharges,
-  harvestSlots,
+  flowChargesFast,
+  harvestSlotsFast,
   uptakeRate,
   hungerNeed,
   redexNeed,
@@ -28,58 +28,90 @@ import {
   rewriteYield,
   seedRequest,
   settlePool,
-  type SlotBody,
   spareEnergy,
   spendExtra,
-  relaxRequests,
-  tickUpkeep,
+  relaxRequestsFast,
+  tickUpkeepFast,
   WireAdjacency,
 } from './energy.ts';
 import { Sim } from './sim.ts';
-import { type Params } from './params.ts';
+import type { Agent, AgentKind } from './agents.ts';
+import { defaultParams, type Params } from './params.ts';
 import { loadPreset } from './presets.ts';
 import { CH } from './fields.ts';
 
-/** Defaults to `con`: Era has its own upkeep rate, so kind matters here. */
-function body(
-  id: number,
-  x: number,
-  y: number,
-  extra = 0,
-  request = 0,
-  locked = false,
-  kind: SlotBody['kind'] = 'con',
-  energyCap = extraCapFor(kind),
-  requestDecay = REQUEST_DECAY,
-  debtCap = EXTRA_FLOOR,
-  rescueTo = 0.9,
-): SlotBody {
-  return {
-    id, kind, x, y, extra, request, locked, recovering: false,
-    energyCap, requestDecay, debtCap, rescueTo, transportQuantum: 0,
+/** Ecology off: nothing spawns, grows, bills, snaps or rewrites on its own. */
+function quietParams(): Params {
+  const p = defaultParams();
+  p.spawnInterval = 0;
+  p.ambientEnergy = 0;
+  p.energyRegrow = 0;
+  p.upkeep = 0;
+  p.snapRadius = 0;
+  p.rewriteDuration = 0;
+  return p;
+}
+
+/** Where the pond is pinned; a body's `x, y` below is an offset from it. */
+const CX = 400;
+const CY = 300;
+
+/**
+ * A pinned pond with its ground on the field at `ambient` a cell, ten units
+ * a cell, so a body's cell is the one under its position. `body` spawns a
+ * real agent and sets the fields the energy passes read; `net` builds the
+ * flat adjacency over the wires the test laid.
+ */
+function pond(ambient = 0) {
+  const params = quietParams();
+  params.ambientEnergy = ambient;
+  params.energyCell = 10;
+  const sim = new Sim(800, 600, 128);
+  sim.pinWorld(CX, CY, params);
+  const store = sim.agentStore;
+  const grid = sim.energy;
+  /** Defaults to `con`: Era has its own upkeep rate, so kind matters here. */
+  const body = (
+    x: number,
+    y: number,
+    extra = 0,
+    request = 0,
+    locked = false,
+    kind: AgentKind = 'con',
+    energyCap = extraCapFor(kind),
+  ): Agent => {
+    const a = sim.spawn(kind, CX + x, CY + y, 0, params, true)!;
+    a.extra = extra;
+    a.request = request;
+    a.locked = locked;
+    a.recovering = false;
+    a.energyCap = energyCap;
+    a.requestDecay = REQUEST_DECAY;
+    a.debtCap = EXTRA_FLOOR;
+    a.rescueTo = 0.9;
+    a.transportQuantum = 0;
+    return a;
   };
-}
-
-
-/**
- * Dense list plus the flat adjacency the energy passes take. They work in
- * index space now: a Map of neighbour arrays cost an array per body per frame.
- */
-function net(agents: Map<number, SlotBody>, wires: { a: { id: number }; b: { id: number } }[]) {
-  const list = [...agents.values()];
-  const index = new Map<number, number>();
-  list.forEach((b, i) => index.set(b.id, i));
-  const adj = new WireAdjacency();
-  adj.build(list.length, index, () => wires);
-  return { list, adj };
-}
-
-/**
- * The need field at its fixpoint — what `Sim` does at the shipped
- * `requestReach` 0, and what these tests are about.
- */
-function settle(list: Parameters<typeof relaxRequests>[0], adj: Parameters<typeof relaxRequests>[1], decay?: number): void {
-  relaxRequests(list, adj, decay);
+  /** Wire consecutive bodies `r` to `l`. */
+  const chain = (list: Agent[]): void => {
+    for (let i = 0; i + 1 < list.length; i++) sim.wire(list[i].id, 'r', list[i + 1].id, 'l', params);
+  };
+  const net = (list: Agent[]) => {
+    const index = new Map<number, number>();
+    list.forEach((b, i) => index.set(b.id, i));
+    const adj = new WireAdjacency();
+    adj.build(list.length, index, () => [...sim.graph.wires.values()]);
+    return { list, adj };
+  };
+  /** The need field at its fixpoint: `Sim` at the shipped `requestReach` 0. */
+  const settle = (list: Agent[], adj: WireAdjacency, decay?: number): void => {
+    relaxRequestsFast(list, store, adj, decay);
+  };
+  const flow = (list: Agent[], adj: WireAdjacency, opts?: Parameters<typeof flowChargesFast>[4]): number =>
+    flowChargesFast(list, store, adj, undefined, opts);
+  const upkeep = (list: Agent[], dt: number, rate: number): number[] => tickUpkeepFast(list, store, dt, rate);
+  const harvest = (list: Agent[]): void => harvestSlotsFast(list, store, grid);
+  return { sim, params, store, grid, body, chain, net, settle, flow, upkeep, harvest };
 }
 
 describe('wire adjacency', () => {
@@ -157,9 +189,10 @@ describe('rewrite energy', () => {
   });
 
   it('returns a body\'s worth plus its stock when it dies', () => {
-    expect(deathYield(body(1, 0, 0, EXTRA_CAP)), 'full').toBeCloseTo(2.5, 6);
-    expect(deathYield(body(2, 0, 0, 0)), 'break-even').toBeCloseTo(BODY_VALUE, 6);
-    expect(deathYield(body(3, 0, 0, EXTRA_FLOOR)), 'starved').toBeCloseTo(0.25, 6);
+    const { body } = pond();
+    expect(deathYield(body(0, 0, EXTRA_CAP)), 'full').toBeCloseTo(2.5, 6);
+    expect(deathYield(body(0, 0, 0)), 'break-even').toBeCloseTo(BODY_VALUE, 6);
+    expect(deathYield(body(0, 0, EXTRA_FLOOR)), 'starved').toBeCloseTo(0.25, 6);
   });
 
   it('counts bodies in and out, and prices the two directions differently', () => {
@@ -206,34 +239,34 @@ describe('EnergyGrid', () => {
 
 describe('harvest slots', () => {
   it('accumulates 0.1 ambient instead of filling in one visit', () => {
-    const grid = new EnergyGrid(10, 0.1);
-    const a = body(1, 2, 2);
-    harvestSlots([a], grid);
+    const { grid, body, harvest } = pond(0.1);
+    const a = body(2, 2);
+    harvest([a]);
     expect(a.extra).toBeCloseTo(0.1);
     expect(canPayShare(a)).toBe(false);
-    expect(grid.getAt(2, 2)).toBe(0);
+    expect(grid.getAt(a.x, a.y)).toBe(0);
   });
 
   it('fills a slot from a cell of 1', () => {
-    const grid = new EnergyGrid(10, 1);
-    const a = body(1, 2, 2);
-    harvestSlots([a], grid);
+    const { grid, body, harvest } = pond(1);
+    const a = body(2, 2);
+    harvest([a]);
     expect(a.extra).toBeCloseTo(1);
-    expect(grid.getAt(2, 2)).toBe(0);
+    expect(grid.getAt(a.x, a.y)).toBe(0);
   });
 
   it('gives a shared cell of 1 to the lower id only', () => {
-    const grid = new EnergyGrid(10, 1);
-    const a = body(1, 2, 2);
-    const b = body(2, 3, 2);
-    harvestSlots([a, b], grid);
+    const { grid, body, harvest } = pond(1);
+    const a = body(2, 2);
+    const b = body(3, 2);
+    harvest([a, b]);
     expect(a.extra).toBeCloseTo(1);
     expect(b.extra).toBe(0);
-    expect(grid.getAt(2, 2)).toBe(0);
+    expect(grid.getAt(a.x, a.y)).toBe(0);
   });
 
   /*
-   * Monod uptake. `docs/energy-chemistry-plan.md` §4.
+   * Monod uptake. `docs/history/energy-chemistry-plan.md` §4.
    *
    * Two claims worth a test each: at `cap` 0 nothing whatsoever changes, and
    * above it the id-order artifact — older bodies systematically eating first
@@ -252,307 +285,260 @@ describe('harvest slots', () => {
   });
 
   /*
-   * The metered path is not pinned here. `harvestSlots` is the take-what-fits
-   * reference and nothing more; the sampled mouthful — the share ceiling, the
-   * contested cell, the rich cell at the rate and the poor one under it — is
-   * pinned in `chemistry.test.ts` against `harvestSlotsFast` with a store,
-   * which is the path the pond runs and the one `field.wgsl` mirrors.
+   * The metered path — the share ceiling, the contested cell, the rich cell
+   * at the rate and the poor one under it — is pinned in `chemistry.test.ts`.
+   * These pin the unmetered take-what-fits path the pond runs by default.
    */
 
   it('does not fill a slot that is already at the cap', () => {
-    const grid = new EnergyGrid(10, 1);
-    const a = body(1, 2, 2, EXTRA_CAP);
+    const { grid, body, harvest } = pond(1);
+    const a = body(2, 2, EXTRA_CAP);
     expect(atCap(a)).toBe(true);
-    harvestSlots([a], grid);
+    harvest([a]);
     expect(a.extra).toBe(EXTRA_CAP);
-    expect(grid.getAt(2, 2), 'the cell is untouched').toBe(1);
+    expect(grid.getAt(a.x, a.y), 'the cell is untouched').toBe(1);
   });
 
   it('keeps harvesting a body that can pay a share but is not yet full', () => {
     // The two used to be the same test. Being able to commute is not being
     // full, and a body that stopped topping up at the share would have no
     // headroom against the next few seconds of upkeep.
-    const grid = new EnergyGrid(10, 1);
-    const a = body(1, 2, 2, REWRITE_SHARE);
+    const { body, harvest } = pond(1);
+    const a = body(2, 2, REWRITE_SHARE);
     expect(canPayShare(a)).toBe(true);
     expect(atCap(a)).toBe(false);
-    harvestSlots([a], grid);
+    harvest([a]);
     expect(a.extra).toBeCloseTo(EXTRA_CAP, 6);
   });
 
   it('skips locked agents', () => {
-    const grid = new EnergyGrid(10, 1);
-    const a = body(1, 2, 2, 0, 0, true);
-    harvestSlots([a], grid);
+    const { grid, body, harvest } = pond(1);
+    const a = body(2, 2, 0, 0, true);
+    harvest([a]);
     expect(a.extra).toBe(0);
-    expect(grid.getAt(2, 2)).toBe(1);
+    expect(grid.getAt(a.x, a.y)).toBe(1);
   });
 
   it('fills every agent on an inexhaustible cell', () => {
-    const grid = new EnergyGrid(10, 8);
+    const { grid, body, harvest } = pond(8);
     grid.inexhaustible = true;
-    const a = body(1, 2, 2);
-    const b = body(2, 3, 2);
-    harvestSlots([a, b], grid);
+    const a = body(2, 2);
+    const b = body(3, 2);
+    harvest([a, b]);
     expect(a.extra).toBeCloseTo(EXTRA_CAP, 6);
     expect(b.extra).toBeCloseTo(EXTRA_CAP, 6);
-    expect(grid.getAt(2, 2)).toBe(8);
+    expect(grid.getAt(a.x, a.y)).toBe(8);
   });
 });
 
 describe('upkeep', () => {
   it("drains extra continuously and reports death at the body's own debt cap", () => {
-    const a = body(1, 0, 0, 1);
-    expect(tickUpkeep([a], 0.5, 1)).toEqual([]);
+    const { body, upkeep } = pond();
+    const a = body(0, 0, 1);
+    expect(upkeep([a], 0.5, 1)).toEqual([]);
     expect(a.extra, 'half a second at one a second').toBeCloseTo(0.5, 6);
-    expect(tickUpkeep([a], 1, 1)).toEqual([]);
+    expect(upkeep([a], 1, 1)).toEqual([]);
     expect(a.extra, 'and straight on into debt').toBeCloseTo(-0.5, 6);
-    expect(tickUpkeep([a], 1, 1), 'reaching the floor is a death').toEqual([1]);
+    expect(upkeep([a], 1, 1), 'reaching the floor is a death').toEqual([a.id]);
     expect(a.extra).toBe(EXTRA_FLOOR);
-    expect(tickUpkeep([a], 1, 1), 'reported once, not every frame after').toEqual([]);
+    expect(upkeep([a], 1, 1), 'reported once, not every frame after').toEqual([]);
     expect(a.extra, 'and never falls past it').toBe(EXTRA_FLOOR);
   });
 
   it('kills a shallow-debt body before a deep-debt one', () => {
-    const shallow = body(1, 0, 0, 0);
+    const { body, upkeep } = pond();
+    const shallow = body(0, 0, 0);
     shallow.debtCap = -0.2;
-    const deep = body(2, 0, 0, 0);
+    const deep = body(0, 0, 0);
     deep.debtCap = -2;
-    expect(tickUpkeep([shallow, deep], 0.3, 1)).toEqual([1]);
+    expect(upkeep([shallow, deep], 0.3, 1)).toEqual([shallow.id]);
     expect(shallow.extra).toBeCloseTo(-0.2, 6);
     expect(deep.extra).toBeCloseTo(-0.3, 6);
     expect(deep.extra, 'still alive, still in debt').toBeGreaterThan(deep.debtCap);
   });
 
   it('skips locked agents', () => {
-    const a = body(1, 0, 0, 1, 0, true);
-    expect(tickUpkeep([a], 10, 1)).toEqual([]);
+    const { body, upkeep } = pond();
+    const a = body(0, 0, 1, 0, true);
+    expect(upkeep([a], 10, 1)).toEqual([]);
     expect(a.extra).toBe(1);
   });
 });
 
 describe('request gradient', () => {
   it('attenuates need by distance instead of counting hops', () => {
-    const agents = new Map([
-      [1, body(1, 0, 0)],
-      [2, body(2, 10, 0)],
-      [3, body(3, 20, 0)],
-    ]);
-    const { list, adj } = net(agents, [
-      { a: { id: 1 }, b: { id: 2 } },
-      { a: { id: 2 }, b: { id: 3 } },
-    ]);
-    seedRequest(agents.get(1)!, 1);
+    const { body, chain, net, settle } = pond();
+    const a = [body(0, 0), body(10, 0), body(20, 0)];
+    chain(a);
+    const { list, adj } = net(a);
+    seedRequest(a[0], 1);
     settle(list, adj);
-    expect(agents.get(1)!.request).toBe(1);
-    expect(agents.get(2)!.request).toBeCloseTo(REQUEST_DECAY, 6);
-    expect(agents.get(3)!.request).toBeCloseTo(REQUEST_DECAY ** 2, 6);
+    expect(a[0].request).toBe(1);
+    expect(a[1].request).toBeCloseTo(REQUEST_DECAY, 6);
+    expect(a[2].request).toBeCloseTo(REQUEST_DECAY ** 2, 6);
   });
 
   it('lets a big distant need outrank a small near one', () => {
     // Chain 1-2-3-4. A large need at 1 must beat a small need at 4 for the
     // body at 3, even though 4 is adjacent — that is what magnitude buys.
-    const agents = new Map([
-      [1, body(1, 0, 0)],
-      [2, body(2, 10, 0)],
-      [3, body(3, 20, 0)],
-      [4, body(4, 30, 0)],
-    ]);
-    const { list, adj } = net(agents, [
-      { a: { id: 1 }, b: { id: 2 } },
-      { a: { id: 2 }, b: { id: 3 } },
-      { a: { id: 3 }, b: { id: 4 } },
-    ]);
-    seedRequest(agents.get(1)!, 1);
-    seedRequest(agents.get(4)!, 0.2);
+    const { body, chain, net, settle } = pond();
+    const a = [body(0, 0), body(10, 0), body(20, 0), body(30, 0)];
+    chain(a);
+    const { list, adj } = net(a);
+    seedRequest(a[0], 1);
+    seedRequest(a[3], 0.2);
     settle(list, adj);
     // 1 reaches 3 at 0.8^2 = 0.64; 4 only offers 0.2 there.
-    expect(agents.get(3)!.request).toBeCloseTo(REQUEST_DECAY ** 2, 6);
-    expect(agents.get(3)!.request).toBeGreaterThan(agents.get(4)!.request);
+    expect(a[2].request).toBeCloseTo(REQUEST_DECAY ** 2, 6);
+    expect(a[2].request).toBeGreaterThan(a[3].request);
   });
 
   it('walks energy up the gradient, one hop a frame', () => {
-    const agents = new Map([
-      [1, body(1, 0, 0, 0, 1)],
-      [2, body(2, 10, 0, 0, REQUEST_DECAY)],
-      [3, body(3, 20, 0, 1, REQUEST_DECAY ** 2)],
-    ]);
-    const { list, adj } = net(agents, [
-      { a: { id: 1 }, b: { id: 2 } },
-      { a: { id: 2 }, b: { id: 3 } },
-    ]);
+    const { body, chain, net, flow } = pond();
+    const a = [body(0, 0, 0, 1), body(10, 0, 0, REQUEST_DECAY), body(20, 0, 1, REQUEST_DECAY ** 2)];
+    chain(a);
+    const { list, adj } = net(a);
     // 3 holds the surplus and 1 is the one that needs it, two hops away. Each
     // frame moves one wire's worth, throttled by the field at the receiving
     // end — 0.8 here, since that is how much of 1's need is visible from 2.
-    expect(flowCharges(list, adj)).toBeCloseTo(REQUEST_DECAY, 6);
-    expect(agents.get(3)!.extra).toBeCloseTo(1 - REQUEST_DECAY, 6);
-    expect(agents.get(2)!.extra).toBeCloseTo(REQUEST_DECAY, 6);
-    flowCharges(list, adj);
-    expect(agents.get(1)!.extra, 'reaches the body that needs it').toBeGreaterThan(0.5);
+    expect(flow(list, adj)).toBeCloseTo(REQUEST_DECAY, 6);
+    expect(a[2].extra).toBeCloseTo(1 - REQUEST_DECAY, 6);
+    expect(a[1].extra).toBeCloseTo(REQUEST_DECAY, 6);
+    flow(list, adj);
+    expect(a[0].extra, 'reaches the body that needs it').toBeGreaterThan(0.5);
   });
 
   it('delivers only as much as the recipient can hold', () => {
-    const agents = new Map([
-      [1, body(1, 0, 0, 0.7, 0.3)],
-      [2, body(2, 10, 0, 1, 0.24)],
-    ]);
-    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
-    expect(flowCharges(list, adj)).toBeCloseTo(0.3, 6);
-    expect(agents.get(1)!.extra).toBeCloseTo(1, 6);
-    expect(agents.get(2)!.extra, 'donor keeps the rest').toBeCloseTo(0.7, 6);
+    const { body, chain, net, flow } = pond();
+    const a = [body(0, 0, 0.7, 0.3), body(10, 0, 1, 0.24)];
+    chain(a);
+    const { list, adj } = net(a);
+    expect(flow(list, adj)).toBeCloseTo(0.3, 6);
+    expect(a[0].extra).toBeCloseTo(1, 6);
+    expect(a[1].extra, 'donor keeps the rest').toBeCloseTo(0.7, 6);
   });
 
   it('relays through a body that needs nothing itself', () => {
     // The middle body is not hungry and is not a redex. If it could only
     // accept what it needs, every shortage more than one wire from a surplus
     // would be unreachable.
-    const agents = new Map([
-      [1, body(1, 0, 0, 0, 1)],
-      [2, body(2, 10, 0, 0, REQUEST_DECAY)],
-      [3, body(3, 20, 0, 1, REQUEST_DECAY ** 2)],
-    ]);
-    const { list, adj } = net(agents, [
-      { a: { id: 1 }, b: { id: 2 } },
-      { a: { id: 2 }, b: { id: 3 } },
-    ]);
-    flowCharges(list, adj);
-    expect(agents.get(2)!.extra, 'held by the conduit').toBeCloseTo(REQUEST_DECAY, 6);
+    const { body, chain, net, flow } = pond();
+    const a = [body(0, 0, 0, 1), body(10, 0, 0, REQUEST_DECAY), body(20, 0, 1, REQUEST_DECAY ** 2)];
+    chain(a);
+    const { list, adj } = net(a);
+    flow(list, adj);
+    expect(a[1].extra, 'held by the conduit').toBeCloseTo(REQUEST_DECAY, 6);
   });
 
   it('leaves a flat spot where two equal needs meet', () => {
     // Needs of the same size at both ends of a 3-chain give the middle body
     // the same field from either side, so nothing crosses it.
-    const agents = new Map([
-      [1, body(1, 0, 0, 0)],
-      [2, body(2, 10, 0, 1)],
-      [3, body(3, 20, 0, 0)],
-    ]);
-    const { list, adj } = net(agents, [
-      { a: { id: 1 }, b: { id: 2 } },
-      { a: { id: 2 }, b: { id: 3 } },
-    ]);
-    seedRequest(agents.get(1)!, 1);
-    seedRequest(agents.get(3)!, 1);
+    const { body, chain, net, settle, flow } = pond();
+    const a = [body(0, 0, 0), body(10, 0, 1), body(20, 0, 0)];
+    chain(a);
+    const { list, adj } = net(a);
+    seedRequest(a[0], 1);
+    seedRequest(a[2], 1);
     settle(list, adj);
-    expect(agents.get(1)!.request).toBeCloseTo(agents.get(3)!.request, 6);
+    expect(a[0].request).toBeCloseTo(a[2].request, 6);
     // The middle body is the one holding energy, and both neighbours pull on
     // it equally hard, so it gives to exactly one of them rather than tearing.
-    const moved = flowCharges(list, adj);
+    const moved = flow(list, adj);
     expect(moved).toBeGreaterThan(0);
-    const fed = [agents.get(1)!.extra, agents.get(3)!.extra];
+    const fed = [a[0].extra, a[2].extra];
     expect(fed.filter((e) => e > 0.5).length, 'one of the two, not both').toBe(1);
   });
 
   it('does not pass energy to a body that is no needier than the donor', () => {
-    const agents = new Map([
-      [1, body(1, 0, 0, 1, 1)],
-      [2, body(2, 10, 0, 0, 1)],
-    ]);
-    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
-    expect(flowCharges(list, adj)).toBe(0);
-    expect(agents.get(1)!.extra).toBe(1);
-    expect(canPayShare(agents.get(1)!), 'the donor could have paid a share').toBe(true);
-    expect(canPayShare(agents.get(2)!), 'the other could not, and got nothing to change that').toBe(
-      false,
-    );
+    const { body, chain, net, flow } = pond();
+    const a = [body(0, 0, 1, 1), body(10, 0, 0, 1)];
+    chain(a);
+    const { list, adj } = net(a);
+    expect(flow(list, adj)).toBe(0);
+    expect(a[0].extra).toBe(1);
+    expect(canPayShare(a[0]), 'the donor could have paid a share').toBe(true);
+    expect(canPayShare(a[1]), 'the other could not, and got nothing to change that').toBe(false);
   });
 
   it('reads hunger straight off the debt', () => {
-    expect(hungerNeed(body(1, 0, 0, 1)), 'stocked').toBe(0);
-    expect(hungerNeed(body(2, 0, 0, 0)), 'break-even').toBe(0);
-    expect(hungerNeed(body(3, 0, 0, -0.1))).toBeCloseTo(0.1, 6);
-    expect(hungerNeed(body(4, 0, 0, -1)), 'at the point of death').toBe(1);
+    const { body } = pond();
+    expect(hungerNeed(body(0, 0, 1)), 'stocked').toBe(0);
+    expect(hungerNeed(body(0, 0, 0)), 'break-even').toBe(0);
+    expect(hungerNeed(body(0, 0, -0.1))).toBeCloseTo(0.1, 6);
+    expect(hungerNeed(body(0, 0, -1)), 'at the point of death').toBe(1);
   });
 
   it('has nothing to pass on while it is in debt', () => {
-    expect(spareEnergy(body(1, 0, 0, 0.4))).toBeCloseTo(0.4, 6);
-    expect(spareEnergy(body(2, 0, 0, 0))).toBe(0);
-    expect(spareEnergy(body(3, 0, 0, -0.4))).toBe(0);
+    const { body } = pond();
+    expect(spareEnergy(body(0, 0, 0.4))).toBeCloseTo(0.4, 6);
+    expect(spareEnergy(body(0, 0, 0))).toBe(0);
+    expect(spareEnergy(body(0, 0, -0.4))).toBe(0);
   });
 
   it('settles a body\'s own debt before anything travels further', () => {
     // 1 is deep in debt, 2 is shallowly in debt, 3 has stock. What reaches 2
     // pays 2 off first; only what is left over can reach 1.
-    const agents = new Map([
-      [1, body(1, 0, 0, -0.9)],
-      [2, body(2, 10, 0, -0.2)],
-      [3, body(3, 20, 0, 1)],
-    ]);
-    const { list, adj } = net(agents, [
-      { a: { id: 1 }, b: { id: 2 } },
-      { a: { id: 2 }, b: { id: 3 } },
-    ]);
+    const { body, chain, net, settle, flow } = pond();
+    const a = [body(0, 0, -0.9), body(10, 0, -0.2), body(20, 0, 1)];
+    chain(a);
+    const { list, adj } = net(a);
     for (let i = 0; i < 2; i++) {
-      resetRequests(agents.values());
-      for (const a of agents.values()) seedRequest(a, hungerNeed(a));
+      resetRequests(a);
+      for (const b of a) seedRequest(b, hungerNeed(b));
       settle(list, adj);
-      flowCharges(list, adj);
+      flow(list, adj);
     }
-    expect(agents.get(2)!.extra, 'out of debt first').toBeGreaterThanOrEqual(0);
-    const total = [...agents.values()].reduce((t, a) => t + a.extra, 0);
+    expect(a[1].extra, 'out of debt first').toBeGreaterThanOrEqual(0);
+    const total = a.reduce((t, b) => t + b.extra, 0);
     expect(total, 'and nothing minted').toBeCloseTo(-0.1, 6);
   });
 
   it('carries a shortage further at a slower decay', () => {
-    const chain = (decay: number) => {
-      const agents = new Map(
-        Array.from({ length: 6 }, (_, i) => [i + 1, body(i + 1, i * 10, 0)] as const),
-      );
-      agents.get(1)!.request = 1;
-      const wires = Array.from({ length: 5 }, (_, i) => ({
-        a: { id: i + 1 },
-        b: { id: i + 2 },
-      }));
-      const { list, adj } = net(agents, wires);
+    const chainAt = (decay: number) => {
+      const { body, chain, net, settle } = pond();
+      const a = Array.from({ length: 6 }, (_, i) => body(i * 10, 0));
+      a[0].request = 1;
+      chain(a);
+      const { list, adj } = net(a);
       settle(list, adj, decay);
-      return agents.get(6)!.request;
+      return a[5].request;
     };
-    expect(chain(0.8), 'five hops at 0.8').toBeCloseTo(0.8 ** 5, 6);
-    expect(chain(0.9), 'and further at 0.9').toBeCloseTo(0.9 ** 5, 6);
-    expect(chain(0.9)).toBeGreaterThan(chain(0.8));
+    expect(chainAt(0.8), 'five hops at 0.8').toBeCloseTo(0.8 ** 5, 6);
+    expect(chainAt(0.9), 'and further at 0.9').toBeCloseTo(0.9 ** 5, 6);
+    expect(chainAt(0.9)).toBeGreaterThan(chainAt(0.8));
   });
 
   it('lets each body relay demand at its own rate instead of one global decay', () => {
-    const agents = new Map(
-      Array.from({ length: 6 }, (_, i) => [i + 1, body(i + 1, i * 10, 0)] as const),
-    );
-    agents.get(1)!.request = 1;
-    for (const a of agents.values()) a.requestDecay = 0.9;
-    agents.get(3)!.requestDecay = 0.05;
-    const wires = Array.from({ length: 5 }, (_, i) => ({
-      a: { id: i + 1 },
-      b: { id: i + 2 },
-    }));
-    const { list, adj } = net(agents, wires);
+    const { body, chain, net, settle } = pond();
+    const a = Array.from({ length: 6 }, (_, i) => body(i * 10, 0));
+    a[0].request = 1;
+    for (const b of a) b.requestDecay = 0.9;
+    a[2].requestDecay = 0.05;
+    chain(a);
+    const { list, adj } = net(a);
     settle(list, adj); // no override: each body's own field governs
-    expect(agents.get(2)!.request, 'upstream of the lossy relay is unaffected').toBeCloseTo(
-      0.9,
-      6,
-    );
-    expect(agents.get(4)!.request, 'the lossy relay chokes what crosses it').toBeCloseTo(
-      0.9 * 0.9 * 0.05,
-      6,
-    );
-    expect(agents.get(6)!.request).toBeLessThan(0.9 ** 5 * 0.1);
+    expect(a[1].request, 'upstream of the lossy relay is unaffected').toBeCloseTo(0.9, 6);
+    expect(a[3].request, 'the lossy relay chokes what crosses it').toBeCloseTo(0.9 * 0.9 * 0.05, 6);
+    expect(a[5].request).toBeLessThan(0.9 ** 5 * 0.1);
   });
 
   it('never lets the field go flat', () => {
     // At decay 1 every body holds the same need, no neighbour is strictly
     // needier than its donor, and nothing moves at all.
-    const agents = new Map([
-      [1, body(1, 0, 0, 0, 1)],
-      [2, body(2, 10, 0, 1)],
-    ]);
-    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
+    const { body, chain, net, settle, flow } = pond();
+    const a = [body(0, 0, 0, 1), body(10, 0, 1)];
+    chain(a);
+    const { list, adj } = net(a);
     settle(list, adj, 1);
-    expect(agents.get(2)!.request).toBeLessThan(agents.get(1)!.request);
-    expect(flowCharges(list, adj), 'so the surplus still crosses').toBeGreaterThan(0);
+    expect(a[1].request).toBeLessThan(a[0].request);
+    expect(flow(list, adj), 'so the surplus still crosses').toBeGreaterThan(0);
   });
 
   it('keeps a rescued body asking until it can act again', () => {
     // Fill fraction 1 on a tank whose cap is a rewrite share: rescue aims at
     // extra=1, which is what used to be the global absolute target.
-    const a = body(1, 0, 0, -0.4);
+    const { body } = pond();
+    const a = body(0, 0, -0.4);
     a.energyCap = 1;
     a.debtCap = -1;
     a.rescueTo = 1;
@@ -570,13 +556,15 @@ describe('request gradient', () => {
   });
 
   it('leaves a body that has never been in debt quiet', () => {
-    const poor = body(1, 0, 0, 0.05);
+    const { body } = pond();
+    const poor = body(0, 0, 0.05);
     expect(rescueNeed(poor)).toBe(0);
     expect(poor.recovering).toBe(false);
   });
 
   it('rescues only to break-even at fill 0, as it used to', () => {
-    const a = body(1, 0, 0, -0.4);
+    const { body } = pond();
+    const a = body(0, 0, -0.4);
     a.rescueTo = 0;
     expect(rescueNeed(a)).toBeCloseTo(0.4, 6);
     a.extra = 0;
@@ -584,7 +572,8 @@ describe('request gradient', () => {
   });
 
   it("aims a rescue between the body's own floor and cap", () => {
-    const a = body(1, 0, 0);
+    const { body } = pond();
+    const a = body(0, 0);
     a.debtCap = -0.5;
     a.energyCap = 2;
     a.rescueTo = 0.5;
@@ -600,12 +589,14 @@ describe('request gradient', () => {
   });
 
   it('measures a stalled redex end by what it is short of a full extra', () => {
-    expect(redexNeed(body(1, 0, 0, 0.8))).toBeCloseTo(0.2, 6);
-    expect(redexNeed(body(2, 0, 0, 1))).toBe(0);
+    const { body } = pond();
+    expect(redexNeed(body(0, 0, 0.8))).toBeCloseTo(0.2, 6);
+    expect(redexNeed(body(0, 0, 1))).toBe(0);
   });
 
   it('clears requests', () => {
-    const a = body(1, 0, 0, 0, 4);
+    const { body } = pond();
+    const a = body(0, 0, 0, 4);
     resetRequests([a]);
     expect(a.request).toBe(0);
   });
@@ -616,9 +607,10 @@ describe('settle pool', () => {
     // Released energy enters the net at the body the gradient would have sent
     // it to. `easy` has the lower id, so id order would have fed it first and
     // left the hungry one short.
+    const { body } = pond();
     const grid = new EnergyGrid(10, 0);
-    const easy = body(1, 0, 0, 1, 0.1);
-    const hungry = body(2, 0, 0, -0.5, 0.9);
+    const easy = body(0, 0, 1, 0.1);
+    const hungry = body(0, 0, -0.5, 0.9);
     settlePool(1, [easy, hungry], grid, 5, 5);
     expect(hungry.extra, 'all of it went to the needy one').toBeCloseTo(0.5, 6);
     expect(easy.extra, 'which had room but no claim on it').toBe(1);
@@ -628,9 +620,10 @@ describe('settle pool', () => {
   it('drops what the survivors cannot hold onto the ground', () => {
     // Two bodies, 2.0 of room between them, against a two-body annihilation.
     // The per-body cap is the bandwidth limit; the rest lands where it died.
+    const { body } = pond();
     const grid = new EnergyGrid(10, 0);
-    const a = body(1, 0, 0, -0.5, 0.9);
-    const b = body(2, 0, 0, 1, 0.1);
+    const a = body(0, 0, -0.5, 0.9);
+    const b = body(0, 0, 1, 0.1);
     settlePool(2 * BODY_VALUE, [a, b], grid, 5, 5);
     expect(a.extra).toBeCloseTo(EXTRA_CAP, 6);
     expect(b.extra).toBeCloseTo(EXTRA_CAP, 6);
@@ -638,9 +631,10 @@ describe('settle pool', () => {
   });
 
   it('fills empty leftover slots before dumping to the grid', () => {
+    const { body } = pond();
     const grid = new EnergyGrid(10, 0);
-    const a = body(1, 0, 0);
-    const b = body(2, 0, 0, EXTRA_CAP);
+    const a = body(0, 0);
+    const b = body(0, 0, EXTRA_CAP);
     settlePool(2, [a, b], grid, 5, 5);
     expect(a.extra, 'the empty slot takes what it can hold').toBeCloseTo(EXTRA_CAP, 6);
     expect(b.extra, 'the full one takes nothing').toBe(EXTRA_CAP);
@@ -865,20 +859,22 @@ describe('sim energy', () => {
   });
 
   it('charges an Era instead of billing it, and never starves one', () => {
-    const era = body(1, 0, 0, 0, 0, false, 'era');
-    const con = body(2, 0, 0, 0, 0, false, 'con');
+    const { body, upkeep } = pond();
+    const era = body(0, 0, 0, 0, false, 'era');
+    const con = body(0, 0, 0, 0, false, 'con');
     // Long enough that a Con has been billed several times over.
-    for (let i = 0; i < 600; i++) tickUpkeep([era, con], 1, 0.025);
+    for (let i = 0; i < 600; i++) upkeep([era, con], 1, 0.025);
     expect(con.extra, 'a Con burns down to the floor').toBe(EXTRA_FLOOR);
     expect(era.extra, 'an Era fills instead, to its own deeper cap').toBe(extraCapFor('era'));
-    expect(tickUpkeep([era], 1000, 0.025), 'and is never reported starved').toEqual([]);
+    expect(upkeep([era], 1000, 0.025), 'and is never reported starved').toEqual([]);
   });
 
   it('gives an Era a deeper tank than a Con or a Dup', () => {
     expect(extraCapFor('era')).toBeCloseTo(EXTRA_CAP * ERA_CAP_RATIO, 6);
     expect(extraCapFor('con')).toBe(EXTRA_CAP);
     expect(extraCapFor('dup')).toBe(EXTRA_CAP);
-    const era = body(1, 0, 0, EXTRA_CAP, 0, false, 'era');
+    const { body } = pond();
+    const era = body(0, 0, EXTRA_CAP, 0, false, 'era');
     expect(atCap(era), 'a Con-sized tankful is only half an Era').toBe(false);
     era.extra = extraCapFor('era');
     expect(atCap(era)).toBe(true);
@@ -888,24 +884,26 @@ describe('sim energy', () => {
     // energyCap is heritable now — two Cons can carry different tanks — so the
     // cap has to come from the body, and extraCapFor is only ever the seed a
     // fresh one starts at.
-    const roomy = body(1, 0, 0, EXTRA_CAP, 0, false, 'con', EXTRA_CAP * 2);
-    const cramped = body(2, 0, 0, EXTRA_CAP * 0.5, 0, false, 'con', EXTRA_CAP * 0.5);
+    const { grid, body, harvest } = pond();
+    const roomy = body(0, 0, EXTRA_CAP, 0, false, 'con', EXTRA_CAP * 2);
+    const cramped = body(0, 0, EXTRA_CAP * 0.5, 0, false, 'con', EXTRA_CAP * 0.5);
     expect(atCap(roomy), 'a normal-sized tankful is not full for the bigger tank').toBe(false);
     expect(atCap(cramped), 'but the smaller tank is already topped out at the same level').toBe(
       true,
     );
-    const grid = new EnergyGrid(10, 0);
-    grid.setCell(0, 0, 10);
-    harvestSlots([roomy, cramped], grid);
+    const cell = grid.index(roomy.x, roomy.y);
+    grid.setCell(cell.i, cell.j, 10);
+    harvest([roomy, cramped]);
     expect(roomy.extra).toBeCloseTo(roomy.energyCap, 6);
     expect(cramped.extra, 'no room left to harvest into').toBeCloseTo(EXTRA_CAP * 0.5, 6);
   });
 
   it('lets a full tank pay a rewrite even when breeding shrank it below a share', () => {
-    const cramped = body(1, 0, 0, EXTRA_CAP * 0.5, 0, false, 'con', EXTRA_CAP * 0.5);
+    const { body } = pond();
+    const cramped = body(0, 0, EXTRA_CAP * 0.5, 0, false, 'con', EXTRA_CAP * 0.5);
     expect(cramped.energyCap).toBeLessThan(REWRITE_SHARE);
     expect(canPayShare(cramped)).toBe(true);
-    const roomy = body(2, 0, 0, EXTRA_CAP * 0.5, 0, false, 'con', EXTRA_CAP);
+    const roomy = body(0, 0, EXTRA_CAP * 0.5, 0, false, 'con', EXTRA_CAP);
     expect(canPayShare(roomy), 'a default tank still needs a whole share').toBe(false);
     expect(rewriteShareOf(cramped), 'and owes only what it can hold').toBeCloseTo(
       EXTRA_CAP * 0.5,
@@ -915,22 +913,20 @@ describe('sim energy', () => {
   });
 
   it('fills an Era past a full Con from the ground and along a wire', () => {
-    const grid = new EnergyGrid(10, 0);
-    const era = body(1, 0, 0, 0, 0, false, 'era');
-    grid.setCell(0, 0, 4);
-    harvestSlots([era], grid);
+    const { sim, params, grid, body, net, settle, flow, harvest } = pond();
+    const era = body(0, 0, 0, 0, false, 'era');
+    const cell = grid.index(era.x, era.y);
+    grid.setCell(cell.i, cell.j, 4);
+    harvest([era]);
     expect(era.extra, 'forages up to its own cap').toBeCloseTo(extraCapFor('era'), 6);
 
-    const drained = body(2, 0, 0, 0.5, 0, false, 'era');
-    const donor = body(3, 10, 0, EXTRA_CAP, 0, false, 'con');
-    const agents = new Map([
-      [drained.id, drained],
-      [donor.id, donor],
-    ]);
-    const { list, adj } = net(agents, [{ a: { id: 2 }, b: { id: 3 } }]);
+    const drained = body(0, 0, 0.5, 0, false, 'era');
+    const donor = body(10, 0, EXTRA_CAP, 0, false, 'con');
+    sim.wire(drained.id, 'p', donor.id, 'l', params);
+    const { list, adj } = net([drained, donor]);
     seedRequest(drained, 1);
     settle(list, adj);
-    flowCharges(list, adj);
+    flow(list, adj);
     expect(drained.extra, 'and a pump can push it past a Con-sized full').toBeGreaterThan(
       EXTRA_CAP,
     );
@@ -938,14 +934,15 @@ describe('sim energy', () => {
 
   it('caps an Era at full however long it produces for', () => {
     const cap = extraCapFor('era');
-    const era = body(1, 0, 0, 0, 0, false, 'era');
-    for (let i = 0; i < 5000; i++) tickUpkeep([era], 1, 0.025);
+    const { body, upkeep } = pond();
+    const era = body(0, 0, 0, 0, false, 'era');
+    for (let i = 0; i < 5000; i++) upkeep([era], 1, 0.025);
     expect(era.extra, 'no banking past the cap').toBe(cap);
     // And the next share has to be earned at the same rate as the first.
     spendExtra(era);
     expect(era.extra, 'a share out of a full tank leaves the headroom')
       .toBeCloseTo(cap - REWRITE_SHARE, 6);
-    tickUpkeep([era], 1, 0.025);
+    upkeep([era], 1, 0.025);
     expect(era.extra).toBeCloseTo(cap - REWRITE_SHARE + 0.005, 6);
   });
 
@@ -990,7 +987,7 @@ describe('EnergyGrid.forEachStored', () => {
 
 describe('conservation', () => {
   /*
-   * `docs/energy-chemistry-plan.md` §5, as one assertion:
+   * `docs/history/energy-chemistry-plan.md` §5, as one assertion:
    *
    *   > The dish is driven — feed in, kill out, patterned.
    *   > The bodies are conservative — no reaction a body runs creates or
@@ -1110,11 +1107,9 @@ describe('conservation', () => {
 
   it('conserves across a whole pond on the shipping path', () => {
     /*
-     * The one that matters. `flowChargesFast` is what runs, it is a hand-kept
-     * twin of the reference above, and nothing else in the suite compares the
-     * two — so this drives the real thing for nine hundred frames of a pond
-     * that latches, commutes and annihilates, with packets crossing wires and
-     * spilling onto the ground throughout, and checks the books still balance.
+     * Packets crossing wires and spilling onto the ground for nine hundred
+     * frames of a pond that latches, commutes and annihilates, and the books
+     * still balance.
      */
     const p = conservativeParams();
     p.transportQuantum = 0.5;
@@ -1159,52 +1154,49 @@ describe('quantised transport', () => {
   it('will not let a body send what it does not yet hold', () => {
     // The accumulate-and-fire half. Under the continuous law this donor gives
     // its 0.4 away immediately; under a packet it has to wait until it has one.
-    const agents = new Map([
-      [1, body(1, 0, 0, 0, 1)],
-      [2, body(2, 10, 0, 0.4, 0)],
-    ]);
-    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
+    const { body, chain, net, flow } = pond();
+    const a = [body(0, 0, 0, 1), body(10, 0, 0.4, 0)];
+    chain(a);
+    const { list, adj } = net(a);
     const grid = new EnergyGrid(10, 0);
-    expect(flowCharges(list, adj, undefined, { quantum: packet, grid })).toBe(0);
-    expect(agents.get(2)!.extra, 'the donor keeps it all').toBeCloseTo(0.4, 9);
-    expect(agents.get(1)!.extra).toBe(0);
+    expect(flow(list, adj, { quantum: packet, grid })).toBe(0);
+    expect(a[1].extra, 'the donor keeps it all').toBeCloseTo(0.4, 9);
+    expect(a[0].extra).toBe(0);
     expect(grid.storedTotal(), 'and nothing leaked to the ground').toBeCloseTo(0, 9);
     // The same pond under the law it replaces, so this cannot pass vacuously.
-    expect(flowCharges(list, adj)).toBeCloseTo(0.4, 9);
+    expect(flow(list, adj)).toBeCloseTo(0.4, 9);
   });
 
   it('sends a whole packet, however little the receiver asked for', () => {
     // Demand still decides *whether* to send — the receiver must be strictly
     // needier — but it no longer decides how much. That cap is what kept every
     // transfer down to the size of the gradient.
-    const agents = new Map([
-      [1, body(1, 0, 0, 0, 0.2)],
-      [2, body(2, 10, 0, 1, 0)],
-    ]);
-    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
+    const { body, chain, net, flow } = pond();
+    const a = [body(0, 0, 0, 0.2), body(10, 0, 1, 0)];
+    chain(a);
+    const { list, adj } = net(a);
     const grid = new EnergyGrid(10, 0);
-    const moved = flowCharges(list, adj, undefined, { quantum: packet, grid });
+    const moved = flow(list, adj, { quantum: packet, grid });
     expect(moved, 'a packet, not the 0.2 the gradient asked for').toBeCloseTo(packet, 9);
-    expect(agents.get(1)!.extra).toBeCloseTo(0.5, 9);
-    expect(agents.get(2)!.extra).toBeCloseTo(0.5, 9);
+    expect(a[0].extra).toBeCloseTo(0.5, 9);
+    expect(a[1].extra).toBeCloseTo(0.5, 9);
   });
 
   it('spills what will not fit onto the ground under the receiver', () => {
     // A whole packet crosses whether or not the far end has room, so the
     // remainder has to land somewhere. The same place a rewrite's leftovers go.
-    const agents = new Map([
-      [1, body(1, 0, 0, 1, 1)],
-      [2, body(2, 10, 0, 1, 0)],
-    ]);
-    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
+    const { body, chain, net, flow } = pond();
+    const a = [body(0, 0, 1, 1), body(10, 0, 1, 0)];
+    chain(a);
+    const { list, adj } = net(a);
     const grid = new EnergyGrid(10, 0);
-    const cap = agents.get(1)!.energyCap;
-    const before = agents.get(1)!.extra + agents.get(2)!.extra;
-    flowCharges(list, adj, undefined, { quantum: packet, grid });
-    expect(agents.get(1)!.extra, 'receiver fills to the brim').toBeCloseTo(cap, 9);
-    expect(agents.get(2)!.extra, 'donor is a whole packet lighter').toBeCloseTo(0.5, 9);
+    const cap = a[0].energyCap;
+    const before = a[0].extra + a[1].extra;
+    flow(list, adj, { quantum: packet, grid });
+    expect(a[0].extra, 'receiver fills to the brim').toBeCloseTo(cap, 9);
+    expect(a[1].extra, 'donor is a whole packet lighter').toBeCloseTo(0.5, 9);
     expect(grid.storedTotal()).toBeCloseTo(packet - (cap - 1), 9);
-    const after = agents.get(1)!.extra + agents.get(2)!.extra + grid.storedTotal();
+    const after = a[0].extra + a[1].extra + grid.storedTotal();
     expect(after, 'nothing minted, nothing lost').toBeCloseTo(before, 9);
   });
 
@@ -1213,23 +1205,31 @@ describe('quantised transport', () => {
     // file exists to protect, and it would only show up as a slow leak. It
     // throws where the loss would happen rather than up front, so a run whose
     // receivers all have room is not made to carry a grid it never needs.
-    const roomy = new Map([[1, body(1, 0, 0, 0, 1)], [2, body(2, 10, 0, 1, 0)]]);
-    const a = net(roomy, [{ a: { id: 1 }, b: { id: 2 } }]);
-    expect(() => flowCharges(a.list, a.adj, undefined, { quantum: packet })).not.toThrow();
+    const roomy = pond();
+    const ra = [roomy.body(0, 0, 0, 1), roomy.body(10, 0, 1, 0)];
+    roomy.chain(ra);
+    const r = roomy.net(ra);
+    expect(() => roomy.flow(r.list, r.adj, { quantum: packet })).not.toThrow();
 
     // The receiver has 0.25 of room and a whole packet is coming.
-    const full = new Map([[1, body(1, 0, 0, 1, 1)], [2, body(2, 10, 0, 1, 0)]]);
-    const b = net(full, [{ a: { id: 1 }, b: { id: 2 } }]);
-    expect(() => flowCharges(b.list, b.adj, undefined, { quantum: packet })).toThrow(/grid/);
+    const full = pond();
+    const fa = [full.body(0, 0, 1, 1), full.body(10, 0, 1, 0)];
+    full.chain(fa);
+    const f = full.net(fa);
+    expect(() => full.flow(f.list, f.adj, { quantum: packet })).toThrow(/grid/);
   });
 
-  it('is the old law exactly at zero', () => {
-    const agents = new Map([[1, body(1, 0, 0, 0, 0.7)], [2, body(2, 10, 0, 1, 0)]]);
-    const { list, adj } = net(agents, [{ a: { id: 1 }, b: { id: 2 } }]);
-    const plain = new Map([[1, body(1, 0, 0, 0, 0.7)], [2, body(2, 10, 0, 1, 0)]]);
-    const two = net(plain, [{ a: { id: 1 }, b: { id: 2 } }]);
-    const withOpts = flowCharges(list, adj, undefined, { quantum: 0 });
-    expect(withOpts).toBe(flowCharges(two.list, two.adj));
-    expect(agents.get(1)!.extra).toBe(plain.get(1)!.extra);
+  it('is the continuous law exactly at a forced quantum of zero', () => {
+    const one = pond();
+    const oa = [one.body(0, 0, 0, 0.7), one.body(10, 0, 1, 0)];
+    one.chain(oa);
+    const o = one.net(oa);
+    const two = pond();
+    const ta = [two.body(0, 0, 0, 0.7), two.body(10, 0, 1, 0)];
+    two.chain(ta);
+    const t = two.net(ta);
+    const withOpts = one.flow(o.list, o.adj, { quantum: 0 });
+    expect(withOpts).toBe(two.flow(t.list, t.adj));
+    expect(oa[0].extra).toBe(ta[0].extra);
   });
 });

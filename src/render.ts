@@ -26,15 +26,9 @@ export interface ViewOpts {
   /** Kind hues with energy as saturation, instead of a ring around each body. */
   kindColors: boolean;
   /**
-   * When true, FAR-tier agents are skipped here entirely — the caller is
-   * expected to have already drawn them as instanced dots on a WebGPU
-   * canvas layered *on top* of this one (see buildFarInstances / AgentsGpu),
-   * which is one draw call regardless of count instead of one drawAgent()
-   * call per agent, and sits above everything here — including wires and
-   * whatever this draws for the energy grid — so a FAR-tier dot can never
-   * end up buried under either. False draws everyone here, exactly as
-   * before the GPU layer existed — the safe default when that layer isn't
-   * ready.
+   * When true, FAR-tier agents are skipped here: the caller draws them as
+   * instanced dots on the WebGPU canvas layered on top of this one (see
+   * buildFarInstances / AgentsGpu). False draws everyone here.
    */
   gpuAgents: boolean;
 }
@@ -50,9 +44,7 @@ function shapeFor(kind: AgentKind): number {
 /**
  * Fills `out` with one FAR_INSTANCE_STRIDE-float record per FAR-tier agent
  * and returns how many were written. `out` must be at least
- * `sim.agents.size * FAR_INSTANCE_STRIDE` long; the caller owns growing it
- * (main.ts keeps one reusable buffer, matching the pattern GravitatePool's
- * scratch array already uses).
+ * `sim.agents.size * FAR_INSTANCE_STRIDE` long; the caller owns growing it.
  */
 export function buildFarInstances(sim: Sim, out: Float32Array, kindColors: boolean): number {
   let n = 0;
@@ -60,10 +52,8 @@ export function buildFarInstances(sim: Sim, out: Float32Array, kindColors: boole
     if (!sim.isFarTier(agent.id)) continue;
     const base = n * FAR_INSTANCE_STRIDE;
     if (base + FAR_INSTANCE_STRIDE > out.length) break;
-    // Numeric fields read straight off the store by slot, bypassing Agent's
-    // getters — this walks the whole FAR-tier population every frame. `kind`
-    // stays a getter call: kindFillRgb/KIND_RGB/shapeFor all key on the
-    // string, and boundRadius needs the Agent shape regardless.
+    // Numeric fields read straight off the store by slot; this walks the
+    // whole FAR-tier population every frame.
     const store = agent.store;
     const slot = agent.slot;
     const kind = agent.kind;
@@ -104,29 +94,19 @@ export function render(
   waves: WaveSnapshot | null = null,
 ): void {
   ctx.save();
-  // The background fill. This also doubles as Canvas2D's per-frame clear —
-  // it never clears itself between draws, so this has to run unconditionally
-  // every frame regardless of whether the GPU dot layer is active.
-  //
-  // This canvas is the *bottom* layer (#view-gpu sits on top of it, not
-  // under — see #viewport in style.css): wires, near-tier agents, and
-  // whatever else this draws should never be able to bury a FAR-tier dot,
-  // which an opaque fill on top of it would. The GPU layer's own clear
-  // (agents-gpu.ts) is to transparent, so it shows this canvas through
-  // everywhere it isn't drawing a dot.
+  // The background fill doubles as Canvas2D's per-frame clear, so it runs
+  // every frame whether or not the GPU dot layer is active. This canvas is
+  // the bottom layer (#view-gpu sits on top, see #viewport in style.css) and
+  // the GPU layer clears to transparent.
   ctx.fillStyle = '#0c0d10';
   ctx.fillRect(0, 0, camera.viewW, camera.viewH);
 
   ctx.save();
   camera.apply(ctx);
 
-  /*
-   * Both of the views below paint from `sim.fields.data`, which is a stale
-   * copy when the field lives on the GPU. Asking for it here rather than
-   * inside them means the sim does one copy a frame while either is open and
-   * none at all when neither is — and it is asked for a frame ahead, since
-   * the copy happens during the step and this runs after it.
-   */
+  // Both views below paint from `sim.fields.data`, a stale copy when the
+  // field lives on the GPU; ask for the readback here, a frame ahead, since
+  // the copy happens during the step and this runs after it.
   sim.wantFieldReadback = opts.energyGrid === true || opts.overlay === true;
 
   if (opts.energyGrid) drawEnergyGrid(ctx, sim, camera);
@@ -176,23 +156,14 @@ function drawEnergyGrid(ctx: CanvasRenderingContext2D, sim: Sim, camera: Camera)
   const top = camera.y - camera.coverHeight() * 0.5 - pad;
   const right = camera.x + camera.coverWidth() * 0.5 + pad;
   const bottom = camera.y + camera.coverHeight() * 0.5 + pad;
-  // Cell (i, j) covers world space [originX + i*size, ...), not [i*size, ...)
-  // — the grid's lattice is anchored to the scent field's origin, not to the
-  // world origin, so the cull window and the draw position both need it.
+  // Cell (i, j) covers world space [originX + i*size, ...): the lattice is
+  // anchored to the field's origin, so the cull window and draw need it.
   let i0 = Math.floor((left - originX) / size);
   let i1 = Math.ceil((right - originX) / size);
   let j0 = Math.floor((top - originY) / size);
   let j1 = Math.ceil((bottom - originY) / size);
-  /*
-   * And clamped to the dish, which the camera window alone is not.
-   *
-   * At the minimum zoom the cover is 72,000 world units across — 1802 x 1127
-   * cells, two million of them, and all but the 256 x 256 that sit over the
-   * field read 0 and so draw a black rect each. That is exactly the freeze the
-   * comment below warns about. The draw is already clipped to this same disk,
-   * so every cell dropped here was invisible anyway; the bounding box is a
-   * superset of the disk, so nothing inside it is lost either.
-   */
+  // Clamped to the dish: at minimum zoom the camera window covers millions of
+  // cells outside the field. The draw is clipped to this disk anyway.
   if (sim.worldR > 0) {
     i0 = Math.max(i0, Math.floor((sim.worldX - sim.worldR - originX) / size));
     i1 = Math.min(i1, Math.ceil((sim.worldX + sim.worldR - originX) / size));
@@ -209,22 +180,11 @@ function drawEnergyGrid(ctx: CanvasRenderingContext2D, sim: Sim, camera: Camera)
     ctx.arc(sim.worldX, sim.worldY, sim.worldR, 0, Math.PI * 2);
     ctx.clip();
   }
-  // Uniform ambient as one fill — walking every cell in a far-zoom cover is
-  // hundreds of thousands of fillRects and freezes the tab.
+  // Uniform ambient as one fill; walking every cell freezes the tab at far zoom.
   ctx.fillStyle = gold(grid.ambient);
   ctx.fillRect(left, top, right - left, bottom - top);
-  /*
-   * Over the cells the camera can see, rather than over the cells that have
-   * been touched.
-   *
-   * The grid used to be sparse — an implicit ambient everywhere, with only
-   * grazed cells stored — so drawing what was stored *was* drawing the
-   * interesting part, and there was nothing else to walk. Now the ground
-   * diffuses and regrows, so every cell in the dish differs from ambient by
-   * something, and "stored" would mean all eight hundred thousand of them.
-   * The cull window is what keeps this bounded instead: a screen of 40-unit
-   * cells is a couple of thousand rects however far the pond has spread.
-   */
+  // Over the cells the camera can see: the cull window is what keeps this
+  // bounded however far the pond has spread.
   const cap = Math.max(1e-9, grid.ambient);
   for (let j = j0; j < j1; j++) {
     for (let i = i0; i < i1; i++) {
@@ -281,12 +241,7 @@ const KIND_RGB: Record<AgentKind, Rgb> = {
   era: [255, 255, 0],
 };
 
-/**
- * Canvas2D's un-tinted fills when kind colors are off. GPU FAR dots have to
- * pack the same RGB — they used to fall through to KIND_RGB, so unchecking
- * kind colors only greyscaled the NEAR-tier Canvas2D bodies and left the
- * zoomed-out population in full hue.
- */
+/** Canvas2D's un-tinted fills when kind colors are off. GPU FAR dots pack the same RGB. */
 export const KIND_BW_RGB: Record<AgentKind, Rgb> = {
   dup: [0x11, 0x12, 0x13],
   era: [0xf3, 0xf3, 0xf3],
@@ -387,35 +342,24 @@ export function kindChroma(kind: AgentKind, extra: number): number {
 }
 
 /**
- * One scratch slot reused for every ghost, rather than a fresh `AgentStore`
- * per call — a ghost is drawn and discarded within the same expression
- * (`drawAgent(ctx, ghostAsAgent(g), ...)`, never stashed), so there is
- * nothing to isolate between calls, and reusing the slot avoids allocating
- * a whole typed-array table per preview frame.
+ * One scratch slot reused for every ghost: a ghost is drawn and discarded
+ * within the same expression, never stashed, so nothing needs isolating.
  */
 const ghostStore = new AgentStore(1);
 const ghostAgent = new Agent(ghostStore, ghostStore.allocate(-1));
 
 /*
  * Everything about the scratch ghost that does not vary from ghost to ghost,
- * written once.
- *
- * `ghostStore` is private to this module and `ghostAgent` its only occupant,
- * so nothing between two draws can disturb these — and a rewrite-heavy dish
- * draws a lot of ghosts. At 1,469 rewrites in flight that loop was running
- * about 5,900 times a frame, and `chem.fill(0)` alone was zeroing 134 floats
- * each time, on an array that has been zero since the first call.
+ * written once. `ghostStore` is private to this module and `ghostAgent` its
+ * only occupant, so nothing between two draws can disturb these.
  */
 function initGhostAgent(): void {
   const a = ghostAgent;
-  // Never read before being rewritten — `csHeading` is set to NaN per ghost, so
-  // the memo in `stemOffsetInto` always misses and recomputes — but set once so
-  // the scratch starts in exactly the state it used to start every call in.
+  // Never read before being rewritten: `csHeading` is NaN per ghost, so the
+  // memo in `stemOffsetInto` always misses and recomputes.
   a.csCos = 1;
   a.csSin = 0;
-  // A ghost is drawn, never simulated, so it neither emits nor smells.
   a.chem.fill(0);
-  // A ghost is drawn, never flocked.
   a.flockAlign = 0;
   a.flockSep = 0;
   a.vx = 0;
@@ -429,7 +373,7 @@ function initGhostAgent(): void {
   a.extra = 0;
   a.request = 0;
   a.recovering = false;
-  // A ghost is preview art, not a simulated body — never bred, never billed.
+  // A ghost is preview art: never bred, never billed.
   a.requestDecay = REQUEST_DECAY;
   a.energyCap = EXTRA_CAP;
   a.debtCap = EXTRA_FLOOR;
@@ -444,7 +388,6 @@ function ghostAsAgent(g: Ghost): Agent {
   a.kind = g.kind;
   a.x = g.x;
   a.y = g.y;
-  // Cold: a ghost is built fresh each time, so there is nothing to reuse.
   a.csHeading = NaN;
   a.heading = g.heading;
   a.alpha = g.alpha;
@@ -478,30 +421,14 @@ export function waveDisplace(fwd: number, back: number, env: number, pin: number
 }
 
 /**
- * Every wire in one path, stroked once.
+ * Every wire in one path, stroked once: they share one white stroke, and
+ * `moveTo` starts a subpath, so caps and joins come out identical.
  *
- * They all share the same white stroke, so per-wire `beginPath`/`stroke` was
- * buying nothing and costing a draw call each: at ~5,500 wires that is 5,500
- * strokes a frame, which is the same ceiling the GPU dot layer exists to get
- * the population off. Subpaths are what `moveTo` starts, so one path holds
- * them all and the caps and joins come out identical.
- */
-/**
- * Body id -> index of the first rewrite in this frame's list consuming it.
- *
- * A set of dying ids was not enough. It skipped the rewrite scan for wires that
- * touch nothing dying, which is most of them in a young pond — but in a grown
- * one a lot of wires touch something dying, and each of those still walked the
- * whole rewrite list. Measured on a pond of 16,765 wires with 1,475 rewrites in
- * flight: 3,621 wires touching a dying body, 5.3 million `rewriteHandoffStems`
- * calls a frame, **64.6 ms** — four fifths of the entire wire pass.
- *
- * `rewriteHandoffStems` returns null unless the wire has an end on that
- * rewrite's own two bodies, so only the rewrites indexed here can ever answer
- * yes: a wire has two ends, so at most two candidates. The index is the
- * position in `sim.rewrites` so they can still be tried in the order the scan
- * would have tried them, which is what makes this exactly equivalent rather
- * than merely close.
+ * `dyingIndex` maps body id -> index of the first rewrite in this frame's
+ * list consuming it. `rewriteHandoffStems` returns null unless the wire has
+ * an end on that rewrite's own two bodies, so a wire has at most two
+ * candidates; the index is the position in `sim.rewrites` so they are tried
+ * in the order a full scan would, which keeps this exactly equivalent.
  */
 const dyingScratch = new Map<number, number>();
 
@@ -523,8 +450,6 @@ function drawWires(
   const rewrites = sim.rewrites;
   // A handoff only exists for a wire touching an agent a rewrite is consuming,
   // so collect those ids once instead of asking every rewrite about every wire.
-  // That inner loop was the whole cross product -- 5,500 wires against 30
-  // rewrites is 165,000 calls a frame to answer "no" 164,900 times.
   dyingScratch.clear();
   for (let i = 0; i < rewrites.length; i++) {
     const rw = rewrites[i];
@@ -540,8 +465,7 @@ function drawWires(
     const ia = dyingScratch.get(wire.a.id);
     const ib = dyingScratch.get(wire.b.id);
     if (ia !== undefined || ib !== undefined) {
-      // Whichever of the two candidates the old scan would have reached first,
-      // then the other. Anything else in the list answers null by definition.
+      // Lower index first, then the other; anything else answers null.
       const lo = ia === undefined ? ib! : ib === undefined ? ia : ia < ib ? ia : ib;
       const hi = ia === undefined || ib === undefined ? -1 : ia < ib ? ib : ia;
       let handoff = rewriteHandoffStems(rewrites[lo], wire, agents, w, h);
@@ -594,17 +518,10 @@ function drawCommuteGhostWires(
 const CHORD_STEPS = 16;
 
 /**
- * Screen pixels a chord segment is worth drawing for.
- *
- * Sixteen segments is the right count for a wire that fills a good part of the
- * view and absurd for one that is a pixel long, which is what nearly every
- * wire is once the camera pulls back far enough to see a whole dish. A 60 s
- * trace of a grown pond put `drawWires` at 13.3% of all CPU, most of it here.
- *
- * The cubic's bow is bounded by its handles, which `wireCubic` caps at a third
- * of the span, so the sagitta is under about a quarter of the span. At five
- * screen pixels a segment, the straight-line case is entering at a span whose
- * whole curve could deviate by roughly one pixel — under the 1.35 px stroke.
+ * Screen pixels a chord segment is worth drawing for. `wireCubic` caps the
+ * handles at a third of the span, so the sagitta is under about a quarter of
+ * it; at five pixels a segment the one-segment case deviates by roughly one
+ * pixel, under the stroke width.
  */
 const CHORD_PX_PER_SEGMENT = 5;
 
@@ -612,11 +529,7 @@ const CHORD_PX_PER_SEGMENT = 5;
 const chordEndA = { x: 0, y: 0 };
 const chordEndB = { x: 0, y: 0 };
 
-/**
- * How many segments this wire is worth at this zoom, from 1 to `CHORD_STEPS`.
- *
- * `lastLen` is the length the step already measured, so this costs a multiply.
- */
+/** How many segments this wire is worth at this zoom, from 1 to `CHORD_STEPS`. */
 function chordSteps(wire: Wire, zoom: number): number {
   const span = wire.lastLen > 0 ? wire.lastLen : wire.rest;
   if (!(span > 0) || !(zoom > 0)) return CHORD_STEPS;
@@ -625,15 +538,7 @@ function chordSteps(wire: Wire, zoom: number): number {
   return want < CHORD_STEPS ? want : CHORD_STEPS;
 }
 
-/**
- * Reused sample buffer for the chord case, which is every wire that is not
- * running a live rope -- i.e. the whole FAR-tier pond.
- *
- * `wireControlPoints` builds that polyline with `push` and a fresh point per
- * sample: seventeen objects per wire per frame, ~93,000 a frame at 5,500
- * wires, all of it discarded before the next one. The length never varies
- * here, so one buffer serves every wire and the objects are written through.
- */
+/** Reused sample buffer for the chord case: every wire not running a live rope. */
 const chordScratch: { x: number; y: number }[] = [];
 
 /** Writes `steps + 1` points into `chordScratch` and returns that count. */
@@ -669,16 +574,11 @@ function strokeWire(
   rope = true,
   zoom = 0,
 ): void {
-  // The chord case ignores the stems anyway -- `wireControlPoints` reads the
-  // ports off the bodies -- so the pooled path is the same geometry.
+  // The chord case reads the ports off the bodies, so the pooled path is the same geometry.
   if (!rope || wire.nodes.length === 0) {
     const steps = chordSteps(wire, zoom);
     if (steps <= 1) {
-      /*
-       * A wire this short on screen is a line. Taking it here skips the whole
-       * cubic — `wireCubic` alone builds about eleven objects a call, and the
-       * sampling built seventeen points for something under five pixels long.
-       */
+      // A wire this short on screen is a line; skip the cubic entirely.
       stemWorldInto(A, wire.a.slot, w, h, chordEndA);
       stemWorldInto(B, wire.b.slot, w, h, chordEndB);
       ctx.moveTo(chordEndA.x, chordEndA.y);
@@ -891,14 +791,7 @@ function drawEra(ctx: CanvasRenderingContext2D, fill?: string): void {
   ctx.stroke();
 }
 
-/*
- * The unit triangle, once.
- *
- * `triangleLocal(1)` builds three points a call, and `drawAgent` scales the
- * context rather than the geometry — so the argument is always 1 and the
- * answer always the same three points. A rewrite-heavy dish draws thousands
- * of ghosts a frame through here.
- */
+// The unit triangle, once: `drawAgent` scales the context, not the geometry.
 const TRIANGLE_UNIT = triangleLocal(1);
 
 function drawTriangle(ctx: CanvasRenderingContext2D, kind: AgentKind, fill?: string): void {
@@ -917,8 +810,7 @@ function drawTriangle(ctx: CanvasRenderingContext2D, kind: AgentKind, fill?: str
 
 /**
  * Stem inner and outer point per slot, flat: `[ix, iy, ox, oy]` a slot, in
- * `ERA_SLOTS` / `NODE_SLOTS` order. Pure geometry of the kind, so it is built
- * once from the same functions that used to be called per port.
+ * `ERA_SLOTS` / `NODE_SLOTS` order. Pure geometry of the kind, built once.
  */
 function stemTable(kind: AgentKind): Float64Array {
   const slots = kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
@@ -945,12 +837,8 @@ function drawPortStems(
 ): void {
   ctx.beginPath();
   let any = false;
-  /*
-   * The stem geometry is a function of kind and slot alone — the body's own
-   * transform is already on the context — so it is a small fixed table rather
-   * than four objects a port. `slotsFor` also built a fresh array a call;
-   * `ERA_SLOTS`/`NODE_SLOTS` are the frozen ones it exists to avoid.
-   */
+  // The body's own transform is already on the context, so the stem table
+  // is a function of kind and slot alone.
   const kind = agent.kind;
   const slots = kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
   const stems = kind === 'era' ? ERA_STEMS : kind === 'dup' ? DUP_STEMS : CON_STEMS;

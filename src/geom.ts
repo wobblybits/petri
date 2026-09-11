@@ -135,19 +135,13 @@ export function segmentsInterfere(
   return dist < minDist;
 }
 
-/**
- * How far a live rope may sit off its stem–stem chord. A body-sized bow is
- * fine; a loop that leaves the two anchors' neighbourhood is not.
- */
+/** How far a live rope may sit off its stem–stem chord, in world px. */
 export function wireBowBudget(span: number, rest: number): number {
   return Math.max(rest, span * 0.4) + 48;
 }
 
-/**
- * Inelastic bounce off a disk of radius `maxDist` around `(cx, cy)`.
- * Projects the point onto the rim and kills outward radial velocity; tangential
- * sliding is kept. No-op when already inside or `maxDist` is not finite.
- */
+/** Inelastic bounce off the disk of radius `maxDist` about `(cx, cy)`: project to the rim, kill
+ *  outward radial velocity, keep tangential. No-op inside or for non-finite `maxDist`. */
 export function bounceOffDisk(
   x: number,
   y: number,
@@ -174,10 +168,7 @@ export function bounceOffDisk(
   };
 }
 
-/**
- * Pull interior points onto a tube around the chord through the ends. The
- * endpoints stay put — those are the stems.
- */
+/** Pull interior points within `maxDev` of the chord through the ends; the endpoints (stems) stay put. */
 export function clampPolylineToChord(
   pts: { x: number; y: number }[],
   maxDev: number,

@@ -2,19 +2,9 @@ import { describe, it } from 'vitest';
 import { runSweep, summarize, writeSweep } from './harness.ts';
 
 /*
- * How much does the pond breed, and what does each dial do to it?
- *
- * The memory of this project says `declutter` and `flockAlign` together cost
- * eighteen times the generation depth, and that the soup barely breeds at the
- * shipped defaults. That was measured once, by hand, over 45 seconds. This is
- * the same question asked properly: a grid over the two sliders and the
- * immigration rate, three seeds each, a minute of simulated time, sampled
- * every ten seconds so the warm-up can be told from the steady state.
- *
- * Read `bornMean` and `lines` together. Under selection `lines` falls while
- * `bornMean` climbs; under drift with immigration `lines` stays near the
- * number that arrived. `commutes` is the raw reproduction rate, `conDupWires`
- * the number of commutes waiting to happen.
+ * A grid over `declutter`, `flockAlign` and `spawnInterval`, three seeds each.
+ * Under selection `lines` falls while `bornMean` climbs; under drift with
+ * immigration `lines` stays near the number that arrived.
  *
  *     npx vitest run --project experiments breeding --disableConsoleIntercept
  */

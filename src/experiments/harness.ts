@@ -7,25 +7,10 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /*
- * A harness for studying the pond rather than asserting about it.
- *
- * The test suite answers "does this still work"; nothing in the repo answered
- * "what does this dial do to evolution", and the sliders that decide it —
- * `declutter`, `flockAlign`, `spawnInterval`, `swimCost`, the six that ship
- * at zero — were tuned by eye against how the pond looks. The one number that
- * says whether selection is happening at all, `census().bornMean`, has been
- * read a handful of times by hand.
- *
- * So: a trial is a seeded pond run for a fixed number of simulated seconds,
- * sampled on a schedule into a timeline; a sweep is a grid of parameter
- * values crossed with seeds, each run as a trial; the output is rows you can
- * plot, not a pass/fail. Everything runs on the CPU path (`Sim.step`), which
- * is what Node can run — the GPU path is the same simulation minus the
- * genome-on-GPU frame of latency, and a regime tuned here transfers.
- *
- * Run through vitest's `experiments` project so `?raw` imports and the wasm
- * blob resolve: `npm run experiment -- breeding`. Output lands in
- * `experiments/out/`, one JSON per run, plus a summary table on stdout.
+ * A trial is a seeded pond run for a fixed number of simulated seconds,
+ * sampled on a schedule; a sweep is a grid of parameter values crossed with
+ * seeds. CPU path (`Sim.step`). Run through vitest's `experiments` project:
+ * `npm run experiment -- breeding`. Output lands in `experiments/out/`.
  */
 
 /** The same LCG the test suite seeds with, so a trial is a reproducible thing. */
@@ -49,15 +34,9 @@ export interface TrialSpec {
   soupCount: number;
   /** Simulated seconds between samples. */
   sampleEvery?: number;
-  /** World size handed to `Sim`; the disk is the field's, this is only the spawn box. */
+  /** World size handed to `Sim`; only the spawn box, the disk is the field's. */
   world?: { w: number; h: number };
-  /**
-   * Field cells a side. The production dish is 1024 (10,240 units); a trial
-   * pays the CPU field's fixed cost every frame, so a smaller dish is the
-   * difference between a sweep that finishes and one that does not. 512 is
-   * a quarter of the work and holds a few thousand bodies at the spacing a
-   * pond settles to.
-   */
+  /** Field cells a side; the production dish is 1024, default 512 for speed. */
   fieldCells?: number;
 }
 
@@ -82,11 +61,7 @@ export interface Sample {
   free: number;
   ground: number;
   escrow: number;
-  /**
-   * Swallowed and not yet digested, across the pond, every species. In
-   * neither a tank nor the ground, and a total that leaves it out reads every
-   * mouthful in transit as matter that went missing — see `Sim.totalGut`.
-   */
+  /** Swallowed and not yet digested, pond-wide; see `Sim.totalGut`. */
   gut: number;
   meanExtra: number;
   /** Fraction of bodies that could pay a rewrite share right now. */
@@ -94,16 +69,7 @@ export interface Sample {
   /** Principal-to-principal wires, and how many of those are Con-Dup (a commute waiting to happen). */
   ppWires: number;
   conDupWires: number;
-  /**
-   * The commute share of all rewrites so far, and the share proximity alone
-   * would give for the current kind census. `commuteEdge` is the gap.
-   *
-   * This is the one number that says whether latching is being decided by
-   * sensing or by crowding: it goes negative while the dish is too full to
-   * steer in, and positive once the opening cull has made room. See
-   * `Sim.rewriteMix`. Cumulative like the counts above — difference two
-   * samples for a window.
-   */
+  /** Cumulative commute share, the share proximity alone would give, and the gap; see `Sim.rewriteMix`. */
   commuteShare: number | null;
   commuteChance: number;
   commuteEdge: number | null;
@@ -148,8 +114,6 @@ export function sampleSim(sim: Sim, t: number): Sample {
       tasteSum[k] += tv;
       tasteSq[k] += tv * tv;
     }
-    // Everything past the taste bases is matrices and heads, dimensionless
-    // and (bar the two seeded entries) zero at birth.
     let d = 0;
     for (let k = TASTE + 4; k < CHEM_LEN; k++) d += Math.abs(CHEM[g + k]);
     driftSum += d / (CHEM_LEN - TASTE - 4);
@@ -319,7 +283,7 @@ export function writeSweep(name: string, rows: SweepRow[], root = 'experiments/o
   return path;
 }
 
-/** Sum of a channel over the field, for a quick "is anything being said". */
+/** Sum of a channel over the field. */
 export function channelTotal(sim: Sim, ch: number): number {
   const d = sim.fields.data;
   let s = 0;

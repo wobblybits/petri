@@ -5,31 +5,19 @@ import { defaultParams, type Params } from '../params.ts';
 import { Sim } from '../sim.ts';
 
 /*
- * One worm on a bench, with its energy under external control.
+ * One worm on a bench, with its energy under external control: one net,
+ * built by hand, with no sensing, steering, grazing, rewriting, immigration
+ * or signalling. Only the wire constraint, the drag law, and energy moving
+ * along wires with the recoil that carries. Every body's tank is written
+ * each frame from a policy, so throughput is an independent variable.
  *
- * Everything measured in the soup so far has been unable to answer the
- * question it was asked. `grip` changed how mobile the whole dish was, so
- * `net_drift` moved for reasons that had nothing to do with swimming; `net_coherence` moved with net size; quantising transport
- * changed almost nothing. The confounds were not incidental — a pond decides
- * its own population, its own net sizes and its own energy throughput, and
- * every one of those moves when a physics dial moves.
- *
- * So: no soup. One net, built by hand, held together, with no sensing, no
- * steering, no grazing, no rewriting, no immigration and no signalling. The
- * only things that happen are the wire constraint, the drag law, and energy
- * moving along wires with the recoil that carries. Every body's tank is
- * written each frame from a policy, which makes throughput an independent
- * variable instead of whatever the economy happened to supply.
- *
- * The worm is three strands of 40, cross-braided, with an Era hanging off the
- * periphery at every segment. An Era has one port, so it can only be a leaf;
- * it is also 0.45 to a node's 1, which puts the light mass on the outside.
+ * Three strands of 40 with a leaf Era at every segment (an Era has one port
+ * and is 0.45 to a node's 1, so the light mass is on the outside).
  *
  *     npm run experiment -- worm
  *
- * The measured quantity is the worm's centre of mass. Under one drag law and
- * no thrust it cannot move at all, whatever energy does inside — so any
- * displacement here is the thing the whole exercise is about.
+ * The measured quantity is the worm's centre of mass; under one drag law and
+ * no thrust it cannot move at all, whatever energy does inside.
  */
 
 /** Segments along the worm. */
@@ -38,15 +26,9 @@ const SEGMENTS = 40;
 const STRANDS = 3;
 /**
  * Spacing along the worm and between strands, and the wires' rest length.
- *
- * Wider than the pond's default 48 on purpose. At 48 the bodies are in
- * permanent contact, and contact radiates: `noteRadiation` books an equal and
- * opposite impulse, but `applyRadiationLoss` then clamps each body's share
- * against *its own* speed, so the pair scales unequally and the centre of mass
- * moves. On the first run of this bench that showed up as the `flat` control
- * drifting 13 px in twenty seconds with not one unit of energy moved. At 72
- * the bodies clear each other and the control sits still, which is the whole
- * requirement for a bench.
+ * Wide enough that bodies never touch: contact radiates, and
+ * `applyRadiationLoss` clamps each body's share against its own speed, which
+ * moves the centre of mass and would foul the `flat` control.
  */
 const PITCH = 72;
 const GAUGE = 72;
@@ -63,11 +45,8 @@ export interface Worm {
 
 /**
  * A bench pond: the wire constraint and the drag law, and nothing else.
- *
- * `rewriteDuration` 0 is the hard kill on rewriting — `collectReadyRedexes`
- * returns immediately — and the worm is wired so that no two principal ports
- * ever face each other anyway, which is the condition for a redex. Belt and
- * braces, because a worm that rewrites is not the worm that was built.
+ * `rewriteDuration` 0 is the hard kill on rewriting; the worm is also wired
+ * so no two principal ports face each other.
  */
 export function rigParams(over: Partial<Params> = {}): Params {
   const p = defaultParams();
@@ -92,33 +71,25 @@ export function rigParams(over: Partial<Params> = {}): Params {
   p.decay = 0;
   p.excreteRate = 0;
   p.sense = 0;
-  // No steering, no self-propulsion, no shoaling. The genome's cruise and
-  // turn heads seed from these, so at zero the locomotion head is inert.
+  // No steering, no self-propulsion, no shoaling; at zero the locomotion head is inert.
   p.stepSpeed = 0;
   p.turnRate = 0;
   p.swimNoise = 0;
   p.flockAlign = 0;
   p.flockSep = 0;
   p.declutter = 0;
-  // Fixed weights, and a wire that holds its length at the bench's spacing
-  // rather than shrinking the worm back into self-contact.
+  // Fixed weights, and a wire that holds its length at the bench's spacing.
   p.learnRate = 0;
   p.wireBreathe = 0;
   p.wireSnap = 0;
   p.wireMinRest = PITCH;
-  // The reactionless drive off, so nothing here can move by minting momentum.
   return { ...p, ...over };
 }
 
 /**
- * Three strands, cross-braided, with a leaf Era at every segment.
- *
- * Along a strand, segment `i`'s principal joins segment `i+1`'s left aux —
- * principal to aux, so it is not a redex. The right aux carries the rungs:
- * A-B on even segments and B-C on odd ones, which is the most a three-strand
- * ladder can do when a body has three ports and two are already spent. That
- * leaves exactly one free aux per segment, alternating flanks, and an Era
- * goes there.
+ * Three strands with a leaf Era at every segment. Along a strand, segment
+ * `i`'s principal joins segment `i+1`'s left aux (principal to aux, so not a
+ * redex); the right aux carries a rung or an Era.
  */
 export function buildWorm(sim: Sim, params: Params, cx: number, cy: number): Worm {
   const nodes: Agent[][] = [];
@@ -141,19 +112,9 @@ export function buildWorm(sim: Sim, params: Params, cx: number, cy: number): Wor
     }
   }
   /*
-   * Rungs at two segments only, which makes the wire graph a tree.
-   *
-   * A rung at every segment is the obvious braid and it cannot be measured.
-   * Every rung closes a cycle, and a cycle of distance constraints has to be
-   * satisfiable in the plane or the net is *frustrated*: the wires are born at
-   * their stem spans, ramp to `wireMinRest`, and no configuration meets all of
-   * them at once, so the worm creeps for as long as it is run. Measured on the
-   * braided version, it was still moving several px/s after a minute, the
-   * creep was chaotic, and the stroke came out the same size at recoil 1 and
-   * recoil 400 — two diverging trajectories rather than a force.
-   *
-   * A tree has no cycles and therefore nothing to frustrate. Two rungs join
-   * the three strands into one net and every other free aux takes an Era.
+   * Rungs at two segments only, so the wire graph is a tree. Every rung
+   * closes a cycle of distance constraints, and a frustrated cycle makes the
+   * worm creep for as long as it is run.
    */
   const eras: Agent[] = [];
   const rungAB = Math.floor(SEGMENTS / 3);
@@ -189,35 +150,22 @@ export function centre(worm: Worm): { x: number; y: number; m: number } {
 
 /**
  * A charge in [0, 1] for a body, from where it sits and what time it is.
- *
- * 0 is not an empty tank, it is `EXTRA_FLOOR` — as deep in debt as the pond
- * allows. That matters, and it is what the first version of this bench got
- * wrong: with rewriting off and nothing starving, the only claim left in
- * `pulseRequests` is `rescueNeed`, and `hungerNeed` is `-extra` clamped at
- * zero. A body holding *any* non-negative amount asks for nothing, the demand
- * field stays flat, `flowCharges` finds no neighbour needier than its donor,
- * and not one unit moves all run. Every condition then measures the same
- * settling twitch, which is exactly what it did: `flat` and `wave` came back
- * identical to the last decimal.
- *
- * So a charge spans debt to full, and a drive that wants transport has to put
- * one end of the worm under water.
- *
- * This is the external supply: it is written over every body every frame, so
- * what transport does with it never feeds back into what is available. That
- * is the point — the soup could not separate "does a stroke move a net" from
- * "how much energy was there to move".
+ * 0 is `EXTRA_FLOOR`, as deep in debt as the pond allows, not an empty tank:
+ * with rewriting off the only claim left is `rescueNeed`, so a body holding
+ * any non-negative amount asks for nothing and a drive that wants transport
+ * has to put one end of the worm under water. Written over every body every
+ * frame, so transport never feeds back into what is available.
  */
 export type Drive = (seg: number, t: number, isEra: boolean) => number;
 
 export const DRIVES: Record<string, Drive> = {
   /** Control: everyone full, no gradient, nothing to transport. */
   flat: () => 1,
-  /** A fixed gradient, head to tail. What a net holding a standing shortage has. */
+  /** A fixed gradient, head to tail. */
   standing: (seg) => 1 - seg / (SEGMENTS - 1),
   /** The same gradient, travelling: peristalsis, at one wavelength per worm. */
   wave: (seg, t) => 0.5 + 0.5 * Math.sin(2 * Math.PI * (seg / SEGMENTS - t / WAVE_PERIOD)),
-  /** Four waves along the body at once, which is what a crawler actually does. */
+  /** Four waves along the body at once. */
   ripple: (seg, t) => 0.5 + 0.5 * Math.sin(2 * Math.PI * ((4 * seg) / SEGMENTS - t / WAVE_PERIOD)),
 };
 
@@ -238,7 +186,7 @@ export interface RunResult {
   dy: number;
   /** Along-body speed, px/s, over the measured window. */
   speed: number;
-  /** Largest distance any body ended up from where the worm's centre says it should be. */
+  /** Largest distance of any body from the worm's centre. */
   spread: number;
   /** Units of energy transport actually delivered, over the whole window. */
   moved: number;
@@ -247,7 +195,7 @@ export interface RunResult {
   bodies: number;
 }
 
-/** The suite's LCG. The experiments project seeds nothing, so a bench must. */
+/** The suite's LCG; the experiments project seeds nothing, so a bench must. */
 function seeded(n: number): () => number {
   let s = n >>> 0;
   return () => {
@@ -274,27 +222,16 @@ function runWormInner(spec: RunSpec): RunResult {
   const sim = new Sim(4000, 4000, 512);
   const worm = buildWorm(sim, params, 2000, 2000);
   /*
-   * Relax the shape first, hard.
-   *
-   * A hand-built worm is not at mechanical equilibrium: a wire is born at the
-   * span between its two stems and then ramps to `wireMinRest`, which is not
-   * the spacing the bodies were placed at, so the whole body inflates. At the
-   * pond's own drag that relaxation is still running minutes later at several
-   * px/s, and it is chaotic — measured, the difference between recoil 1 and
-   * recoil 400 was the same 20 px, which is not a force scaling with impulse
-   * but two trajectories diverging.
-   *
-   * So the settle runs heavily overdamped, which reaches the same
-   * configuration without the ringing, and the measurement only starts once
-   * the worm has stopped moving on its own.
+   * Relax the shape first, heavily overdamped: a hand-built worm is not at
+   * mechanical equilibrium (wires are born at their stem span and ramp to
+   * `wireMinRest`), and at the pond's own drag the relaxation rings for minutes.
    */
   for (const a of worm.all) a.extra = 0;
   const thick = { ...params, drag: 20, angDrag: 20 };
   for (let f = 0; f < Math.round(settle / dt); f++) sim.step(dt, thick);
 
-  // What the shape is still doing when the clock starts. Under one drag law
-  // and no thrust the centre cannot move at all, so any residue here is
-  // construction momentum that would be counted as travel.
+  // What the shape is still doing when the clock starts: construction
+  // momentum that would otherwise be counted as travel.
   let residual = 0;
   {
     const a = centre(worm);
@@ -318,9 +255,7 @@ function runWormInner(spec: RunSpec): RunResult {
       written[i] = a.extra;
     }
     sim.step(dt, params);
-    // Arrivals, which is what transport delivered this frame. Measured rather
-    // than assumed: throughput is the independent variable the soup could
-    // never hold still, and a condition that moved nothing explains itself.
+    // Arrivals: what transport delivered this frame.
     for (let i = 0; i < worm.all.length; i++) {
       const d = worm.all[i].extra - written[i];
       if (d > 0) moved += d;
@@ -338,40 +273,26 @@ function runWormInner(spec: RunSpec): RunResult {
 
 
 /*
- * Free running: the worm's own transport, not an imposed pattern.
- *
- * The driven bench answered "if a wave of fullness ran down the body, would
- * it swim" — yes, and three times better than a standing gradient. It could
- * not answer where a wave would come from, because the wave was written in by
- * hand every frame.
- *
- * This is the other half. Only the two ends are held: the head at a full tank
- * and the tail in debt, which is a source and a sink and nothing else. Every
- * body between them floats on what transport brings it. A body with a quantum
- * accumulates until it holds a packet and then fires, which makes it a
- * relaxation oscillator whose natural period is its quantum over its income —
- * so a row of them with *different* quanta is a chain of coupled oscillators
- * at different natural frequencies. That is the standard account of how gut
- * peristalsis comes to travel in one direction rather than pulsing in place.
- *
- * Whether it does so here is the question, and the arrangement is the thing
- * to vary: identical quanta everywhere, a difference across the worm (core
- * against flanks, which is what "Con and Dup differ" comes to on this
- * skeleton), a difference scattered body by body, and a monotonic gradient
- * along the axis, which is the arrangement the gut actually has.
+ * Free running: the worm's own transport, not an imposed pattern. Only the
+ * two ends are held, the head at a full tank and the tail in debt; every
+ * body between floats on what transport brings it. A body with a quantum
+ * accumulates until it holds a packet and then fires, a relaxation oscillator
+ * with period quantum over income, so a row with different quanta is a chain
+ * of coupled oscillators at different frequencies. The arrangement of quanta
+ * is the thing to vary.
  */
 export type Quanta = (seg: number, strand: number, isEra: boolean) => number;
 
 export const QUANTA: Record<string, Quanta> = {
   /** Continuous transport: the pond as it ships. */
   none: () => 0,
-  /** Every body the same. A row of identical oscillators, which synchronise. */
+  /** Every body the same. */
   uniform: () => 0.5,
-  /** Core against flanks — Con against Dup, on this worm. Across, not along. */
+  /** Core against flanks: Con against Dup, on this worm. */
   kind: (_seg, strand) => (strand === 1 ? 0.5 : 1),
-  /** The same two values, scattered, which is what a bred net would look like. */
+  /** The same two values, scattered. */
   mixed: (seg, strand) => ((seg * 7 + strand * 3) % 5 < 2 ? 0.5 : 1),
-  /** A monotonic gradient head to tail: the arrangement the gut has. */
+  /** A monotonic gradient head to tail. */
   gradient: (seg) => 0.35 + (0.9 * seg) / (SEGMENTS - 1),
 };
 
@@ -382,16 +303,9 @@ export interface FreeSpec {
   seconds?: number;
   /**
    * Units per second fed to the head and taken from the tail. Omit for the
-   * unmetered bench, which pins the head at a full tank and the tail in debt
-   * and so supplies whatever the physics will take.
-   *
-   * The unmetered version answers "can this swim at all" and nothing about
-   * whether a pond could pay for it. Metering makes the through-flux an
-   * independent variable: at steady state exactly this many units cross the
-   * worm each second, whatever the wires do. A worm of `n` bodies at the
-   * pond's own `upkeep` needs `n * upkeep` units a second to stand still —
-   * 3.0 at the default and 15.8 in the starved regime the sweeps used — so
-   * those are the numbers a real economy could put through it.
+   * unmetered bench, which pins the head full and the tail in debt and so
+   * supplies whatever the physics will take. A worm of `n` bodies needs
+   * `n * upkeep` units a second to stand still.
    */
   income?: number;
 }
@@ -409,13 +323,10 @@ export interface FreeResult {
 }
 
 /**
- * Lag between neighbouring segments' fullness, by cross-correlation.
- *
- * A standing pulse has every segment rising and falling together, so the lag
- * that best matches one segment to the next is zero. A travelling wave has a
- * consistent non-zero lag, and its sign is the direction of travel. The
- * fraction of pairs agreeing on that sign is reported beside it, because a
- * mean lag near zero means "standing" and "half of it going each way" alike.
+ * Lag between neighbouring segments' fullness, by cross-correlation. A
+ * standing pulse has lag zero; a travelling wave a consistent non-zero lag
+ * whose sign is the direction. `agree` is the fraction of pairs agreeing on
+ * the sign, since a mean lag near zero is also "half going each way".
  */
 function waveLag(series: Float64Array, segments: number, frames: number): { lag: number; agree: number } {
   const MAXLAG = 45;
@@ -489,13 +400,11 @@ export function runFree(spec: FreeSpec): FreeResult {
     const income = spec.income;
     for (let f = 0; f < frames; f++) {
       if (income === undefined) {
-        // Unmetered: an infinite source and an infinite sink. Whatever the
-        // physics will carry, it gets.
+        // Unmetered: an infinite source and an infinite sink.
         for (const a of head) a.extra = a.energyCap;
         for (const a of tail) a.extra = EXTRA_FLOOR;
       } else {
-        // Metered: a fixed number of units a second in at the head and the
-        // same out at the tail, which is what an economy would supply.
+        // Metered: a fixed number of units a second in at the head, the same out at the tail.
         const per = (income * dt) / head.length;
         for (const a of head) a.extra = Math.min(a.energyCap, a.extra + per);
         for (const a of tail) a.extra = Math.max(EXTRA_FLOOR, a.extra - per);
@@ -546,8 +455,7 @@ describe('experiment: one worm on a bench', () => {
     const sim = new Sim(4000, 4000, 512);
     const worm = buildWorm(sim, params, 2000, 2000);
     expect(worm.all.length).toBe(STRANDS * SEGMENTS + 2 * SEGMENTS - 2);
-    // No principal faces a principal, so nothing here is a redex even before
-    // `rewriteDuration` 0 takes rewriting away.
+    // No principal faces a principal, so nothing here is a redex.
     for (const w of sim.graph.wires.values()) {
       expect(w.a.slot === 'p' && w.b.slot === 'p', `wire ${w.id} is a redex`).toBe(false);
     }
@@ -560,20 +468,9 @@ describe('experiment: one worm on a bench', () => {
 
   /*
    * The stroke, as a difference against the same worm with the kicks off.
-   *
-   * A hand-built worm does not start at rest. It relaxes for a long time —
-   * the wires are born at their stem span and ramp to `wireMinRest`, which is
-   * not the spacing the bodies were placed at, so the whole body inflates and
-   * keeps inflating well past a minute — and that relaxation moves the centre
-   * by pixels, which is the size of the effect being looked for. Settling
-   * longer does not fix it and a quiescent bench is not cheaply available.
-   *
-   * `transportRecoil` 0 is the control that makes it irrelevant. The run is
-   * seeded and deterministic, so the twin has the identical geometry, the
-   * identical relaxation and the identical drag pattern — the energy still
-   * moves, `grip` still reads the same tank levels — and the only thing
-   * removed is the impulse a transfer carries. The difference between the two
-   * is the momentum transport produced, and nothing else.
+   * The run is seeded and deterministic, so the `transportRecoil` 0 twin has
+   * identical geometry, relaxation and drag; the difference is the momentum
+   * transport produced, with the settling creep subtracted out.
    */
   function stroke(spec: RunSpec): { ddx: number; ddy: number; px: number; moved: number } {
     const on = runWorm({ ...spec, params: { ...spec.params, transportRecoil: 100 } });
@@ -587,15 +484,9 @@ describe('experiment: one worm on a bench', () => {
 
   it('asks whether unequal quanta make a wave on their own', () => {
     /*
-     * The driven bench showed a travelling wave swims and a standing gradient
-     * barely does. This asks where a wave could come from without one being
-     * written in: hold a source at the head and a sink at the tail, give the
-     * bodies different quanta, and see whether the fullness pattern travels.
-     *
-     * `lag` is frames of delay between one segment and the next, `agree` how
-     * much of the body agrees on a direction, `swing` whether anything is
-     * oscillating at all — a flat profile has no phase to measure and its lag
-     * is noise.
+     * Source at the head, sink at the tail, different quanta: does the
+     * fullness pattern travel? A flat profile (`swing` near 0) has no phase
+     * to measure and its lag is noise.
      */
     console.log('\n  free running: source at the head, sink at the tail, grip 2');
     console.log('\n  quanta      lag  agree  swing     moved   stroke px/s');
@@ -603,9 +494,7 @@ describe('experiment: one worm on a bench', () => {
     for (const q of ['none', 'uniform', 'kind', 'mixed', 'gradient'] as const) {
       const on = runFree({ quanta: q, params: { grip: 2, transportRecoil: 100 } });
       const off = runFree({ quanta: q, params: { grip: 2, transportRecoil: 0 } });
-      // The same control the driven bench uses: identical worm, identical
-      // energy, the impulse removed. What is left is the momentum transport
-      // made, with the settling creep and everything else subtracted out.
+      // The same control the driven bench uses: the impulse removed, the creep subtracted.
       const d = Math.hypot(on.dx - off.dx, on.dy - off.dy);
       console.log(
         `  ${q.padEnd(8)} ${on.lag.toFixed(2).padStart(7)} ${on.agree.toFixed(2).padStart(6)} ` +
@@ -619,15 +508,8 @@ describe('experiment: one worm on a bench', () => {
 
   it('asks what a pond could actually pay for', () => {
     /*
-     * The unmetered bench supplies whatever the physics will take, which is
-     * about 1,200 units of wire-crossing a second. A worm of 198 bodies at
-     * the pond's own upkeep needs 3.0 units a second to stand still, 15.8 in
-     * the starved regime, and each of those units crosses roughly twenty
-     * wires on its way down the body — so a real economy puts something like
-     * 60 to 320 units of crossing a second through it, not 1,200.
-     *
-     * This meters the source and sink to a fixed flux and asks what is left
-     * of the stroke. The floor is the settling creep, ~0.015 px/s.
+     * Meters the source and sink to the flux a pond could pay (`n * upkeep`
+     * units a second to stand still) and asks what is left of the stroke.
      */
     console.log('\n  metered: gradient quanta, grip 2, 30 s');
     console.log('\n  income  what it is              moved   px/s (3 seeds)');
@@ -641,11 +523,7 @@ describe('experiment: one worm on a bench', () => {
       [undefined, 'unmetered, for scale'],
     ];
     for (const [income, what] of rows) {
-      // Three seeds, which buy nothing and are kept to show that. The rig
-      // has no stochastic part left — no swim noise, no spawning, no
-      // rewriting, and a hand-placed worm — so the seed changes nothing and
-      // the spread is exactly zero at every point. Any structure in this
-      // curve is therefore real and reproducible rather than noise.
+      // Three seeds, kept to show the rig has no stochastic part: the spread is zero.
       const px: number[] = [];
       let moved = 0;
       for (const seed of [1, 2, 3]) {
@@ -671,22 +549,11 @@ describe('experiment: one worm on a bench', () => {
 
   it('separates thrust from recoil', () => {
     /*
-     * Two things push a pair along its own wire, and they are not
-     * independent. Within a frame the order is drag, then wires, then
-     * transport — so the drag law always reads the fullness a transfer has
-     * *already* produced: the sender is the empty one and slides, the
-     * receiver is the full one and holds.
-     *
-     * `transportRecoil` is the impulse, and it shoves the pair apart along
-     * the wire; `grip` is what stops the two ends sharing that impulse
-     * equally, so the pair's centre keeps a share of it.
-     * `transportThrust` withholds the receiver's half of the same impulse,
-     * which is the reactionless part and the only one that mints momentum.
-     * It is retired at 0 and swept here to keep the comparison readable.
-     *
-     * Signed dx, because the direction is the point: the worm lies along x
-     * with its source at low x, so energy flows +x and a negative dx is the
-     * worm walking back toward its supply.
+     * Within a frame the order is drag, then wires, then transport, so the
+     * drag law reads the fullness a transfer has already produced: the
+     * sender slides, the receiver holds. `transportRecoil` is the impulse;
+     * `grip` stops the two ends sharing it equally. Signed dx: energy flows
+     * +x, so a negative dx is the worm walking back toward its supply.
      */
     console.log('\n  grip 2, gradient quanta, source at low x so energy flows +x');
     console.log('  metered to 3 units/s, which is this worm at its whole upkeep on the');
@@ -712,22 +579,9 @@ describe('experiment: one worm on a bench', () => {
 
   it('asks what would make the stroke an order of magnitude larger', () => {
     /*
-     * The whole stroke is now: a transfer kicks the pair apart along the wire
-     * with an equal and opposite impulse, and the two ends coast different
-     * distances from it because `grip` damps them at different rates. The
-     * pair's centre keeps `|p| * (1/k_sender - 1/k_receiver) / (m_s + m_r)`.
-     * So the step is set by the *ratio* of the anchored end's rate to the
-     * sliding end's, not by the level of either — which is why turning `grip`
-     * up alone reads as paralysis.
-     *
-     * `drag` is the floor under that ratio. At the shipped 0.55 against grip
-     * 2 a full body damps at 2.55 and an empty one at 0.55, which is only
-     * 4.6 to 1, and the sliding end is being held back nearly as hard as the
-     * anchored one. Lowering `drag` while keeping `grip` widens the ratio and
-     * lets the free end actually travel.
-     *
-     * The ratio is what the bench optimises and the pond cannot have: `drag`
-     * 0.05 and `grip` 4 each stall the calculus inside a simulated minute.
+     * The pair's centre keeps `|p| * (1/k_sender - 1/k_receiver) / (m_s + m_r)`,
+     * so the step is set by the ratio of the anchored end's damping to the
+     * sliding end's, `(drag + grip) / drag`, not by the level of either.
      * See `docs/experiments.md` on why travel is not what the pond is for.
      */
     console.log('\n  thrust 0, recoil 100, income 3: what widens the stroke');
@@ -781,9 +635,7 @@ describe('experiment: one worm on a bench', () => {
   });
 
   it('asks how long the worm takes to stop moving', () => {
-    // A tree of distance constraints has a satisfying configuration, so the
-    // worm should reach it and stay. How long that takes decides whether a
-    // stroke can be measured at all: the creep is the noise floor.
+    // The settling creep is the noise floor under any stroke.
     const params = rigParams();
     const thick = { ...params, drag: 20, angDrag: 20 };
     const sim = new Sim(4000, 4000, 512);
@@ -806,18 +658,10 @@ describe('experiment: one worm on a bench', () => {
 
   it('asks whether the kick conserves momentum at all', () => {
     /*
-     * With `grip` at zero, one drag rate applies to every body,
-     * and `applyTransportRecoil` at `transportThrust` 0 is exactly equal and
-     * opposite. Under those two facts the worm's centre cannot move however
-     * much energy runs through it — that is the whole reason the two drag
-     * terms were built. So the `wave, no grip` row above must be zero,
-     * and it is not.
-     *
-     * If the leak is a real force proportional to the impulse, the stroke per
-     * unit of recoil is flat. If it is the solver clamping a correction it
-     * cannot apply in one substep — and there are such clamps, sized for
-     * pixels per substep — it appears only once the kicks are large, and the
-     * ratio climbs with recoil.
+     * With `grip` at zero one drag rate applies to every body and the recoil
+     * is exactly equal and opposite, so the centre cannot move. A real leak
+     * gives a flat stroke per unit of recoil; a solver clamp appears only
+     * once the kicks are large, and the ratio climbs with recoil.
      */
     console.log('\n  is the recoil conservative? (no grip, wave drive)');
     console.log('\n  recoil     ddx     ddy   px/s   px/s per unit recoil');
@@ -836,11 +680,8 @@ describe('experiment: one worm on a bench', () => {
   });
 
   it('is a control that reads zero when nothing is transported', () => {
-    // `flat` puts every tank at the same level, so no neighbour is needier
-    // than its donor and not one unit crosses. With no transfers there are no
-    // kicks, so the two arms of the difference are the same run twice and the
-    // stroke has to be identically zero. If this ever reads non-zero the
-    // difference is measuring something other than transport.
+    // `flat` moves no units, so the two arms are the same run twice and the
+    // stroke must be identically zero.
     const r = stroke({ drive: 'flat' });
     expect(r.moved).toBe(0);
     expect(r.ddx).toBe(0);

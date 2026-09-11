@@ -176,20 +176,11 @@ export function stemFromGhost(g: Ghost, slot: PortSlot, w: number, h: number): {
 export const PULL_END = 0.55;
 /** Nothing shrinks or fades before this — the collapse is its own beat. */
 export const COLLAPSE_START = 0.65;
-/**
- * Commute children sit on a Dup–Con frame, not on the old aux tips.
- * Those tips are only ~18px apart across the pair, so pushOut from mid
- * made a pancake and the K₂,₂ chords stacked. Half-width is two-plus
- * body sizes so the rectangle has two sides, two diagonals, one crossing.
- */
+/** Minimum half-extents of the Dup–Con frame commute children sit on, so the K₂,₂ chords do not stack. */
 export const COMMUTE_ALONG_MIN = 48;
 export const COMMUTE_ACROSS_MIN = 40;
 
-/**
- * Accelerating ease. A wire pulling two bodies together is releasing tension,
- * so they should arrive faster than they set off; easeInOut decelerates into
- * the meeting, which reads as a gentle docking rather than a snap shut.
- */
+/** Accelerating ease: a wire releasing tension arrives faster than it set off. */
 function easeIn(t: number): number {
   return t * t;
 }
@@ -206,17 +197,12 @@ export function detectRule(kindA: AgentKind, kindB: AgentKind): Rule {
 /**
  * Reconnect what is left when two agents die.
  *
- * A rule says which of the dying agents' ports get identified with each other.
- * Following one wire out from each is not enough: a port can lead straight back
- * into the dying pair, and then on again. The identity function is exactly that
- * shape — `λx.x` is a Con with its own two aux ports wired together — so an
- * application of it used to lose both of its connections and silently drop the
- * result on the floor.
- *
- * Union-find over ports instead: fuse every wire touching a dying agent and
- * every identification the rule makes, then emit one wire per class that still
- * has two surviving ends. A class with none was a closed loop and correctly
- * disappears; a class with one had a free end and stays free.
+ * Union-find over ports, because a port can lead straight back into the dying
+ * pair and on again (`λx.x` is a Con with its own aux ports wired together).
+ * Fuse every wire touching a dying agent and every identification the rule
+ * makes, then emit one wire per class that still has two surviving ends. A
+ * class with none was a closed loop and disappears; a class with one had a
+ * free end and stays free.
  */
 function fuse(
   net: NetSnapshot,
@@ -313,7 +299,7 @@ export function applyRewrite(
   }
 
   if (rule === 'annihilate-con') {
-    // Crossed: l to the other's r. This is beta reduction when the pair is an
+    // Crossed: l to the other's r. Beta reduction when the pair is an
     // application meeting an abstraction.
     const joined = fuse(net, dying, [
       [{ id: a, slot: 'l' }, { id: b, slot: 'r' }],
@@ -377,21 +363,11 @@ export function snapshotOf(
 }
 
 /**
- * The part of the net a rewrite of `a` against `b` can actually see: the pair
- * themselves, and every wire touching either of them.
- *
- * `applyRewrite` reads `net.agents` only to look up the kinds of `a` and `b`,
- * and everything it does after that runs through `fuse` and `stripAgents`,
- * both of which drop any wire not incident to a dying agent on the first pass.
- * So a whole-pond snapshot hands it thousands of rows it will discard --
- * `snapshotOf` was copying every agent and every wire into fresh objects for
- * each completed rewrite, about 16,000 allocations a time and 80,000 a frame,
- * which made it 1.65ms of the 1.7ms a commit cost and the largest single cost
- * in the sim.
- *
- * An agent has at most three ports, so the wires that matter are six lookups
- * rather than a scan. `snapshotOf` stays for `lambda.ts` and the tests, which
- * build small nets and do read the whole thing back.
+ * The part of the net a rewrite of `a` against `b` can see: the pair
+ * themselves, and every wire touching either of them. `applyRewrite` reads
+ * `net.agents` only for the kinds of `a` and `b`, and `fuse` and
+ * `stripAgents` drop every wire not incident to a dying agent, so nothing
+ * else is needed. `snapshotOf` stays for `lambda.ts` and the tests.
  */
 export function localSnapshotOf(
   agents: Map<number, Agent>,
@@ -401,8 +377,7 @@ export function localSnapshotOf(
 ): NetSnapshot {
   const outAgents: NetAgent[] = [];
   const outWires: NetWire[] = [];
-  // The pair share a wire, so without this it is in the list twice and `fuse`
-  // unions it twice.
+  // The pair share a wire; without this it is in the list twice.
   const seen = new Set<number>();
   for (let i = 0; i < 2; i++) {
     const id = i === 0 ? a : b;
@@ -416,11 +391,8 @@ export function localSnapshotOf(
       outWires.push({ a: wire.a, b: wire.b, id: wire.id });
     }
   }
-  // Ascending id, because `graph.wires` iterates in insertion order and that is
-  // what the whole-pond snapshot handed over. `fuse` unions in list order, so
-  // the order decides the union-find roots, and through them which end of a
-  // fused wire becomes `a`. Walking ports instead would build the same graph
-  // with some wires reversed, which is not the same sim.
+  // Ascending id: `fuse` unions in list order, and the order decides the
+  // union-find roots and through them which end of a fused wire becomes `a`.
   outWires.sort((x, y) => (x.id ?? 0) - (y.id ?? 0));
   return { agents: outAgents, wires: outWires };
 }
@@ -470,10 +442,8 @@ export function beginRewrite(
     a: agentA.id,
     b: agentB.id,
     wireId,
-    // The pair keeps whatever the two bodies had in common. Only the closing
-    // half of their motion is the rewrite's business; the drift belongs to
-    // the soup and killing it pins a collapsing pair to the world while
-    // everything around it keeps moving.
+    // The pair keeps the drift the two bodies had in common; only the closing
+    // half of their motion is the rewrite's business.
     vx: (agentA.vx + agentB.vx) * 0.5,
     vy: (agentA.vy + agentB.vy) * 0.5,
     struck: false,
@@ -500,22 +470,15 @@ export function beginRewrite(
   return rw;
 }
 
-/**
- * Scratch for the deltas below. They are read and finished with inside one
- * call, and this runs for every rewrite in flight every frame.
- */
+/** Scratch for the deltas below; read and finished with inside one call. */
 const advToB = { x: 0, y: 0 };
 const advToA = { x: 0, y: 0 };
 const advSpread = { x: 0, y: 0 };
 
 /**
  * Grow the ghost trail off `rw.targets`, reusing the objects already there.
- *
- * Rebuilt with `map` this minted an array and an object per ghost per frame,
- * plus two deltas inside each -- measured at 565 rewrites in flight and 1,014
- * ghosts, about 3,600 objects a frame to restate what was already in place.
- * Callers test `rw.ghosts.length` to decide between ghosts and targets, so the
- * length still has to track the target count exactly.
+ * Callers test `rw.ghosts.length` to decide between ghosts and targets, so
+ * the length has to track the target count exactly.
  */
 function spreadGhosts(
   rw: Rewrite,
@@ -529,8 +492,6 @@ function spreadGhosts(
   if (ghosts.length !== targets.length) ghosts.length = targets.length;
   for (let i = 0; i < targets.length; i++) {
     const g = targets[i];
-    // Once, not once per axis: this used to run the whole delta twice and
-    // throw away a component each time.
     const d = wrapDeltaVecInto(rw.midX, rw.midY, g.x, g.y, w, h, advSpread);
     let out = ghosts[i];
     if (out === undefined) {
@@ -564,14 +525,10 @@ export function advanceRewrite(
   const toA = wrapDeltaVecInto(rw.bx, rw.by, rw.ax, rw.ay, w, h, advToA);
 
   if (rw.rule === 'era-era' || rw.rule === 'annihilate-con' || rw.rule === 'annihilate-dup') {
-    // Three beats, not one blur. The wire hauls them together, they touch,
-    // and only then does the pair collapse. Running convergence, shrink and
-    // fade on one curve meant they were half transparent before anything had
-    // happened, and nothing read as causing anything else.
+    // Three beats: the wire hauls them together, they touch, and only then
+    // does the pair collapse.
     const pull = easeIn(clamp(t / PULL_END, 0, 1));
     const collapse = easeInOut(clamp((t - COLLAPSE_START) / (1 - COLLAPSE_START), 0, 1));
-    // The drift the pair shared is still theirs; only the closing half of the
-    // motion belongs to the rewrite.
     const dx = rw.vx * rw.t * rw.duration;
     const dy = rw.vy * rw.t * rw.duration;
     A.x = wrap(rw.ax + dx + toB.x * pull * 0.5, w);
@@ -582,8 +539,7 @@ export function advanceRewrite(
     A.alpha = B.alpha = 1 - collapse;
     A.heading = rw.ah + angleDelta(rw.ah, Math.atan2(toB.y, toB.x)) * pull;
     B.heading = rw.bh + angleDelta(rw.bh, Math.atan2(toA.y, toA.x)) * pull;
-    // Callers read the length to mean "no ghosts"; a fresh array says the
-    // same thing and allocates to say it.
+    // Callers read the length to mean "no ghosts".
     rw.ghosts.length = 0;
   } else if (rw.rule === 'erase') {
     const era = A.kind === 'era' ? A : B;
@@ -776,8 +732,8 @@ function snapshotTargets(
   const ur = portWorld(dup, 'r', w, h);
   const cl = portWorld(con, 'l', w, h);
   const cr = portWorld(con, 'r', w, h);
-  // Keep the old along span (ports, not an extra pushOut) so leftover eras
-  // stay outside the quad. Floor the pancake's ~9px across to a real width.
+  // Span the ports along the axis so leftover eras stay outside the quad;
+  // floor the across width so the frame is not a pancake.
   const alongHalf = Math.max(
     COMMUTE_ALONG_MIN,
     Math.abs(alongOf(ul.x, ul.y)),
@@ -826,7 +782,7 @@ function snapshotTargets(
     const lo = leftovers[role];
     if (lo) return headingTo(p.x, p.y, lo, agents, w, h, outAlong);
     // Fused principals face out of the rectangle along v̂ so aux ports sit
-    // on the interior; the fused p–p is then a short exterior edge.
+    // on the interior.
     if (fused[role]) return outAcross;
     return outAlong;
   };
@@ -867,22 +823,10 @@ function snapshotTargets(
 }
 
 /**
- * The heritable *scalars* a Con+Dup commute recombines into its children.
- *
- * Four now, not eight. Flocking and transport left because they became output
- * heads — `F.h + f0` and `P.h + p0` — and so are inherited through the genome
- * like everything else the network computes, rather than as numbers of their
- * own. What is left here is physiology: how deep a tank goes, how far into
- * debt a body can run, how full a rescue fills it, and how well it conducts
- * demand. Those are properties of a body, not decisions it makes, and none of
- * them should depend on its mood.
- *
- * The bases keep the property the old ranges were shaped around. `f0` seeds
- * from a slider that ships at zero for alignment, and nothing clamps it at
- * zero on the way through inheritance — a floor would reflect, so a gene
- * sitting at off would have half its mutations absorbed and drift upward
- * whether or not anything selected for it. `flockGain` still does the clamping
- * where the force reads it, which is the same arrangement as before.
+ * The heritable scalars a Con+Dup commute recombines into its children:
+ * physiology (tank depth, debt, rescue, demand conduction), properties of a
+ * body rather than decisions it makes. Behaviour is inherited through the
+ * genome's output heads instead. Serves "inheritance" in `docs/concepts.md`.
  */
 export const TRAIT_KEYS = [
   'adenylate',
@@ -895,108 +839,47 @@ export const TRAIT_KEYS = [
 export type TraitKey = (typeof TRAIT_KEYS)[number];
 
 /**
- * Bounds a bred trait is clamped to, and how far one generation's mutation
- * can nudge it. Matches the corresponding slider's own range in params.ts,
- * except `energyCap`, which has no slider — it is a multiple of `EXTRA_CAP`,
- * the tank a fresh Con or Dup starts at, since commute parents are always
- * one of each.
- */
-/**
- * How far one generation can nudge a single chemistry weight.
- *
- * Scaled to the genome's size rather than fixed, because the thing that should
- * stay constant across a change to the layout is how far a child lands from
- * its parents *overall* — and that is the root-sum-square of the per-gene
- * steps, so it grows as the square root of the gene count. The genome doubled
- * from sixteen floats to thirty-two when the inner state went from one number
- * to three; left at a flat 0.06 that would have quietly multiplied every
- * lineage's drift by 1.41, on a system where drift already competes with
- * selection for control of the outcome.
- *
- * `0.06` was the figure at sixteen genes, so that is the reference.
+ * How far one generation can nudge a single chemistry weight. Scaled to the
+ * genome's size so that how far a child lands from its parents overall (the
+ * root-sum-square of the per-gene steps) stays constant when the layout
+ * changes; 0.06 at sixteen genes is the reference.
  */
 export const CHEM_MUTATE = 0.06 * Math.sqrt(16 / CHEM_LEN);
 /** Ceiling on a taste weight, positive or negative. */
 export const CHEM_TASTE_MAX = 4;
-/** Ceiling on an emit slope. One unit of voice is the base's whole budget, so
- *  a slope of one can silence a body or double it at full need, no more. */
+/** Ceiling on an emit slope: one unit of voice is the base's whole budget. */
 export const CHEM_SLOPE_MAX = 1;
 
+/**
+ * Bounds a bred trait is clamped to, and how far one generation's mutation
+ * can nudge it. Matches the corresponding slider's range in params.ts, except
+ * `energyCap`, which is a multiple of `EXTRA_CAP`, the tank a fresh Con or
+ * Dup starts at.
+ */
 export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: number }> = {
-  /*
-   * Working capital: how much adenylate a body carries, and so how much work
-   * it can have outstanding before it has to wait on its own regeneration.
-   *
-   * A small pool discharges fast and recharges fast, which is a quick shallow
-   * stroke; a large one rides through a lean patch on stored charge and
-   * strokes slower and deeper. Neither dominates, which is why it is a gene
-   * and not a constant — and it is the first thing about a lineage's
-   * metabolism that selection can reach.
-   */
+  /* Working capital: how much work a body can have outstanding before it waits on its own regeneration. */
   adenylate: { min: 0.2, max: 6, mutate: 0.15 },
   requestDecay: { min: 0.5, max: 0.98, mutate: 0.03 },
   energyCap: { min: EXTRA_CAP * 0.5, max: EXTRA_CAP * 2, mutate: EXTRA_CAP * 0.1 },
-  /*
-   * Strictly negative. A reflecting barrier at zero would let the gene sit
-   * at break-even, and then the rescue latch never fires — extra never goes
-   * under, recovering never sets. The clamp is the sign lock.
-   */
+  /* Strictly negative: at zero the rescue latch never fires. The clamp is the sign lock. */
   debtCap: { min: -2.5, max: DEBT_CAP_MAX, mutate: 0.12 },
   rescueTo: { min: 0, max: 1, mutate: 0.06 },
   /*
-   * The whole range, because both ends are meaningful: 0 is a lineage that
-   * blends every gene of every child, 1 is one that copies each from a single
-   * parent. It is seeded in the middle so that the kind offset in
-   * `assortChance` reproduces the old absolute rule exactly.
+   * 0 is a lineage that blends every gene of every child, 1 one that copies
+   * each from a single parent. Seeded in the middle; see `assortChance`.
    */
   assort: { min: 0, max: 1, mutate: 0.05 },
 };
 
 /**
- * A commute child's traits are its own recombination of its two parents',
- * not a copy of either, then a small mutation nudge so a lineage can drift
- * past whatever range its ancestors already spanned.
- *
- * Erase is the other birth: two new Eras, clones of the Era that met the
- * binary, each nudged. That is what the rule does — the eraser continues
- * down both leftover ports — so there is no second parent to blend with.
- *
- * A body created any other way just keeps whatever `createAgent` seeded it
- * with.
- *
- * The two commute child kinds recombine differently, matching what each node
- * actually does in the calculus. A Con child blends: each trait picks its
- * own independent weight between the two parents, so it can land anywhere
- * on the line between them. A Dup child instead assorts: each trait is
- * copied whole from a coin-flipped parent, never averaged — duplication
- * copies a value, it does not combine two of them. Both draw the flip or
- * the weight per trait rather than once for all four, which is what lets
- * the four children of one commute end up with four different profiles
- * instead of two blends and two copies.
- */
-/**
  * How far outside the interval between two parents a blended child may land.
  *
- * Plain `lerp(a, b, random())` draws a child uniformly *between* its parents,
- * and that shrinks the spread of the population every time it runs: the mean of
- * two draws has half the variance of one. Half of every commute's offspring are
- * Con children and blend, and since `inheritChem` blends all 134 genes the same
- * way, that is a variance sink sitting directly upstream of the entire genome —
- * and variance is the thing selection has to grip. It is Jenkin's swamping
- * objection to Darwin, running in half the population, and the answer in real
- * genetics was particulate inheritance.
- *
- * Assorting everything like a Dup child would fix it, but throws away a
- * distinction that means something: a Con combines its inputs and a Dup copies
- * them, which is what those nodes actually do. Widening the draw keeps both.
- * At 0.5 the child is drawn from `[a - 0.5(b-a), b + 0.5(b-a)]`, which is the
- * standard BLX-alpha operator and is tuned to hold offspring variance roughly
- * equal to parental variance rather than halving it. A child can now land
- * outside what either parent had, which is also the only way a blending lineage
- * can explore past the range its ancestors already spanned.
- *
- * Every consumer clamps afterwards — `TRAIT_RANGE` for the scalars, the matrix
- * bounds for the genome — so widening the draw cannot put a value out of range.
+ * A plain `lerp(a, b, random())` halves the variance of the population every
+ * time it runs, and variance is what selection grips. At 0.5 the child is
+ * drawn from `[a - 0.5(b-a), b + 0.5(b-a)]` (BLX-alpha), which holds
+ * offspring variance roughly equal to parental variance. Every consumer
+ * clamps afterwards (`TRAIT_RANGE`, the matrix bounds), so the widened draw
+ * cannot put a value out of range.
  */
 export const BLEND_WIDEN = 0.5;
 
@@ -1011,24 +894,11 @@ function nudgeTrait(value: number, range: { min: number; max: number; mutate: nu
 }
 
 /**
- * How likely a single gene is copied whole from one parent, rather than blended
- * between the two.
- *
- * This was `child.kind === 'dup'` — absolute, and a property of the calculus
- * rather than of the lineage. The rationale was good (a Con combines its
- * inputs, a Dup copies them) but it made the *mode* of inheritance the one
- * thing about a body that could never evolve, in a system whose whole premise
- * is that nothing should be true by fiat. Blending and assortment have very
- * different consequences for how fast variance is lost and how easily two
- * lines can pull apart, and which suits a lineage is exactly the sort of
- * question selection is for.
- *
- * The parents' mean `assort`, offset by half a unit either way by the child's
- * kind and clamped. At the seeded 0.5 that is 0 for a Con child and 1 for a
- * Dup child — precisely the old rule — so nothing changes until the trait
- * drifts, and when it does both kinds move together while keeping their
- * relationship. A lineage that walks `assort` up becomes wholly particulate;
- * one that walks it down blends even its Dup children.
+ * How likely a single gene is copied whole from one parent, rather than
+ * blended between the two: the parents' mean `assort`, offset by half a unit
+ * up for a Dup child and down for a Con child, clamped. At the seeded 0.5 a
+ * Con child blends everything and a Dup child copies everything; the flip
+ * or the weight is drawn per gene, not once per child.
  */
 function assortChance(child: Agent, conParent: Agent, dupParent: Agent): number {
   const mean = (conParent.assort + dupParent.assort) * 0.5;
@@ -1038,11 +908,8 @@ function assortChance(child: Agent, conParent: Agent, dupParent: Agent): number 
 
 function inheritTraits(child: Agent, conParent: Agent, dupParent: Agent, kappa: number): void {
   const chance = assortChance(child, conParent, dupParent);
-  // Depth is one past the deeper parent, so a line's generation count does not
-  // reset every time it crosses with a fresher one. Which line the child is
-  // *of* follows the Con — arbitrary between two parents, but it has to be one
-  // of them and picking at random would make lineage counts a coin-flip rather
-  // than a measurement.
+  // Depth is one past the deeper parent. Lineage follows the Con: arbitrary,
+  // but deterministic, so lineage counts are a measurement.
   child.born = Math.max(conParent.born, dupParent.born) + 1;
   child.lineage = conParent.lineage;
   for (const key of TRAIT_KEYS) {
@@ -1065,41 +932,25 @@ function inheritFromClone(child: Agent, parent: Agent, kappa: number): void {
   for (const key of TRAIT_KEYS) {
     child[key] = nudgeTrait(parent[key], TRAIT_RANGE[key]);
   }
-  // One parent, so blending and assorting are the same thing; 1 is the cheaper
-  // of the two and says what is happening.
+  // One parent, so blending and assorting are the same thing.
   inheritChem(child, parent, parent, 1, kappa);
 }
 
 /**
- * The scent genome recombines the same way the scalar traits do — blended for
- * a Con child, assorted whole for a Dup — but per *channel* rather than per
- * vector, so a child can take what it says on one channel from one parent and
- * on another from the other. That is what lets a lineage explore combinations
- * instead of only the line between its two ancestors.
- *
- * Emit is clamped non-negative and to a unit sum: a body has one voice to
- * spend across four channels, and choosing what to say is free while shouting
- * is not. Without that, "louder" is a strictly better strategy and every
- * lineage converges on it. Taste is left signed, because a negative weight is
- * avoidance, and a body that flees what it can smell is a behaviour the fixed
- * weights could never express.
+ * The genome recombines the same way the scalar traits do, per gene. Emit is
+ * clamped non-negative and to a unit sum: a body has one voice to spend
+ * across four channels, otherwise "louder" is strictly better and every
+ * lineage converges on it. Taste is signed; a negative weight is avoidance.
  */
 function inheritChem(child: Agent, con: Agent, dup: Agent, chance: number, kappa: number): void {
   const c = child.chem;
   /*
-   * A parent hands on what it was born with *plus* what it learned, scaled
-   * by `params.inheritLearned`.
-   *
-   * Consolidation rather than a second inherited array: the child starts
-   * with an empty slate of its own and the parents' experience arrives
-   * already written into its genome, where mutation and the clamps treat it
-   * like any other gene. At `kappa` of 1 a lineage compounds what the bodies
-   * it grew from worked out; at 0 learning is somatic and dies with them.
-   *
-   * With nothing learned every `plastic` entry is zero, so this is exactly
-   * the arithmetic it was before, down to the bit — and it consumes the same
-   * random numbers in the same order, which is what keeps a pond that has
-   * learning switched off reproducible against its old hashes.
+   * A parent hands on what it was born with plus what it learned, scaled by
+   * `kappa` (`params.inheritLearned`): the child starts with an empty
+   * plastic slate and the parents' experience arrives written into its
+   * genome. At 0 learning is somatic and dies with the body. Consumes the
+   * same random numbers in the same order regardless of `kappa`, which is
+   * what keeps a pond with learning off hashing as it does.
    */
   const conP = con.store.plasticAll;
   const dupP = dup.store.plasticAll;
@@ -1116,13 +967,8 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, chance: number, kappa
     const combined = Math.random() < chance ? (Math.random() < 0.5 ? a : b) : blend(a, b);
     c[k] = combined + (Math.random() * 2 - 1) * CHEM_MUTATE;
   }
-  /*
-   * The critic comes across too, averaged rather than assorted: it is not a
-   * gene, it is a prediction about the neighbourhood the child is being born
-   * into, and both parents were standing in it. Averaged and not blended so
-   * that this consumes no random numbers — a pond with learning off has to
-   * hash exactly as it did.
-   */
+  // The critic is averaged, not assorted: a prediction about the
+  // neighbourhood the child is born into, and averaging consumes no random numbers.
   const childC = child.store.criticAll;
   const conC = con.store.criticAll;
   const dupC = dup.store.criticAll;
@@ -1133,14 +979,9 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, chance: number, kappa
     childC[childO + k] = kappa * 0.5 * (conC[conCo + k] + dupC[dupCo + k]);
   }
   /*
-   * One unit of voice across all four channels, the ground included.
-   *
-   * The ground is still in the budget although nothing reads its slot:
-   * farming moved to the expression head (`seedProduction`, `runExcretion`),
-   * where production trades against uptake on a simplex of its own. Dropping
-   * the slot here would renormalise every genome in the library, so it stays
-   * — see `effEmit` — and a child's voice is divided four ways as its
-   * parents' were.
+   * One unit of voice across all four channels, the ground included. Nothing
+   * reads the ground's slot (farming is the expression head), but dropping it
+   * would renormalise every genome in the library; see `effEmit`.
    */
   let sum = 0;
   for (let k0 = 0; k0 < 4; k0++) {
@@ -1154,33 +995,18 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, chance: number, kappa
     c[k] = Math.min(CHEM_TASTE_MAX, Math.max(-CHEM_TASTE_MAX, c[k]));
   }
   /*
-   * Slopes are only bounded, not normalised or forced positive. A negative
-   * emit slope is a body that goes quiet as its neighbourhood gets hungry, and
-   * a negative taste slope is one that stops caring about a channel under
-   * pressure — both are things worth being able to evolve into, and neither is
-   * expressible if the slope is held to the same shape as the base.
-   */
-  /*
-   * Every weight is bounded, and it has to be for the same reason the state
-   * is: `phi` keeps `h` inside (-1, 1), so a bounded weight against a bounded
-   * activation is a bounded product, and the mutation range means something.
-   * Leave any matrix unclamped and one lineage's runaway entry produces a
-   * number the field cannot hold.
-   *
-   * `E` gets the tighter bound. One unit of voice is a body's whole budget, so
-   * a coefficient of one against a saturated state can silence a channel or
-   * double it and no more; `T` and the state matrices are allowed to be
-   * louder, because a taste weight is compared against other taste weights
-   * rather than spent.
+   * Slopes and matrices are bounded but signed. Every weight must be bounded:
+   * `phi` keeps `h` inside (-1, 1), so a bounded weight against a bounded
+   * activation is a bounded product; an unclamped matrix lets one runaway
+   * entry produce a number the field cannot hold. `E` gets the tighter
+   * bound because one unit of voice is a body's whole budget.
    */
   for (let k = E_OUT; k < E_OUT + 4 * STATE_DIMS; k++) {
     c[k] = Math.min(CHEM_SLOPE_MAX, Math.max(-CHEM_SLOPE_MAX, c[k]));
   }
   /*
-   * Everything from `T` to the end of the genome, which is the state matrices
-   * and both output heads. They are all dimensionless — `HEAD_SCALE` is what
-   * turns a head gene into a force — so one bound covers them, and every gene
-   * in the genome gets a mutation step that means the same thing.
+   * Everything from `T` to the end of the genome is dimensionless
+   * (`HEAD_SCALE` turns a head gene into a force), so one bound covers it.
    */
   for (let k = T_OUT; k < CHEM_LEN; k++) {
     c[k] = Math.min(CHEM_TASTE_MAX, Math.max(-CHEM_TASTE_MAX, c[k]));
@@ -1199,11 +1025,8 @@ export function commitRewrite(
   store: AgentStore,
   breed = true,
 ): number {
-  // Local, not the whole pond: `commitRewrite` reads only `result.spawned` and
-  // the fused joins out of `result.net.wires`. Wires that were not incident to
-  // the pair come back untouched and are then skipped anyway -- they have no
-  // `sources` for `inheritLeftoverWires`, and their ports are still attached so
-  // the reconnect loop below leaves them alone.
+  // Local, not the whole pond: only `result.spawned` and the fused joins in
+  // `result.net.wires` are read.
   const result = applyRewrite(localSnapshotOf(agents, graph, rw.a, rw.b), rw.rule, rw.a, rw.b, nextId);
   const poses = spawnPoses(rw);
   // Read before the parents are deleted below.
@@ -1241,9 +1064,9 @@ export function commitRewrite(
 }
 
 /**
- * Leftover strings are the same instruments with new owners. Rebind the
- * surviving graph wire onto the fused ports so its id, rest, and rope stay.
- * The principal that was consumed is not in `desired` and still detaches.
+ * Rebind the surviving graph wire onto the fused ports so its id, rest, and
+ * rope stay. The principal that was consumed is not in `desired` and still
+ * detaches.
  */
 function inheritLeftoverWires(
   graph: Graph,

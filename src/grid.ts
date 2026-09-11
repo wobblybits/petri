@@ -1,14 +1,7 @@
 /**
- * Uniform spatial grid for broad-phase pair queries.
- *
- * The all-pairs loops this replaces were the whole scaling story: at 382 agents
- * the contact solver tested 72,771 pairs to find 21 actual contacts, eight times
- * a frame. Bucketing by cell and only visiting a cell and its forward neighbours
- * yields every close pair exactly once, and skips the 99.9% that are nowhere
- * near each other.
- *
- * Counting-sort layout, so a rebuild allocates nothing once the arrays are big
- * enough — which matters because contacts rebuild it every substep.
+ * Uniform spatial grid for broad-phase pair queries: bucket by cell, visit a cell
+ * and its forward neighbours, so every close pair is yielded exactly once.
+ * Counting-sort layout: a rebuild allocates nothing once the arrays are big enough.
  */
 export class PairGrid {
   private cols = 1;
@@ -21,10 +14,7 @@ export class PairGrid {
   private start = new Int32Array(0);
   private order = new Int32Array(0);
 
-  /**
-   * Bucket `count` points. `cellSize` should be at least the largest interaction
-   * radius, so every interacting pair lands in the same cell or an adjacent one.
-   */
+  /** Bucket `count` points. `cellSize` must be at least the largest interaction radius. */
   build(xs: ArrayLike<number>, ys: ArrayLike<number>, count: number, cellSize: number): void {
     this.count = count;
     if (count === 0) return;
@@ -46,8 +36,7 @@ export class PairGrid {
       if (y > maxY) maxY = y;
     }
 
-    // NaN/Inf bounds make cols*rows stay non-finite, so the coarsen loop
-    // never exits and the tab freezes.
+    // Non-finite bounds would keep the coarsen loop below from ever exiting.
     if (
       !Number.isFinite(minX) ||
       !Number.isFinite(minY) ||
@@ -60,9 +49,7 @@ export class PairGrid {
       maxY = 0;
     }
 
-    // A scattered swarm could otherwise ask for billions of empty buckets.
-    // Prefer more cells (tighter buckets) until the cap: coarsening toward
-    // all-pairs is how a spread of 400 became as expensive as 400 stacked.
+    // Cap the bucket count, preferring more cells (tighter buckets) up to the cap.
     let cell = Math.max(1e-3, Number.isFinite(cellSize) ? cellSize : 1);
     const maxCells = Math.min(65536, Math.max(256, count * 32));
     let cols = Math.floor((maxX - minX) / cell) + 1;
@@ -103,10 +90,7 @@ export class PairGrid {
     start[0] = 0;
   }
 
-  /**
-   * Visit every pair of points sharing a cell or lying in adjacent cells, once
-   * each. Callers still do their own distance test — this only narrows the field.
-   */
+  /** Visit every pair sharing a cell or in adjacent cells, once each; callers still distance-test. */
   forEachPair(fn: (i: number, j: number) => void): void {
     if (this.count === 0) return;
     const { cols, rows, start, order } = this;
@@ -155,14 +139,9 @@ export class PairGrid {
 }
 
 /**
- * Uniform grid over axis-aligned boxes, for "what is near this segment".
- *
- * `PairGrid` buckets points, which is wrong for a wire: a wire is a polyline
- * with real extent, and binning it by one point would miss every chord that
- * crosses it away from that point. So each box goes into every cell it
- * overlaps, and a query collects each entry once however many cells it spans.
- *
- * Counting-sort layout like its sibling, so a steady state allocates nothing.
+ * Uniform grid over axis-aligned boxes, for "what is near this segment". Each box
+ * goes into every cell it overlaps; a query yields each entry once however many
+ * cells it spans. Counting-sort layout, so a steady state allocates nothing.
  */
 export class BoxGrid {
   private cols = 1;
@@ -175,11 +154,7 @@ export class BoxGrid {
   private items = new Int32Array(0);
   private cellLo = new Int32Array(0);
   private cellHi = new Int32Array(0);
-  /**
-   * Entries too sprawling to bin, tested by every query instead. A wire may be
-   * REST_CAP long while its neighbours are 40, and letting one of those paint
-   * thousands of cells would cost more than the scan it replaces.
-   */
+  /** Entries too sprawling to bin, tested by every query instead. */
   private oversized: number[] = [];
   private seen = new Int32Array(0);
   private stamp = 0;
@@ -224,9 +199,7 @@ export class BoxGrid {
       extent = 0;
     }
 
-    // Cell to the mean box, so a typical entry lands in a handful of cells.
-    // Sizing to the largest instead would put the whole pond in one bucket the
-    // moment a single wire stretched.
+    // Cell to the mean box, not the largest, so one stretched wire cannot coarsen the whole grid.
     let cell = Math.max(1e-3, extent / Math.max(1, count * 2));
     const maxCells = Math.min(65536, Math.max(256, count * 8));
     let cols = Math.floor((hix - lox) / cell) + 1;

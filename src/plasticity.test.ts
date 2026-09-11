@@ -228,3 +228,42 @@ describe('plasticity: inheritance', () => {
     expect(Math.abs(meanLearned(off.chem, off.slots))).toBeLessThan(0.1);
   });
 });
+
+describe('plasticity: direction', () => {
+  /*
+   * The property learning exists for: when a state dimension being high is
+   * what fills the tank, the rule should raise that dimension. The tank is
+   * written from the body's own h[0] every frame, so the body is in a world
+   * where h[0] high pays and nothing else varies.
+   *
+   * `it.fails` because the rule as shipped has no sign per state dimension:
+   * one scalar surprise moves every dimension the same way, and in this rig
+   * it drives h[0] to the wrong clamp. Flip this to `it` when the rule is
+   * given a direction; the test is the acceptance test for that change.
+   */
+  it.fails('raises a state dimension that pays', () => {
+    seed(7);
+    const params = still();
+    params.learnRate = 0.02;
+    const sim = new Sim(600, 400);
+    loadPreset(sim, 'soup', params);
+    const a = sim.spawn('con', 300, 200, 0, params, true)!;
+    const H = sim.agentStore.hAll;
+    const s = a.slot;
+    const mean = (from: number, to: number): number => {
+      let sum = 0;
+      for (let f = from; f < to; f++) {
+        const h0 = H[s * 4];
+        a.extra = a.energyCap * Math.min(1, Math.max(0, 0.5 + 2 * h0));
+        sim.step(1 / 60, params);
+        sum += H[s * 4];
+      }
+      return sum / (to - from);
+    };
+    const early = mean(0, 120);
+    mean(120, 2400);
+    const late = mean(2400, 3000);
+    expect(late, 'h[0] should have risen, since h[0] high is what fills the tank').toBeGreaterThan(early);
+    Math.random = realRandom;
+  });
+});

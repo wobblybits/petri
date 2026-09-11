@@ -2,16 +2,8 @@ import { describe, it } from 'vitest';
 import { runSweep, summarize, writeSweep } from './harness.ts';
 
 /*
- * The dials that ship at zero, one at a time.
- *
- * `swimCost`, `forageAsk` and `fertilise` all change what energy is spent on
- * and none of them has been run. `excreteRate` is not here: its two regimes
- * are the arms in `pond/protocol.ts`, and swept alone against the defaults it
- * would hold `senseScale` at the minted value across the switch, which is the
- * coupling that table exists to catch. Each dial here is swept alone against the
- * defaults so its effect is its own: population, deaths, how much of the
- * pond can afford to breed, and how far the genome has drifted — which is the
- * first thing that would show a dial creating selection where there was none.
+ * The dials that ship at zero, each swept alone against the defaults.
+ * `excreteRate` is not here: its two regimes are the arms in `pond/protocol.ts`.
  *
  *     npx vitest run --project experiments economy --disableConsoleIntercept
  */
@@ -31,9 +23,7 @@ describe('experiment: economy dials', () => {
             seconds: Number(process.env.EXP_SECONDS ?? 60),
             soupCount: Number(process.env.EXP_BODIES ?? 300),
             sampleEvery: 10,
-            // The breeding sweep says these two are what keeps the pond from
-            // meeting; the economy dials only mean anything on a pond that
-            // reproduces, so they are off here.
+            // Off so the pond reproduces; the economy dials mean nothing otherwise.
             params: { declutter: 0, flockAlign: 0 },
           },
         },

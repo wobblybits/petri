@@ -7,30 +7,19 @@ import { CHEM_TASTE_MAX } from './rewrite.ts';
 import { clamp } from './wrap.ts';
 
   /**
-   * One round of message passing: every body's `h` from its inputs, its own
-   * last value, and the mean of its wired neighbours'.
+   * One round of message passing per frame: every body's `h` from its
+   * inputs, its own last value, and the mean of its wired neighbours'.
    *
    *     h <- phi( Wx.x + Wh.h + Wn.mean(h_j) + b )
    *
-   * One round per frame, not a relaxation to convergence. The recurrence is
-   * across frames rather than within one, which is both cheaper and more
-   * expressive than iterating: state persists, so a body can integrate over
-   * time rather than recomputing itself from scratch. Information travels one
-   * wire-hop a frame, sixty hops a second, which crosses any net worth having.
+   * Mean, not sum: a sum scales with degree, and `BOUND` already carries it.
    *
-   * *Mean* of the neighbours, not sum. A sum scales with degree, so the same
-   * genome saturates `phi` at a hub and barely moves a leaf — behaviour
-   * differing by position for a reason that is not about position. `BOUND`
-   * already carries degree, bounded and on purpose.
+   * Runs after `spreadRequests` and `flowCharges`, so `DEMAND` and `FULL`
+   * are this frame's; `sense` and `trail` are last frame's, written by the
+   * steer pass.
    *
-   * Read *after* `spreadRequests` and `flowCharges`, so `DEMAND` and `FULL` are
-   * this frame's. `sense` and `trail` are last frame's, written by the steer
-   * pass — a frame of latency in smell that steering has always had.
-   *
-   * `hPrev` because every body has to see the same generation of its
-   * neighbours. Updating in place would make the answer depend on iteration
-   * order, and the order is the roster, which changes whenever anything is
-   * born.
+   * `hPrev` so every body sees the same generation of its neighbours;
+   * updating in place would make the answer depend on roster order.
    */
 let hPrev = new Float64Array(0);
 let slotBuf = new Int32Array(0);
@@ -56,17 +45,8 @@ export function updateState(host: StateHost, list: Agent[], adj: WireAdjacency, 
   const store = host.agentStore;
   const H = store.hAll;
   const SENSE = store.senseAll;
-  /*
-   * Straight into `chemAll` with a slot offset, rather than through
-   * `Agent.chem`.
-   *
-   * That accessor hands back a `subarray` view per body, and this reads
-   * eighty weights out of it per body per frame. Through the view the pass
-   * cost 16.5 ms at 20k bodies — 825 ns a body for eighty multiplies, which
-   * is an order of magnitude off what the arithmetic is worth. It is the
-   * same finding the store conversions in this file's history keep making,
-   * and the same fix.
-   */
+  // Straight into `chemAll` with a slot offset: the `Agent.chem` subarray
+  // view costs more than the eighty multiplies it serves.
   const CHEM = store.chemAll;
   const S = STATE_DIMS;
   if (hPrev.length < n * S) hPrev = new Float64Array(n * S);
@@ -118,29 +98,18 @@ export function updateState(host: StateHost, list: Agent[], adj: WireAdjacency, 
     const g = slot * CHEM_LEN;
 
     /*
-     * Sampling is skipped entirely unless this genome reads the field. A
-     * bilinear sample is four scattered reads into a sixteen-megabyte array
-     * that will not be in cache, once a body, for a value nearly every
-     * genome multiplies by zero — `Wx`'s sense columns seed to zero, because
-     * the one seeded pathway runs through `IN_DEMAND`. The inputs are zeroed
-     * rather than left reading a stale `SENSE`, so behaviour never depends
-     * on when a body last happened to sample.
+     * Sampling is skipped unless this genome reads the field. The inputs are
+     * zeroed rather than left reading a stale `SENSE`, so behaviour never
+     * depends on when a body last happened to sample.
      */
     if (READS[slot]) {
       const so = slot * 4;
       /*
        * On the GPU path `gpuFieldStep` filled these at the end of last
-       * frame, already scaled, straight out of the buffer that holds the
-       * live field; `fields.data` is a stale copy there and sampling it
-       * reads garbage. Here the sample is taken and scaled at the write,
-       * so the store holds the same thing on both paths.
-       *
-       * Both scales bring an input onto the range the other four already
-       * occupy. The ground is a quantity per cell, so a full cell reads one;
-       * the signal channels are accumulated deposits, so a strong local
-       * reading reads about one. Without the second, a sense gene had seven
-       * times the mutation leverage of every other input gene and `phi` was
-       * pinned across all but about 7% of its legal range.
+       * frame, already scaled; `fields.data` is a stale copy there. Both
+       * scales bring an input onto the [0, 1] range the other inputs
+       * occupy: a full ground cell reads one, a strong local signal about
+       * one.
        */
       if (!host.fieldOnGpu) {
         host.fields.sampleAll(X[slot], Y[slot], SENSE, so);
@@ -166,12 +135,7 @@ export function updateState(host: StateHost, list: Agent[], adj: WireAdjacency, 
     const r = REQUEST[slot];
     x[IN_DEMAND] = r <= 0 ? 0 : r >= 1 ? 1 : r;
 
-    /*
-     * The neighbour mean is a property of the body, not of the dimension
-     * being computed, so it is gathered once rather than inside the `d`
-     * loop. The obvious way round cost four times as much, because each of
-     * the four output dimensions re-walked the whole adjacency.
-     */
+    // Neighbour mean once per body, not once per output dimension.
     const lo = off[i];
     const hi = off[i + 1];
     const deg = hi - lo;
@@ -184,17 +148,8 @@ export function updateState(host: StateHost, list: Agent[], adj: WireAdjacency, 
       for (let k = 0; k < S; k++) mean[k] /= deg;
     }
 
-    /*
-     * Unrolled over the four state dimensions and the fifteen weights each
-     * reads. `STATE_DIMS` and `IN_DIMS` are compile-time constants, and the
-     * loop overhead around sixty multiply-adds is most of what this pass
-     * costs — the same finding, and the same fix, as the channel loop in
-     * `Fields.diffuse`.
-     *
-     * A neighbour mean of zero when there are no neighbours rather than a
-     * branch inside the arithmetic: `Wn` times nothing is nothing, and the
-     * branch was per dimension.
-     */
+    // Unrolled over the four state dimensions; a neighbour mean of zero when
+    // there are no neighbours, since `Wn` times nothing is nothing.
     const po = i * S;
     const ho = slot * S;
     const p0 = prev[po];
@@ -213,11 +168,9 @@ export function updateState(host: StateHost, list: Agent[], adj: WireAdjacency, 
     const x5 = x[5];
     const x6 = x[6];
     /*
-     * The state matrices as this body actually has them: its genome plus
-     * whatever it has learned since it was born. `plasticOn` is monotone —
-     * learned weights never decay, so a body that has learned anything has
-     * learned it for good — which keeps the sum off the path of a pond
-     * where nothing has.
+     * Genome plus whatever the body has learned. `plasticOn` is monotone —
+     * learned weights never decay — so the sum is off the path of a body
+     * that has not learned.
      */
     let W = CHEM;
     let wo = g + W_IN;
@@ -290,37 +243,12 @@ export function updateState(host: StateHost, list: Agent[], adj: WireAdjacency, 
     }
 
     /*
-     * The output heads, off this frame's state.
-     *
-     * Written into the same store fields the traits used to live in, so
-     * every consumer downstream — the native flock packing, the JS pair
-     * force, `recoil`, `state-hash` — reads what it always read and does not
-     * need to know these stopped being constants. What changed is that they
-     * are now a phenotype computed from `h` rather than a number a body
-     * carries for life, so a lineage can shoal while fed and scatter while
-     * starving instead of having to pick one.
-     *
-     * Clamped to the ranges the heritable versions were bred inside, because
-     * those bounds were about what the *forces* survive, not about what the
-     * genome was allowed to say. Alignment past its ceiling is negative
-     * damping; separation past its own has no equilibrium to settle at.
-     */
-    /*
-     * Emit and taste materialised here, once, instead of by each consumer.
-     *
-     * Both are pure functions of `h`, which was computed three lines up, and
-     * both were being rebuilt from the genome four times a body a frame —
-     * `effEmit` in the scent pass and `tasteOf` in steer, 13.8 ms between
-     * them at 20k. Emit is normalised on the way in, which is the only place
-     * all four channels are known at once and therefore the only place the
-     * unit budget can actually be enforced.
-     *
-     * One behaviour change worth naming: `taste` is now this frame's rather
-     * than last frame's. `updateState` runs in `endFrame`, so the scent pass
-     * already saw this frame's `h` while `steer` and `flock` ran in the next
-     * frame's `beginFrame` and saw the previous. That asymmetry between what
-     * a body says and what it listens for is gone, which is almost certainly
-     * an improvement and is definitely a change — it moves `state-hash`.
+     * The output heads off this frame's state, written into the store
+     * fields every consumer reads. Clamped to what the forces survive:
+     * alignment past its ceiling is negative damping; separation past its
+     * own has no equilibrium to settle at. Emit and taste are materialised
+     * here once; emit is normalised on the way in, the one place all four
+     * channels are known together.
      */
     emitVector(CHEM, g, H, ho, EMITS, slot * 4);
     tasteVector(CHEM, g, H, ho, TASTES, slot * 4);
@@ -335,29 +263,12 @@ export function updateState(host: StateHost, list: Agent[], adj: WireAdjacency, 
     GA[slot] = clamp(headAt(CHEM, g, G_OUT, G_BASE, 0, H, ho, S) * HEAD_SCALE.anchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
 
     /*
-     * What this body learns from the frame it has just had.
-     *
-     * Three factors, every one of them local to the body: an eligibility
-     * trace per weight saying what that weight was lately doing, `phi'`
-     * saying how much the state would have moved had the weight been
-     * different, and one scalar saying whether things went better than
-     * expected. The scalar is a temporal-difference error from the body's
-     * own critic, and it is the only part of this that is a gradient
-     * rather than a correlation — without it a Hebbian rule cannot tell a
-     * useful coincidence from any other, and everything that fires
-     * together grows together until it all saturates.
-     *
-     * The cost is the body's **own** tank: `x4` is `IN_FULL`, clamped to
-     * [0,1], so `x4 - 1` is zero when full and -1 when empty. Local, by
-     * decision. `x6` is the same shortfall relaxed over the wire graph and
-     * is the other candidate teacher — it would make the net's condition
-     * the thing a body learns about rather than its own — and swapping
-     * them is this one line, since both are already in `x`.
-     *
-     * Nothing here decays except the trace, which is a credit window and
-     * not a memory. A learned weight is the body's for life and travels
-     * with it into whatever net it latches into next; that carriage is the
-     * point of learning rather than only breeding.
+     * Three-factor Hebbian learning, every factor local to the body: an
+     * eligibility trace per weight, `phi'` per state dim, and a
+     * temporal-difference error from the body's own critic. The cost is the
+     * body's own tank: `x4` is `IN_FULL` in [0, 1], so `x4 - 1` is zero
+     * when full and -1 when empty. Nothing decays but the trace; a learned
+     * weight is the body's for life and travels with it into its next net.
      */
     if (learn) {
       const plo = slot * PLASTIC_LEN;
@@ -370,11 +281,8 @@ export function updateState(host: StateHost, list: Agent[], adj: WireAdjacency, 
         CRITIC[cro + 4];
       const dlt = x4 - 1 + discount * value - PREV_V[slot];
       PREV_V[slot] = value;
-      /*
-       * The critic's own update is an ordinary delta rule. Its estimate a
-       * frame ago was a dot product with `h` a frame ago, so `h` a frame
-       * ago is the gradient, and `prev` still holds it.
-       */
+      // Critic delta rule: its last estimate was a dot with last frame's
+      // `h`, which `prev` still holds.
       const kc = etaC * dlt;
       CRITIC[cro] += kc * p0;
       CRITIC[cro + 1] += kc * p1;
@@ -411,12 +319,8 @@ export function updateState(host: StateHost, list: Agent[], adj: WireAdjacency, 
       const gW = g + W_IN;
       let touched = 0;
       let at = 0;
-      /*
-       * `Wx`, then `Wh`, then `Wn`, then `b` — the order the genome lays
-       * them in, so one running index serves the trace, the learned delta
-       * and the gene it is added to. The clamp is against the sum, because
-       * what has to stay in range is the weight the state pass reads.
-       */
+      // `Wx`, `Wh`, `Wn`, `b` in genome order, so one index serves trace,
+      // delta and gene. The clamp is against the sum the state pass reads.
       for (let d = 0; d < S; d++) {
         const pd = post[d];
         for (let k = 0; k < IN_DIMS; k++, at++) {
@@ -430,12 +334,8 @@ export function updateState(host: StateHost, list: Agent[], adj: WireAdjacency, 
           PLASTIC[ti] = w;
           if (w !== 0) {
             touched = 1;
-            /*
-             * A learned sense weight turns a body that could not look at
-             * the field into one that can, and the gate saying so is
-             * otherwise settled at birth. Monotone, which is exact here
-             * precisely because nothing decays back to zero.
-             */
+            // A learned sense weight makes a field reader; monotone, exact
+            // because nothing decays back to zero.
             if (k < 4) READS[slot] = 1;
           }
         }
@@ -486,11 +386,8 @@ export function updateState(host: StateHost, list: Agent[], adj: WireAdjacency, 
 }
 
 /**
- * One row of an output head, read straight out of the store arrays.
- *
- * The twin of `agents.ts`'s `head`, which goes through `Agent.chem` and
- * `Agent.h`. This one exists for `updateState`'s inner loop, where those two
- * accessors are the whole cost — see the note on reading `chemAll` directly.
+ * One row of an output head, read straight out of the store arrays: the
+ * twin of `agents.ts`'s `head` for `updateState`'s inner loop.
  */
 function headAt(
   chem: Float32Array,

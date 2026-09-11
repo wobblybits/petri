@@ -116,12 +116,9 @@ function shapeAt(agent: Agent, x: number, y: number): Shape {
 }
 
 /**
- * Disc overlap, the cheap stand-in for `queryHit`. Same separation-axis
- * convention, cheap enough to run on every pair the broadphase reports.
- *
- * The radius is the glyph-area disc, not the SAT bound: this is the same
- * contact seen at a coarser tier, so it has to settle where SAT settles or
- * the net changes size when the camera crosses the LOD line.
+ * Disc overlap, the cheap stand-in for `queryHit` on every broadphase pair.
+ * The radius is the glyph-area disc, not the SAT bound: it must settle where
+ * SAT settles, or the net changes size when the camera crosses the LOD line.
  */
 export function queryDiscHit(A: Agent, B: Agent, w: number, h: number): Hit | null {
   const d = wrapDeltaVec(A.x, A.y, B.x, B.y, w, h);

@@ -8,14 +8,9 @@ import type { PortSlot } from '../agents.ts';
 import type { NetBody, NetData, NetWire } from './net-blob.ts';
 
 /*
- * A net, out of a live pond and back into one.
- *
- * A "net" here is a connected component of the wire graph, which is the only
- * definition the simulation itself uses — `componentIds` is what the LOD pass,
- * the demand spread and the harvest already mean by "a net". A lone unattached
- * body is a component of one, and `captureNets` will skip those by default,
- * because a soup of ten thousand singletons is not ten thousand things worth
- * storing.
+ * A net, out of a live pond and back into one. A "net" is a connected
+ * component of the wire graph (`componentIds`); `captureNets` skips
+ * singletons by default.
  */
 
 /** Summary numbers, so the database can be queried without opening a blob. */
@@ -41,11 +36,7 @@ export interface NetStats {
   learned: number;
   /** Mean absolute learned delta per weight; 0 for a net that has not learned. */
   plasticMean: number;
-  /**
-   * Mean absolute weight over the part of the genome that seeds to zero — the
-   * matrices and heads past the taste bases. How far this net has walked from
-   * a fresh body, by drift or by selection; it does not distinguish them.
-   */
+  /** Mean absolute weight over the part of the genome that seeds to zero; drift and selection alike. */
   matrixDrift: number;
 }
 
@@ -66,12 +57,8 @@ export interface CaptureOptions {
 }
 
 /**
- * Every connected component of the pond, largest first.
- *
- * The genome and matrix arrays are copied out of the store rather than
- * aliased: the store reallocates on growth and recycles slots on death, so a
- * view taken here would be reading somebody else's body by the time it was
- * written to disk.
+ * Every connected component of the pond, largest first. Genome and matrix
+ * arrays are copied, not aliased: the store reallocates and recycles slots.
  */
 export function captureNets(sim: Sim, opts: CaptureOptions = {}): CapturedNet[] {
   const minBodies = opts.minBodies ?? 2;
@@ -83,9 +70,7 @@ export function captureNets(sim: Sim, opts: CaptureOptions = {}): CapturedNet[] 
     else groups.set(root, [id]);
   }
 
-  // Wires bucketed by component, so this is one pass over the graph rather
-  // than one pass per component. A pond with a thousand nets makes the
-  // difference between linear and quadratic.
+  // Wires bucketed by component: one pass over the graph, not one per component.
   const wiresBy = new Map<number, GraphWire[]>();
   for (const w of sim.graph.wires.values()) {
     const root = comps.get(w.a.id);
@@ -99,8 +84,7 @@ export function captureNets(sim: Sim, opts: CaptureOptions = {}): CapturedNet[] 
   const out: CapturedNet[] = [];
   for (const [root, ids] of groups) {
     if (ids.length < minBodies) continue;
-    // Sorted so a net captured twice from the same pond is byte-identical,
-    // and so the blob's body order does not depend on Map iteration.
+    // Sorted so a net captured twice from the same pond is byte-identical.
     ids.sort((a, b) => a - b);
     out.push(captureComponent(sim, ids, wiresBy.get(root) ?? []));
   }
@@ -168,9 +152,7 @@ function captureComponent(sim: Sim, ids: number[], wires: GraphWire[]): Captured
     let p = 0;
     for (let k = 0; k < PLASTIC_LEN; k++) p += Math.abs(plastic[k]);
     plasticSum += p / PLASTIC_LEN;
-    // Past the taste bases is matrices and heads: zero at seed bar two
-    // entries, so this is how far the unseeded genome has moved. Same measure
-    // the experiment harness reports as `matrixDrift`, over one net.
+    // Past the taste bases is matrices and heads, zero at seed bar two entries.
     let d = 0;
     for (let k = TASTE + 4; k < CHEM_LEN; k++) d += Math.abs(chem[k]);
     driftSum += d / (CHEM_LEN - TASTE - 4);
@@ -228,13 +210,9 @@ function captureComponent(sim: Sim, ids: number[], wires: GraphWire[]): Captured
 
 export interface PlantOptions {
   /**
-   * Overwrite every body's founder line with this.
-   *
-   * A stored net's `lineage` values are agent ids from the pond it grew in and
-   * mean nothing here, so a run that plants several nets would see their lines
-   * collide at random. The runner passes a negative number per planted net —
-   * ids are always positive, so a negative line is unambiguously "arrived from
-   * the database", and `census().lines` keeps counting something true.
+   * Overwrite every body's founder line with this: a stored net's `lineage`
+   * values are ids from another pond. The runner passes a negative number per
+   * planted net; ids are positive, so a negative line means "from the database".
    */
   lineage?: number;
   /** Rotate the whole net about its centroid before placing it. */
@@ -242,17 +220,10 @@ export interface PlantOptions {
 }
 
 /**
- * Drop a stored net into a pond, centred on `(x, y)`.
- *
- * Returns the new ids in blob-index order, or an empty array if the net does
- * not fit under `params.maxAgents`. The cap is checked once for the whole net
- * rather than a body at a time, which is the only way to check it that means
- * anything here: a net planted up to the cap and truncated is not the net, it
- * is a torn piece of one, and the bodies it did place would go on latching
- * into whatever was around them.
- *
- * Wires are made `silent`, as `restore` and `pasteFragment` do: a net arriving
- * is not fifty latch events, and the audio queue should not think it is.
+ * Drop a stored net into a pond, centred on `(x, y)`. Returns the new ids in
+ * blob-index order, or an empty array if the whole net does not fit under
+ * `params.maxAgents`; a truncated net is a torn piece, not the net. Wires are
+ * `silent` so the audio queue does not hear fifty latches.
  */
 export function plantNet(
   sim: Sim,
@@ -284,8 +255,7 @@ export function plantNet(
     const dy = b.y - cy;
     // Forced, because the cap was already checked for the whole net above.
     const a = sim.spawn(b.kind, x + dx * cos - dy * sin, y + dx * sin + dy * cos, b.heading + rot, params, true);
-    // Belt to that check's braces: if `spawn` ever learns a second way to
-    // refuse, the net comes back out rather than going in half.
+    // If `spawn` refuses anyway, the net comes back out rather than going in half.
     if (!a) break;
     ids.push(a.id);
     a.vx = 0;
@@ -296,10 +266,7 @@ export function plantNet(
     a.prevHeading = a.heading;
     a.drive = 0;
     a.extra = b.extra;
-    // The list itself, and not a copy of it written out: a trait added to
-    // `TRAIT_KEYS` and to the blob but missed here plants at its seed value,
-    // which is a body that is not the body that was captured. `adenylate`
-    // spent a while being exactly that.
+    // The list itself, so a trait added to `TRAIT_KEYS` cannot be missed here.
     for (const k of TRAIT_KEYS) a[k] = b[k];
     a.born = b.born;
     a.lineage = opts.lineage ?? b.lineage;
@@ -311,16 +278,13 @@ export function plantNet(
     store.criticAll.set(b.critic, s * CRITIC_LEN);
     store.prevValue[s] = b.prevValue;
     store.hAll.set(b.h, s * STATE_DIMS);
-    // Monotone in the store and it has to be set by hand here: the learning
-    // pass sets it when a weight first moves, and a body that arrives already
-    // holding a delta would otherwise run its bare genome until it learned
-    // something of its own — which is exactly the experience the plant is for.
+    // Set by hand: the learning pass only sets it when a weight first moves,
+    // and a body arriving with a delta would otherwise run its bare genome.
     let on = 0;
     for (let k = 0; k < PLASTIC_LEN && !on; k++) if (b.plastic[k] !== 0) on = 1;
     store.plasticOn[s] = on;
     store.markLearn(s);
-    // The one choke point every `chem` write has to pass through: it refreshes
-    // the sense gate and stamps the GPU's copy of the genome stale.
+    // Every `chem` write passes through this: it refreshes the sense gate and stamps the GPU genome stale.
     refreshReadsField(a);
   }
 

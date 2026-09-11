@@ -23,13 +23,7 @@ export function wrapDeltaVec(
   return { x: bx - ax, y: by - ay };
 }
 
-/**
- * `wrapDeltaVec` writing into a caller's vector instead of minting one.
- *
- * The same trade `stemWorldInto` and `bezierPointInto` already make. A delta
- * inside a per-frame loop over everything is not somewhere to be allocating:
- * `advanceRewrite` alone was churning thousands of these a frame.
- */
+/** `wrapDeltaVec` writing into a caller's vector; for per-frame loops that must not allocate. */
 export function wrapDeltaVecInto(
   ax: number,
   ay: number,
@@ -69,14 +63,7 @@ export function wrapMid(
 
 const TAU = Math.PI * 2;
 
-/**
- * Normalize an angle to [-pi, pi).
- *
- * This was atan2(sin a, cos a) — three transcendentals to do arithmetic, and
- * 3.8% of a step at soup scale. Angles here are nearly always already in
- * range (a heading plus one substep of rotation), so the common case is a
- * pair of comparisons and no work at all.
- */
+/** Normalize an angle to [-pi, pi). The in-range fast path is the common case and must stay cheap. */
 export function wrapAngle(a: number): number {
   if (a >= -Math.PI && a < Math.PI) return a;
   if (!Number.isFinite(a)) return 0;
