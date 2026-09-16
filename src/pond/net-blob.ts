@@ -175,6 +175,9 @@ export interface NetHeader extends NetMeta {
   plasticAt?: number;
 }
 
+/** The scalar fields this build knows, as a set, for the reader's name lookup. */
+const SCALAR_KNOWN: ReadonlySet<string> = new Set<string>(SCALAR_FIELDS);
+
 /** What this build's `chem-layout.ts` says. Written into every blob. */
 export function currentLayout(): NetLayout {
   return { chem: CHEM_LEN, plastic: PLASTIC_LEN, critic: CRITIC_LEN, state: STATE_DIMS };
@@ -228,6 +231,16 @@ export interface NetData {
   layout?: NetLayout;
   segments?: ChemSegment[];
   plasticAt?: number;
+  /**
+   * Which scalars the blob actually carried, in its own order. Absent means
+   * this build's whole list, which is what `captureNets` produces.
+   *
+   * The same job `segments` does for the genome, and for the same reason: the
+   * list is append-only, so a blob written before a field existed is missing
+   * it rather than wrong about it, and the missing one has to be seeded rather
+   * than read. See `storedScalars`.
+   */
+  scalars?: readonly string[];
 }
 
 const BYTES: Record<SectionType, number> = { u8: 1, i32: 4, f32: 4, f64: 8 };
@@ -299,6 +312,39 @@ export interface LayoutLike {
   layout: NetLayout;
   segments?: readonly ChemSegment[];
   plasticAt?: number;
+  /**
+   * The blob's own scalar list; see `storedScalars`. A decoded net carries it
+   * directly, and a header carries it inside `sections` — pass either, and
+   * absent from both means this build's own list.
+   */
+  scalars?: readonly string[];
+  sections?: readonly Section[];
+}
+
+/**
+ * The scalars a blob carries, read off the `scalar` section's own field names.
+ *
+ * The encoder has always written those names into the header, and for a while
+ * the decoder ignored them and read by fixed index instead. That is a silent
+ * corruption rather than a failure: `adenylate` was appended to
+ * `SCALAR_FIELDS`, so every blob written before it stores six scalars a body
+ * and this build read seven — body zero came out right, body one was shifted
+ * by one, and the tail read off the end of the section as `undefined`. Both
+ * nets in `nets/` are such blobs. Planted, they arrived with each other's
+ * tanks and debt caps, `requestDecay` values outside its own range, and
+ * pools that were negative or not numbers at all, so most of their bodies
+ * never metabolised — which looked like the pathway being broken and was
+ * this.
+ *
+ * So the names are what the reader trusts, and a missing field is seeded the
+ * way a missing genome segment is. Nothing here has to know which build wrote
+ * what: the blob says.
+ */
+export function storedScalars(h: { sections?: readonly Section[] }): readonly string[] {
+  const s = h.sections?.find((x) => x.name === 'scalar');
+  // A section with no names is one this build wrote the list for, since the
+  // encoder has always written them; read it as our own rather than refusing.
+  return s?.fields ?? SCALAR_FIELDS;
 }
 
 /**
@@ -319,7 +365,24 @@ export function compatibility(h: LayoutLike): Compatibility {
   const off = keys.filter((k) => L[k] !== now[k]);
   const segs = h.segments;
   const sameMap = segs === undefined || (sameSegments(segs, CHEM_SEGMENTS) && (h.plasticAt ?? PLASTIC_BASE) === PLASTIC_BASE);
-  if (off.length === 0 && sameMap) return { kind: 'exact' };
+  /*
+   * The scalars, before the genome, because a name this build cannot place is
+   * unreadable rather than migratable — there is nowhere to put it and no way
+   * to know what the rest of the row means.
+   */
+  const scalars = h.scalars ?? storedScalars(h);
+  const unknown = scalars.filter((name) => !SCALAR_KNOWN.has(name));
+  if (unknown.length > 0) {
+    return {
+      kind: 'refused',
+      reason: `net blob carries scalars this build does not know: ${unknown.join(', ')}`,
+    };
+  }
+  const missing = SCALAR_FIELDS.filter((name) => !scalars.includes(name));
+  const sameScalars = missing.length === 0 && scalars.length === SCALAR_FIELDS.length;
+  if (off.length === 0 && sameMap && sameScalars) return { kind: 'exact' };
+  const scalarNotes = missing.map((name) => `${name} seeded (new in this build)`);
+  if (off.length === 0 && sameMap) return { kind: 'migratable', notes: scalarNotes };
 
   const changed = 'genome layout has changed since this net was stored: ' + off.map((k) => `${k} ${L[k]} -> ${now[k]}`).join(', ');
   if (L.state !== now.state || L.critic !== now.critic || L.plastic !== now.plastic) {
@@ -340,7 +403,7 @@ export function compatibility(h: LayoutLike): Compatibility {
   const bad = segmentsComplaint(segs, L.chem, h.plasticAt, L.plastic);
   if (bad) return { kind: 'refused', reason: `net blob header is inconsistent: ${bad}` };
 
-  const notes: string[] = [];
+  const notes: string[] = [...scalarNotes];
   const byName = new Map(segs.map((s) => [s.name, s]));
   for (const cur of CHEM_SEGMENTS) {
     const old = byName.get(cur.name);
@@ -375,8 +438,13 @@ export function compatibility(h: LayoutLike): Compatibility {
 
 /** Whether a `NetData` is at this build's layout, so it can be encoded or planted as is. */
 export function isCurrent(net: NetData): boolean {
-  if (!net.layout) return true;
-  return compatibility({ layout: net.layout, segments: net.segments, plasticAt: net.plasticAt }).kind === 'exact';
+  if (!net.layout && !net.scalars) return true;
+  return compatibility({
+    layout: net.layout ?? currentLayout(),
+    segments: net.segments,
+    plasticAt: net.plasticAt,
+    scalars: net.scalars,
+  }).kind === 'exact';
 }
 
 /**
@@ -391,12 +459,41 @@ export function isCurrent(net: NetData): boolean {
  * Identity on a net that is already current, and throws on one that cannot
  * be brought across, with the reason.
  */
-export function migrateNet(net: NetData, seed: (kind: AgentKind) => Float32Array): { net: NetData; notes: string[] } {
+export function migrateNet(
+  net: NetData,
+  seed: (kind: AgentKind) => Float32Array,
+  seedTrait?: (kind: AgentKind, field: ScalarField) => number,
+): { net: NetData; notes: string[] } {
   if (isCurrent(net)) return { net, notes: [] };
-  const c = compatibility({ layout: net.layout!, segments: net.segments, plasticAt: net.plasticAt });
+  const c = compatibility({
+    layout: net.layout ?? currentLayout(),
+    segments: net.segments,
+    plasticAt: net.plasticAt,
+    scalars: net.scalars,
+  });
   if (c.kind === 'refused') throw new Error(`pond: ${c.reason}`);
   if (c.kind === 'exact') return { net, notes: [] };
-  const oldSegs = net.segments!;
+  /*
+   * The scalars a blob did not carry, seeded for the body's kind — what a
+   * body born in this pond would have, which is exactly what a missing genome
+   * segment gets. Without a seeder they stay NaN, which is the decoder's own
+   * marker and is louder than a zero that would read as a real gene.
+   */
+  const had = net.scalars ?? SCALAR_FIELDS;
+  const missingScalars = SCALAR_FIELDS.filter((name) => !had.includes(name));
+  const oldSegs = net.segments;
+  if (!oldSegs) {
+    // Scalars only: the genome is already this build's, so nothing moves in it.
+    const bodies = net.bodies.map((b) => {
+      const out = { ...b };
+      for (const name of missingScalars) out[name] = seedTrait ? seedTrait(b.kind, name) : NaN;
+      return out;
+    });
+    return {
+      net: { ...net, bodies, layout: currentLayout(), scalars: [...SCALAR_FIELDS] },
+      notes: c.notes,
+    };
+  }
   const oldPlasticAt = net.plasticAt!;
   const byName = new Map(oldSegs.map((s) => [s.name, s]));
   const moves: { from: number; to: number; len: number; learned: boolean }[] = [];
@@ -421,7 +518,9 @@ export function migrateNet(net: NetData, seed: (kind: AgentKind) => Float32Array
         trace.set(b.trace.subarray(src, src + m.len), dst);
       }
     }
-    return { ...b, chem, plastic, trace };
+    const out = { ...b, chem, plastic, trace };
+    for (const name of missingScalars) out[name] = seedTrait ? seedTrait(b.kind, name) : NaN;
+    return out;
   });
   return {
     net: {
@@ -430,6 +529,7 @@ export function migrateNet(net: NetData, seed: (kind: AgentKind) => Float32Array
       layout: currentLayout(),
       segments: CHEM_SEGMENTS.map((s) => ({ ...s })),
       plasticAt: PLASTIC_BASE,
+      scalars: [...SCALAR_FIELDS],
     },
     notes: c.notes,
   };
@@ -468,12 +568,13 @@ export function encodeNetAs(
   segments: readonly ChemSegment[],
   plasticAt: number,
   meta: NetMeta = {},
+  scalarFields: readonly ScalarField[] = SCALAR_FIELDS,
 ): Uint8Array {
   const n = net.bodies.length;
   const w = net.wires.length;
   const plan: Omit<Section, 'offset'>[] = [
     { name: 'pose', type: 'f64', count: n * POSE_FIELDS.length, stride: POSE_FIELDS.length, fields: POSE_FIELDS },
-    { name: 'scalar', type: 'f64', count: n * SCALAR_FIELDS.length, stride: SCALAR_FIELDS.length, fields: SCALAR_FIELDS },
+    { name: 'scalar', type: 'f64', count: n * scalarFields.length, stride: scalarFields.length, fields: scalarFields },
     { name: 'critic', type: 'f64', count: n * L.critic, stride: L.critic },
     { name: 'prevValue', type: 'f64', count: n, stride: 1 },
     { name: 'h', type: 'f64', count: n * L.state, stride: L.state },
@@ -545,8 +646,8 @@ export function encodeNetAs(
     pose[i * 3] = b.x;
     pose[i * 3 + 1] = b.y;
     pose[i * 3 + 2] = b.heading;
-    const so = i * SCALAR_FIELDS.length;
-    for (let k = 0; k < SCALAR_FIELDS.length; k++) scalar[so + k] = b[SCALAR_FIELDS[k]];
+    const so = i * scalarFields.length;
+    for (let k = 0; k < scalarFields.length; k++) scalar[so + k] = b[scalarFields[k]];
     ancestry[i * 2] = b.born;
     ancestry[i * 2 + 1] = b.lineage;
     chem.set(b.chem, i * L.chem);
@@ -651,21 +752,38 @@ export function decodeNet(input: Uint8Array): NetData {
   const ancestry = i32('ancestry');
   const wire = i32('wire');
 
+  /*
+   * By the names the section declares, not by fixed index. `storedScalars`
+   * has the whole argument; the short version is that the list is append-only
+   * and a blob written before a field existed is one row narrower, so reading
+   * it at this build's width shifts every body after the first.
+   *
+   * A field the blob does not carry reads NaN, loudly, and `migrateNet` is
+   * what seeds it — the same division of labour the genome's segment map has.
+   */
+  const scalarSection = need('scalar');
+  const scalarNames = storedScalars(header);
+  const scalarStride = scalarSection.stride;
+  const scalarAt = new Map(scalarNames.map((name, k) => [name, k]));
+  const scalarOf = (i: number, name: ScalarField): number => {
+    const k = scalarAt.get(name);
+    return k === undefined ? NaN : scalar[i * scalarStride + k];
+  };
+
   const bodies: NetBody[] = [];
   for (let i = 0; i < header.bodies; i++) {
-    const so = i * SCALAR_FIELDS.length;
     bodies.push({
       kind: CODE_KIND[kind[i]],
       x: pose[i * 3],
       y: pose[i * 3 + 1],
       heading: pose[i * 3 + 2],
-      extra: scalar[so],
-      requestDecay: scalar[so + 1],
-      energyCap: scalar[so + 2],
-      debtCap: scalar[so + 3],
-      rescueTo: scalar[so + 4],
-      assort: scalar[so + 5],
-      adenylate: scalar[so + 6],
+      extra: scalarOf(i, 'extra'),
+      requestDecay: scalarOf(i, 'requestDecay'),
+      energyCap: scalarOf(i, 'energyCap'),
+      debtCap: scalarOf(i, 'debtCap'),
+      rescueTo: scalarOf(i, 'rescueTo'),
+      assort: scalarOf(i, 'assort'),
+      adenylate: scalarOf(i, 'adenylate'),
       born: ancestry[i * 2],
       lineage: ancestry[i * 2 + 1],
       chem: chem.subarray(i * L.chem, (i + 1) * L.chem),
@@ -692,5 +810,6 @@ export function decodeNet(input: Uint8Array): NetData {
     layout: { ...L },
     segments: header.segments?.map((s) => ({ ...s })),
     plasticAt: header.plasticAt,
+    scalars: [...scalarNames],
   };
 }

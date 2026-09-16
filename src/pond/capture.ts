@@ -1,5 +1,5 @@
 import { CHEM_LEN, CRITIC_LEN, PLASTIC_LEN, STATE_DIMS, TASTE } from '../chem-layout.ts';
-import { refreshReadsField, seedChem } from '../agents.ts';
+import { refreshReadsField, seedChem, seedTraits } from '../agents.ts';
 import { formatNet } from '../net-text.ts';
 import type { Params } from '../params.ts';
 import { TRAIT_KEYS } from '../rewrite.ts';
@@ -235,7 +235,11 @@ function captureComponent(sim: Sim, ids: number[], wires: GraphWire[]): Captured
  * was dropped; empty for a net that was already current.
  */
 export function prepareNet(net: NetData, params: Params): { net: NetData; notes: string[] } {
-  return migrateNet(net, (kind) => seedChem(kind, params));
+  return migrateNet(
+    net,
+    (kind) => seedChem(kind, params),
+    (kind, field) => seedTraits(kind, params)[field],
+  );
 }
 
 export interface PlantOptions {

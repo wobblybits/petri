@@ -1360,7 +1360,8 @@ export function createAgent(
   mix ^= mix >>> 13;
   mix = Math.imul(mix, 3266489917) >>> 0;
   mix ^= mix >>> 16;
-  const pool = params.adenylate;
+  const traits = seedTraits(kind, params);
+  const pool = traits.adenylate;
   store.adenylate[slot] = pool;
   // Part charged, and not all of it: a pool that starts full has no ADP for
   // the autocatalytic step to work on and the pathway never lights.
@@ -1383,7 +1384,7 @@ export function createAgent(
   agent.csCos = 1;
   agent.csSin = 0;
   agent.chem.set(seedChem(kind, params));
-  agent.extra = 0;
+  agent.extra = traits.extra;
   agent.request = 0;
   // Phenotype, seeded so frame zero is right; `updateState` rewrites it from
   // `F` and `f0` every frame after that. The locomotion head gets the same
@@ -1395,15 +1396,50 @@ export function createAgent(
   store.cruise[slot] = params.stepSpeed;
   store.turn[slot] = params.turnRate;
   agent.recovering = false;
-  agent.requestDecay = params.requestDecay;
-  agent.energyCap = extraCapFor(kind, params.eraCapRatio);
-  agent.debtCap = params.debtCap;
-  agent.rescueTo = params.rescueTo;
-  agent.assort = params.assortBias;
+  agent.requestDecay = traits.requestDecay;
+  agent.energyCap = traits.energyCap;
+  agent.debtCap = traits.debtCap;
+  agent.rescueTo = traits.rescueTo;
+  agent.assort = traits.assort;
   agent.transportThrust = params.transportThrust;
   agent.transportRecoil = params.transportRecoil;
   agent.transportQuantum = params.transportQuantum;
   return agent;
+}
+
+/**
+ * The heritable scalars a fresh body of this kind carries.
+ *
+ * One table, read by the two places that need it: `createAgent`, and the net
+ * migration when it meets a blob written before a scalar existed. It used to
+ * live only in `createAgent`, so the migration had nothing to seed from and
+ * a missing scalar arrived as whatever the decoder happened to read — see
+ * `storedScalars` in `pond/net-blob.ts` for what that cost.
+ *
+ * `extra` is here because the blob carries it, and it is zero: a planted body
+ * is given the tank the blob recorded, and a body whose blob did not record
+ * one starts empty rather than fed.
+ */
+export interface SeededTraits {
+  extra: number;
+  requestDecay: number;
+  energyCap: number;
+  debtCap: number;
+  rescueTo: number;
+  assort: number;
+  adenylate: number;
+}
+
+export function seedTraits(kind: AgentKind, params: Params): SeededTraits {
+  return {
+    extra: 0,
+    requestDecay: params.requestDecay,
+    energyCap: extraCapFor(kind, params.eraCapRatio),
+    debtCap: params.debtCap,
+    rescueTo: params.rescueTo,
+    assort: params.assortBias,
+    adenylate: params.adenylate,
+  };
 }
 
 export function portAxis(agent: Agent, slot: PortSlot): Vec2 {
