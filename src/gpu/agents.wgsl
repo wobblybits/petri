@@ -6,7 +6,15 @@
  * corners come from vertex_index) per instance, billboarded and rotated to
  * the body's heading, then clipped to a circle or a triangle in the
  * fragment shader depending on SHAPE — Era is round, Con and Dup are the
- * same triangle Canvas2D draws them as, just simplified.
+ * same triangle Canvas2D draws them as.
+ *
+ * Exactly the same, not a stand-in. The quad is `boundRadius` across, so the
+ * glyph constants below are `triangleLocal(1)` and `ERA_RADIUS` divided by
+ * that bound. They used to be eyeballed — a triangle 19% longer and 22%
+ * fatter than the canvas one, and an Era circle 15% too wide — so the whole
+ * population changed size as the camera crossed the LOD line, which reads as
+ * the bodies moving apart. `render.test.ts` pins these against the geometry
+ * in `agents.ts`.
  *
  * Instance layout, 9 floats (36 bytes) per body:
  *   [0] x, [1] y (world), [2] radius (world units), [3] heading (radians),
@@ -78,9 +86,12 @@ fn edgeDist(a: vec2f, b: vec2f, p: vec2f) -> f32 {
 
 // A triangle pointing along local +X (heading's own direction, since the
 // vertex stage rotates the quad by heading before this UV space is reached).
-const TRI_TIP = vec2f(1.0, 0.0);
-const TRI_BACK_L = vec2f(-0.7, 0.75);
-const TRI_BACK_R = vec2f(-0.7, -0.75);
+// `triangleLocal(1)` over `boundRadius`'s 1.12: 1.05/1.12, 0.55/1.12, 0.82/1.12.
+const TRI_TIP = vec2f(0.9375, 0.0);
+const TRI_BACK_L = vec2f(-0.4910714, 0.7321429);
+const TRI_BACK_R = vec2f(-0.4910714, -0.7321429);
+/** ERA_RADIUS over its own bound, ERA_RADIUS + 1.2: 8/9.2. */
+const ERA_UV = 0.8695652;
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
@@ -96,11 +107,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     edge = smoothstep(-0.08, 0.0, d);
   } else {
     let r = length(in.uv);
-    if (r > 1.0) {
+    if (r > ERA_UV) {
       discard;
     }
     // A soft 1px-ish edge instead of a hard-aliased circle.
-    edge = 1.0 - smoothstep(0.85, 1.0, r);
+    edge = 1.0 - smoothstep(0.85 * ERA_UV, ERA_UV, r);
   }
   let a = in.color.a * edge;
   // Premultiplied: the canvas is configured alphaMode: 'premultiplied', and

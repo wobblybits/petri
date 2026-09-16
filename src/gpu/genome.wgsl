@@ -21,21 +21,24 @@ const IN_DIMS: u32 = 7u;
 // chem-layout.ts, derived the same way and in the same order.
 const EMIT: u32 = 0u;
 const TASTE: u32 = 4u;
-const E_OUT: u32 = 8u;
-const T_OUT: u32 = 24u;
-const W_IN: u32 = 40u;
-const W_SELF: u32 = 68u;
-const W_NET: u32 = 84u;
-const B_STATE: u32 = 100u;
+// The recurrent core first, so that everything a body can learn is one
+// contiguous run from `W_IN` to the end of `G_BASE`; the heads follow it.
+const W_IN: u32 = 8u;
+const W_SELF: u32 = 36u;
+const W_NET: u32 = 52u;
+const B_STATE: u32 = 68u;
+const E_OUT: u32 = 72u;
+const T_OUT: u32 = 88u;
 const F_OUT: u32 = 104u;
 const F_BASE: u32 = 112u;
 const P_OUT: u32 = 114u;
 const P_BASE: u32 = 122u;
 const L_OUT: u32 = 124u;
 const L_BASE: u32 = 132u;
-// The gait head sits past the chemistry genes, at the end of the genome.
-const G_OUT: u32 = 135u;
-const G_BASE: u32 = 139u;
+const G_OUT: u32 = 134u;
+const G_BASE: u32 = 138u;
+// `ksg` is the first gene past the learnable run, and the chemistry genes
+// follow it.
 // `chem-layout.ts`'s GAIT_ANCHOR_MAX, transcribed with the offsets above.
 // The transmission and gate vectors past it are plain genes, not heads, so
 // the shader neither computes nor carries them; `Sim.advanceGait` reads them

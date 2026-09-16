@@ -126,17 +126,18 @@ describe('the genome shader matches the genome layout', () => {
   it('reads inside the genome it is given', () => {
     /*
      * The shader stops at the gait head. `G` is the last block it reads, and
-     * everything past it — the transmission and gate vectors — is a plain
-     * gene the host reads straight off `chem`, so the assertion is that the
-     * shader's furthest read is where those begin.
+     * everything past it is a plain gene the host reads straight off `chem`,
+     * so the assertion is that the shader's furthest read is where those
+     * begin: first `ks`, which the harvest reads, then the transmission and
+     * gate vectors.
      *
-     * `ks` is the one chemistry gene left between the locomotion heads and the
-     * gait's: the eight expression rows that used to sit here are gone, and it
-     * is a plain gene the host reads inside the harvest.
+     * The heads run to `g0` without a gap, which is what makes them one
+     * learnable block with the recurrent core: a plain gene caught in the
+     * middle of that run would be a gene that moves with the body's mood.
      */
-    expect(L_BASE + 2).toBe(KS_BASE);
-    expect(KS_BASE).toBeLessThan(G_OUT);
-    expect(G_BASE + 1).toBe(TX_BASE);
+    expect(L_BASE + 2).toBe(G_OUT);
+    expect(G_BASE + 1).toBe(KS_BASE);
+    expect(KS_BASE + 1).toBe(TX_BASE);
     expect(TX_BASE).toBeLessThan(CHEM_LEN);
   });
 });

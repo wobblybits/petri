@@ -229,6 +229,8 @@ describe('migration', () => {
     expect(c.notes).toEqual([
       `L moved ${at('L')} -> ${segment('L').at}`,
       `l0 moved ${at('l0')} -> ${segment('l0').at}`,
+      `G moved ${at('G')} -> ${segment('G').at}`,
+      `g0 moved ${at('g0')} -> ${segment('g0').at}`,
       `ksg moved ${at('ksg')} -> ${segment('ksg').at}`,
     ]);
     const { net: now } = prepareNet(decodeNet(blob), params);

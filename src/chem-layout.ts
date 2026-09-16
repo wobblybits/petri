@@ -125,18 +125,24 @@ export const SENSE_SCALE = 4.3;
  */
 export const EMIT = 0;
 export const TASTE = 4;
-/** `E`, state -> emit. Row-major by channel: `E_OUT + c * STATE_DIMS + d`. */
-export const E_OUT = 8;
-/** `T`, state -> taste. Same shape. */
-export const T_OUT = E_OUT + 4 * STATE_DIMS;
+/*
+ * The recurrent core comes first and the heads follow it, so that everything
+ * a body can learn is one contiguous run: `Wx` through `g0`. The order used to
+ * be `E, T` then the core then the rest, which put two heads on the wrong side
+ * of the learned block and was the only reason a head could not learn.
+ */
 /** `Wx`, input -> state. Row-major by state dim: `W_IN + d * IN_DIMS + k`. */
-export const W_IN = T_OUT + 4 * STATE_DIMS;
+export const W_IN = 8;
 /** `Wh`, state -> state. This body's own memory. */
 export const W_SELF = W_IN + STATE_DIMS * IN_DIMS;
 /** `Wn`, mean neighbour state -> state. Its diagonal is a learned per-hop decay. */
 export const W_NET = W_SELF + STATE_DIMS * STATE_DIMS;
 /** `b`, the state bias. */
 export const B_STATE = W_NET + STATE_DIMS * STATE_DIMS;
+/** `E`, state -> emit. Row-major by channel: `E_OUT + c * STATE_DIMS + d`. */
+export const E_OUT = B_STATE + STATE_DIMS;
+/** `T`, state -> taste. Same shape. */
+export const T_OUT = E_OUT + 4 * STATE_DIMS;
 /**
  * `F`, state -> flocking, and its base. Two rows: align, then separate.
  *
@@ -152,7 +158,7 @@ export const B_STATE = W_NET + STATE_DIMS * STATE_DIMS;
  * `f0`. Everything downstream — the native flock packing, the JS pair force,
  * `state-hash` — keeps reading the same field and does not care.
  */
-export const F_OUT = B_STATE + STATE_DIMS;
+export const F_OUT = T_OUT + 4 * STATE_DIMS;
 export const F_BASE = F_OUT + 2 * STATE_DIMS;
 /** `P`, state -> transport. Two rows: thrust, then recoil. */
 export const P_OUT = F_BASE + 2;
@@ -196,23 +202,7 @@ export const CHEM_SPECIES = 4;
  * because the door led to a room that is no longer there.
  */
 
-/**
- * `ks`, the half-saturation of a body's uptake: one dimensionless gene. The
- * effective constant is `params.uptakeKs * ks`, the way `HEAD_SCALE` converts
- * every other dimensionless gene into its natural unit, and it seeds to 1 so a
- * fresh body uses the global.
- *
- * One rather than four, because a body eats one species. A plain heritable
- * gene rather than a head off `h`: affinity is a property of the transporter
- * itself — which one you have, not how much of it you made — so it has no
- * business moving with mood.
- *
- * `(vmax, ks)` do not dominate each other, so a fast grazer needing rich
- * ground and a scavenger living on scraps are both viable and neither wins
- * everywhere. `vmax` is global (`uptakeVmax`) now that `X` is gone, so what a
- * lineage owns of the pair is the affinity.
- */
-export const KS_BASE = L_BASE + 2;
+
 
 
 
@@ -241,8 +231,28 @@ export const KS_BASE = L_BASE + 2;
  *
  * Row-major, like every head here: `G_OUT + row * STATE_DIMS + d`.
  */
-export const G_OUT = KS_BASE + 1;
+export const G_OUT = L_BASE + 2;
 export const G_BASE = G_OUT + STATE_DIMS;
+
+/**
+ * `ks`, the half-saturation of a body's uptake: one dimensionless gene. The
+ * effective constant is `params.uptakeKs * ks`, the way `HEAD_SCALE` converts
+ * every other dimensionless gene into its natural unit, and it seeds to 1 so a
+ * fresh body uses the global.
+ *
+ * One rather than four, because a body eats one species. A plain heritable
+ * gene rather than a head off `h`: affinity is a property of the transporter
+ * itself — which one you have, not how much of it you made — so it has no
+ * business moving with mood — which is now also where it *sits*: the first
+ * gene past `g0`, so the learnable run ends cleanly and no gene that must
+ * not move is caught inside it.
+ *
+ * `(vmax, ks)` do not dominate each other, so a fast grazer needing rich
+ * ground and a scavenger living on scraps are both viable and neither wins
+ * everywhere. `vmax` is global (`uptakeVmax`) now that `X` is gone, so what a
+ * lineage owns of the pair is the affinity.
+ */
+export const KS_BASE = G_BASE + 1;
 
 /**
  * `Tx`, the transmission vector, and `Gx`, the gate vector: one gene per
@@ -263,7 +273,7 @@ export const G_BASE = G_OUT + STATE_DIMS;
  * mood, because the rate is `Tx[c] * (x_c - Gx[c])` and the concentration is
  * the swinging part — the impulse is in the chemistry, not in the gene.
  */
-export const TX_BASE = G_BASE + 1;
+export const TX_BASE = KS_BASE + 1;
 /**
  * Slots in `Tx` and `Gx`, the doc's four: A is the gut, then the reactor's
  * three. `TX_A` moves swallowed food down a wire, which is §6.1's Era pushing
@@ -336,21 +346,21 @@ export interface ChemSegment {
 export const CHEM_SEGMENTS: readonly ChemSegment[] = [
   { name: 'emit', at: EMIT, len: 4 },
   { name: 'taste', at: TASTE, len: 4 },
-  { name: 'E', at: E_OUT, len: 4 * STATE_DIMS },
-  { name: 'T', at: T_OUT, len: 4 * STATE_DIMS },
   { name: 'Wx', at: W_IN, len: STATE_DIMS * IN_DIMS },
   { name: 'Wh', at: W_SELF, len: STATE_DIMS * STATE_DIMS },
   { name: 'Wn', at: W_NET, len: STATE_DIMS * STATE_DIMS },
   { name: 'b', at: B_STATE, len: STATE_DIMS },
+  { name: 'E', at: E_OUT, len: 4 * STATE_DIMS },
+  { name: 'T', at: T_OUT, len: 4 * STATE_DIMS },
   { name: 'F', at: F_OUT, len: 2 * STATE_DIMS },
   { name: 'f0', at: F_BASE, len: 2 },
   { name: 'P', at: P_OUT, len: 2 * STATE_DIMS },
   { name: 'p0', at: P_BASE, len: 2 },
   { name: 'L', at: L_OUT, len: 2 * STATE_DIMS },
   { name: 'l0', at: L_BASE, len: 2 },
-  { name: 'ksg', at: KS_BASE, len: 1 },
   { name: 'G', at: G_OUT, len: STATE_DIMS },
   { name: 'g0', at: G_BASE, len: 1 },
+  { name: 'ksg', at: KS_BASE, len: 1 },
   { name: 'Tx', at: TX_BASE, len: CHEM_SPECIES },
   { name: 'Gx', at: GX_BASE, len: CHEM_SPECIES },
   { name: 'Sw', at: SW_BASE, len: SPECIES_W },
@@ -373,7 +383,7 @@ export const CHEM_SEGMENTS: readonly ChemSegment[] = [
  * other number in this file; if a matrix moves, this moves with it.
  */
 export const PLASTIC_BASE = W_IN;
-export const PLASTIC_LEN = F_OUT - W_IN;
+export const PLASTIC_LEN = E_OUT - W_IN;
 
 /**
  * The critic: a linear readout of `h` that predicts the cost this body is

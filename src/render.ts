@@ -68,7 +68,7 @@ export function buildFarInstances(sim: Sim, out: Float32Array, kindColors: boole
     const slot = agent.slot;
     const kind = agent.kind;
     const extra = store.extra[slot];
-    const rgb = agentFillRgb(kind, extra, kindColors);
+    const rgb = agentFillRgb(kind, extra, kindColors, store.debtCap[slot], store.energyCap[slot]);
     out[base + 0] = store.x[slot];
     out[base + 1] = store.y[slot];
     out[base + 2] = boundRadius(agent);
@@ -293,9 +293,26 @@ export const KIND_BW_RGB: Record<AgentKind, Rgb> = {
   con: [0xf4, 0xf4, 0xf4],
 };
 
-/** Kind hue (energy as saturation) or the grayscale fill, matching drawAgent. */
-export function agentFillRgb(kind: AgentKind, extra: number, kindColors: boolean): Rgb {
-  return kindColors ? kindFillRgb(kind, extra) : KIND_BW_RGB[kind];
+/**
+ * Kind hue (energy as saturation) or the grayscale fill, matching drawAgent.
+ *
+ * `floor` and `cap` are the body's own `debtCap` and `energyCap`, because
+ * saturation means "how full is this body" and full is a gene. Leaving them
+ * defaulted reads a body against the population's constants instead of its
+ * own, and the two caps range over 0.625..2.5 and -2.5..-0.05 — so a body
+ * whose span is twice the default reads full when it is three-quarters, and
+ * one that is deeper in debt than `EXTRA_FLOOR` reads dead grey when it is
+ * not. That was the FAR tier's colour until it was given the same two
+ * numbers `drawAgent` has always passed.
+ */
+export function agentFillRgb(
+  kind: AgentKind,
+  extra: number,
+  kindColors: boolean,
+  floor = EXTRA_FLOOR,
+  cap = EXTRA_CAP,
+): Rgb {
+  return kindColors ? kindFillRgb(kind, extra, floor, cap) : KIND_BW_RGB[kind];
 }
 
 const KIND_HSL: Record<AgentKind, Hsl> = {
