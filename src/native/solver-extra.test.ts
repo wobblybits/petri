@@ -363,6 +363,41 @@ describe('native WASM solver extras', () => {
     expect(Math.hypot(e1.x - e0.x, e1.y - e0.y)).toBeGreaterThan(2);
   });
 
+  /**
+   * The Era pair above exercises `ERA_R`; this one exercises `TRI_DISC_R`,
+   * which is the only constant in `native/solver.c` that is a *product* of
+   * two TS ones — `agentSize('con') * TRI_DISC_RATIO`, typed out by hand. A
+   * disc radius the host and the solver disagree about does not fail loudly:
+   * with the pre-2026-09 value the suite did not go red, it hung.
+   */
+  it('disc-pushes two FAR cons at the radius discRadius gives them', async () => {
+    const native = new NativeSolver();
+    expect(await native.init(), native.lastError).toBe(true);
+    const params = fixedParams();
+    const h = 1 / 60 / 8;
+    // Inside the disc keep (2 * discRadius + 2 * SKIN) and outside the Era
+    // one, so a solver still using ERA_R would not push at all.
+    const c0 = createAgent(1, 'con', 0, 0, 0.3, params);
+    const c1 = createAgent(2, 'con', 21, 0, 2.1, params);
+    expect(discRadius(c0) + discRadius(c1) + SKIN * 2).toBeGreaterThan(21);
+    packAgent(native, 0, c0, false);
+    packAgent(native, 1, c1, false);
+
+    const c0Ts = cloneAgent(c0);
+    const c1Ts = cloneAgent(c1);
+    solveDiscPair(c0Ts, c1Ts, h);
+    expect(Math.abs(c0Ts.x - c0.x), 'the JS reference moved it').toBeGreaterThan(1e-3);
+
+    native.nearContacts(2, 0, h);
+    unpackAgent(native, 0, c0);
+    unpackAgent(native, 1, c1);
+    // Discs carry no torque and SAT is not running, so this is translation
+    // only — and a heading either side would have moved under SAT.
+    expect(native.hitCount()).toBe(0);
+    expectPose(c0, c0Ts, 2e-3);
+    expectPose(c1, c1Ts, 2e-3);
+  });
+
   it('stepNear 8 substeps separates two overlapping cons beyond bound radii', async () => {
     const native = new NativeSolver();
     expect(await native.init(), native.lastError).toBe(true);

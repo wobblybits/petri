@@ -24,6 +24,15 @@ describe('world bound shape', () => {
     params.spawnInterval = 0;
     params.upkeep = 0;
     params.ambientEnergy = 0;
+    /*
+     * And no reactor, or there is nothing to measure. This is a geometry
+     * bench — where do free bodies end up in a bounded world — and it runs on
+     * a barren dish by design. The reactor is fed by eating, so on a dish with
+     * nothing to eat every body runs its primer out and the death clock takes
+     * it inside half a minute: the run ended with one body of the thirty this
+     * wanted to place. `gait.test.ts` is the file that owns this dial.
+     */
+    params.metabolicRate = 0;
     params.snapRadius = 0;
     params.rewriteDuration = 0;
     const sim = new Sim(800, 600);

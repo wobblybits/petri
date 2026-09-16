@@ -6688,10 +6688,6 @@ export class Sim {
          * the previous frame's. The eligibility has to name the number the
          * output was actually computed from.
          */
-        const hc0 = H[ho];
-        const hc1 = H[ho + 1];
-        const hc2 = H[ho + 2];
-        const hc3 = H[ho + 3];
         let row = 0;
         for (let hi = 0; hi < HEAD_TABLE.length; hi++) {
           const head = HEAD_TABLE[hi];
@@ -6701,7 +6697,7 @@ export class Sim {
             const mo = head.at + r * S;
             for (let d = 0; d < S; d++) {
               const ti = plo + mo + d;
-              const tr = lam * TRACE[ti] + xr * (d === 0 ? hc0 : d === 1 ? hc1 : d === 2 ? hc2 : hc3);
+              const tr = lam * TRACE[ti] + xr * H[ho + d];
               TRACE[ti] = tr;
               const base = CHEM[gW + mo + d];
               let w = PLASTIC[ti] + step * tr;

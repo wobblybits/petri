@@ -458,9 +458,16 @@ in step across a dispatch, and a body that migrates between the two paths
 mid-run sees the same sequence.
 
 Measured, three seeds at 120 s: mean |learned delta| over the head block is 0
-with `learnExplore` at 0, 0.172 at 0.05, 0.332 at 0.15 — the block is live and
-the dial controls it. Population and founder lines are level with a
-no-learning pond at 0.05 and start to cost at 0.15. Whether it helps a body
+with `learnExplore` at 0, 0.143 at the shipped 0.02, 0.172 at 0.05, 0.332 at
+0.15 — the block is live and the dial controls it. Population and founder lines are level with a
+no-learning pond at 0.05 and start to cost at 0.15. It ships at 0.02 for a
+different reason: above about 0.03 the jitter walks a body off a gradient it
+was following, and `scent-steering.perf.test.ts` — twenty-four bodies climbing
+to a source on a barren dish — closes 3%, 1%, 3% and **-2%** at 0.01, 0.02,
+0.03 and 0.05 against a bar of 4%. That rig is the worst case for the rule by
+construction: with nothing to eat, nothing a body does improves its tank, so
+the critic's error is a standing negative and the perturbation anti-reinforces
+whatever the body was doing, including the taste it was seeded with. Whether it helps a body
 *forage* is **not resolvable**: `forage_ratio` runs 0.34 to 0.93 across seeds
 in every arm including no-learning, which is far wider than any difference
 between them. That ratio is below 1 in every arm, so nothing in this pond

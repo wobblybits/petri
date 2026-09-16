@@ -1009,6 +1009,27 @@ export interface Params {
    * `transportRecoil` and the *receiver's* own `transportThrust`, so breeding
    * a strong low-thrust pump against a high-thrust receiver can drift a
    * net's stroke somewhere neither parent line swims alone.
+   *
+   * **Stays at 0, and the measurement is the reason rather than an oversight —
+   * but it is a weak reason.** Three seeds at 120 s on the conservative patchy
+   * dish:
+   *
+   *     thrust    0        0.25            0.5
+   *     bodies  621        332             490
+   *      seeds  603/613/647  291/239/467   287/297/887
+   *      lines  192        193             209
+   *
+   * Nothing is resolved there. The spread *within* an arm is wider than the
+   * gap between arms — 287 to 887 inside one of them — which is this pond's
+   * standing lesson about three seeds, and the founder lines, which are
+   * steadier, barely move at all. So this is not "0 is better"; it is "0 is
+   * where it was, and nothing here is evidence for moving it".
+   *
+   * What makes 0 a *seed* rather than a ban is that `P` is inside the learned
+   * block now. The base is what a fresh body has; the row off `h` moves within
+   * a life, so a lineage in a pond where running away from its own supply pays
+   * can find its own thrust without every other body paying for it, and
+   * without a sweep having to resolve a global first.
    */
   transportThrust: number;
   /**
@@ -1044,11 +1065,25 @@ export interface Params {
    * worth keeping. Without it every head row would move on the same sign and
    * no body could discover that it should swim faster while turning less.
    *
-   * Small on purpose. The heads are dimensionless and `HEAD_SCALE` converts
-   * them, so 0.05 is about 2 px/s on a 38 px/s cruise and about 0.4 on an
-   * alignment gain of 5.5 — visible as jitter, far under the swing the pond's
-   * own `swimNoise` already puts on a heading, and enough for a correlation to
-   * find over a trace window.
+   * Small on purpose, and smaller than it started. The heads are dimensionless
+   * and `HEAD_SCALE` converts them, so 0.02 is about 0.8 px/s on a 38 px/s
+   * cruise and about 0.16 on an alignment gain of 5.5.
+   *
+   * It shipped at 0.05 for one afternoon, where the pond was indifferent —
+   * population and founder lines level with a no-learning arm over three seeds
+   * — but `scent-steering.perf.test.ts` was not. Twenty-four bodies climbing a
+   * gradient on a barren dish over ten seconds closed, against a bar of 4%:
+   *
+   *     explore   0     0.01   0.02   0.03   0.05
+   *     closed   pass    3%     1%     3%    -2%
+   *
+   * Above 0.03 the jitter is enough to walk a body off a gradient it was
+   * following, and the rig is the worst case for the rule by construction:
+   * with `ambientEnergy` at 0 nothing a body does improves its tank, so the
+   * critic's error is a standing negative and the perturbation anti-reinforces
+   * whatever the body was doing — including the taste it was seeded with.
+   * Turned down rather than argued with, which is what this project does with
+   * a mechanism that costs a behaviour it already had.
    */
   learnExplore: number;
   /**
@@ -1196,14 +1231,25 @@ export interface Params {
    * are in their own units and outside the books, so that food leaves them.
    * At 1 it lands back on the ground the body is standing on.
    *
-   * **0 is today, so the reactor is a sink.** 1 makes bodies conservative — no
-   * reaction a body runs creates or destroys matter — which is the invariant
-   * that makes selection honest, and `docs/metabolism-spec.md` §3.2 says so
-   * while the dial says otherwise. It used to lay this down as the body's own
-   * *excretion mix*, which for a Con is signal rather than food, and that is
-   * why turning it on cost the pond; nothing excretes now and it returns as
-   * ground. Measured over three seeds at 90 s it is no longer a cost and no
-   * longer a clear gain either — the seed spread is wider than the effect.
+   * **1, so a body is conservative: no reaction it runs creates or destroys
+   * matter.** That is the invariant that makes selection honest, and
+   * `docs/metabolism-spec.md` §3.2 has always said so while the dial said
+   * otherwise. It shipped at 0 — the reactor a sink, the pond quietly bleeding
+   * matter — because turning it on used to lay the food down as the body's own
+   * *excretion mix*, which for a Con is signal rather than food. Nothing
+   * excretes now and it returns as ground.
+   *
+   * Measured three seeds at 120 s on the patchy dish, against 0:
+   *
+   *     bodies 327 -> 621    lines 187 -> 192
+   *     forage 0.65 -> 1.19  wires/body 0.86 -> 1.03
+   *
+   * Every seed above every seed of the other arm, and `forage_ratio` crossing
+   * 1 for the first time in anything measured here — bodies standing on
+   * better-than-average ground. Read that last one carefully: a body that puts
+   * its reactor's food back under itself makes its own cell rich, so some of
+   * the crossing is the deposit rather than the finding. The population and
+   * the lineage count are not open to that reading.
    */
   upkeepExcrete: number;
   /**
@@ -1419,7 +1465,7 @@ export function defaultParams(): Params {
     transportThrust: 0,
     learnRate: 0.02,
     learnCritic: 0.2,
-    learnExplore: 0.05,
+    learnExplore: 0.02,
     learnReward: 0.5,
     learnTrace: 0.99,
     learnDiscount: 0.99,
@@ -1430,7 +1476,7 @@ export function defaultParams(): Params {
     hillN: 1,
     yDirect: 1,
     yEra: 1,
-    upkeepExcrete: 0,
+    upkeepExcrete: 1,
     bodyValue: REWRITE_SHARE,
     eraCapRatio: ERA_CAP_RATIO,
     eraUpkeepRatio: ERA_UPKEEP_RATIO,
