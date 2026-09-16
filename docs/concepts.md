@@ -39,10 +39,13 @@ not also be asked to do. Nothing else belongs here; measurements go in
   the four channels are for, and it is why there is no longer a fork between a
   minted pond and a conserving one.
 - Memory
-- Learning. Lives in the three-factor rule on the state matrices: a TD error
-  from a per-body critic, times an eligibility trace on `phi'(v) * pre`. Only
-  `Wx`, `Wh`, `Wn` and `b` move within a life; every other gene moves by
-  breeding alone.
+- Learning. Lives in two rules sharing one TD error from a per-body critic.
+  On the state matrices it is the three-factor rule: `delta` times an
+  eligibility trace on `phi'(v) * pre`. On the output heads it is node
+  perturbation: each of a body's fifteen head outputs is displaced by its own
+  reproducible draw, and the trace credits *that* draw. Everything from `Wx`
+  to `g0` moves within a life — the recurrent core and every head — and every
+  other gene moves by breeding alone.
 
   **The teacher is the one designed objective in this pond, and it is said out
   loud here because everything else is emergent.** There is no fitness term and
@@ -54,16 +57,32 @@ not also be asked to do. Nothing else belongs here; measurements go in
   sits at exactly zero reward) with its *rate* (the change per second, which
   still reads for a body at its cap). It ships at 0.5, both.
 
-  **What that teacher can reach is one scalar wide.** `h` only becomes
-  behaviour through the six head matrices, which seed to zero with one
-  exception, so a fresh body's whole state-dependent behaviour is
-  `IN_DEMAND -> h[0] -> taste(ground)`. Widening that is the open question
-  under this heading, and it is not a matter of turning a learning rate up:
-  teaching a head needs a per-channel error the scalar reward does not supply,
-  and the mechanism that would work — perturb the head's output, correlate the
-  noise with the reward — is a policy-gradient estimator rather than an
-  extension of this rule. `inheritLearned` ships at 1, so what a body learns is
-  written into its children's genome: this pond is Lamarckian, deliberately.
+  **What that teacher can reach was one scalar wide, and the heads are how it
+  widened.** `h` only becomes behaviour through the six head matrices, which
+  seed to zero but for two entries, so a fresh body's whole state-dependent
+  behaviour is `IN_DEMAND -> h[0] -> taste(ground)` and
+  `IN_FULL -> h[1] -> flock alignment`. The rest used to be unreachable:
+  measured on a grown pond, four of the six heads sat at the mutation floor for
+  their whole lives, because an undirected walk around zero is unbiased and
+  half the population has the wrong sign at all times.
+
+  Teaching a head needs a per-channel error the scalar reward does not supply,
+  so what supplies it is the perturbation: the body swam at `head + xi` this
+  frame, and if things then went better than the critic predicted, the weights
+  that produced that displacement are the ones to keep. That is a
+  policy-gradient estimator rather than an extension of the Hebbian rule, and
+  it is why there are two rules here rather than one. `learnExplore` is how
+  hard a body jitters itself, and at zero the heads freeze and learning goes
+  back to the core alone.
+
+  **What is still open under this heading is whether any of it helps.** The
+  heads demonstrably move. Whether a pond that learns forages better than one
+  that does not is not resolvable at three seeds — `forage_ratio` varies more
+  between seeds of the same arm than between arms — and it sits below 1 in
+  every arm, which says no pond here forages yet.
+
+  `inheritLearned` ships at 1, so what a body learns is written into its
+  children's genome: this pond is Lamarckian, deliberately.
 
 - Regulation: behaviour that follows state without learning
 - Death

@@ -368,6 +368,7 @@ universe" and "the learnable genetics". This pond's split, against that one:
 | Inflow `J_i` | per-agent | `intake` | **per-agent** |
 | Transmission rates `α_c`, `β_d` | per-agent | `metabolicDiffuse` | **global** |
 | Learning rate `μ_i` | per-agent | `learnRate` | **global** |
+| Exploration `σ` | — | `learnExplore` | **global** |
 | Saturation `σ`, stoichiometry `S`, decays `d` | global | `metabolicSigma`, the reaction table, `metabolicDecay` | global |
 | Reward window `τ` | global | `learnTrace`, `learnDiscount` | global |
 | Traction `γ`, springs `K`, `L` | global | `gaitSwell`, `metabolicWork`, `springK` | global |
@@ -393,18 +394,21 @@ stays a law of the world.
 
 ### 6.2 The genome, in full
 
-148 floats, 19 segments. Everything here is inherited, mutated and clamped;
-`Wx`, `Wh`, `Wn` and `b` are also **learned within a life** — 64 floats at
-offset 40, and the only span that moves without breeding.
+154 floats, 21 segments. Everything here is inherited, mutated and clamped;
+the recurrent core **and every output head** are also **learned within a
+life** — 131 floats at offset 8, the only span that moves without breeding.
+The layout puts them in that order for exactly this reason, so the learnable
+span is one contiguous run and the learned delta is one add.
 
 | segment | floats | what it decides |
 |---|---:|---|
-| `emit`, `E` | 4 + 16 | what a body says, and how its state shapes that |
-| `taste`, `T` | 4 + 16 | what it seeks, and how its state shapes that |
-| `Wx`, `Wh`, `Wn`, `b` | 64 | the recurrent state `h`. **The learned block.** |
+| `emit`, `taste` | 4 + 4 | the two head bases outside the learned block: a voice budget that is renormalised every frame, and a lineage's standing preference |
+| `Wx`, `Wh`, `Wn`, `b` | 64 | the recurrent state `h` |
+| `E`, `T` | 16 + 16 | how its state shapes what it says and what it seeks |
 | `F`, `f0`, `P`, `p0`, `L`, `l0` | 30 | the locomotion heads |
-| `ksg` | 1 | uptake affinity — the whole of what a lineage owns about eating |
 | `G`, `g0` | 5 | the gait's anchor |
+| — | *131* | **the learned block**: `Wx` through `g0`, everything above but the two bases |
+| `ksg` | 1 | uptake affinity — the whole of what a lineage owns about eating. The first gene past the learned run, because affinity is which transporter you have and has no business moving with mood |
 | `Tx` | 4 | which species this body broadcasts |
 | `Gx` | 4 | how much it must hold before it broadcasts any |
 | `Sw`, `Gw` | 3 + 3 | **the phase of each actuator** — what mixture of B, C and D the stroke and the grip read |
@@ -415,20 +419,52 @@ Plus seven heritable scalars outside `chem`: `extra`, `requestDecay`,
 **Every segment has a reader** — checked one at a time after this session's
 cuts, the same way the parameter surface was.
 
-**But the learned block reaches behaviour through one scalar.** `Wx`, `Wh`,
-`Wn` and `b` are the only 64 floats that move within a life, and `h` only
-becomes behaviour through the six head matrices `E`, `T`, `F`, `P`, `L` and
-`G` — 60 floats which seed to **zero**, with exactly one exception. A seeded
-body's whole state-dependent behaviour is:
+**A fresh body's state reaches behaviour through two scalars, and learning
+can open the rest.** The six head matrices seed to **zero** with two
+exceptions, so a seeded body's whole state-dependent behaviour is:
 
-        IN_DEMAND  --Wx[0][6]=1-->  h[0]  --T[energy][0]=1.8-->  taste(ground)
+        IN_DEMAND  --Wx[0][6]=1-->  h[0]  --T[energy][0]--> taste(ground)
+        IN_FULL    --Wx[1][4]=2-->  h[1]  --F[align][1]---> flock alignment
 
-The neighbourhood's unmet need makes a body hungrier for ground, and that is
-the single channel lifetime learning has to act through until a lineage mutates
-another head entry off zero. A fresh pond learns into a bottleneck one scalar
-wide. That is a door rather than a bug — the bases seed from the sliders so a
-fresh body is exactly the constant it used to be — but it is worth knowing that
-the door is this narrow, because it bounds what any learning rule here can do.
+The neighbourhood's unmet need makes a body hungrier for ground; its own tank,
+centred so that half a tank is the slider, makes it shoal when fed and scatter
+when starving.
+
+The rest of the head block used to be unreachable. Measured on a grown pond,
+`E`, `P`, `L` and `G` sat at the mutation floor for their whole lives — mean
+0.007 to 0.013 against a drift sd of 0.04 — because an undirected walk around
+zero is unbiased and half the population has the wrong sign at all times. There
+was no ratchet, and the learner could only reshape `h` against a read-out fixed
+at birth.
+
+The heads learn now, which supplies the ratchet. Two rules share one delta:
+
+| | eligibility `e ← λe + …` | why |
+|---|---|---|
+| core (`Wx`, `Wh`, `Wn`, `b`) | `φ'(v_d) · x_k` | `φ'` is the gradient of `h_d` in that weight |
+| heads (`E`…`G`, bases) | `ξ_r · h_d` | a head is linear, so its `φ'` is 1 for every row — the same factor everywhere moves every head in lockstep on the critic's sign and can never find that cruise should rise while turn falls |
+
+`Δw = η · δ · e` in both, with `δ` the body's own TD error. `ξ_r` is the
+displacement actually added to output `r` this frame, scaled by `learnExplore`:
+the body swam at `head + ξ`, and if things then went better than the critic
+predicted, the weights that produced that displacement are the ones to keep.
+Correlating a perturbation with what followed it is **node perturbation**, the
+standard answer for a policy with a scalar reward and no target vector (Fiete &
+Seung 2006; Werfel, Xie & Seung 2005).
+
+`ξ` is a pure hash of (body, frame, output) rather than a stream, which is the
+only shape the host and `genome.wgsl` can share exactly: no RNG state to keep
+in step across a dispatch, and a body that migrates between the two paths
+mid-run sees the same sequence.
+
+Measured, three seeds at 120 s: mean |learned delta| over the head block is 0
+with `learnExplore` at 0, 0.172 at 0.05, 0.332 at 0.15 — the block is live and
+the dial controls it. Population and founder lines are level with a
+no-learning pond at 0.05 and start to cost at 0.15. Whether it helps a body
+*forage* is **not resolvable**: `forage_ratio` runs 0.34 to 0.93 across seeds
+in every arm including no-learning, which is far wider than any difference
+between them. That ratio is below 1 in every arm, so nothing in this pond
+forages yet.
 
 **Nothing in the genome is per-species any more except `Tx` and `Gx`.** `ks`
 was four affinities and is one; `X` and `x0` were eight reaction rows and are
