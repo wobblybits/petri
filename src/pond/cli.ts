@@ -64,7 +64,7 @@ run options
   --ground <spec>      uniform | patches[:n]        (default patches:24)
                        the same total mass, arranged differently. Sugar for
                        --set groundPatches=n, which a sweep can put on an axis
-                       `uniform` is the control, not the shipped dish
+                       uniform is the control, not the shipped dish
   --set <key>=<value>  override one Params field; repeatable
   --note <text>        free text on the run row
 
