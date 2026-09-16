@@ -23,7 +23,7 @@ import { CHEM_LEN, HEAD_SCALE, LEARN_STRIDE } from '../chem-layout.ts';
 /** Floats written per body: h(4), emit(4), taste(4), six heads. */
 const OUT_STRIDE = 19;
 /** 80 bytes: twenty f32/u32, and nothing here is a vec so nothing has to align. */
-const UNIFORM_BYTES = 80;
+const UNIFORM_BYTES = 96;
 /** Most learning rows read back in one frame. A frame that begins more
  *  rewrites than this leaves the rest marked for the next one. */
 const LEARN_READ_CAP = 64;
@@ -297,7 +297,7 @@ export class GenomeGpu {
     groundScale: number,
     energyCh: number,
     senseScale: number,
-    learn: { rate: number; critic: number; trace: number; discount: number; maxWeight: number; reward: number; dtInv: number },
+    learn: { rate: number; critic: number; trace: number; discount: number; maxWeight: number; reward: number; dtInv: number; explore: number; frame: number },
   ): Promise<boolean> {
     if (!this.submit(samples, n, nei, groundScale, energyCh, senseScale, learn)) return false;
     return this.collect();
@@ -311,7 +311,7 @@ export class GenomeGpu {
     groundScale: number,
     energyCh: number,
     senseScale: number,
-    learn: { rate: number; critic: number; trace: number; discount: number; maxWeight: number; reward: number; dtInv: number },
+    learn: { rate: number; critic: number; trace: number; discount: number; maxWeight: number; reward: number; dtInv: number; explore: number; frame: number },
   ): boolean {
     const device = this.device;
     if (!this.ready || !device || !this.pipeline) return false;
@@ -342,6 +342,10 @@ export class GenomeGpu {
       f32[16] = HEAD_SCALE.anchor;
       f32[17] = learn.reward;
       f32[18] = learn.dtInv;
+      f32[19] = learn.explore;
+      // The exploration key. Wrapped by `Sim` at `FRAME_WRAP` so it is exact
+      // in this `f32`, which is what lets the shader's hash match the host's.
+      f32[20] = learn.frame;
       device.queue.writeBuffer(this.uniform!, 0, u);
       device.queue.writeBuffer(this.hPrev!, 0, this.hData.buffer, this.hData.byteOffset, n * 4 * 4);
       device.queue.writeBuffer(

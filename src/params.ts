@@ -1032,6 +1032,26 @@ export interface Params {
   /** How fast the critic itself learns to predict. Its own delta rule. */
   learnCritic: number;
   /**
+   * How hard a body jitters its own head outputs so that it can learn them,
+   * in the heads' own dimensionless units. 0 freezes every head at whatever
+   * the genome says and learning goes back to the recurrent core alone.
+   *
+   * This is the exploration half of node perturbation, and it is not optional
+   * noise: it is the *signal* the head learning rule correlates against. Each
+   * of a body's fifteen outputs is displaced by its own reproducible draw
+   * (`exploreAt`), the eligibility trace remembers that draw against the state
+   * that produced it, and the critic's error says whether the displacement was
+   * worth keeping. Without it every head row would move on the same sign and
+   * no body could discover that it should swim faster while turning less.
+   *
+   * Small on purpose. The heads are dimensionless and `HEAD_SCALE` converts
+   * them, so 0.05 is about 2 px/s on a 38 px/s cruise and about 0.4 on an
+   * alignment gain of 5.5 — visible as jitter, far under the swing the pond's
+   * own `swimNoise` already puts on a heading, and enough for a correlation to
+   * find over a trace window.
+   */
+  learnExplore: number;
+  /**
    * What a body is taught by: the level of its tank, or the rate it is filling
    * at. 0 is all level, 1 is all rate.
    *
@@ -1399,6 +1419,7 @@ export function defaultParams(): Params {
     transportThrust: 0,
     learnRate: 0.02,
     learnCritic: 0.2,
+    learnExplore: 0.05,
     learnReward: 0.5,
     learnTrace: 0.99,
     learnDiscount: 0.99,
@@ -1510,6 +1531,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'transportQuantum', label: 'Transport quantum', min: 0, max: 1, step: 0.05 },
   { key: 'learnRate', label: 'Learn rate', min: 0, max: 0.02, step: 0.0005 },
   { key: 'learnCritic', label: 'Learn critic', min: 0, max: 0.2, step: 0.005 },
+  { key: 'learnExplore', label: 'Learn explore', min: 0, max: 0.4, step: 0.005 },
   { key: 'learnReward', label: 'Teacher: level -> rate', min: 0, max: 1, step: 0.05 },
   { key: 'learnTrace', label: 'Learn trace decay', min: 0.5, max: 0.995, step: 0.005 },
   { key: 'learnDiscount', label: 'Learn discount', min: 0.5, max: 0.995, step: 0.005 },

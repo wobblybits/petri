@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import shader from './genome.wgsl?raw';
 import {
   B_STATE, CHEM_LEN, EMIT, E_OUT, F_BASE, F_OUT, GAIT_ANCHOR_MAX,
-  G_BASE, G_OUT, KS_BASE, TX_BASE,
+  G_BASE, G_OUT, HEAD_ROWS, KS_BASE, TX_BASE,
   HEAD_SCALE, IN_DIMS, L_BASE, L_OUT,
   LEARN_CRITIC, LEARN_PREV_V, LEARN_STRIDE, LEARN_TRACE,
   P_BASE, P_OUT, PLASTIC_LEN, SENSE_SCALE, STATE_DIMS, TASTE, T_OUT, W_IN, W_NET, W_SELF,
@@ -61,6 +61,10 @@ describe('the genome shader matches the genome layout', () => {
       // The learning row is indexed by the same hand-copied constants and
       // carries the same hazard.
       PLASTIC_LEN, LEARN_TRACE, LEARN_CRITIC, LEARN_PREV_V, LEARN_STRIDE,
+      // Node perturbation draws one number per head output, and the shader
+      // unrolls `HEAD_TABLE` to spend them — so it has to agree about how many
+      // there are before it can agree about which is which.
+      HEAD_ROWS,
     };
     for (const [name, value] of Object.entries(want)) {
       expect(shaderConst(name), `genome.wgsl's ${name}`).toBe(value);
@@ -85,7 +89,7 @@ describe('the genome shader matches the genome layout', () => {
       'W_NET', 'B_STATE', 'F_OUT', 'F_BASE', 'P_OUT', 'P_BASE', 'L_OUT', 'L_BASE',
       'G_OUT', 'G_BASE',
       'OUT_STRIDE', 'PLASTIC_LEN', 'LEARN_TRACE', 'LEARN_CRITIC', 'LEARN_PREV_V', 'LEARN_PREV_FULL',
-      'LEARN_STRIDE',
+      'LEARN_STRIDE', 'HEAD_ROWS',
     ]);
     expect(declared.filter((d) => !known.has(d)), 'undocumented shader constant').toEqual([]);
   });
@@ -105,7 +109,8 @@ describe('the genome shader matches the genome layout', () => {
       'n', 'chemLen', 'senseScale', 'groundScale',
       'sCruise', 'sTurn', 'sAlign', 'sSep', 'sThrust', 'sRecoil', 'energyCh',
       'learnRate', 'learnCritic', 'learnTrace', 'learnDiscount', 'maxWeight',
-      'sAnchor', 'learnReward', 'dtInv', 'pad3',
+      'sAnchor', 'learnReward', 'dtInv', 'learnExplore', 'frame',
+      'pad0', 'pad1', 'pad2',
     ]);
     // A uniform buffer's size has to be a whole number of sixteen-byte
     // blocks, which is what the pads are for.

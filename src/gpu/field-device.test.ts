@@ -53,6 +53,17 @@ function pondParams(): Params {
    * times out of five, and "they agree that nothing happened" is not parity.
    */
   params.groundPatches = 0;
+  /*
+   * And no exploration. Every test here compares two implementations of the
+   * same field, and node perturbation displaces each body's heads by a draw
+   * scaled in `f64` on the host and `f32` on the device — identical draws,
+   * differing in the last bits once scaled, and then fed straight back into
+   * where the body swims. That is a divergence amplifier bolted to the thing
+   * under test, and it is not what the test is asking about. The precedent is
+   * the gait and the pair flock, pinned in the solver parity rigs for the same
+   * reason.
+   */
+  params.learnExplore = 0;
   return params;
 }
 

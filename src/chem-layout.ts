@@ -368,14 +368,31 @@ export const CHEM_SEGMENTS: readonly ChemSegment[] = [
 ];
 
 /**
- * The span of `chem` a body can change while it is alive: `Wx`, `Wh`, `Wn`
- * and `b`, which the layout above happens to put next to each other.
+ * The span of `chem` a body can change while it is alive: the recurrent core
+ * (`Wx`, `Wh`, `Wn`, `b`) **and every output head** (`E`, `T`, `F`, `P`, `L`,
+ * `G` with their bases), which the layout above puts next to each other for
+ * exactly this reason.
  *
- * Only the state matrices learn. They are the only weights with a local
- * gradient — `phi'` gives each one a defensible eligibility — while an
- * output head has no per-channel error signal to learn from, so teaching one
- * would need random feedback and that is a separate decision. Behaviour
- * still changes, because every head reads `h`.
+ * It used to be the core alone, and the argument was that only the state
+ * matrices have a local gradient — `phi'` gives each one a defensible
+ * eligibility — while an output head has no per-channel error to learn from.
+ * That argument was right about the gradient and wrong about the conclusion.
+ * Measured on a grown pond, four of the six heads sat at the mutation floor
+ * for their whole lives: the learner could reshape `h` all it liked against a
+ * map from `h` to behaviour that was fixed at birth and only ever drifted.
+ * Learning the state without learning the read-out is learning half a policy.
+ *
+ * What supplies the missing factor is `exploreAt`: each head output is
+ * perturbed by its own reproducible noise, and the eligibility correlates
+ * *that* noise with what the critic says happened next. See it there.
+ *
+ * `emit`'s and `taste`'s bases are the two things inside these heads that do
+ * *not* learn, and they are outside the run on purpose. `emit` is normalised
+ * to a simplex — a body's whole voice budget — so a learned delta on the base
+ * would be renormalised away every frame; `taste`'s base is the lineage's
+ * standing preference, which is what a learned delta is supposed to be
+ * measured against. `ksg` sits just past the run for the same kind of reason,
+ * written where it is defined.
  *
  * Contiguous, so the learned block and the eligibility trace are both flat
  * arrays indexed exactly as the genome indexes the same weights, and the
@@ -383,7 +400,71 @@ export const CHEM_SEGMENTS: readonly ChemSegment[] = [
  * other number in this file; if a matrix moves, this moves with it.
  */
 export const PLASTIC_BASE = W_IN;
-export const PLASTIC_LEN = E_OUT - W_IN;
+export const PLASTIC_LEN = KS_BASE - W_IN;
+
+/**
+ * The heads, in the order the genome lays them, as offsets *within* the
+ * learned block. `rows` is how many outputs each drives; `base` is where that
+ * head's biases start, or −1 when its base lives outside the block.
+ *
+ * One table rather than seven call sites, because three things have to agree
+ * about it exactly: which weight the state pass reads, which perturbation the
+ * output gets, and which eligibility the learner credits. `genome.wgsl`
+ * unrolls the same table and `genome-kernel.test.ts` checks that it did.
+ */
+export const HEAD_TABLE: readonly { at: number; rows: number; base: number }[] = [
+  { at: E_OUT - W_IN, rows: 4, base: -1 },
+  { at: T_OUT - W_IN, rows: 4, base: -1 },
+  { at: F_OUT - W_IN, rows: 2, base: F_BASE - W_IN },
+  { at: P_OUT - W_IN, rows: 2, base: P_BASE - W_IN },
+  { at: L_OUT - W_IN, rows: 2, base: L_BASE - W_IN },
+  { at: G_OUT - W_IN, rows: 1, base: G_BASE - W_IN },
+];
+
+/** How many head outputs one body drives, which is how many noises it needs. */
+export const HEAD_ROWS = HEAD_TABLE.reduce((n, h) => n + h.rows, 0);
+
+/**
+ * The exploration noise one head output gets this frame, in [-1, 1).
+ *
+ * A pure function of (body, frame, output) and not a stream, which is the
+ * only shape that can be identical on the CPU and inside `genome.wgsl`: there
+ * is no RNG state to keep in step, no buffer to carry across a dispatch, and
+ * a body that migrates between the two paths mid-run sees the same sequence.
+ * The hash is the `lowbias32` finalizer, whose multiplies are exact in `u32`
+ * on both sides — `Math.imul` here, native wrapping there — and the top 24
+ * bits are taken so the result is exact in `f32` too.
+ *
+ * Why a head needs noise at all: node perturbation. The three-factor rule on
+ * the recurrent core uses `phi'(v)` as its post-synaptic factor, which is the
+ * gradient of `h` with respect to the weight. A head is linear, so its
+ * equivalent factor is 1 — the same for every row — and every head in the body
+ * would then move in lockstep on the critic's sign, never able to find that
+ * cruise should rise while turn falls. Perturbing each output independently
+ * and correlating *its own* perturbation with the reward that followed is what
+ * gives each row its own credit, and it is the standard answer for a policy
+ * with a scalar reward and no target vector (Fiete & Seung 2006; Werfel,
+ * Xie & Seung 2005).
+ */
+export function exploreAt(slot: number, frame: number, row: number): number {
+  // The `+ 1` matters: `lowbias32(0)` is 0, so without it body 0 at frame 0
+  // would draw exactly -1 on row 0 every time a pond starts.
+  let v = (Math.imul(slot, 0x9e3779b1) + Math.imul(frame, 0x85ebca6b) + Math.imul(row, 0xc2b2ae35) + 1) >>> 0;
+  v = (v ^ (v >>> 16)) >>> 0;
+  v = Math.imul(v, 0x7feb352d) >>> 0;
+  v = (v ^ (v >>> 15)) >>> 0;
+  v = Math.imul(v, 0x846ca68b) >>> 0;
+  v = (v ^ (v >>> 16)) >>> 0;
+  return (v >>> 8) * (2 / 16777216) - 1;
+}
+
+/**
+ * Frames wrap here, so the noise key stays exact in an `f32`: the uniform
+ * carries the count as a float and 2^24 is the last integer it can hold
+ * without rounding. At 60fps that is 77 hours of simulated time before the
+ * sequence repeats, against runs measured in minutes.
+ */
+export const FRAME_WRAP = 1 << 24;
 
 /**
  * The critic: a linear readout of `h` that predicts the cost this body is

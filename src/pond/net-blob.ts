@@ -386,12 +386,20 @@ export function compatibility(h: LayoutLike): Compatibility {
   if (off.length === 0 && sameMap) return { kind: 'migratable', notes: scalarNotes };
 
   const changed = 'genome layout has changed since this net was stored: ' + off.map((k) => `${k} ${L[k]} -> ${now[k]}`).join(', ');
-  if (L.state !== now.state || L.critic !== now.critic || L.plastic !== now.plastic) {
+  if (L.state !== now.state || L.critic !== now.critic) {
     return {
       kind: 'refused',
-      reason: `${changed}; the recurrent state or its learned block changed width, so nothing this net learned means the same thing`,
+      reason: `${changed}; the recurrent state or its critic changed width, so nothing this net learned means the same thing`,
     };
   }
+  /*
+   * The learned block's *width* is migratable and used not to be. It is keyed
+   * by segment name below, so a block that grew — which is what happened when
+   * the output heads became learnable — places every delta the blob carried at
+   * its new offset and leaves the new segments at zero, which is exactly what
+   * a body born in this pond has. Only a segment that *stops* being learnable
+   * loses anything, and that still refuses.
+   */
   if (!segs) {
     return {
       kind: 'refused',
@@ -420,15 +428,15 @@ export function compatibility(h: LayoutLike): Compatibility {
     }
     const wasLearned = within(old, h.plasticAt, L.plastic);
     const isLearned = within(cur, PLASTIC_BASE, PLASTIC_LEN);
-    if (wasLearned !== isLearned) {
+    if (wasLearned && !isLearned) {
       return {
         kind: 'refused',
         reason:
           `genome layout has changed since this net was stored: segment ${cur.name} ` +
-          (wasLearned ? 'was learned and is not' : 'is learned and was not') +
-          ', so its learned delta has nowhere to go',
+          'was learned and is not, so its learned delta has nowhere to go',
       };
     }
+    if (isLearned && !wasLearned) notes.push(`${cur.name} is learnable now, and starts unlearned`);
     if (old.at !== cur.at) notes.push(`${cur.name} moved ${old.at} -> ${cur.at}`);
   }
   for (const old of segs) {
@@ -501,7 +509,14 @@ export function migrateNet(
   for (const cur of CHEM_SEGMENTS) {
     const old = byName.get(cur.name);
     if (!old) continue;
-    moves.push({ from: old.at, to: cur.at, len: cur.len, learned: within(cur, PLASTIC_BASE, PLASTIC_LEN) });
+    moves.push({
+      from: old.at,
+      to: cur.at,
+      len: cur.len,
+      // Both, not either: a segment learnable now but not then has no delta to
+      // carry, and reading one would run off the end of the stored row.
+      learned: within(cur, PLASTIC_BASE, PLASTIC_LEN) && within(old, oldPlasticAt, net.layout?.plastic ?? PLASTIC_LEN),
+    });
   }
   const bodies: NetBody[] = net.bodies.map((b) => {
     const chem = seed(b.kind);

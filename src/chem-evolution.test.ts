@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHEM_LEN, EMIT, E_OUT, STATE_DIMS, TASTE, T_OUT, bareBody, effEmit, effTaste, emitVector, seedChem, type Agent } from './agents.ts';
+import { CHEM_LEN, EMIT, E_OUT, HEAD_ROWS, STATE_DIMS, TASTE, T_OUT, bareBody, effEmit, effTaste, emitVector, seedChem, type Agent } from './agents.ts';
 
 /**
  * The emit head's ground slot. Nothing in the sim reads it any more — farming
@@ -9,9 +9,12 @@ import { CHEM_LEN, EMIT, E_OUT, STATE_DIMS, TASTE, T_OUT, bareBody, effEmit, eff
  */
 function emitEnergy(a: Agent): number {
   const out = new Float64Array(4);
-  emitVector(a.chem, 0, a.h, 0, out, 0);
+  // The genome's own statement, with no learned delta and no exploration: this
+  // asks what the seed *says*, which is a question about the simplex.
+  emitVector(a.chem, 0, a.chem, 0, a.h, 0, NO_XI, 0, out, 0);
   return out[CH.energy];
 }
+const NO_XI = new Float64Array(HEAD_ROWS);
 import { CHEM_SLOPE_MAX } from './rewrite.ts';
 import { CH } from './fields.ts';
 import { CHEM_TASTE_MAX } from './rewrite.ts';

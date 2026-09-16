@@ -30,6 +30,10 @@ import {
   P_BASE,
   P_OUT,
   PLASTIC_LEN,
+  HEAD_TABLE,
+  HEAD_ROWS,
+  FRAME_WRAP,
+  exploreAt,
   CRITIC_LEN,
   LEARN_CRITIC,
   LEARN_PREV_V,
@@ -893,6 +897,13 @@ export class Sim {
    */
   private openFrame(dt: number, params: Params, view: PanView | null | undefined): number {
     Sim.phaseStart();
+    /*
+     * One counter for both paths, advanced where every frame begins. Only
+     * `exploreAt` reads it, and it needs a number the host and the device
+     * agree on: wrapped at `FRAME_WRAP` so it stays exact in the `f32` the
+     * genome uniform carries it in.
+     */
+    this.frames = (this.frames + 1) % FRAME_WRAP;
     const t = this.beginFrame(dt, params);
     this.collectRewriteFrozen();
     Sim.phase('collectRewriteFrozen');
@@ -3700,6 +3711,8 @@ export class Sim {
         reward: params.learnReward,
         dtInv: this.frameDt > 0 ? 1 / this.frameDt : 0,
         maxWeight: CHEM_TASTE_MAX,
+        explore: params.learnExplore,
+        frame: this.frames,
       })
     ) {
       this.genomeOnGpu = false;
@@ -6113,6 +6126,19 @@ export class Sim {
   private readonly stateMean = new Float64Array(STATE_DIMS);
   /** `chem + plastic` over the state matrices, for a body that has learned. */
   private readonly effWeights = new Float32Array(PLASTIC_LEN);
+  /** This body's fifteen head displacements, redrawn every frame. */
+  private readonly exploreDraw = new Float64Array(HEAD_ROWS);
+  /**
+   * Whether last frame drew anything, so that turning exploration off clears
+   * the scratch once instead of every body zeroing it every frame.
+   */
+  private exploreWasOn = false;
+  /**
+   * Frames since the pond began, wrapped at `FRAME_WRAP`. The only thing that
+   * reads it is `exploreAt`, which needs a counter both paths agree on; the
+   * device gets it in the genome uniform.
+   */
+  private frames = 0;
   /** `phi'` per state dim, and the inputs each learned weight multiplies. */
   private readonly learnPost = new Float64Array(STATE_DIMS);
   private readonly learnPre = new Float64Array(IN_DIMS + 2 * STATE_DIMS);
@@ -6191,6 +6217,14 @@ export class Sim {
     const lam = params.learnTrace;
     const discount = params.learnDiscount;
     const mix = params.learnReward;
+    /*
+     * Exploration only while there is a learner to use it. Noise a body cannot
+     * learn from is noise, and this pond has `swimNoise` for that already.
+     */
+    const sigma = learn ? params.learnExplore : 0;
+    const sigmaWasOn = this.exploreWasOn;
+    this.exploreWasOn = sigma > 0;
+    const frame = this.frames;
     const invDt = this.frameDt > 0 ? 1 / this.frameDt : 0;
     const MAXW = CHEM_TASTE_MAX;
     for (let i = 0; i < n; i++) {
@@ -6198,15 +6232,28 @@ export class Sim {
       const g = slot * CHEM_LEN;
 
       /*
-       * Sampling is skipped entirely unless this genome reads the field. A
-       * bilinear sample is four scattered reads into a sixteen-megabyte array
-       * that will not be in cache, once a body, for a value nearly every
-       * genome multiplies by zero — `Wx`'s sense columns seed to zero, because
-       * the one seeded pathway runs through `IN_DEMAND`. The inputs are zeroed
-       * rather than left reading a stale `SENSE`, so behaviour never depends
-       * on when a body last happened to sample.
+       * Sampling is skipped unless this genome reads the field **or anything
+       * is learning**. A bilinear sample is four scattered reads into a
+       * sixteen-megabyte array that will not be in cache, once a body, for a
+       * value nearly every genome multiplies by zero — `Wx`'s sense columns
+       * seed to zero, because the one seeded pathway runs through `IN_DEMAND`.
+       * The inputs are zeroed rather than left reading a stale `SENSE`, so
+       * behaviour never depends on when a body last happened to sample.
+       *
+       * `|| learn` because the gate was only ever an optimisation and stopped
+       * being invisible when learning arrived. Two things go wrong without it.
+       * The eligibility trace is `phi'(v) * pre`, and `pre` is this input — a
+       * weight of zero zeroes the forward pass but not the *update*, so a
+       * gated body learns a different sense weight from an ungated one holding
+       * the same genome. And the gate self-locks: `READS` is raised when a
+       * sense weight becomes non-zero, but with the input pinned at zero no
+       * sense weight can ever move, so the line below claiming a body can
+       * learn its way into seeing was unreachable. `genome.wgsl` never had the
+       * gate — it argued a zero weight made the paths agree, which is true of
+       * the forward pass and false of the trace — so this is also what makes
+       * the two paths learn the same thing, which is how it was found.
        */
-      if (READS[slot]) {
+      if (READS[slot] || learn) {
         const so = slot * 4;
         /*
          * On the GPU path `gpuFieldStep` filled these at the end of last
@@ -6402,18 +6449,52 @@ export class Sim {
        * a body says and what it listens for is gone, which is almost certainly
        * an improvement and is definitely a change — it moves `state-hash`.
        */
-      emitVector(CHEM, g, H, ho, EMITS, slot * 4);
-      tasteVector(CHEM, g, H, ho, TASTES, slot * 4);
+      /*
+       * This frame's exploration, one draw per head output, in the genome's
+       * own row order: `E` 0-3, `T` 4-7, `F` align 8 sep 9, `P` thrust 10
+       * recoil 11, `L` cruise 12 turn 13, `G` anchor 14.
+       *
+       * Drawn once and used twice — displacing the output below, then standing
+       * as the post-synaptic factor in that row's eligibility. The two *must*
+       * be the same number or the learner credits a displacement that never
+       * happened, which is the one way node perturbation fails silently: it
+       * still moves weights, just in a direction uncorrelated with anything.
+       */
+      const XI = this.exploreDraw;
+      if (sigma > 0) {
+        for (let r = 0; r < HEAD_ROWS; r++) XI[r] = sigma * exploreAt(slot, frame, r);
+      } else if (sigmaWasOn) {
+        XI.fill(0);
+      }
 
-      CRUISE[slot] = clamp(headAt(CHEM, g, L_OUT, L_BASE, 0, H, ho, S) * HEAD_SCALE.cruise, 0, 180);
-      TURN[slot] = clamp(headAt(CHEM, g, L_OUT, L_BASE, 1, H, ho, S) * HEAD_SCALE.turn, 0, 8);
-      FA[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 0, H, ho, S) * HEAD_SCALE.align, -8, 16);
-      FS[slot] = clamp(headAt(CHEM, g, F_OUT, F_BASE, 1, H, ho, S) * HEAD_SCALE.sep, -60, 120);
-      TT[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 0, H, ho, S) * HEAD_SCALE.thrust, 0, 1);
-      TR[slot] = clamp(headAt(CHEM, g, P_OUT, P_BASE, 1, H, ho, S) * HEAD_SCALE.recoil, 0, 200);
+      /*
+       * The heads read `W`/`wb`, not the genome: with learning on, `W` is the
+       * effective array — genome plus what this body has learned — and the
+       * heads are inside the learned block now. `wb` is `wo` shifted so a
+       * genome offset indexes it directly, which is the same trick the state
+       * matrices above use and the reason the block starts at `W_IN`.
+       *
+       * `emit` and `taste` take their bases from the genome and their matrices
+       * from `W`, because those two bases are the only part of a head that
+       * does not learn; see `PLASTIC_LEN`.
+       */
+      const wb = wo - W_IN;
+      emitVector(W, wb, CHEM, g, H, ho, XI, 0, EMITS, slot * 4);
+      tasteVector(W, wb, CHEM, g, H, ho, XI, 4, TASTES, slot * 4);
+
+      CRUISE[slot] = clamp((headAt(W, wb, L_OUT, L_BASE, 0, H, ho, S) + XI[12]) * HEAD_SCALE.cruise, 0, 180);
+      TURN[slot] = clamp((headAt(W, wb, L_OUT, L_BASE, 1, H, ho, S) + XI[13]) * HEAD_SCALE.turn, 0, 8);
+      FA[slot] = clamp((headAt(W, wb, F_OUT, F_BASE, 0, H, ho, S) + XI[8]) * HEAD_SCALE.align, -8, 16);
+      FS[slot] = clamp((headAt(W, wb, F_OUT, F_BASE, 1, H, ho, S) + XI[9]) * HEAD_SCALE.sep, -60, 120);
+      TT[slot] = clamp((headAt(W, wb, P_OUT, P_BASE, 0, H, ho, S) + XI[10]) * HEAD_SCALE.thrust, 0, 1);
+      TR[slot] = clamp((headAt(W, wb, P_OUT, P_BASE, 1, H, ho, S) + XI[11]) * HEAD_SCALE.recoil, 0, 200);
       // Signed both ways on purpose: a body that lets go where its neighbour
       // holds walks the other way, and that is a lineage's to choose.
-      GA[slot] = clamp(headAt(CHEM, g, G_OUT, G_BASE, 0, H, ho, S) * HEAD_SCALE.anchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
+      GA[slot] = clamp(
+        (headAt(W, wb, G_OUT, G_BASE, 0, H, ho, S) + XI[14]) * HEAD_SCALE.anchor,
+        -GAIT_ANCHOR_MAX,
+        GAIT_ANCHOR_MAX,
+      );
 
       /*
        * What this body learns from the frame it has just had.
@@ -6580,6 +6661,69 @@ export class Sim {
           else if (w > MAXW - base) w = MAXW - base;
           PLASTIC[ti] = w;
           if (w !== 0) touched = 1;
+        }
+
+        /*
+         * And the heads, on the same `delta` and the same trace, with one
+         * factor swapped.
+         *
+         * The core's post-synaptic factor is `phi'(v)`, the gradient of `h`
+         * with respect to that weight. A head is linear, so its equivalent is
+         * 1 for every row — and a rule with the same factor everywhere moves
+         * every head of the body in lockstep on the critic's sign, which can
+         * never discover that cruise should rise while turn falls. So the
+         * factor here is the row's *own* displacement `XI[row]`: the body
+         * actually swam at `head + xi` this frame, and if the critic then says
+         * things went better than expected, the weights that produced that
+         * displacement are the ones to keep. Correlating a perturbation with
+         * what followed it is node perturbation, and it is the standard answer
+         * for a policy with a scalar reward and no target vector.
+         *
+         * `sigma` at zero makes every `XI` zero, so the trace decays and
+         * nothing here moves — the heads go back to being genome-only without
+         * a second code path saying so.
+         *
+         * `hc` and not `pre[7..]`: a head reads *this* frame's state, the one
+         * the rows above have just written, while the core's own inputs are
+         * the previous frame's. The eligibility has to name the number the
+         * output was actually computed from.
+         */
+        const hc0 = H[ho];
+        const hc1 = H[ho + 1];
+        const hc2 = H[ho + 2];
+        const hc3 = H[ho + 3];
+        let row = 0;
+        for (let hi = 0; hi < HEAD_TABLE.length; hi++) {
+          const head = HEAD_TABLE[hi];
+          const hb = head.base;
+          for (let r = 0; r < head.rows; r++, row++) {
+            const xr = XI[row];
+            const mo = head.at + r * S;
+            for (let d = 0; d < S; d++) {
+              const ti = plo + mo + d;
+              const tr = lam * TRACE[ti] + xr * (d === 0 ? hc0 : d === 1 ? hc1 : d === 2 ? hc2 : hc3);
+              TRACE[ti] = tr;
+              const base = CHEM[gW + mo + d];
+              let w = PLASTIC[ti] + step * tr;
+              if (w < -MAXW - base) w = -MAXW - base;
+              else if (w > MAXW - base) w = MAXW - base;
+              PLASTIC[ti] = w;
+              if (w !== 0) touched = 1;
+            }
+            // The bias, whose input is one — where the head has one inside the
+            // block. `emit` and `taste` do not; see `PLASTIC_LEN`.
+            if (hb >= 0) {
+              const ti = plo + hb + r;
+              const tr = lam * TRACE[ti] + xr;
+              TRACE[ti] = tr;
+              const base = CHEM[gW + hb + r];
+              let w = PLASTIC[ti] + step * tr;
+              if (w < -MAXW - base) w = -MAXW - base;
+              else if (w > MAXW - base) w = MAXW - base;
+              PLASTIC[ti] = w;
+              if (w !== 0) touched = 1;
+            }
+          }
         }
         if (touched) PLASTIC_ON[slot] = 1;
       }

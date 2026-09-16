@@ -10,6 +10,14 @@ function liveLatchParams() {
   params.flockAlign = 5.5;
   params.flockSep = 36;
   params.wireShrink = 0.9;
+  /*
+   * No exploration. These place two bodies on a collision course and ask
+   * whether they latch; node perturbation jitters `cruise` and `turn` a few
+   * per cent every frame, which is a random walk in heading and enough to walk
+   * an approach past a snap radius. That is the mechanism working, not the
+   * latch failing, and it is not what this file is about.
+   */
+  params.learnExplore = 0;
   return params;
 }
 

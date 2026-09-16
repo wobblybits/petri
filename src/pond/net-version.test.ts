@@ -59,10 +59,24 @@ function segment(name: string): ChemSegment {
  * where that build kept it. The learned block has to stay a contiguous run
  * for this to be a valid layout, which every case below arranges.
  */
+/**
+ * A blob as some other build would have written it: the same numbers, laid out
+ * in `names` order, with `learned` naming the segments *that* build's learned
+ * block covered.
+ *
+ * `learned` is explicit because it is the thing these tests are usually about
+ * and it is not derivable from the order — a build that laid the genome out
+ * differently may well have learned a different set, and taking this build's
+ * set would quietly assert that it did not. It defaults to this build's,
+ * which is what a pure reorder means.
+ */
 function asOldBuild(
   net: NetData,
   names: string[],
   rename: Record<string, string> = {},
+  learned: string[] = CHEM_SEGMENTS.filter(
+    (s) => s.at >= PLASTIC_BASE && s.at + s.len <= PLASTIC_BASE + PLASTIC_LEN,
+  ).map((s) => s.name),
 ): { blob: Uint8Array; segments: ChemSegment[]; chem: number } {
   const segments: ChemSegment[] = [];
   let at = 0;
@@ -72,16 +86,41 @@ function asOldBuild(
     at += cur.len;
   }
   const chem = at;
-  const plasticAt = segments[names.indexOf('Wx')].at;
+  const first = names.indexOf(learned[0]);
+  const plasticAt = segments[first].at;
+  let plasticLen = 0;
+  for (let i = 0; i < learned.length; i++) {
+    if (names[first + i] !== learned[i]) throw new Error(`asOldBuild: ${learned.join(',')} is not a run in this order`);
+    plasticLen += segment(learned[i]).len;
+  }
   const bodies = net.bodies.map((b) => {
     const c = new Float32Array(chem);
     for (let i = 0; i < names.length; i++) {
       const cur = segment(names[i]);
       c.set(b.chem.subarray(cur.at, cur.at + cur.len), segments[i].at);
     }
-    return { ...b, chem: c };
+    /*
+     * And the learned rows at that build's width, taking only the segments it
+     * learned. A segment `learned` names that this build does not learn has no
+     * delta here to copy, which is the case the lossy-direction test builds:
+     * it gets zeros, and what the migration refuses is the *claim* that the
+     * blob carried one.
+     */
+    const plastic = new Float32Array(plasticLen);
+    const trace = new Float32Array(plasticLen);
+    let po = 0;
+    for (const name of learned) {
+      const cur = segment(name);
+      const src = cur.at - PLASTIC_BASE;
+      if (src >= 0 && src + cur.len <= PLASTIC_LEN) {
+        plastic.set(b.plastic.subarray(src, src + cur.len), po);
+        trace.set(b.trace.subarray(src, src + cur.len), po);
+      }
+      po += cur.len;
+    }
+    return { ...b, chem: c, plastic, trace };
   });
-  const blob = encodeNetAs({ bodies, wires: net.wires }, { ...currentLayout(), chem }, segments, plasticAt);
+  const blob = encodeNetAs({ bodies, wires: net.wires }, { ...currentLayout(), chem, plastic: plasticLen }, segments, plasticAt);
   return { blob, segments, chem };
 }
 
@@ -121,7 +160,9 @@ describe('the segment map', () => {
     const dup = segs.map((s, i) => (i === 3 ? { ...s, name: segs[2].name } : s));
     expect(segmentsComplaint(dup, CHEM_LEN, PLASTIC_BASE, PLASTIC_LEN)).toMatch(/twice/);
     expect(segmentsComplaint(segs, CHEM_LEN, PLASTIC_BASE + 1, PLASTIC_LEN)).toMatch(/learned block starts/);
-    expect(segmentsComplaint(segs, CHEM_LEN, PLASTIC_BASE, PLASTIC_LEN - 1)).toMatch(/learned block ends/);
+    // Two, not one: the block ends at `g0` and `G` ends one float short of it,
+    // so an off-by-one lands on a real boundary and is not a complaint.
+    expect(segmentsComplaint(segs, CHEM_LEN, PLASTIC_BASE, PLASTIC_LEN - 2)).toMatch(/learned block ends/);
   });
 });
 
@@ -218,20 +259,19 @@ describe('migration', () => {
   it('puts reordered segments back where this build keeps them', () => {
     const { sim, params } = learningPond(120, 400);
     const net = captureNets(sim)[0].data;
-    // A build that kept `ksg` ahead of the locomotion heads.
-    const order = NAMES.filter((n) => n !== 'ksg');
-    order.splice(order.indexOf('L'), 0, 'ksg');
+    // A build that kept `ksg` at the very end, past the chemistry genes.
+    const order = [...NAMES.filter((n) => n !== 'ksg'), 'ksg'];
     const { blob, segments: was } = asOldBuild(net, order);
     const c = compatibility(readHeader(blob));
     expect(c.kind).toBe('migratable');
     if (c.kind !== 'migratable') return;
     const at = (name: string) => was.find((s) => s.name === name)!.at;
     expect(c.notes).toEqual([
-      `L moved ${at('L')} -> ${segment('L').at}`,
-      `l0 moved ${at('l0')} -> ${segment('l0').at}`,
-      `G moved ${at('G')} -> ${segment('G').at}`,
-      `g0 moved ${at('g0')} -> ${segment('g0').at}`,
       `ksg moved ${at('ksg')} -> ${segment('ksg').at}`,
+      `Tx moved ${at('Tx')} -> ${segment('Tx').at}`,
+      `Gx moved ${at('Gx')} -> ${segment('Gx').at}`,
+      `Sw moved ${at('Sw')} -> ${segment('Sw').at}`,
+      `Gw moved ${at('Gw')} -> ${segment('Gw').at}`,
     ]);
     const { net: now } = prepareNet(decodeNet(blob), params);
     for (let i = 0; i < net.bodies.length; i++) {
@@ -244,18 +284,33 @@ describe('migration', () => {
     const { sim, params } = learningPond(120, 400);
     const net = captureNets(sim)[0].data;
     expect(net.bodies.some((b) => b.plastic.some((v) => v !== 0))).toBe(true);
-    // The four learned segments after the heads rather than before them.
+    /*
+     * The build this pond's own nets came from: only the four core matrices
+     * learned, and here with them moved past the heads as well. Every head is
+     * learnable now and was not, which is the growing direction — the delta
+     * has somewhere to go and starts at zero, exactly as a fresh body's does.
+     */
     const learned = ['Wx', 'Wh', 'Wn', 'b'];
     const order = [...NAMES.filter((n) => !learned.includes(n)), ...learned];
-    const { blob } = asOldBuild(net, order);
+    const { blob } = asOldBuild(net, order, {}, learned);
     const c = compatibility(readHeader(blob));
     expect(c.kind).toBe('migratable');
     const { net: now } = prepareNet(decodeNet(blob), params);
+    const core = segment('Wx').at - PLASTIC_BASE;
+    const coreEnd = segment('b').at + segment('b').len - PLASTIC_BASE;
     for (let i = 0; i < net.bodies.length; i++) {
       expect([...now.bodies[i].chem]).toEqual([...net.bodies[i].chem]);
-      expect([...now.bodies[i].plastic]).toEqual([...net.bodies[i].plastic]);
-      expect([...now.bodies[i].trace]).toEqual([...net.bodies[i].trace]);
+      // What that build learned comes back at this build's offsets...
+      expect([...now.bodies[i].plastic.subarray(core, coreEnd)]).toEqual([
+        ...net.bodies[i].plastic.subarray(core, coreEnd),
+      ]);
+      expect([...now.bodies[i].trace.subarray(core, coreEnd)]).toEqual([...net.bodies[i].trace.subarray(core, coreEnd)]);
+      // ...and what it could not learn starts unlearned, which is what a body
+      // born in this pond has.
+      expect([...now.bodies[i].plastic.subarray(coreEnd)].every((v) => v === 0)).toBe(true);
+      expect([...now.bodies[i].trace.subarray(coreEnd)].every((v) => v === 0)).toBe(true);
     }
+    expect(c.kind === 'migratable' && c.notes).toContain('E is learnable now, and starts unlearned');
   });
 
   it('drops a segment this build lost and seeds one it gained', () => {
@@ -308,13 +363,18 @@ describe('migration', () => {
   it('refuses a segment that crossed into or out of the learned block', () => {
     const { sim } = learningPond(60, 120);
     const net = captureNets(sim)[0].data;
-    // `b` out of the learned run and two bases into it, at the same width.
-    const order = NAMES.filter((n) => !['b', 'f0', 'l0'].includes(n));
-    order.splice(order.indexOf('Wn') + 1, 0, 'f0', 'l0', 'b');
-    const { blob } = asOldBuild(net, order);
+    /*
+     * The lossy direction, which is the only one that refuses: a build that
+     * learned `ksg` as well, on a pond where this one does not. Its delta has
+     * nowhere to go, and dropping it silently would hand back a body that is
+     * not the body that was stored. The growing direction — a segment learnable
+     * now and not then — is fine and the test above covers it.
+     */
+    const learned = ['Wx', 'Wh', 'Wn', 'b', 'E', 'T', 'F', 'f0', 'P', 'p0', 'L', 'l0', 'G', 'g0', 'ksg'];
+    const { blob } = asOldBuild(net, NAMES, {}, learned);
     const c = compatibility(readHeader(blob));
     expect(c.kind).toBe('refused');
-    if (c.kind === 'refused') expect(c.reason).toMatch(/segment b is learned and was not/);
+    if (c.kind === 'refused') expect(c.reason).toMatch(/segment ksg was learned and is not/);
   });
 
   it('refuses a format 1 blob at any other width, saying why', () => {

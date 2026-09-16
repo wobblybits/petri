@@ -46,15 +46,18 @@ const G_BASE: u32 = 138u;
 const GAIT_ANCHOR_MAX: f32 = 8.0;
 
 // The learning row, from `chem-layout.ts`: learned deltas on the state
-// matrices, then their eligibility traces, then the critic, then last
-// frame's value estimate. Indexed by slot, like the genome, because it is
-// state a body keeps rather than something the host packs each frame.
-const PLASTIC_LEN: u32 = 64u;
-const LEARN_TRACE: u32 = 64u;
-const LEARN_CRITIC: u32 = 128u;
-const LEARN_PREV_V: u32 = 133u;
-const LEARN_PREV_FULL: u32 = 134u;
-const LEARN_STRIDE: u32 = 135u;
+// matrices **and every head**, then their eligibility traces, then the critic,
+// then last frame's value estimate. Indexed by slot, like the genome, because
+// it is state a body keeps rather than something the host packs each frame.
+const PLASTIC_LEN: u32 = 131u;
+const LEARN_TRACE: u32 = 131u;
+const LEARN_CRITIC: u32 = 262u;
+const LEARN_PREV_V: u32 = 267u;
+const LEARN_PREV_FULL: u32 = 268u;
+const LEARN_STRIDE: u32 = 269u;
+// How many head outputs a body drives, which is how many exploration draws it
+// needs: E 4, T 4, F 2, P 2, L 2, G 1.
+const HEAD_ROWS: u32 = 15u;
 
 // Floats written per body: h(4), emit(4), taste(4), then the seven heads.
 const OUT_STRIDE: u32 = 19u;
@@ -83,7 +86,14 @@ struct GenomeParams {
   // The teacher: 0 all level, 1 all rate. See `params.learnReward`.
   learnReward: f32,
   dtInv: f32,
-  pad3: f32,
+  // Node perturbation: how hard a head output is displaced, and the frame
+  // counter the displacement is keyed on. See `exploreAt` in chem-layout.ts.
+  learnExplore: f32,
+  frame: f32,
+  // A uniform buffer's size must be a whole number of sixteen-byte blocks.
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> G: GenomeParams;
@@ -121,11 +131,57 @@ fn clampf(v: f32, lo: f32, hi: f32) -> f32 {
   return min(max(v, lo), hi);
 }
 
-/** One row of an output head: `base[row] + matrix[row] . h`. */
-fn headAt(g: u32, matrix: u32, base: u32, row: u32, h: vec4f) -> f32 {
-  let o = g + matrix + row * STATE_DIMS;
-  return chem[g + base + row]
-    + chem[o] * h.x + chem[o + 1u] * h.y + chem[o + 2u] * h.z + chem[o + 3u] * h.w;
+/**
+ * `chem-layout.ts`'s `exploreAt`, transcribed: the `lowbias32` finalizer over
+ * a mixed (body, frame, output) key, mapped to [-1, 1) off the top 24 bits.
+ *
+ * A pure function and not a stream, which is the only shape the host and this
+ * can share exactly — there is no RNG state to keep in step across a dispatch,
+ * and a body that moves between the two paths mid-run sees the same sequence.
+ * The multiplies wrap in `u32` on both sides (`Math.imul` there), and 24 bits
+ * is exact in `f32`.
+ */
+fn exploreAt(slot: u32, frame: u32, row: u32) -> f32 {
+  // The `+ 1u` matters: `lowbias32(0)` is 0, so without it body 0 at frame 0
+  // would draw exactly -1 on row 0 every time a pond starts.
+  var v: u32 = slot * 0x9e3779b1u + frame * 0x85ebca6bu + row * 0xc2b2ae35u + 1u;
+  v = v ^ (v >> 16u);
+  v = v * 0x7feb352du;
+  v = v ^ (v >> 15u);
+  v = v * 0x846ca68bu;
+  v = v ^ (v >> 16u);
+  return f32(v >> 8u) * (2.0 / 16777216.0) - 1.0;
+}
+
+/**
+ * One row of an output head: `base[row] + matrix[row] . h`, plus this row's
+ * exploration.
+ *
+ * The matrix comes from the genome *plus what the body has learned* — every
+ * head is inside the learned block now — while the base comes from wherever
+ * the caller says, because `emit`'s and `taste`'s bases are outside it.
+ */
+fn headAt(g: u32, lb: u32, matrix: u32, base: u32, row: u32, h: vec4f, xi: f32) -> f32 {
+  let o = matrix + row * STATE_DIMS;
+  let go = g + o;
+  let lo = lb + o - W_IN;
+  return chem[g + base + row] + learn[lb + base + row - W_IN] + xi
+    + (chem[go] + learn[lo]) * h.x
+    + (chem[go + 1u] + learn[lo + 1u]) * h.y
+    + (chem[go + 2u] + learn[lo + 2u]) * h.z
+    + (chem[go + 3u] + learn[lo + 3u]) * h.w;
+}
+
+/** The same, for a head whose base is outside the learned block. */
+fn headAtFixedBase(g: u32, lb: u32, matrix: u32, base: u32, row: u32, h: vec4f, xi: f32) -> f32 {
+  let o = matrix + row * STATE_DIMS;
+  let go = g + o;
+  let lo = lb + o - W_IN;
+  return chem[g + base + row] + xi
+    + (chem[go] + learn[lo]) * h.x
+    + (chem[go + 1u] + learn[lo + 1u]) * h.y
+    + (chem[go + 2u] + learn[lo + 2u]) * h.z
+    + (chem[go + 3u] + learn[lo + 3u]) * h.w;
 }
 
 @compute @workgroup_size(64)
@@ -148,16 +204,20 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
    * gene has seven times the mutation leverage of every other input gene.
    */
   /*
-   * No sense gate here, unlike the CPU pass.
+   * No sense gate here, unlike the CPU pass with learning off.
    *
    * There it saves a bilinear sample into a sixteen-megabyte array for the
    * many genomes that multiply the result by zero. Here `gather` has already
-   * taken that sample for every body — it is sitting in `samples` either way
-   * — so the gate would save nothing at all. It would also go stale: it is
-   * settled at birth from the genome's sense columns, and a body that
-   * *learns* a sense weight would still be told it cannot see. The two paths
-   * agree wherever the gate is right, because a gate of zero means every
-   * weight multiplying the reading is zero.
+   * taken that sample for every body — it is sitting in `samples` either way —
+   * so the gate would save nothing at all.
+   *
+   * This used to say the two paths agree wherever the gate is right, because
+   * a gate of zero means every weight multiplying the reading is zero. That is
+   * true of the forward pass and false of the eligibility trace, which is
+   * `phi' * pre` and reads this input whatever the weight is. So the CPU pass
+   * now takes the sample whenever anything is learning, which is what makes
+   * the two agree about what a body learned — and what lets a body learn its
+   * way into seeing the field at all.
    */
   let raw = samples[i * 2u + 1u];
   var s = raw * G.senseScale;
@@ -237,6 +297,21 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
     h[d] = phi(v);
   }
 
+  /*
+   * This frame's exploration, one draw per head output, in the genome's own
+   * row order: E 0-3, T 4-7, F align 8 sep 9, P thrust 10 recoil 11, L cruise
+   * 12 turn 13, G anchor 14. Drawn once and used twice — displacing the output
+   * and standing as the post-synaptic factor in that row's eligibility. The
+   * two must be the same number or the learner credits a displacement that
+   * never happened.
+   */
+  var XI = array<f32, 15>();
+  if (G.learnRate > 0.0 && G.learnExplore > 0.0) {
+    for (var r = 0u; r < HEAD_ROWS; r++) {
+      XI[r] = G.learnExplore * exploreAt(slot, u32(G.frame), r);
+    }
+  }
+
   // Emit: relu, then normalised to a unit budget. That budget is the honesty
   // mechanism — feeding the dish and being heard come out of the same purse —
   // and this is the only place all four channels are known at once, so it is
@@ -244,9 +319,7 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
   var emit = vec4f(0.0);
   var sum = 0.0;
   for (var c = 0u; c < 4u; c++) {
-    let o = g + E_OUT + c * STATE_DIMS;
-    let v = chem[g + EMIT + c]
-      + chem[o] * h.x + chem[o + 1u] * h.y + chem[o + 2u] * h.z + chem[o + 3u] * h.w;
+    let v = headAtFixedBase(g, lb, E_OUT, EMIT, c, h, XI[c]);
     let w = max(v, 0.0);
     emit[c] = w;
     sum += w;
@@ -257,9 +330,7 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
   // other taste weights rather than spent, so there is no budget.
   var taste = vec4f(0.0);
   for (var c = 0u; c < 4u; c++) {
-    let o = g + T_OUT + c * STATE_DIMS;
-    taste[c] = chem[g + TASTE + c]
-      + chem[o] * h.x + chem[o + 1u] * h.y + chem[o + 2u] * h.z + chem[o + 3u] * h.w;
+    taste[c] = headAtFixedBase(g, lb, T_OUT, TASTE, c, h, XI[4u + c]);
   }
 
   let o = i * OUT_STRIDE;
@@ -277,15 +348,15 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
   outv[o + 11u] = taste.w;
   // Clamped to the ranges the heritable versions were bred inside: those
   // bounds are about what the forces survive, not about what a genome may say.
-  outv[o + 12u] = clampf(headAt(g, L_OUT, L_BASE, 0u, h) * G.sCruise, 0.0, 180.0);
-  outv[o + 13u] = clampf(headAt(g, L_OUT, L_BASE, 1u, h) * G.sTurn, 0.0, 8.0);
-  outv[o + 14u] = clampf(headAt(g, F_OUT, F_BASE, 0u, h) * G.sAlign, -8.0, 16.0);
-  outv[o + 15u] = clampf(headAt(g, F_OUT, F_BASE, 1u, h) * G.sSep, -60.0, 120.0);
-  outv[o + 16u] = clampf(headAt(g, P_OUT, P_BASE, 0u, h) * G.sThrust, 0.0, 1.0);
-  outv[o + 17u] = clampf(headAt(g, P_OUT, P_BASE, 1u, h) * G.sRecoil, 0.0, 200.0);
+  outv[o + 12u] = clampf(headAt(g, lb, L_OUT, L_BASE, 0u, h, XI[12]) * G.sCruise, 0.0, 180.0);
+  outv[o + 13u] = clampf(headAt(g, lb, L_OUT, L_BASE, 1u, h, XI[13]) * G.sTurn, 0.0, 8.0);
+  outv[o + 14u] = clampf(headAt(g, lb, F_OUT, F_BASE, 0u, h, XI[8]) * G.sAlign, -8.0, 16.0);
+  outv[o + 15u] = clampf(headAt(g, lb, F_OUT, F_BASE, 1u, h, XI[9]) * G.sSep, -60.0, 120.0);
+  outv[o + 16u] = clampf(headAt(g, lb, P_OUT, P_BASE, 0u, h, XI[10]) * G.sThrust, 0.0, 1.0);
+  outv[o + 17u] = clampf(headAt(g, lb, P_OUT, P_BASE, 1u, h, XI[11]) * G.sRecoil, 0.0, 200.0);
   // The gait's grip. Signed both ways: a body that lets go where its
   // neighbour holds walks the other way.
-  outv[o + 18u] = clampf(headAt(g, G_OUT, G_BASE, 0u, h) * G.sAnchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
+  outv[o + 18u] = clampf(headAt(g, lb, G_OUT, G_BASE, 0u, h, XI[14]) * G.sAnchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
 
   /*
    * What this body learns from the frame it has just had. A line-for-line
@@ -379,6 +450,44 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
       let base = chem[g + W_IN + at];
       learn[lb + at] = clamp(learn[lb + at] + step * tr, -G.maxWeight - base, G.maxWeight - base);
       at = at + 1u;
+    }
+
+    /*
+     * And the heads, on the same delta and the same trace, with one factor
+     * swapped: a head is linear, so `phi'` is 1 for every row and a rule using
+     * it would move every head of the body in lockstep on the critic's sign.
+     * The factor is the row's own displacement instead — the body swam at
+     * `head + xi`, and the critic says whether that was worth keeping. See the
+     * block at the end of `Sim.updateState`, which is the reference.
+     *
+     * `HEAD_TABLE` unrolled: matrix offset inside the block, row count, then
+     * the base's offset or a sentinel for the two heads whose base is outside.
+     */
+    var hAt = array<u32, 6>(E_OUT - W_IN, T_OUT - W_IN, F_OUT - W_IN, P_OUT - W_IN, L_OUT - W_IN, G_OUT - W_IN);
+    var hRows = array<u32, 6>(4u, 4u, 2u, 2u, 2u, 1u);
+    var hBase = array<u32, 6>(0xffffffffu, 0xffffffffu, F_BASE - W_IN, P_BASE - W_IN, L_BASE - W_IN, G_BASE - W_IN);
+    var row = 0u;
+    for (var hi = 0u; hi < 6u; hi++) {
+      let hb = hBase[hi];
+      for (var r = 0u; r < hRows[hi]; r++) {
+        let xr = XI[row];
+        let mo = hAt[hi] + r * STATE_DIMS;
+        for (var d = 0u; d < STATE_DIMS; d++) {
+          let ti = lb + LEARN_TRACE + mo + d;
+          let tr = G.learnTrace * learn[ti] + xr * h[d];
+          learn[ti] = tr;
+          let base = chem[g + W_IN + mo + d];
+          learn[lb + mo + d] = clamp(learn[lb + mo + d] + step * tr, -G.maxWeight - base, G.maxWeight - base);
+        }
+        if (hb != 0xffffffffu) {
+          let ti = lb + LEARN_TRACE + hb + r;
+          let tr = G.learnTrace * learn[ti] + xr;
+          learn[ti] = tr;
+          let base = chem[g + W_IN + hb + r];
+          learn[lb + hb + r] = clamp(learn[lb + hb + r] + step * tr, -G.maxWeight - base, G.maxWeight - base);
+        }
+        row = row + 1u;
+      }
     }
   }
 }

@@ -8,6 +8,9 @@ import {
   G_BASE,
   GW_BASE,
   GX_BASE,
+  HEAD_ROWS,
+  PLASTIC_BASE,
+  PLASTIC_LEN,
   HEAD_SCALE,
   TX_A,
   SW_BASE,
@@ -833,6 +836,10 @@ export {
   LEARN_TRACE,
   PLASTIC_BASE,
   PLASTIC_LEN,
+  HEAD_TABLE,
+  HEAD_ROWS,
+  FRAME_WRAP,
+  exploreAt,
   P_BASE,
   P_OUT,
   KS_BASE,
@@ -928,7 +935,18 @@ export function head(a: Agent, matrix: number, base: number, row: number): numbe
  * A body that has mutated its way to silence stays silent rather than being
  * amplified back out of noise — the same rule `inheritChem` uses on the bases.
  */
-export function emitVector(chem: Float32Array, g: number, h: Float64Array, ho: number, out: Float64Array, oo: number): void {
+export function emitVector(
+  W: Float32Array,
+  wb: number,
+  chem: Float32Array,
+  g: number,
+  h: Float64Array,
+  ho: number,
+  xi: Float64Array,
+  xo: number,
+  out: Float64Array,
+  oo: number,
+): void {
   // Unrolled for the same reason the state update is: four channels by four
   // dimensions is a compile-time shape, and the loop around sixteen
   // multiply-adds costs more than the arithmetic.
@@ -938,37 +956,37 @@ export function emitVector(chem: Float32Array, g: number, h: Float64Array, ho: n
   const h3 = h[ho + 3];
   let sum = 0;
   {
-    const o = g + E_OUT + 0;
+    const o = wb + E_OUT + 0;
     const v =
-      chem[g + EMIT + 0] +
-      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+      chem[g + EMIT + 0] + xi[xo + 0] +
+      W[o] * h0 + W[o + 1] * h1 + W[o + 2] * h2 + W[o + 3] * h3;
     const w = v > 0 ? v : 0;
     out[oo + 0] = w;
     sum += w;
   }
   {
-    const o = g + E_OUT + 4;
+    const o = wb + E_OUT + 4;
     const v =
-      chem[g + EMIT + 1] +
-      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+      chem[g + EMIT + 1] + xi[xo + 1] +
+      W[o] * h0 + W[o + 1] * h1 + W[o + 2] * h2 + W[o + 3] * h3;
     const w = v > 0 ? v : 0;
     out[oo + 1] = w;
     sum += w;
   }
   {
-    const o = g + E_OUT + 8;
+    const o = wb + E_OUT + 8;
     const v =
-      chem[g + EMIT + 2] +
-      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+      chem[g + EMIT + 2] + xi[xo + 2] +
+      W[o] * h0 + W[o + 1] * h1 + W[o + 2] * h2 + W[o + 3] * h3;
     const w = v > 0 ? v : 0;
     out[oo + 2] = w;
     sum += w;
   }
   {
-    const o = g + E_OUT + 12;
+    const o = wb + E_OUT + 12;
     const v =
-      chem[g + EMIT + 3] +
-      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+      chem[g + EMIT + 3] + xi[xo + 3] +
+      W[o] * h0 + W[o + 1] * h1 + W[o + 2] * h2 + W[o + 3] * h3;
     const w = v > 0 ? v : 0;
     out[oo + 3] = w;
     sum += w;
@@ -983,37 +1001,48 @@ export function emitVector(chem: Float32Array, g: number, h: Float64Array, ho: n
 
 /** The taste vector. Signed, and not normalised — a taste weight is compared
  *  against other taste weights rather than spent, so there is no budget. */
-export function tasteVector(chem: Float32Array, g: number, h: Float64Array, ho: number, out: Float64Array, oo: number): void {
+export function tasteVector(
+  W: Float32Array,
+  wb: number,
+  chem: Float32Array,
+  g: number,
+  h: Float64Array,
+  ho: number,
+  xi: Float64Array,
+  xo: number,
+  out: Float64Array,
+  oo: number,
+): void {
   const h0 = h[ho];
   const h1 = h[ho + 1];
   const h2 = h[ho + 2];
   const h3 = h[ho + 3];
   {
-    const o = g + T_OUT + 0;
+    const o = wb + T_OUT + 0;
     const v =
-      chem[g + TASTE + 0] +
-      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+      chem[g + TASTE + 0] + xi[xo + 0] +
+      W[o] * h0 + W[o + 1] * h1 + W[o + 2] * h2 + W[o + 3] * h3;
     out[oo + 0] = v;
   }
   {
-    const o = g + T_OUT + 4;
+    const o = wb + T_OUT + 4;
     const v =
-      chem[g + TASTE + 1] +
-      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+      chem[g + TASTE + 1] + xi[xo + 1] +
+      W[o] * h0 + W[o + 1] * h1 + W[o + 2] * h2 + W[o + 3] * h3;
     out[oo + 1] = v;
   }
   {
-    const o = g + T_OUT + 8;
+    const o = wb + T_OUT + 8;
     const v =
-      chem[g + TASTE + 2] +
-      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+      chem[g + TASTE + 2] + xi[xo + 2] +
+      W[o] * h0 + W[o + 1] * h1 + W[o + 2] * h2 + W[o + 3] * h3;
     out[oo + 2] = v;
   }
   {
-    const o = g + T_OUT + 12;
+    const o = wb + T_OUT + 12;
     const v =
-      chem[g + TASTE + 3] +
-      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
+      chem[g + TASTE + 3] + xi[xo + 3] +
+      W[o] * h0 + W[o + 1] * h1 + W[o + 2] * h2 + W[o + 3] * h3;
     out[oo + 3] = v;
   }
 }
@@ -1039,14 +1068,37 @@ const SCRATCH4 = new Float64Array(4);
  */
 export function effEmit(a: Agent, c: number): number {
   if (c === CH.energy) return 0;
-  emitVector(a.chem, 0, a.h, 0, SCRATCH4, 0);
+  emitVector(effChem(a), 0, a.chem, 0, a.h, 0, NO_EXPLORE, 0, SCRATCH4, 0);
   return SCRATCH4[c];
 }
 
 /** Taste weight for one channel. May be negative — that is avoidance. */
 export function effTaste(a: Agent, c: number): number {
-  tasteVector(a.chem, 0, a.h, 0, SCRATCH4, 0);
+  tasteVector(effChem(a), 0, a.chem, 0, a.h, 0, NO_EXPLORE, 0, SCRATCH4, 0);
   return SCRATCH4[c];
+}
+
+/**
+ * One body's genome with what it has learned folded in, laid out so that a
+ * genome offset indexes it directly — which is what `wb = 0` above means.
+ *
+ * The hot path in `updateState` does not come through here: it already has
+ * the effective block in a scratch array and passes `wb = wo - W_IN`. This is
+ * for the readers that hold an `Agent` and nothing else, and it exists so they
+ * cannot quietly answer off the genome while the pond runs off the sum.
+ */
+const EFF_CHEM = new Float32Array(CHEM_LEN);
+const NO_EXPLORE = new Float64Array(HEAD_ROWS);
+function effChem(a: Agent): Float32Array {
+  // `bareBody` builds an agent with no store at all, which is the shape most
+  // of the genome tests hold; such a body has learned nothing by definition.
+  const store = a.store as AgentStore | undefined;
+  if (!store || !store.plasticOn[a.slot]) return a.chem;
+  EFF_CHEM.set(a.chem);
+  const P = store.plasticAll;
+  const po = a.slot * PLASTIC_LEN;
+  for (let k = 0; k < PLASTIC_LEN; k++) EFF_CHEM[PLASTIC_BASE + k] += P[po + k];
+  return EFF_CHEM;
 }
 
 /**
