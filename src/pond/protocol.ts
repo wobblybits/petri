@@ -118,29 +118,23 @@ export interface Protocol {
 export const ARM_AXIS = 'arm';
 
 /*
- * The two chemistry regimes as arms, because they are the canonical case of
- * constants that cannot be shared: `senseScale` is three orders apart between
- * them, `deposit` exists in only one, and `uptakeVmax` is the difference
- * between take-what-fits and one metered mouthful a frame. It is no longer the
- * difference between one species and four — uptake samples all four in both
- * arms now — but zero and six are still two mechanisms, which is why they are
- * arms and not levels. Shared by three protocols below.
+ * The two food regimes as arms. `uptakeVmax` is the difference between
+ * take-what-fits and one metered mouthful a frame, which is two mechanisms
+ * rather than two levels, and `senseScale` has to be re-chosen with it because
+ * a body that eats slowly sits in a different signal range.
+ *
+ * It used to be the *minted* versus *conserved* signal regimes, where a body
+ * paid for its voice out of its tank through the excretion rows. There is no
+ * such fork any more: a signal is always minted, because it is not matter and
+ * nothing eats it. Shared by three protocols below.
  */
-const MINTED: Arm = { name: 'minted', set: { excreteRate: 0, senseScale: 4.3, uptakeVmax: 0, catCoSubstrate: 0 } };
-const CONSERVED: Arm = {
-  name: 'conserved',
-  set: { excreteRate: 0.015, senseScale: 0.002, uptakeVmax: 6, catCoSubstrate: 1 },
-};
-const ACCEPT_DEPOSIT: Accepted = {
-  axis: 'excreteRate',
-  constant: 'deposit',
-  because: 'deposit is inert in the conserved arm and the minted arm keeps its default; there is nothing to re-choose',
-};
+const MINTED: Arm = { name: 'take-what-fits', set: { senseScale: 4.3, uptakeVmax: 0 } };
+const CONSERVED: Arm = { name: 'metered', set: { senseScale: 0.002, uptakeVmax: 6 } };
 const ACCEPT_GUT: Accepted[] = [
   {
     axis: 'uptakeVmax',
     constant: 'digestRate',
-    because: 'nothing fills a gut in the minted arm, so digestRate is inert there and the conserved arm keeps its default; there is nothing to re-choose',
+    because: 'nothing fills a gut in the take-what-fits arm, so digestRate is inert there and the metered arm keeps its default',
   },
   {
     axis: 'uptakeVmax',
@@ -344,47 +338,6 @@ export const PROTOCOLS: Protocol[] = [
     ],
   },
 
-  /*
-   * What conserved signalling costs, at the regime the sweeps picked, with
-   * the thing the sweeps forgot to measure at first — whether anything is
-   * left in the water to hear. Depth is the outcome the author asked about so
-   * it stays, at a seed count that can only resolve a large gap; signal and
-   * netFst are the cheaper reads. `sense_read_p90` is the gauge that the two
-   * arms are each seeing their own signal at a scale phi can resolve.
-   */
-  {
-    name: 'conserved-signal-price',
-    question: 'What does paying for what you say cost reproduction, and does it leave anything in the water to hear?',
-    prediction:
-      'the conserved arm reproduces at no worse than half the minted arm\'s depth, keeps signal_total well above ' +
-      'zero, and is at least as differentiated (net_fst).',
-    nullReading:
-      'Depth at CV 0.73 will not resolve a twofold gap at five seeds unless the gap is large; read the commute ' +
-      'rate and netFst first. If signal_total is near zero in the conserved arm the pond is not a cheaper ' +
-      'signalling pond, it is the pre-chemistry pond with extra machinery.',
-    arms: [MINTED, CONSERVED],
-    axes: {},
-    accepts: [ACCEPT_DEPOSIT, ...ACCEPT_GUT],
-    seeds: 5,
-    seconds: 600,
-    soupCount: 500,
-    outcomes: [
-      { metric: 'born_mean', expect: 'down' },
-      { metric: 'commutes', summary: 'window', expect: 'down' },
-      { metric: 'signal_total' },
-      { metric: 'net_fst' },
-      { metric: 'lines_effective' },
-    ],
-    preconditions: [
-      { metric: 'signal_total', min: 1, arms: ['conserved'], why: 'a silent conserved pond is not the mechanism' },
-      {
-        metric: 'sense_read_p90',
-        min: 0.1,
-        max: 10,
-        why: 'each arm must read its own signal near the range phi resolves; see couplings excreteRate/senseScale',
-      },
-    ],
-  },
 
   /*
    * Phase 7b of the chemistry plan: no sweep so far has produced a contested
@@ -411,7 +364,6 @@ export const PROTOCOLS: Protocol[] = [
     axes: { ambientEnergy: [1, 0.25] },
     base: { energyRegrow: 0, groundPatches: 8 },
     accepts: [
-      ACCEPT_DEPOSIT,
       ...ACCEPT_GUT,
       {
         axis: 'ambientEnergy',

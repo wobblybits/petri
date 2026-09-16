@@ -35,6 +35,13 @@ import type { LatchEvent } from './audio/types.ts';
 const stemScratchA = { x: 0, y: 0 };
 const stemScratchB = { x: 0, y: 0 };
 
+/**
+ * The rest length a wire settles at when nobody says otherwise: the seed value
+ * of `params.wireMinRest`. Only the callers that reach `attach` without params
+ * — tests, mostly — fall back to it.
+ */
+export const DEFAULT_REST_BASE = 48;
+
 export interface Wire {
   id: number;
   /**
@@ -58,6 +65,36 @@ export interface Wire {
   b: PortRef;
   latchLen: number;
   lastLen: number;
+  /**
+   * **The length this wire settles at — its own, not the world's.**
+   *
+   * A wire is born at the span it is observed to have (`latchLen`) and reels
+   * in toward this over `wireShrink`. It used to reel in toward
+   * `params.wireMinRest`, one global that every wire in the pond drifted to,
+   * so a net had no shape of its own: every wire ended the same length and the
+   * only morphology available was how many wires there were and where.
+   *
+   * It also made the rewrite gate absolute. `Sim.principalRedexReady` asks
+   * whether two principals are within `1.3` rest lengths of each other, and
+   * with one global that is a fixed number of pixels — so anything that
+   * shortened a wire (`wireTug`, and any tension term since) competed with
+   * breeding for the same variable. Against a wire's *own* rest the question
+   * is a ratio, and a short wire is simply a short wire.
+   *
+   * Seeded at `params.wireMinRest`, so a pond that changes nothing is what it
+   * was. What moves it afterwards is a wire's history.
+   */
+  restBase: number;
+  /**
+   * Units of tank this wire carried since `syncRest` last looked.
+   *
+   * `concepts.md`'s Shape heading asks for exactly one thing and has never had
+   * it: *tension is held by energy flowing along a wire, so a net that moves
+   * no energy is slack*. This is that flow, recorded where the tension has to
+   * be applied. Written by the transport pass through `flowChargesFast`'s
+   * `onMoved`, read and cleared once a frame by `syncRest`.
+   */
+  carried: number;
   rest: number;
   /** Arc length of the rope. Longer than `rest` when the ports force a detour. */
   ropeLen: number;
@@ -94,7 +131,7 @@ export interface Wire {
    * reservoir — so a wire that snaps or is rewritten away owes nobody a
    * spill, and the pond's conservation does not have to know wires exist.
    */
-  fluxGut: Float64Array;
+  fluxGut: number;
   fluxB: number;
   fluxC: number;
   fluxD: number;
@@ -486,12 +523,12 @@ export class Graph {
     this.comps = null;
   }
 
-  attach(a: PortRef, b: PortRef, latchLen: number, time: number): Wire | null {
+  attach(a: PortRef, b: PortRef, latchLen: number, time: number, restBase = DEFAULT_REST_BASE): Wire | null {
     if (a.id === b.id && a.slot === b.slot) return null;
     if (!this.isFree(a) || !this.isFree(b)) return null;
     const id = this.nextWireId++;
     const len = Math.max(1, latchLen);
-    const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full', fluxGut: new Float64Array(4), fluxB: 0, fluxC: 0, fluxD: 0 };
+    const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, restBase: Math.max(1, restBase), carried: 0, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full', fluxGut: 0, fluxB: 0, fluxC: 0, fluxD: 0 };
     this.wires.set(id, wire);
     this.setWireAt(a.id, a.slot, id);
     this.setWireAt(b.id, b.slot, id);
@@ -650,7 +687,7 @@ export class Graph {
           p3: { x: sbx, y: sby },
         }
       : wireCubic(A, a.slot, B, b.slot, w, h, len);
-    const wire = this.attach(a, b, len, time);
+    const wire = this.attach(a, b, len, time, params.wireMinRest);
     if (wire) {
       // `len` is the span the wire is observed to have, which is the
       // contracted length while its bodies are mid-stroke. `latchLen` starts
@@ -773,21 +810,40 @@ export class Graph {
   }
 
   restLength(wire: Wire, time: number, params: Params): number {
-    const travel = Math.abs(wire.latchLen - params.wireMinRest);
-    const span = Math.max(1, params.wireMinRest);
+    const base = wire.restBase > 0 ? wire.restBase : params.wireMinRest;
+    const travel = Math.abs(wire.latchLen - base);
+    const span = Math.max(1, base);
     const dur = Math.max(0.05, params.wireShrink) * Math.max(1, travel / span);
     const u = clamp((time - wire.born) / dur, 0, 1);
-    const rest = lerp(wire.latchLen, params.wireMinRest, easeInOut(u));
-    if (!Number.isFinite(rest)) return params.wireMinRest;
+    const rest = lerp(wire.latchLen, base, easeInOut(u));
+    if (!Number.isFinite(rest)) return base;
     return Math.min(REST_CAP, rest);
   }
 
   /** 0 → 1 over the (distance-scaled) shrink window. */
   shrinkProgress(wire: Wire, time: number, params: Params): number {
-    const travel = Math.abs(wire.latchLen - params.wireMinRest);
-    const span = Math.max(1, params.wireMinRest);
+    const base = wire.restBase > 0 ? wire.restBase : params.wireMinRest;
+    const travel = Math.abs(wire.latchLen - base);
+    const span = Math.max(1, base);
     const dur = Math.max(0.05, params.wireShrink) * Math.max(1, travel / span);
     return clamp((time - wire.born) / dur, 0, 1);
+  }
+
+  /**
+   * The wire joining two bodies, or null.
+   *
+   * Three lookups rather than a scan, for the reason `detachAgent` gives: a
+   * body has three ports and a port holds at most one wire, so the whole
+   * neighbourhood is three reads. Called once per transport transfer.
+   */
+  wireBetween(aId: number, bId: number): Wire | null {
+    for (const slot of ['p', 'l', 'r'] as const) {
+      const w = this.wireAtSlot(aId, slot);
+      if (!w) continue;
+      const other = w.a.id === aId ? w.b.id : w.a.id;
+      if (other === bId) return w;
+    }
+    return null;
   }
 
   detach(id: number): void {
@@ -1163,8 +1219,29 @@ export class Graph {
       const rate = 0.55 + (wire.id % 7) * 0.11;
       const breathe = 1 + params.wireBreathe * Math.sin(time * rate + phase);
       const quiet = base * breathe;
-      const raw = quiet * this.strokeOf(wire.a, wire.b, agents, wave, params);
-      wire.rest = Number.isFinite(raw) ? clamp(raw, 4, REST_CAP) : params.wireMinRest;
+      /*
+       * **A wire carrying energy pulls its ends together.** One packet across
+       * this frame is `f = 1`, so the saturating `f/(1+f)` is half of
+       * `wireTug` at one packet and approaches all of it on a busy wire — a
+       * wire that moves nothing is exactly its resting length.
+       *
+       * This is `wireTug` restored, and what makes it viable is that the
+       * rewrite gate no longer measures against a global: `restBase` is the
+       * wire's own, `Sim.principalRedexReady` asks a ratio against it, so
+       * shortening a wire no longer decides who breeds. The other half of the
+       * old objection — that the pull and the grip were one packet at one
+       * instant, tracing a loop with no area — is answered by `gripSwing`,
+       * which is on the reactor's D and 53 degrees off the stroke.
+       */
+      const tug = params.wireTug;
+      let pull = 1;
+      if (tug > 0 && wire.carried > 0) {
+        const f = wire.carried / Math.max(1e-6, params.transportQuantum);
+        pull = 1 - tug * (f / (1 + f));
+      }
+      wire.carried = 0;
+      const raw = quiet * pull * this.strokeOf(wire.a, wire.b, agents, wave, params);
+      wire.rest = Number.isFinite(raw) ? clamp(raw, 4, REST_CAP) : wire.restBase;
       wire.pitchFloor = wire.rest * 0.5;
       // Applied under the floor on purpose: a collapsing wire has to be able
       // to reach nothing, and 4 px is still a visible thread.

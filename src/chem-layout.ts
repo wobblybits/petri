@@ -171,9 +171,9 @@ export const L_BASE = L_OUT + 2 * STATE_DIMS;
 
 /**
  * The body reaction table's rows: `excrete_c` and `uptake_c` for each of the
- * four species. See `docs/energy-chemistry-plan.md` §3.
+ * four species.
  *
- * Eight, not four. The plan's own arithmetic says "4 + 4 * STATE_DIMS = 20
+ * Eight, not four. The plan this came from had arithmetic saying "4 + 4 * STATE_DIMS = 20
  * floats" while its table lists eight rows and its prose says the simplex is
  * "normalised across all eight rows"; the table and the prose agree with each
  * other and the sizing does not, so the sizing is the slip. Derived here from
@@ -181,82 +181,40 @@ export const L_BASE = L_OUT + 2 * STATE_DIMS;
  * module.
  */
 export const CHEM_SPECIES = 4;
-export const ROW_EXCRETE = 0;
-export const ROW_UPTAKE = CHEM_SPECIES;
-export const ROW_COUNT = 2 * CHEM_SPECIES;
+
+/*
+ * `X` and `x0` were here: a head from `h` to eight reaction rows, one unit
+ * budget over four excretion reactions and four uptake ones, so a body could
+ * not both shout and eat without giving something up.
+ *
+ * Both halves lost their subject. Nothing excretes, so the production rows
+ * have nothing to produce; a body eats the ground and nothing else, so an
+ * uptake row has one species to be a recipe for and every body can digest it
+ * raw. Forty floats a body, recomputed every frame by `expressVector` and read
+ * by nothing — `rowCost` shipped at 0 and `upkeep` at 0, which were the only
+ * two things left that looked at them. Deleted rather than left as a door,
+ * because the door led to a room that is no longer there.
+ */
 
 /**
- * `X`, state -> expression: one rate multiplier per reaction row.
+ * `ks`, the half-saturation of a body's uptake: one dimensionless gene. The
+ * effective constant is `params.uptakeKs * ks`, the way `HEAD_SCALE` converts
+ * every other dimensionless gene into its natural unit, and it seeds to 1 so a
+ * fresh body uses the global.
  *
- * The head a body's chemistry is a phenotype through. An enzyme, in the sense
- * the plan commits to, is a reaction whose rate constant comes from here —
- * nothing more. Row-major by row: `X_OUT + row * STATE_DIMS + d`.
+ * One rather than four, because a body eats one species. A plain heritable
+ * gene rather than a head off `h`: affinity is a property of the transporter
+ * itself — which one you have, not how much of it you made — so it has no
+ * business moving with mood.
  *
- * The matrix seeds to zero; the bases are written by `seedProduction`, so a
- * fresh body already expresses its kind's production half and an even uptake
- * half (`SEED_PRODUCTION`, `SEED_UPTAKE`). Every reaction still runs at the
- * constant it ran at before this existed, because those constants carry
- * `ROW_COUNT` and the uptake rows land on the flat fallback's own eighth. The
- * rows are read through a unit simplex like `emitVector`'s, so this is a
- * budget rather than eight independent dials: a body cannot both shout and
- * eat without giving something up, which is the trade-off division of labour
- * needs and the reason the head is one head and not eight.
- *
- * Outside `[PLASTIC_BASE, PLASTIC_BASE + PLASTIC_LEN)` on purpose — see the
- * plan's §8. Expression is inherited and mutated, not learned, though it
- * still varies within a life because it reads `h`.
+ * `(vmax, ks)` do not dominate each other, so a fast grazer needing rich
+ * ground and a scavenger living on scraps are both viable and neither wins
+ * everywhere. `vmax` is global (`uptakeVmax`) now that `X` is gone, so what a
+ * lineage owns of the pair is the affinity.
  */
-export const X_OUT = L_BASE + 2;
-export const X_BASE = X_OUT + ROW_COUNT * STATE_DIMS;
+export const KS_BASE = L_BASE + 2;
 
-/**
- * `ks`, the half-saturation of each species' uptake, one dimensionless gene
- * per species. The effective constant is `params.uptakeKs * ks[c]`, the way
- * `HEAD_SCALE` converts every other dimensionless gene into its natural unit,
- * and it seeds to 1 so a fresh body uses the global.
- *
- * A plain heritable gene rather than a head off `h`, which is a departure
- * from the plan's §4 ("`vmax` and `Ks` read off `h` as heads") and a
- * deliberate one. `X` supplies `vmax`: how much transporter a body is
- * *expressing*, which is regulation and should depend on how hungry it is.
- * Affinity is a property of the transporter itself — which one you have, not
- * how much of it you made — so it has no business moving with mood, and
- * giving it a head would cost twenty floats to model something as a decision
- * that is not one.
- *
- * The pair is what matters either way: `(vmax, ks)` do not dominate each
- * other, so a fast grazer needing rich ground and a scavenger living on
- * scraps are both viable and neither wins everywhere. That is the plan's
- * stated payoff and it survives the change.
- */
-export const KS_BASE = X_BASE + ROW_COUNT;
 
-/**
- * What `seedProduction` writes: the bias on a kind's production rows, and the
- * bias on every uptake row.
- *
- * Chosen together so that the uptake half lands on exactly an eighth a row —
- * the flat fallback's own value, which is what a seeded genome expressed
- * before any kind produced anything in particular. Four uptake rows at
- * `SEED_UPTAKE` against production summing to `SEED_PRODUCTION` is a simplex
- * of `SEED_PRODUCTION + CHEM_SPECIES * SEED_UPTAKE`, and `SEED_UPTAKE` over
- * that has to be `1 / ROW_COUNT`. A kind with two production species splits
- * `SEED_PRODUCTION` between them.
- */
-export const SEED_PRODUCTION = 2;
-export const SEED_UPTAKE = 0.5;
-
-/**
- * What share of its whole chemical budget a seeded Era puts on making ground:
- * its entire production half, after normalisation.
- *
- * Derived from the seed rather than restated beside it, because two places
- * read it as a *scale* — the producer's upkeep discount is "how far along is
- * this body toward what an Era expresses" — and a copy of the number would
- * drift the moment the seed moved. `chemistry.test.ts` pins the derivation to
- * what `expressVector` actually produces.
- */
-export const ERA_GROUND_SHARE = SEED_PRODUCTION / (SEED_PRODUCTION + CHEM_SPECIES * SEED_UPTAKE);
 
 /**
  * `G`, state -> gait, and its base. One row: `anchor`.
@@ -283,7 +241,7 @@ export const ERA_GROUND_SHARE = SEED_PRODUCTION / (SEED_PRODUCTION + CHEM_SPECIE
  *
  * Row-major, like every head here: `G_OUT + row * STATE_DIMS + d`.
  */
-export const G_OUT = KS_BASE + CHEM_SPECIES;
+export const G_OUT = KS_BASE + 1;
 export const G_BASE = G_OUT + STATE_DIMS;
 
 /**
@@ -316,7 +274,41 @@ export const TX_B = 1;
 export const TX_C = 2;
 export const TX_D = 3;
 export const GX_BASE = TX_BASE + CHEM_SPECIES;
-export const CHEM_LEN = GX_BASE + CHEM_SPECIES;
+
+/**
+ * `Sw` and `Gw`: what mixture of the reactor's three species each of the two
+ * actuators reads. **This is where a lineage owns the phase of its own gait.**
+ *
+ * The reactor holds B, C and D at fixed angles to each other — the eigenvector
+ * at the operating point puts B at +84 degrees, C at 0 and D at −51 to −65,
+ * and those are `k3` and `d` rather than anything anybody dialled. Three
+ * phasors spanning more than 180 degrees, so a weighted sum of them reaches
+ * **any** phase and amplitude. A body that changes its weights changes when in
+ * its own cycle it strokes, and when it grips.
+ *
+ * Both, and not one with the other as a reference, because the phase that
+ * matters is not only the angle between the two actuators. The impulse a
+ * stroke works against is the gut broadcast, which is timed by the chemistry
+ * (`Sim.advanceGait`), so each actuator's angle to *that* is a real degree of
+ * freedom. Fixing one would lose reachable gaits.
+ *
+ * Genes and not heads, for `Tx`'s reason: three floats each against eighteen,
+ * and a phase that moved with a body's mood would be a body that could not
+ * hold a gait. Seeded so a fresh pond is exactly what it was — `Sw` pure C,
+ * which is the stroke the rest length has always read, and `Gw` pure D, which
+ * is the grip swing's 53-degree lag. What is new is everything between.
+ *
+ * `gaitSwell` and `gripSwing` stay the global magnitudes: the weights choose a
+ * direction in (B, C, D) and those choose how hard it is pulled.
+ */
+export const SPECIES_W = 3;
+export const SW_BASE = GX_BASE + CHEM_SPECIES;
+export const GW_BASE = SW_BASE + SPECIES_W;
+/** Slots in `Sw` and `Gw`, in the reactor's own order. */
+export const W_B = 0;
+export const W_C = 1;
+export const W_D = 2;
+export const CHEM_LEN = GW_BASE + SPECIES_W;
 
 /**
  * The genome as a list of named segments, in memory order.
@@ -356,13 +348,13 @@ export const CHEM_SEGMENTS: readonly ChemSegment[] = [
   { name: 'p0', at: P_BASE, len: 2 },
   { name: 'L', at: L_OUT, len: 2 * STATE_DIMS },
   { name: 'l0', at: L_BASE, len: 2 },
-  { name: 'X', at: X_OUT, len: ROW_COUNT * STATE_DIMS },
-  { name: 'x0', at: X_BASE, len: ROW_COUNT },
-  { name: 'ks', at: KS_BASE, len: CHEM_SPECIES },
+  { name: 'ksg', at: KS_BASE, len: 1 },
   { name: 'G', at: G_OUT, len: STATE_DIMS },
   { name: 'g0', at: G_BASE, len: 1 },
   { name: 'Tx', at: TX_BASE, len: CHEM_SPECIES },
   { name: 'Gx', at: GX_BASE, len: CHEM_SPECIES },
+  { name: 'Sw', at: SW_BASE, len: SPECIES_W },
+  { name: 'Gw', at: GW_BASE, len: SPECIES_W },
 ];
 
 /**
@@ -403,7 +395,14 @@ export const LEARN_PLASTIC = 0;
 export const LEARN_TRACE = PLASTIC_LEN;
 export const LEARN_CRITIC = 2 * PLASTIC_LEN;
 export const LEARN_PREV_V = 2 * PLASTIC_LEN + CRITIC_LEN;
-export const LEARN_STRIDE = LEARN_PREV_V + 1;
+/**
+ * Last frame's `IN_FULL`, for the *rate* half of the reward. See
+ * `params.learnReward`: the level signal says how short a body is and the rate
+ * signal says whether it is gaining, and a body at its cap has a gradient
+ * under the second where it has none under the first.
+ */
+export const LEARN_PREV_FULL = LEARN_PREV_V + 1;
+export const LEARN_STRIDE = LEARN_PREV_FULL + 1;
 
 /**
  * What one unit of a head's output is worth, per row.
@@ -441,15 +440,15 @@ export const HEAD_SCALE = {
 } as const;
 
 /**
- * This body's half-saturation for species `c`, in the field's own units.
+ * This body's half-saturation for the ground, in the field's own units.
  *
  * Here rather than in `agents.ts` for the reason this module exists at all:
  * `energy.ts` reads it inside the harvest, and `agents.ts` imports `energy.ts`
  * for `extraCapFor`, so the other direction would be a runtime cycle. Reading
  * a gene is layout knowledge, which is what lives here.
  */
-export function uptakeKsOf(chem: Float32Array, g: number, c: number, globalKs: number): number {
-  const gene = chem[g + KS_BASE + c];
+export function uptakeKsOf(chem: Float32Array, g: number, globalKs: number): number {
+  const gene = chem[g + KS_BASE];
   const ks = globalKs * (gene > 0 ? gene : 0);
   // Zero affinity is division by zero downstream, and a gene mutated to or
   // past zero is a body with an infinitely good transporter, which is not a

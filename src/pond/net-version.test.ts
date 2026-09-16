@@ -166,7 +166,7 @@ describe('the header', () => {
   it('refuses to encode a net at another layout', () => {
     const { sim } = learningPond(60, 120);
     const net = captureNets(sim)[0].data;
-    const old = decodeNet(asOldBuild(net, NAMES.filter((n) => n !== 'Tx' && n !== 'Gx')).blob);
+    const old = decodeNet(asOldBuild(net, NAMES.filter((n) => n !== 'Sw' && n !== 'Gw')).blob);
     expect(() => encodeNet(old)).toThrow(/migrateNet/);
   });
 });
@@ -175,18 +175,18 @@ describe('migration', () => {
   it('seeds a head this build appended, and carries everything else bit for bit', () => {
     // The case that stranded every net in the library: `G` and `g0` went on
     // the end, the width grew, and nothing a stored body carried had changed.
-    // The tail is whatever this build appended last — `Gc` and `gc0` now —
+    // The tail is whatever this build appended last — `Sw` and `Gw` now —
     // so the test follows the layout rather than naming the head of the day.
     const { sim, params } = learningPond(120, 400);
     const net = captureNets(sim)[0].data;
     const { blob, chem } = asOldBuild(
       net,
-      NAMES.filter((n) => n !== 'Tx' && n !== 'Gx'),
+      NAMES.filter((n) => n !== 'Sw' && n !== 'Gw'),
     );
-    expect(chem).toBe(CHEM_LEN - segment('Tx').len - segment('Gx').len);
+    expect(chem).toBe(CHEM_LEN - segment('Sw').len - segment('Gw').len);
 
     const c = compatibility(readHeader(blob));
-    expect(c).toEqual({ kind: 'migratable', notes: ['Tx seeded (new in this build)', 'Gx seeded (new in this build)'] });
+    expect(c).toEqual({ kind: 'migratable', notes: ['Sw seeded (new in this build)', 'Gw seeded (new in this build)'] });
 
     const old = decodeNet(blob);
     expect(old.bodies[0].chem.length).toBe(chem);
@@ -195,7 +195,7 @@ describe('migration', () => {
     const { net: now, notes } = prepareNet(old, params);
     expect(notes).toEqual(c.kind === 'migratable' ? c.notes : []);
     expect(isCurrent(now)).toBe(true);
-    const G = segment('Tx');
+    const G = segment('Sw');
     for (let i = 0; i < net.bodies.length; i++) {
       const was = net.bodies[i];
       const is = now.bodies[i];
@@ -218,18 +218,18 @@ describe('migration', () => {
   it('puts reordered segments back where this build keeps them', () => {
     const { sim, params } = learningPond(120, 400);
     const net = captureNets(sim)[0].data;
-    // A build that kept `ks` ahead of the expression head.
-    const order = NAMES.filter((n) => n !== 'ks');
-    order.splice(order.indexOf('X'), 0, 'ks');
+    // A build that kept `ksg` ahead of the locomotion heads.
+    const order = NAMES.filter((n) => n !== 'ksg');
+    order.splice(order.indexOf('L'), 0, 'ksg');
     const { blob, segments: was } = asOldBuild(net, order);
     const c = compatibility(readHeader(blob));
     expect(c.kind).toBe('migratable');
     if (c.kind !== 'migratable') return;
     const at = (name: string) => was.find((s) => s.name === name)!.at;
     expect(c.notes).toEqual([
-      `X moved ${at('X')} -> ${segment('X').at}`,
-      `x0 moved ${at('x0')} -> ${segment('x0').at}`,
-      `ks moved ${at('ks')} -> ${segment('ks').at}`,
+      `L moved ${at('L')} -> ${segment('L').at}`,
+      `l0 moved ${at('l0')} -> ${segment('l0').at}`,
+      `ksg moved ${at('ksg')} -> ${segment('ksg').at}`,
     ]);
     const { net: now } = prepareNet(decodeNet(blob), params);
     for (let i = 0; i < net.bodies.length; i++) {
@@ -259,14 +259,14 @@ describe('migration', () => {
   it('drops a segment this build lost and seeds one it gained', () => {
     const { sim, params } = learningPond(60, 120);
     const net = captureNets(sim)[0].data;
-    const { blob } = asOldBuild(net, NAMES, { ks: 'affinity' });
+    const { blob } = asOldBuild(net, NAMES, { ksg: 'affinity' });
     const c = compatibility(readHeader(blob));
     expect(c).toEqual({
       kind: 'migratable',
-      notes: ['ks seeded (new in this build)', 'affinity dropped (gone from this build)'],
+      notes: ['ksg seeded (new in this build)', 'affinity dropped (gone from this build)'],
     });
     const { net: now } = prepareNet(decodeNet(blob), params);
-    const ks = segment('ks');
+    const ks = segment('ksg');
     for (let i = 0; i < net.bodies.length; i++) {
       const seed = seedChem(net.bodies[i].kind, params);
       expect([...now.bodies[i].chem.subarray(ks.at, ks.at + ks.len)]).toEqual([...seed.subarray(ks.at, ks.at + ks.len)]);
@@ -288,18 +288,18 @@ describe('migration', () => {
   it('refuses a segment that changed length, by name', () => {
     const { sim } = learningPond(60, 120);
     const net = captureNets(sim)[0].data;
-    // Same total width, two floats moved from `ks` to `x0`.
+    // Same total width, two floats moved from `Gx` to `Tx`.
     const segs = CHEM_SEGMENTS.map((s) => ({ ...s }));
-    const x0 = segs.find((s) => s.name === 'x0')!;
-    const ks = segs.find((s) => s.name === 'ks')!;
-    x0.len += 2;
-    ks.at += 2;
-    ks.len -= 2;
+    const tx = segs.find((s) => s.name === 'Tx')!;
+    const gx = segs.find((s) => s.name === 'Gx')!;
+    tx.len += 2;
+    gx.at += 2;
+    gx.len -= 2;
     const blob = encodeNetAs(net, currentLayout(), segs, PLASTIC_BASE);
     const c = compatibility(readHeader(blob));
     expect(c).toEqual({
       kind: 'refused',
-      reason: 'genome layout has changed since this net was stored: segment x0 was 10 floats and is 8',
+      reason: 'genome layout has changed since this net was stored: segment Tx was 6 floats and is 4',
     });
   });
 
@@ -352,13 +352,13 @@ describe('migration', () => {
   it('is what plantNet does on the way in', () => {
     const { sim, params } = learningPond(120, 400);
     const net = captureNets(sim)[0].data;
-    const old = decodeNet(asOldBuild(net, NAMES.filter((n) => n !== 'Tx' && n !== 'Gx')).blob);
+    const old = decodeNet(asOldBuild(net, NAMES.filter((n) => n !== 'Sw' && n !== 'Gw')).blob);
 
     const fresh = new Sim(1600, 1200, 128);
     loadPreset(fresh, 'soup', { ...params, soupCount: 0 });
     const ids = plantNet(fresh, params, old, fresh.w * 0.5, fresh.h * 0.5);
     expect(ids.length).toBe(net.bodies.length);
-    const G = segment('Tx');
+    const G = segment('Sw');
     const store = fresh.agentStore;
     for (let i = 0; i < ids.length; i++) {
       const a = fresh.agents.get(ids[i])!;
@@ -373,11 +373,11 @@ describe('migration', () => {
   it('seeds through migrateNet with whatever seeder it is handed', () => {
     const { sim } = learningPond(60, 120);
     const net = captureNets(sim)[0].data;
-    const old = decodeNet(asOldBuild(net, NAMES.filter((n) => n !== 'Gx')).blob);
+    const old = decodeNet(asOldBuild(net, NAMES.filter((n) => n !== 'Gw')).blob);
     const marker = new Float32Array(CHEM_LEN).fill(-7);
     const { net: now, notes } = migrateNet(old, () => marker.slice());
-    expect(notes).toEqual(['Gx seeded (new in this build)']);
-    const g0 = segment('Gx');
+    expect(notes).toEqual(['Gw seeded (new in this build)']);
+    const g0 = segment('Gw');
     expect([...now.bodies[0].chem.subarray(g0.at)]).toEqual(new Array(g0.len).fill(-7));
     expect(() => migrateNet(old, () => new Float32Array(3))).toThrow(new RegExp(`not ${CHEM_LEN}`));
   });
@@ -518,7 +518,7 @@ describe('net files', () => {
     const dir = mkdtempSync(join(tmpdir(), 'petri-nets-'));
     try {
       const path = join(dir, 'old.petrinet');
-      const { blob } = asOldBuild(net, NAMES.filter((n) => n !== 'Tx' && n !== 'Gx'));
+      const { blob } = asOldBuild(net, NAMES.filter((n) => n !== 'Sw' && n !== 'Gw'));
       writeFileSync(path, blob);
       expect(inspectNetFile(path).compatibility.kind).toBe('migratable');
       const loaded = loadNet(path, params);

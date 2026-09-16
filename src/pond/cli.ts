@@ -2,8 +2,8 @@ import { CHEM_LEN, CHEM_SEGMENTS, PLASTIC_BASE, PLASTIC_LEN } from '../chem-layo
 import { fieldGpu } from '../gpu/field-gpu.ts';
 import { nativeSolver } from '../native/solver.ts';
 import { PondDb, type NetRow } from './db.ts';
-import { NET_FORMAT, compatibility, layoutSelfCheck, readHeader, type Compatibility } from './net-blob.ts';
-import { NET_FILE_EXT, loadNet, saveNet, writeNetFile } from './net-file.ts';
+import { NET_FORMAT, compatibility, decodeNet, layoutSelfCheck, readHeader, type Compatibility } from './net-blob.ts';
+import { NET_FILE_EXT, fixturePath, listFixtures, loadNet, readNetBlob, saveNet, writeNetFile } from './net-file.ts';
 import { prepareNet } from './capture.ts';
 import { parseGround } from './ground.ts';
 import { latinHypercube, parseAxis } from './sample.ts';
@@ -14,6 +14,7 @@ import { paramsWith, runPond, type SeedNet } from './run.ts';
 import { DEFAULT_WARMUP, effectTable, effects, pointTable, sweepTrials } from './analyze.ts';
 import { checkCouplings, formatCouplings } from './couplings.ts';
 import { PROTOCOLS, describeProtocol, findProtocol, planProtocol, preflight, protocolReport } from './protocol.ts';
+import { epsilon, netSpectrum, perHopGain, reactorBands, relayBand, type Node } from './spectrum.ts';
 import { gridPoints, runSweep } from './sweep.ts';
 import { closeWebGpu } from './webgpu-node.ts';
 
@@ -42,6 +43,7 @@ petri pond — a headless pond, and the library it writes to
   npm run pond -- analyze --name n      what the sweep says, and which dial did it
   npm run pond -- explore [--name n]    what varies together across the library
   npm run pond -- import <files...>     fold other library files into --db
+  npm run pond -- spectrum [--set k=v]  the metabolism in closed form: bands, gain, net spectra
   npm run pond -- protocols             the experiments written down (docs/experiments.md)
   npm run pond -- protocol <name>       run one: preflight, every arm, then the report
   npm run pond -- analyze --protocol n  read a protocol's runs back against its prediction
@@ -59,9 +61,10 @@ run options
   --min-bodies <n>     smallest component worth storing  (default 2)
   --limit <n>          store only the n largest components per harvest
   --gpu auto|on|off    field and genome on the GPU, via Dawn  (default auto)
-  --ground <spec>      uniform | patches[:n]           (default uniform)
+  --ground <spec>      uniform | patches[:n]        (default patches:24)
                        the same total mass, arranged differently. Sugar for
                        --set groundPatches=n, which a sweep can put on an axis
+                       `uniform` is the control, not the shipped dish
   --set <key>=<value>  override one Params field; repeatable
   --note <text>        free text on the run row
 
@@ -751,6 +754,69 @@ async function cmdSweep(args: Args): Promise<void> {
   }
 }
 
+/**
+ * The metabolism, answered by algebra instead of by running a pond.
+ *
+ * Every number here is closed form — Routh-Hurwitz for the fuel window, the
+ * catalyst channel's transfer function for the per-hop gain, and the cycle
+ * structure of the principal-out graph for the Laplacian's spectrum. It costs
+ * milliseconds, it is exact, and it answers the two questions a sweep has
+ * twice been the wrong instrument for: does this body oscillate, and does a
+ * chain of them carry a wave. `docs/metabolism-spec.md` has the derivations.
+ */
+function cmdSpectrum(args: Args): void {
+  const params = paramsWith(args.sets);
+  const b = reactorBands(params);
+  const relay = relayBand(params);
+  const out: string[] = [];
+  out.push(
+    `one body, per reactor unit (the wall clock is metabolicRate = ${params.metabolicRate}x faster)`,
+    `  fuel window      influx j in (${b.hopfLow.toFixed(4)}, ${b.hopfHigh.toFixed(4)})   ` +
+      `period at onset ${b.periodSeconds.toFixed(2)} s wall`,
+    `  excitability (E) j > ${b.excite.toFixed(4)}   per-hop gain there ${relay.atExcite.toFixed(3)}` +
+      `${relay.atExcite < 1 ? ' — below 1, so a body on (E) attenuates' : ''}`,
+    `  relay band       j in (${relay.low.toFixed(4)}, ${relay.high.toFixed(4)})   ` +
+      `where (metabolicDiffuse/metabolicRate) * |G(jw)| >= 1,  eps = ${epsilon(params).toFixed(4)}`,
+    '',
+    '  per-hop gain below the boundary, which is where a relay sits:',
+  );
+  for (const f of [0.4, 0.6, 0.75, 0.85, 0.95, 0.995]) {
+    const j = b.hopfLow * f;
+    const g = perHopGain(params, j);
+    out.push(
+      `    j = ${j.toFixed(4)}  gain ${g > 1e3 ? '>1000' : g.toFixed(3)}  ` +
+        (g >= 1 ? 'sustains' : `${(1 / g).toFixed(1)}x attenuation per hop`),
+    );
+  }
+  out.push('    (the gain diverges at the boundary: a body just under its Hopf point is a high-Q resonator)');
+  for (const name of listFixtures()) {
+    const net = decodeNet(readNetBlob(fixturePath(name)));
+    const nodes: Node[] = net.bodies.map((body) => ({ kind: body.kind as Node['kind'], out: -1 }));
+    for (const w of net.wires) {
+      if (w.aSlot === 'p') nodes[w.a].out = w.b;
+      if (w.bSlot === 'p') nodes[w.b].out = w.a;
+    }
+    const s = netSpectrum(nodes);
+    const lens = new Map<number, number>();
+    for (const len of s.cycles) lens.set(len, (lens.get(len) ?? 0) + 1);
+    const far = s.hops.filter((h) => h < 0 || h > 1).length;
+    const none = s.hops.filter((h) => h < 0).length;
+    out.push(
+      '',
+      `${name}: ${s.bodies} bodies, ${s.speaking} with a wired principal`,
+      `  cycles ${s.cycles.length} ` +
+        `(${[...lens].sort((x, y) => x[0] - y[0]).map(([l, c]) => `${c} of length ${l}`).join(', ') || 'none'})` +
+        `  -> ${s.laplacianComplex} complex Laplacian eigenvalues` +
+        `${s.laplacianComplex === 0 ? ': no travelling eigenmode, only driven transients' : ''}`,
+      `  primer reach: ${s.hops.filter((h) => h === 1).length} bodies one hop from an Era, ` +
+        `${far} at hop 2 or beyond (${none} with no Era upstream at all)`,
+      `    -> under Era-only intake ${far} of ${s.bodies} (${((100 * far) / s.bodies).toFixed(0)}%) have no primer,` +
+        ' so no autocatalysis and no clock',
+    );
+  }
+  process.stdout.write(`${out.join('\n')}\n`);
+}
+
 function cmdProtocols(): void {
   process.stdout.write(
     `${PROTOCOLS.map((p) => describeProtocol(p)).join('\n\n')}\n\n` +
@@ -863,6 +929,7 @@ async function main(): Promise<void> {
   else if (args.command === 'analyze' || args.command === 'analyse') cmdAnalyze(args);
   else if (args.command === 'explore') cmdExplore(args);
   else if (args.command === 'import') cmdImport(args);
+  else if (args.command === 'spectrum') cmdSpectrum(args);
   else if (args.command === 'protocols') cmdProtocols();
   else if (args.command === 'protocol') await cmdProtocol(args);
   else if (args.command === 'format') {

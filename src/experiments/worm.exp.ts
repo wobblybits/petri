@@ -83,6 +83,24 @@ export function rigParams(over: Partial<Params> = {}): Params {
   p.uptakeVmax = 0;
   p.swimCost = 0;
   p.contactCost = 0;
+  /*
+   * **And the reactor, which is what killed this rig.**
+   *
+   * The rig feeds nothing — `ambientEnergy`, `energyRegrow` and `uptakeVmax`
+   * are all zero, because the question is the drag law and not the economy.
+   * When the gait shipped on (`metabolicRate` 15), every body here began
+   * running a reactor with no gut to fill it, so its primer sat at zero, its
+   * starvation window ran out at `starveTime` 25 s, and the whole worm died a
+   * quarter of the way through the 120 s settle. Every locomotion number this
+   * file printed after that was measuring a corpse: 0.000 px/s at every
+   * setting, and `moved` stuck at the head's first fill.
+   *
+   * Pinned here for the reason `fixedParams` pins it in the suite — a rig that
+   * is not about the reactor says so — and an arm that *is* about it turns it
+   * on and feeds the worm. See the grip-swing arm, which drives the wave from
+   * a policy instead so the phase is an independent variable.
+   */
+  p.metabolicRate = 0;
   // No rewriting, and no latching that could start one.
   p.rewriteDuration = 0;
   p.snapRadius = 0;
@@ -93,7 +111,6 @@ export function rigParams(over: Partial<Params> = {}): Params {
   p.deposit = 0;
   p.diffuse = 0;
   p.decay = 0;
-  p.excreteRate = 0;
   p.sense = 0;
   // No steering, no self-propulsion, no shoaling. The genome's cruise and
   // turn heads seed from these, so at zero the locomotion head is inert.
@@ -385,6 +402,22 @@ export interface FreeSpec {
   seed?: number;
   seconds?: number;
   /**
+   * Units of ground written into every body's gut each frame, so the reactor
+   * runs without the worm having to eat.
+   *
+   * The rig cannot simply be fed. Give bodies ground and `uptakeVmax` and each
+   * one earns its own income, every tank fills, `hungerNeed` goes to zero
+   * everywhere and the head-to-tail gradient this bench exists to control
+   * stops existing — measured, `moved` falls from about 2600 to 1.
+   *
+   * So the gut is written from a policy, the way the tanks are. Keep it small
+   * enough that digestion's whole mouthful is inside what `intake` routes to
+   * the reactor (`gut * (1 - exp(-digestRate*dt))` under `intake * dt`) and
+   * nothing reaches the tank: the reactor is fed at exactly its own rate and
+   * the transport gradient is untouched.
+   */
+  primeGut?: number;
+  /**
    * Units per second fed to the head and taken from the tail. Omit for the
    * unmetered bench, which pins the head at a full tank and the tail in debt
    * and so supplies whatever the physics will take.
@@ -410,6 +443,12 @@ export interface FreeResult {
   moved: number;
   dx: number;
   dy: number;
+  /** Frames of lag between one segment's *gait phase* and the next one's. */
+  gaitLag: number;
+  /** How much of that lag agrees on a direction, 0 to 1. */
+  gaitAgree: number;
+  /** Peak-to-trough swing of segment gait phase. 0 = the reactor is not running. */
+  gaitSwingSeen: number;
 }
 
 /**
@@ -473,7 +512,18 @@ export function runFree(spec: FreeSpec): FreeResult {
     const worm = buildWorm(sim, params, 2000, 2000);
     for (const a of worm.all) a.extra = 0;
     const thick = { ...params, drag: 20, angDrag: 20 };
-    for (let f = 0; f < Math.round(120 / dt); f++) sim.step(dt, thick);
+    const prime = spec.primeGut;
+    const GUT = sim.agentStore.gut;
+    /*
+     * The settle is primed too, and it has to be: it is 120 s long and the
+     * starvation window is 25, so a reactor left unfed here kills the whole
+     * worm before the clock even starts. That is exactly how this rig died
+     * quietly when the gait shipped on.
+     */
+    for (let f = 0; f < Math.round(120 / dt); f++) {
+      if (prime !== undefined) for (const a of worm.all) GUT[a.slot] = prime;
+      sim.step(dt, thick);
+    }
 
     // Quanta by arrangement, and the two ends that are held.
     const pick = QUANTA[spec.quanta];
@@ -486,12 +536,18 @@ export function runFree(spec: FreeSpec): FreeResult {
 
     const frames = Math.round(seconds / dt);
     const series = new Float64Array(SEGMENTS * frames);
+    // The same cross-correlation, on the gait's own phase rather than on
+    // fullness: is there a wave running along this worm at all?
+    const gait = new Float64Array(SEGMENTS * frames);
+    const WAVE = sim.agentStore.gaitWave;
     const before = centre(worm);
     let moved = 0;
     const last = new Map<number, number>();
     for (const a of worm.all) last.set(a.id, a.extra);
     const income = spec.income;
     for (let f = 0; f < frames; f++) {
+      // The reactor's own supply, written rather than eaten. See `primeGut`.
+      if (prime !== undefined) for (const a of worm.all) GUT[a.slot] = prime;
       if (income === undefined) {
         // Unmetered: an infinite source and an infinite sink. Whatever the
         // physics will carry, it gets.
@@ -517,9 +573,30 @@ export function runFree(spec: FreeSpec): FreeResult {
         last.set(a.id, a.extra);
       }
       for (let seg = 0; seg < SEGMENTS; seg++) series[seg * frames + f] = count[seg] > 0 ? fill[seg] / count[seg] : 0;
+      const gw = new Float64Array(SEGMENTS);
+      const gn = new Float64Array(SEGMENTS);
+      for (const a of worm.all) {
+        const seg = worm.segOf.get(a.id) ?? 0;
+        gw[seg] += WAVE[a.slot];
+        gn[seg] += 1;
+      }
+      for (let seg = 0; seg < SEGMENTS; seg++) gait[seg * frames + f] = gn[seg] > 0 ? gw[seg] / gn[seg] : 0;
     }
     const after = centre(worm);
     const { lag, agree } = waveLag(series, SEGMENTS, frames);
+    const g = waveLag(gait, SEGMENTS, frames);
+    let gaitSwingSeen = 0;
+    for (let seg = 0; seg < SEGMENTS; seg++) {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let f = 0; f < frames; f++) {
+        const v = gait[seg * frames + f];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      gaitSwingSeen += hi - lo;
+    }
+    gaitSwingSeen /= SEGMENTS;
     let swing = 0;
     for (let seg = 0; seg < SEGMENTS; seg++) {
       let lo = Infinity;
@@ -538,6 +615,9 @@ export function runFree(spec: FreeSpec): FreeResult {
       moved,
       dx: after.x - before.x,
       dy: after.y - before.y,
+      gaitLag: g.lag,
+      gaitAgree: g.agree,
+      gaitSwingSeen,
     };
   } finally {
     Math.random = real;
@@ -764,6 +844,144 @@ describe('experiment: one worm on a bench', () => {
       );
       expect(Number.isFinite(r.dx)).toBe(true);
     }
+  });
+
+  it('is a tripwire on the rig itself', () => {
+    /*
+     * **This rig was dead for a while and nothing said so.** When the gait
+     * shipped on (`metabolicRate` 15), every body here started running a
+     * reactor on a bench that deliberately feeds nothing, so the primer sat at
+     * zero, the starvation window ran out at 25 s, and the worm died a quarter
+     * of the way through the 120 s settle. Every arm went on printing numbers:
+     * 0.000 px/s at every setting, including the `drag` 0.05 / `grip` 12 row
+     * the stroke arm calls the widest ratio it can reach. A column of zeros
+     * reads like a null result rather than a corpse.
+     *
+     * `moved` is the tell, and it is why this arm asserts on that rather than
+     * on travel. It counts increases in a body's tank, so with the head pinned
+     * at its cap and income arriving every frame it climbs all run whether or
+     * not the worm goes anywhere. Dead it read **4** — three strands of head
+     * filling once, then nothing. Alive it reads about **2600**.
+     *
+     * So: a tripwire on the *rig*, not on the pond. It fails when the worm
+     * cannot pass a packet along, which is the precondition every other arm in
+     * this file assumes and none of them checks.
+     */
+    const r = runFree({ quanta: 'gradient', income: 3, params: { grip: 2, transportRecoil: 100 } });
+    console.log(`\n  rig tripwire: moved ${r.moved.toFixed(1)}, swing ${r.swing.toFixed(4)}, dx ${r.dx.toFixed(3)}`);
+    // Three strands of head, filling once, is about 4. Anything at or below
+    // that is a worm that never passed a packet along.
+    expect(
+      r.moved,
+      'the rig transported nothing: every locomotion number from this file is measuring a dead worm',
+    ).toBeGreaterThan(10);
+  });
+
+  it('asks whether a D-driven grip swing is worth anything', () => {
+    /*
+     * The stroke and the anchor are both driven by `wave(C)`, so the worm
+     * deforms and undeforms through the same shapes: a reciprocal cycle, which
+     * nets zero displacement however hard it is driven. That is Purcell's
+     * scallop theorem, and it is the same objection that retired `wireTug` —
+     * "one degree of freedom and a race".
+     *
+     * `gripSwing` is the second degree of freedom, and the angle between them
+     * is the reactor's own: `dD/dt = k3*C - d*D` is a first-order lag, so D
+     * trails C by `atan(w/d)` — 51 degrees at the bottom of the fuel window,
+     * 65 at the top, measured at 53.5 on a lone fed body. Nobody chose those
+     * numbers.
+     *
+     * **This arm primes the worm's guts**, which the rest of the file
+     * deliberately does not: the reactor has to be running for there to be a
+     * second actuator at all. So it is not comparable with the arms above, and
+     * the control is `gripSwing` 0 with everything else identical.
+     *
+     * **Measured, and it costs:** 4.22 px/s at swing 0, against 2.62 at 0.5
+     * and 1.88 at 1. Turning the second actuator on makes this worm slower,
+     * and the reason is that it has no travelling wave to ride. Every body
+     * here is primed identically, so every reactor runs at the same phase and
+     * the grip swings *together* at both ends of every wire. Travel per kick
+     * is `|p| * (1/k_a - 1/k_b) / (m_a + m_b)`, which is nonlinear in `k`, so
+     * scaling both ends by the same factor shrinks the difference on average
+     * rather than leaving it alone. A phase offset between the reactor's own
+     * species is not enough; the offset has to be *along the body*.
+     *
+     * **That explanation was wrong and the rig says so.** `gaitLag` reads 6.64
+     * frames a segment with 0.67 of pairs agreeing on the direction, against a
+     * period of about 128 — a real travelling wave, roughly 19 degrees a
+     * segment, even with every gut primed identically, because the broadcast
+     * coupling makes the gradient rather than the priming. The swing cost
+     * anyway.
+     *
+     * **The real reason was that nothing timed the kicks.** `Sim.recoil` was
+     * reachable from exactly one place, the demand gradient's
+     * `flowChargesFast` — so the only impulse in the pond arrived on the
+     * economy's clock while the grip swung on the chemistry's, and an
+     * uncorrelated zero-mean modulation on a steady asymmetry is a loss,
+     * because travel goes as `1/k` and that is convex. The gait's own
+     * broadcast moved matter along the same wires and kicked nothing. It does
+     * now, and the swing turns from a cost into a gain:
+     *
+     *     gripSwing      before      after
+     *          0.00    4.217       3.969   <- control
+     *          0.50    2.623       4.032
+     *          0.75    3.462       5.091   <- +28% on the control
+     *          1.00    1.876       2.719
+     *
+     * **One seed, and that is not a shortcut.** Nothing in this rig calls
+     * `Math.random`: the worm is built to a plan, there is no noise, no
+     * spawning and no immigration, and `runFree` swaps in a seeded generator
+     * that nothing draws from. Eight seeds return the same numbers as three to
+     * four significant figures. So these are exact readings of a deterministic
+     * rig rather than a sample of a noisy one — which means the caveat is
+     * generalisation, not variance, and that averaging over seeds here costs
+     * time and buys nothing.
+     */
+    const fed: Partial<Params> = {
+      grip: 2,
+      transportRecoil: 100,
+      transportThrust: 0,
+      // The reactor on, still eating nothing: `primeGut` supplies it.
+      metabolicRate: defaultParams().metabolicRate,
+    };
+    // Small enough that digestion's whole mouthful is inside what `intake`
+    // routes to the reactor, so the tank never sees any of it.
+    const PRIME = 0.004;
+    console.log('\n  gut primed at ' + PRIME + ', gradient quanta, income 3, recoil 100, 30 s');
+    console.log('\n  gripSwing      dx     dy   px/s      moved  gaitLag  agree  gaitSwing');
+    console.log('  --------- ------- ------ ------ ---------- -------- ------ ----------');
+    // One seed, because there is nothing for a seed to vary — see below.
+    const seeds = [1];
+    for (const swing of [0, 0.25, 0.5, 0.75, 1]) {
+      let px = 0;
+      let dx = 0;
+      let dy = 0;
+      let moved = 0;
+      let glag = 0;
+      let gagree = 0;
+      let gswing = 0;
+      for (const seed of seeds) {
+        const r = runFree({
+          quanta: 'gradient', income: 3, seed, primeGut: PRIME,
+          params: { ...fed, gripSwing: swing },
+        });
+        px += Math.hypot(r.dx, r.dy) / 30;
+        dx += r.dx;
+        dy += r.dy;
+        moved += r.moved;
+        glag += r.gaitLag;
+        gagree += r.gaitAgree;
+        gswing += r.gaitSwingSeen;
+        expect(Number.isFinite(r.dx)).toBe(true);
+      }
+      const n = seeds.length;
+      console.log(
+        `  ${swing.toFixed(2).padStart(9)} ${(dx / n).toFixed(2).padStart(7)} ${(dy / n).toFixed(2).padStart(6)} ` +
+          `${(px / n).toFixed(3).padStart(6)} ${(moved / n).toFixed(0).padStart(10)} ` +
+          `${(glag / n).toFixed(2).padStart(8)} ${(gagree / n).toFixed(2).padStart(6)} ${(gswing / n).toFixed(3).padStart(10)}`,
+      );
+    }
+    console.log('\n  the control is the 0 row: same fed worm, no swing on the grip.');
   });
 
   it('runs the hypotheses', () => {

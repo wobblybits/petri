@@ -1,36 +1,35 @@
-import { extraCapFor } from './energy.ts';
+import { EXTRA_CAP, extraCapFor } from './energy.ts';
 import { REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
 import {
   CHEM_LEN,
-  CHEM_SPECIES,
   EMIT,
-  SEED_PRODUCTION,
-  SEED_UPTAKE,
   E_OUT,
   F_BASE,
   G_BASE,
+  GW_BASE,
   GX_BASE,
   HEAD_SCALE,
   TX_A,
+  SW_BASE,
   TX_B,
   TX_BASE,
+  W_C,
+  W_D,
   TX_C,
   TX_D,
   KS_BASE,
   L_BASE,
+  B_STATE,
+  F_OUT,
   IN_DEMAND,
+  IN_FULL,
   IN_DIMS,
   IN_SENSE,
   P_BASE,
-  ROW_COUNT,
-  ROW_EXCRETE,
-  ROW_UPTAKE,
   STATE_DIMS,
   TASTE,
   T_OUT,
   W_IN,
-  X_BASE,
-  X_OUT,
 } from './chem-layout.ts';
 import { CH } from './fields.ts';
 import type { Params } from './params.ts';
@@ -569,9 +568,7 @@ export function cloneAgent(a: Agent): Agent {
   const ro = a.slot * REACT_SPECIES;
   const co = clone.slot * REACT_SPECIES;
   for (let k = 0; k < REACT_SPECIES; k++) clone.store.react[co + k] = a.store.react[ro + k];
-  const ao = a.slot * CHEM_SPECIES;
-  const bo = clone.slot * CHEM_SPECIES;
-  for (let k = 0; k < CHEM_SPECIES; k++) clone.store.gut[bo + k] = a.store.gut[ao + k];
+  clone.store.gut[clone.slot] = a.store.gut[a.slot];
   clone.store.intake[clone.slot] = a.store.intake[a.slot];
   clone.store.starve[clone.slot] = a.store.starve[a.slot];
   clone.store.gaitWave[clone.slot] = a.store.gaitWave[a.slot];
@@ -839,12 +836,6 @@ export {
   P_BASE,
   P_OUT,
   KS_BASE,
-  ROW_COUNT,
-  ROW_EXCRETE,
-  ROW_UPTAKE,
-  uptakeKsOf,
-  X_BASE,
-  X_OUT,
   SENSE_SCALE,
   STATE_DIMS,
   TASTE,
@@ -990,49 +981,6 @@ export function emitVector(chem: Float32Array, g: number, h: Float64Array, ho: n
   }
 }
 
-/**
- * What a kind's metabolism makes, and what it can eat, at the seed.
- *
- * `X`'s eight rows are one unit budget over four excretion reactions and four
- * uptake ones, and a genome seeded to zero takes `expressVector`'s flat
- * fallback: an eighth each, which says every kind produces all four species
- * equally and eats all four equally. That is a body with no metabolism in
- * particular, and it is not what any of the three kinds are.
- *
- * A Con makes `conP` and `aux`, a Dup makes `dupP` and `aux`, and an Era makes
- * ground — the same thing it has always done, now said in the same place as
- * the other two rather than only through `farmRate` and the emit head. The
- * plan's §3 table has held that the excretion rows subsume `effEmit` and
- * `farmRate` since it was written; this is that half of it, at the seed.
- *
- * The uptake half is left at exactly even, which is what `SEED_UPTAKE` and
- * `SEED_PRODUCTION` are chosen for: every uptake row lands on an eighth — the
- * flat fallback's own value — and the production half is `ERA_GROUND_SHARE`
- * of the budget however a kind divides it. A fresh body eats like a
- * generalist and speaks like its kind, and nothing about what it can digest
- * has been decided for it.
- *
- * Inherited and mutated, not learned: `X` sits outside the plastic span on
- * purpose (plan §8). What moves within a life is regulation — the rows read
- * `h`, so a body shifts its own mix with its state, and the learned weights
- * that shape `h` move it indirectly. A lineage that ought to make something
- * else gets there by breeding, which is the timescale a metabolism belongs on.
- */
-function seedProduction(c: Float32Array, kind: AgentKind): void {
-  const x = X_BASE + ROW_EXCRETE;
-  if (kind === 'con') {
-    c[x + CH.conP] = SEED_PRODUCTION / 2;
-    c[x + CH.aux] = SEED_PRODUCTION / 2;
-  } else if (kind === 'dup') {
-    c[x + CH.dupP] = SEED_PRODUCTION / 2;
-    c[x + CH.aux] = SEED_PRODUCTION / 2;
-  } else {
-    c[x + CH.energy] = SEED_PRODUCTION;
-  }
-  const u = X_BASE + ROW_UPTAKE;
-  for (let i = 0; i < CHEM_SPECIES; i++) c[u + i] = SEED_UPTAKE;
-}
-
 /** The taste vector. Signed, and not normalised — a taste weight is compared
  *  against other taste weights rather than spent, so there is no budget. */
 export function tasteVector(chem: Float32Array, g: number, h: Float64Array, ho: number, out: Float64Array, oo: number): void {
@@ -1075,13 +1023,12 @@ const SCRATCH4 = new Float64Array(4);
 /**
  * Emit weight for one *signal* channel. Never negative.
  *
- * Zero on `CH.energy`, and the reason is now a choke point and nothing else.
- * The ground is a thing a body can put into the field — that is the ground's
- * excretion row, `runExcretion` at `excreteRate`, which is what farming became
- * — but it must never reach the field through the scent deposit path, because
- * that path multiplies by `params.deposit`, which is five. A body emitting a
- * whole unit would put five units of food a frame into the world out of
- * nothing.
+ * Zero on `CH.energy`, and the reason is a choke point and nothing else. The
+ * ground is a thing a body can put into the field — by dying, by spilling, by
+ * paying the reactor's routed food back at `upkeepExcrete` — but it must never
+ * reach the field through the scent deposit path, because that path multiplies
+ * by `params.deposit`, which is five. A body emitting a whole unit would put
+ * five units of food a frame into the world out of nothing.
  *
  * So the emit head's ground slot is read by nothing. It stays a quarter of
  * `emitVector`'s simplex because dropping it would renormalise every genome
@@ -1152,35 +1099,74 @@ const GAIT_ANCHOR_ERA = 0.02;
 const GAIT_ANCHOR_NODE = 0.25;
 
 /**
- * What each kind broadcasts down its principal wire, at the seed: the doc's
- * §4.1 transmission presets, as genes a lineage drifts from rather than a
- * rule it is held to.
+ * What each kind broadcasts down its principal wire, at the seed: **one kind,
+ * one species**, as genes a lineage drifts from rather than a rule it is held
+ * to.
  *
- * A Con broadcasts the catalyst C and drives excitation down the mesh; a Dup
- * broadcasts the inhibitor D and resets the wave front. An Era broadcasts the
- * *fuel and the primer*, which is §6.1: it has nothing but a principal, so it
- * can only push, and what it pushes is what it ate. That is what makes a leaf
- * a net's feeder rather than one more oscillator, and it is the first thing
- * in this simulation that gives a net a metabolic reason to have one.
+ * An Era broadcasts the food it ate, a Con the catalyst C, a Dup the inhibitor
+ * D. That is `docs/scratch.txt` §4.1 exactly, and the one species each is the
+ * whole of the rule — there is no kind with a second channel and no case to
+ * remember.
  *
- * Note which way that runs. A Con's or a Dup's principal faces *out* of the
- * net toward a redex, so its signal travels toward whatever it is about to
- * rewrite with; an Era's principal is its only attachment, so its food
- * travels inward. Neither is a rule — both are where a fresh body starts.
+ * **An Era sends fuel, not primer.** It used to send both, which was §6.1's
+ * reading, and the argument against it is `docs/metabolism-spec.md` §2.3's own:
+ * the gut and the primer are two timescales, the gut measuring minutes and the
+ * primer seconds. Broadcasting the primer ships the fast currency, so it
+ * arrives at one neighbour, drives that one body far up its own operating
+ * curve, and makes it the instability the whole net is then slaved to.
+ * Broadcasting the gut ships the slow one: the neighbour digests it and makes
+ * its own primer, at its own rate, from its own `intake`. Computed over the
+ * library and 38 grown nets, dropping the primer broadcast gives half again as
+ * many independently oscillating modes and a quarter lower leading growth rate
+ * — more of the net moving, and nothing running away.
+ *
+ * Note which way it runs. A Con's or a Dup's principal faces *out* of the net
+ * toward a redex, so its signal travels toward whatever it is about to rewrite
+ * with; an Era's principal is its only attachment, so its food travels inward.
+ * Neither is a rule — both are where a fresh body starts.
  */
 const SEED_SEND = 1;
 
+/** The one species each kind speaks. `npm run pond -- spectrum` reads it. */
+export const SEED_SPECIES: Record<AgentKind, number> = {
+  era: TX_A,
+  con: TX_C,
+  dup: TX_D,
+};
+
 function seedGait(c: Float32Array, kind: AgentKind, params: Params): void {
   c[G_BASE] = kind === 'era' ? GAIT_ANCHOR_ERA : GAIT_ANCHOR_NODE;
-  if (kind === 'era') {
-    c[TX_BASE + TX_A] = SEED_SEND;
-    c[TX_BASE + TX_B] = SEED_SEND;
-  } else if (kind === 'con') {
-    c[TX_BASE + TX_C] = SEED_SEND;
-  } else {
-    c[TX_BASE + TX_D] = SEED_SEND;
-  }
-  for (let k = 0; k < CHEM_SPECIES; k++) c[GX_BASE + k] = params.metabolicGate;
+  c[TX_BASE + SEED_SPECIES[kind]] = SEED_SEND;
+  /*
+   * The broadcast gate, **each species at the same fraction of its own natural
+   * level**. It used to seed flat, one number across four pools whose scales
+   * differ by orders — the catalyst runs about 1, the inhibitor `k3/d` times
+   * that, the primer `(k3+d)/k2` — so a gate that pulsed one of them was
+   * either inert or shut for the others. That is why it shipped at zero and
+   * gated nothing.
+   *
+   * At the same fraction of each, it means one thing: *a body stays quiet
+   * below this much of its own resting level and speaks above it*. The
+   * broadcast was already a pulse, because mass action sends most at a peak
+   * and least at a trough; this makes it a pulse with a **floor**, so a body
+   * at its trough says nothing at all rather than a little.
+   */
+  const gate = params.metabolicGate;
+  const reset = params.metabolicReset;
+  const decay = params.metabolicDecay;
+  const cat = params.metabolicCat;
+  c[GX_BASE + TX_A] = gate * EXTRA_CAP;
+  c[GX_BASE + TX_B] = gate * (cat > 0 ? (reset + decay) / cat : 0);
+  c[GX_BASE + TX_C] = gate;
+  c[GX_BASE + TX_D] = gate * (decay > 0 ? reset / decay : 0);
+  /*
+   * The two actuators' mixtures, seeded to exactly what they were welded to:
+   * the stroke reads the catalyst, the grip reads the inhibitor 53 degrees
+   * behind it. A fresh pond is bit for bit what it was, and what is new is
+   * that a lineage can move either. See `SW_BASE`.
+   */
+  c[SW_BASE + W_C] = 1;
+  c[GW_BASE + W_D] = 1;
 }
 
 /**
@@ -1240,15 +1226,46 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
   c[W_IN + 0 * IN_DIMS + IN_DEMAND] = 1;
   c[T_OUT + CH.energy * STATE_DIMS + 0] = params.attractFood * 2;
   // Output-head bases: the sliders' values, so a fresh body's flocking and
-  // pumping are exactly the constants they used to be.
+  // pumping are the constants they used to be *at half a tank*.
   c[F_BASE] = params.flockAlign / HEAD_SCALE.align;
   c[F_BASE + 1] = params.flockSep / HEAD_SCALE.sep;
   c[P_BASE] = params.transportThrust / HEAD_SCALE.thrust;
   c[P_BASE + 1] = params.transportRecoil / HEAD_SCALE.recoil;
   c[L_BASE] = params.stepSpeed / HEAD_SCALE.cruise;
   c[L_BASE + 1] = params.turnRate / HEAD_SCALE.turn;
+  /*
+   * The second two-hop pathway, and the reason is written on `F_OUT`: "no body
+   * could shoal while fed and scatter while starving, which is the obvious
+   * thing for a forager to do and was not expressible at any genome".
+   *
+   * `h[1]` is wired to carry the body's own tank, **centred**: the weight is 2
+   * and the bias −1, so the pre-activation runs [−1, 1] across an empty tank
+   * to a full one and `phi` lands it on [−0.5, +0.5]. Centred so the swing is
+   * symmetric about the slider's value — a body at half a tank behaves exactly
+   * as it used to, a full one shoals and settles, an empty one scatters and
+   * runs. Off-centre the base would be a floor and "scatter when starving"
+   * could not be said at all.
+   *
+   * Two heads off the one wire, which is what a state dimension is for. The
+   * bias is inside the learned block, so a lineage can move its own set-point
+   * — where half a tank stops feeling like enough — without touching either
+   * head.
+   */
+  c[W_IN + 1 * IN_DIMS + IN_FULL] = 2;
+  c[B_STATE + 1] = -1;
+  /*
+   * `phi` gives ±0.5 at the ends, so a gain of one base swings each head over
+   * half its value either way: an empty body shoals at half and runs at half
+   * again as fast, a full one the other way round.
+   *
+   * Twice that was tried first and is too much. A fresh spawn arrives at about
+   * four fifths of a tank, so at a full swing it barely cruises at all — 9.5
+   * against a slider of 38 — and a pond of well-fed bodies that will not move
+   * stops meeting, stops latching, and grows nets of two. The swing has to be
+   * something a body does, not something that switches it off.
+   */
+  c[F_OUT + 0 * STATE_DIMS + 1] = c[F_BASE];
   seedGait(c, kind, params);
-  seedProduction(c, kind);
   if (kind === 'con') {
     c[EMIT] = 1;
     c[TASTE + 1] = M;
@@ -1304,68 +1321,10 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
    * across all eight rows and every reaction runs at whatever constant it ran
    * at. See `chem-layout.ts`.
    */
-  for (let k = 0; k < CHEM_SPECIES; k++) c[KS_BASE + k] = 1;
+  c[KS_BASE] = 1;
   return c;
 }
 
-/**
- * Expression: how a body divides one unit of chemical effort across the eight
- * rows of the reaction table. See `docs/energy-chemistry-plan.md` §3.
- *
- * Same shape as `emitVector` and for the same reason — relu, then normalised
- * to a unit sum across the whole table at once. The simplex is the trade-off
- * the plan is built on: a body cannot both shout and eat without giving
- * something up, and extending the budget past emission to *uptake* is the
- * strongest form of that, because it means feeding the ground trades against
- * feeding yourself.
- *
- * Seeded flat at zero, which relu and the normalisation turn into an even
- * eighth each — so a fresh body expresses every row equally and the global
- * rate constants are what decide anything. A body that mutates its way to
- * silence on every row stays silent rather than being amplified back out of
- * noise, exactly as `emitVector` handles the same case.
- */
-export function expressVector(
-  chem: Float32Array,
-  g: number,
-  h: Float64Array,
-  ho: number,
-  out: Float64Array,
-  oo: number,
-): void {
-  const h0 = h[ho];
-  const h1 = h[ho + 1];
-  const h2 = h[ho + 2];
-  const h3 = h[ho + 3];
-  let sum = 0;
-  // Eight rows by four dimensions is a loop rather than the unrolled form the
-  // four-wide vectors use: twice the rows for the same shape, and this runs
-  // once a body a frame against `emitVector`'s several times.
-  for (let r = 0; r < ROW_COUNT; r++) {
-    const o = g + X_OUT + r * STATE_DIMS;
-    const v =
-      chem[g + X_BASE + r] +
-      chem[o] * h0 + chem[o + 1] * h1 + chem[o + 2] * h2 + chem[o + 3] * h3;
-    const w = v > 0 ? v : 0;
-    out[oo + r] = w;
-    sum += w;
-  }
-  if (sum > 0) {
-    const inv = 1 / sum;
-    for (let r = 0; r < ROW_COUNT; r++) out[oo + r] *= inv;
-  } else {
-    /*
-     * Nothing expressed. Flat rather than zero: a genome seeds every entry of
-     * `X` to zero, so the pre-activation is zero on every row and relu leaves
-     * nothing to normalise — and a body expressing *no* reaction at all would
-     * be inert from birth, which is not what "ships at the neutral value"
-     * means. An eighth each is the even division, and the rate constants
-     * decide the rest.
-     */
-    const even = 1 / ROW_COUNT;
-    for (let r = 0; r < ROW_COUNT; r++) out[oo + r] = even;
-  }
-}
 
 
 

@@ -1,3 +1,4 @@
+import { F_OUT } from '../chem-layout.ts';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createAgent, momentOfInertia, boundRadius, discRadius, cloneAgent, type Agent } from '../agents.ts';
 import { solveContact, solveWire, solveWireSpan, type ChainNode } from '../chain.ts';
@@ -703,6 +704,17 @@ describe('steering: WASM against the JS reference', () => {
       const kind = i % 3 === 0 ? 'era' : i % 3 === 1 ? 'con' : 'dup';
       sim.spawn(kind, 120 + (i * 61) % 360, 110 + (i * 97) % 200, i * 0.83, params, true);
     }
+    /*
+     * And the tank's grip on flocking comes off, for the same reason the gait
+     * did: it is a second source of divergence and not one of the ports under
+     * test. `seedChem` wires `h[1]` to a body's own fullness and alignment to
+     * read it, and flocking is a *pairwise* force — so each body's steering
+     * couples to its neighbours' tanks and a one-bit disagreement propagates
+     * instead of staying local. Left in, the two copies separate four times
+     * faster and the budget below stops measuring the ports at all: 41px of
+     * drift on 85px travelled, against 4px before it was wired.
+     */
+    for (const a of sim.agents.values()) a.chem[F_OUT + 1] = 0;
     // A wired pair, so the principal-wire bias term is exercised too.
     const ids = [...sim.agents.keys()];
     sim.wire(ids[1], 'p', ids[2], 'p', params);

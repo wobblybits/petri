@@ -6,7 +6,7 @@ import { COUPLINGS, checkCouplings } from './couplings.ts';
  * The table is data about the model, and the two things that can go wrong
  * with it are a name that is not a parameter and a check that does not fire
  * for the case it was written from. The second case here is the one that
- * cost two afternoons: `excreteRate` on an axis with `senseScale` held.
+ * cost two afternoons: an axis swept with a coupled constant held.
  */
 describe('couplings', () => {
   it('names only real parameters', () => {
@@ -18,23 +18,23 @@ describe('couplings', () => {
     }
   });
 
-  it('warns when excreteRate is swept with senseScale held', () => {
-    const warnings = checkCouplings(['excreteRate']);
-    expect(warnings.map((w) => w.constant)).toContain('senseScale');
-    // `uptakeVmax` used to be here too; see the retirement note on the table.
-    expect(warnings.map((w) => w.constant)).not.toContain('uptakeVmax');
-    // And the gut dials are coupled to the metering switch, both of them.
-    const gut = checkCouplings(['uptakeVmax']).map((w) => w.constant);
-    expect(gut).toContain('digestRate');
-    expect(gut).toContain('gutSize');
+  it('warns when uptakeVmax is swept with the gut dials held', () => {
+    // The gut dials are coupled to the metering switch, both of them: nothing
+    // fills a gut at `uptakeVmax` 0, so they are inert there and live above it.
+    const warnings = checkCouplings(['uptakeVmax']).map((w) => w.constant);
+    expect(warnings).toContain('digestRate');
+    expect(warnings).toContain('gutSize');
+    // `senseScale` used to be here, coupled to `excreteRate`; a signal is
+    // always minted now, so there is no second regime to re-choose it for.
+    expect(warnings).not.toContain('senseScale');
   });
 
   it('is quiet when the coupled constant moves with the axis, on the grid or per arm', () => {
     // `digestRate` and `gutSize` are here for the `uptakeVmax` axis in the
     // grid form; per arm they are moot, because `uptakeVmax` is not an axis.
-    const moved = ['senseScale', 'uptakeVmax', 'deposit', 'digestRate', 'gutSize'];
-    expect(checkCouplings(['excreteRate', ...moved])).toEqual([]);
-    expect(checkCouplings(['excreteRate'], moved)).toEqual([]);
+    const moved = ['uptakeVmax', 'digestRate', 'gutSize'];
+    expect(checkCouplings(['uptakeVmax', ...moved])).toEqual([]);
+    expect(checkCouplings(['uptakeVmax'], moved)).toEqual([]);
   });
 
   it('is quiet about an axis nothing is coupled to', () => {

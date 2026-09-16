@@ -183,12 +183,40 @@ describe('the state network', () => {
 });
 
 describe('the locomotion head', () => {
-  it('gives a seeded body exactly the sliders it always had', () => {
+  it('shoals when fed and scatters when starving, off one state wire', () => {
+    /*
+     * The second two-hop pathway the seed wires, and the one `F_OUT`'s own
+     * comment asked for: "no body could shoal while fed and scatter while
+     * starving, which is the obvious thing for a forager to do and was not
+     * expressible at any genome".
+     *
+     * `h[1]` carries the body's own tank, **centred** — weight 2, bias −1, so
+     * `phi` lands an empty body at −0.5, a full one at +0.5 and half a tank at
+     * exactly zero. The slider is therefore what a body does at half a tank,
+     * and hunger swings alignment either way. `cruise` has no such wire and is
+     * the slider flat, which is what makes this a test of the pathway rather
+     * than of the head.
+     */
     const { sim, params } = pond();
-    const a = sim.spawn('con', 5000, 5000, 0, params, true)!;
+    // `fixedParams` pins `uptakeVmax` to 0, which is the *unmetered* path — a
+    // body takes whatever fits the instant it steps. With ground under it,
+    // every tank set here would be back at its cap before the head is read.
+    params.ambientEnergy = 0;
+    const half = sim.spawn('con', 5000, 5000, 0, params, true)!;
+    const hungry = sim.spawn('con', 5000, 5400, 0, params, true)!;
+    const fed = sim.spawn('con', 5000, 5800, 0, params, true)!;
+    half.extra = half.energyCap * 0.5;
+    hungry.extra = 0;
+    fed.extra = fed.energyCap;
     sim.step(1 / 60, params);
-    expect(a.cruise).toBeCloseTo(params.stepSpeed, 4);
-    expect(a.turn).toBeCloseTo(params.turnRate, 4);
+
+    const align = (b: typeof half) => sim.agentStore.flockAlign[b.slot];
+    expect(align(half), 'half a tank is the slider').toBeCloseTo(params.flockAlign, 4);
+    expect(align(hungry), 'an empty body scatters').toBeLessThan(params.flockAlign);
+    expect(align(fed), 'a full body shoals').toBeGreaterThan(params.flockAlign);
+    // Untouched: no wire reaches it, so it is the slider at any fullness.
+    expect(half.cruise).toBeCloseTo(params.stepSpeed, 4);
+    expect(hungry.cruise).toBeCloseTo(params.stepSpeed, 4);
   });
 
   it('lets one body swim while another beside it does not', () => {

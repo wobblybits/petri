@@ -46,6 +46,13 @@ function pondParams(): Params {
   const params = defaultParams();
   params.soupCount = 0;
   params.spawnInterval = 0;
+  /*
+   * Flat. Every test in this file reads a named cell — the one a body stands
+   * in, the one against the wall — and asks whether host and device agree
+   * about it. On the shipped patchy dish those coordinates are bare four
+   * times out of five, and "they agree that nothing happened" is not parity.
+   */
+  params.groundPatches = 0;
   return params;
 }
 
@@ -119,6 +126,71 @@ describe('field.wgsl on a device', () => {
     expect(sim.energy.storedTotal()).toBeCloseTo(before, 1);
   });
 
+  it('lays the shipped patchy dish on the device, at the same mass', async ({ skip }) => {
+    if (!device) skip();
+    /*
+     * The one thing about the shipped ground that only a device can confirm,
+     * and the reason the rest of this file pins `groundPatches` to 0: a patchy
+     * seed is the only layout that does not go through `fill`. It clears the
+     * dish through `fill` at zero and then puts the mass back as three
+     * thousand deferred conserved adds, which reach the device as `scatter`
+     * deposits — a different kernel, on a different code path, with the rim
+     * behaviour of `addAt` rather than of `deposit`.
+     *
+     * So this asks the two questions that path can get wrong: does the mass
+     * arrive at all (the passes run `fill` before `scatter`, and the other
+     * order would wipe it), and does it arrive *once* (`configure` notices the
+     * count and lays the dish, then `pinWorld` asks again, and the seed drops
+     * its own queue so the two agree).
+     */
+    const params = pondParams();
+    params.groundPatches = 24;
+    params.energyRegrow = 0;
+    params.decay = 0;
+    params.diffuse = 0;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', params);
+    expect(await sim.openFieldGpu(), fieldGpu.lastError).toBe(true);
+    sim.wantFieldReadback = true;
+    // One body, pinned and full, so there is a frame to dispatch on at all
+    // and nothing for it to graze. An empty pond never reaches the field.
+    const a = sim.spawn('con', sim.w * 0.5, sim.h * 0.5, 0, params, true)!;
+    a.pinned = true;
+
+    const want = sim.energy.uniformMass;
+    expect(want).toBeGreaterThan(0);
+    // One frame to dispatch the queued seed; before it the device holds the
+    // clear and nothing else, which is the timeline note in `pond/ground.ts`.
+    for (let i = 0; i < 2; i++) await sim.stepAsync(1 / 60, params);
+    const got = sim.energy.storedTotal();
+    expect(got / want, 'the whole dish arrived, once').toBeGreaterThan(0.95);
+    expect(got / want, 'the whole dish arrived, once').toBeLessThan(1.05);
+
+    /*
+     * And it is a landscape rather than a flat dish: most of the disk is bare.
+     * Diffusion is off, so this is the seed as laid — but it is laid through
+     * `scatter`, which spreads each add bilinearly over the four cells around
+     * its point, so every blob arrives with a one-cell ring the host's direct
+     * `addAt` does not draw. On a 71px blob in a 12.5px cell that is about a
+     * third more area, which is the whole difference between the quarter the
+     * host lays and the figure below.
+     */
+    const f = sim.fields;
+    const cs = f.worldW / f.cols;
+    let inDisk = 0;
+    let fed = 0;
+    for (let j = 0; j < f.rows; j++) {
+      for (let i = 0; i < f.cols; i++) {
+        if (!sim.energy.inBounds(f.originX + (i + 0.5) * cs, f.originY + (j + 0.5) * cs)) continue;
+        inDisk++;
+        if (f.data[(j * f.cols + i) * CHANNELS + CH.energy] > 0) fed++;
+      }
+    }
+    expect(inDisk).toBeGreaterThan(0);
+    expect(fed / inDisk, 'most of the disk is bare').toBeGreaterThan(0.2);
+    expect(fed / inDisk, 'most of the disk is bare').toBeLessThan(0.45);
+  });
+
   it('grazes a block the way EnergyGrid.take does, with real bodies', async ({ skip }) => {
     if (!device) skip();
     /*
@@ -176,9 +248,7 @@ describe('field.wgsl on a device', () => {
     params.ambientEnergy = 0.3;
     params.decay = 0;
     params.upkeep = 0;
-    params.excreteRate = 0.015;
     params.uptakeVmax = 6;
-    params.catCoSubstrate = 1;
 
     const build = (): Sim => {
       const sim = new Sim(1600, 1200, 128);
@@ -235,18 +305,21 @@ describe('field.wgsl on a device', () => {
   it('runs the whole reaction table the way the host does', async ({ skip }) => {
     if (!device) skip();
     /*
-     * Four species out and four back in, on the device. `harvest` gained a
-     * per-species drain and a per-entry row of rates and affinities to do it,
-     * and the row is the widest thing in this pass — the field shader binds
-     * eight storage buffers of a guaranteed eight, so it had to grow a stride
-     * rather than a buffer. Nothing but a device says the two agree.
+     * The food loop, on the device: ground out of the field, into a gut,
+     * digested, and the tanks on both sides agreeing about how much.
+     *
+     * It used to be four species out and four back in — `harvest` carried a
+     * per-species drain and a row of four affinities, and excretion put four
+     * back. A body eats the ground and nothing else now and excretes nothing,
+     * so the whole table is one uptake row, the harvest stride is three floats
+     * instead of six, and the signalling channels are minted rather than
+     * traded. Nothing but a device says the two paths agree.
      */
     const params = pondParams();
     params.energyRegrow = 0;
     params.ambientEnergy = 0.4;
     params.decay = 0;
     params.upkeep = 0;
-    params.excreteRate = 0.5;
     params.uptakeVmax = 1.5;
 
     const build = (): Sim => {
@@ -273,94 +346,30 @@ describe('field.wgsl on a device', () => {
     }
 
     const held = (s: Sim) => [...s.agents.values()].reduce((n, a) => n + a.extra, 0);
-    // Something moved in both directions, or this asserts about a still pond.
-    expect(totalOf(cpu.fields, CH.conP), 'nothing excreted').toBeGreaterThan(0);
-    expect(held(cpu)).toBeGreaterThan(0);
-    // The tanks agree, which is uptake and excretion netting out the same way
-    // on both sides. The harvest's one-frame lag is why this is not exact.
+    // Something was actually eaten, or this asserts about a still pond.
+    expect(held(cpu), 'nothing was banked').toBeGreaterThan(12);
+    // The tanks agree. The harvest's one-frame lag is why this is not exact.
     expect(held(gpu)).toBeCloseTo(held(cpu), 1);
     /*
-     * Relative, not absolute, and for a stated reason: with the table running,
-     * every species is grazed, and the GPU harvest is credited a frame late by
-     * design. What stands in the field at any instant is the difference
-     * between what has been excreted and what has been eaten back, so the two
-     * paths are one frame's uptake apart — about 0.02 on a standing 2.7 here.
-     * A tolerance tighter than that is asserting they agree about *when*,
-     * which they deliberately do not; one looser would wave through a real
-     * divergence.
+     * And the ground they ate it out of, relative rather than absolute: the
+     * GPU harvest is credited a frame late by design, so the two paths stand
+     * one frame's uptake apart. A tolerance tighter than this asserts they
+     * agree about *when*, which they deliberately do not; one looser would
+     * wave through a real divergence.
      */
-    for (const ch of [CH.conP, CH.dupP, CH.aux]) {
+    const ground = totalOf(cpu.fields, CH.energy);
+    expect(ground, 'the dish was stripped, so there is nothing to compare').toBeGreaterThan(0);
+    expect(Math.abs(totalOf(gpu.fields, CH.energy) - ground) / ground, 'the ground differs').toBeLessThan(0.02);
+    // The signalling channels are minted rather than traded, so they should
+    // stand at the same level either way — within the same one-frame lag,
+    // which is the deposit pass being a frame behind on the device.
+    // The rig is all Cons, so `conP` and `aux` are the channels they write.
+    for (const ch of [CH.conP, CH.aux]) {
       const c = totalOf(cpu.fields, ch);
       expect(c, `nothing on channel ${ch}`).toBeGreaterThan(0);
       expect(Math.abs(totalOf(gpu.fields, ch) - c) / c, `channel ${ch} differs`).toBeLessThan(0.02);
     }
-  });
-
-  it('excretes every species onto the device the way the host does', async ({ skip }) => {
-    if (!device) skip();
-    /*
-     * The reaction table's excretion rows go through the *conserving* deposit
-     * rather than the scent path's density scatter, and on this side that is a
-     * `Deposit` with `conserve` set and a weight on all four channels. The
-     * host has been packing only the ground into those records since they
-     * existed; this is what says the other three arrive too, and arrive whole.
-     */
-    const params = pondParams();
-    params.energyRegrow = 0;
-    params.ambientEnergy = 0;
-    params.decay = 0;
-    params.diffuse = 0;
-    params.upkeep = 0;
-    params.excreteRate = 0.4;
-
-    const build = (): Sim => {
-      const sim = new Sim(1600, 1200, 128);
-      loadPreset(sim, 'soup', params);
-      const cx = sim.w * 0.5;
-      const cy = sim.h * 0.5;
-      for (let i = 0; i < 10; i++) {
-        const a = sim.spawn('con', cx + i * 13 - 65, cy, 0, params, true)!;
-        a.pinned = true;
-        a.extra = 1;
-      }
-      return sim;
-    };
-
-    const cpu = build();
-    const gpu = build();
-    expect(await gpu.openFieldGpu(), fieldGpu.lastError).toBe(true);
-    gpu.wantFieldReadback = true;
-
-    for (let i = 0; i < 60; i++) {
-      cpu.step(1 / 60, params);
-      await gpu.stepAsync(1 / 60, params);
-    }
-
-    const held = (s: Sim) => [...s.agents.values()].reduce((n, a) => n + a.extra, 0);
-    expect(held(cpu), 'nobody excreted').toBeLessThan(10 * 0.9);
-    expect(held(gpu)).toBeCloseTo(held(cpu), 3);
-    /*
-     * The three signal species strictly: nothing grazes them, so the only
-     * thing that could move them is the deposit under test.
-     */
-    for (const ch of [CH.conP, CH.dupP, CH.aux]) {
-      const c = totalOf(cpu.fields, ch);
-      expect(c, `nothing on channel ${ch}`).toBeGreaterThan(0);
-      expect(totalOf(gpu.fields, ch), `channel ${ch} differs`).toBeCloseTo(c, 3);
-    }
-    /*
-     * `CH.energy` loosely, and for a reason rather than a shrug: it is the one
-     * species bodies eat, the GPU harvest is credited a frame late by design,
-     * and what is standing in the field at any instant is the small difference
-     * between what was excreted and what has been grazed back. Comparing that
-     * residue strictly would be asserting the two paths agree about *when*,
-     * which they deliberately do not. What has to agree is that the species
-     * arrived at all, and the pond totals above already pin the amount.
-     */
-    expect(totalOf(cpu.fields, CH.energy)).toBeGreaterThan(0);
-    expect(totalOf(gpu.fields, CH.energy)).toBeGreaterThanOrEqual(0);
-    const excreted = 10 - held(cpu);
-    expect(Math.abs(10 - held(gpu) - excreted)).toBeLessThan(excreted * 0.05);
+    expect(totalOf(cpu.fields, CH.dupP), 'no Dup, no dupP').toBe(0);
   });
 
   it('meters uptake on the device the way runHarvestPlan does', async ({ skip }) => {

@@ -3,7 +3,7 @@ import { CH, CHANNELS } from '../fields.ts';
 import { defaultParams } from '../params.ts';
 import { loadPreset } from '../presets.ts';
 import { Sim } from '../sim.ts';
-import { layGround, parseGround, uniformMass } from './ground.ts';
+import { parseGround } from './ground.ts';
 
 /*
  * The property that makes a ground comparison mean anything: **the same total
@@ -11,8 +11,20 @@ import { layGround, parseGround, uniformMass } from './ground.ts';
  * comparison about how much food there is, which is not the question §0 poses.
  */
 
-function pond(): { sim: Sim; params: ReturnType<typeof defaultParams> } {
+/**
+ * The layout is a parameter now, not a function call: `Energy.configure`
+ * carries `groundPatches` over every frame and lays the dish again when it
+ * changes, which is what makes the slider live and what makes the page, the
+ * runner and the designer agree. These tests drive it the way the pond does.
+ */
+const lay = (sim: Sim, patches: number): void => {
+  sim.energy.patches = patches;
+  sim.energy.seedGround();
+};
+
+function pond(patches = 0): { sim: Sim; params: ReturnType<typeof defaultParams> } {
   const params = defaultParams();
+  params.groundPatches = patches;
   params.soupCount = 0;
   params.spawnInterval = 0;
   params.energyRegrow = 0;
@@ -43,13 +55,13 @@ describe('ground layout', () => {
     const { sim } = pond();
     const before = groundTotal(sim);
     expect(before).toBeGreaterThan(0);
-    layGround(sim, 0);
+    lay(sim, 0);
     expect(groundTotal(sim)).toBe(before);
   });
 
   it('puts the same mass into patches that it took out of the dish', () => {
     /*
-     * The whole point. `uniformMass` is computed from the disk's area rather
+     * The whole point. `Energy.uniformMass` is computed from the disk's area rather
      * than measured off `fields.data`, because that array is a stale mirror on
      * the GPU path — measuring there would hand a patchy pond a different
      * total from a uniform one and quietly turn a structure comparison into a
@@ -57,12 +69,18 @@ describe('ground layout', () => {
      */
     const { sim } = pond();
     const before = groundTotal(sim);
-    const analytic = uniformMass(sim);
+    const analytic = sim.energy.uniformMass;
     // The analytic count is the disk's area over a cell's; near enough at the
     // rim that the two agree to a few per cent, which is what makes it usable.
     expect(Math.abs(analytic - before) / before).toBeLessThan(0.05);
 
-    layGround(sim, 12);
+    lay(sim, 12);
+    expect(groundTotal(sim)).toBeCloseTo(analytic, 3);
+
+    // And laying it again lands the same mass, not twice it: the seed drops
+    // its own queue first, so the two callers that both ask on the first
+    // frame — `configure` noticing the change, then `pinWorld` — agree.
+    lay(sim, 12);
     expect(groundTotal(sim)).toBeCloseTo(analytic, 3);
   });
 
@@ -77,13 +95,18 @@ describe('ground layout', () => {
     const flatCells = occupied(flat.sim).length;
 
     const patchy = pond();
-    layGround(patchy.sim, 12);
+    lay(patchy.sim, 12);
     const patchyCells = occupied(patchy.sim).length;
 
-    // Same mass, a tiny fraction of the cells. That is the structure the
-    // uniform dish cannot express and the reason nothing has anywhere to go.
-    expect(patchyCells).toBeGreaterThan(0);
-    expect(patchyCells).toBeLessThan(flatCells / 100);
+    /*
+     * Same mass over a quarter of the cells, so what is standing there is four
+     * times as rich and three quarters of the dish is bare. That is the
+     * structure a uniform dish cannot express and the reason nothing on one
+     * has anywhere to go. A quarter and not a tenth on purpose: patches are
+     * blobs with an extent a body can stand on and graze down, not points.
+     */
+    expect(patchyCells / flatCells).toBeGreaterThan(0.2);
+    expect(patchyCells / flatCells).toBeLessThan(0.32);
   });
 
   it('feeds a body standing on a patch and starves one that is not', () => {
@@ -94,10 +117,9 @@ describe('ground layout', () => {
     params.decay = 0;
     params.diffuse = 0;
     params.upkeep = 0;
+    params.groundPatches = 1; // one patch, at the centre by construction
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', params);
-    layGround(sim, 1);
-    // One patch, at the centre by construction.
     const on = sim.spawn('con', sim.w * 0.5, sim.h * 0.5, 0, params, true)!;
     const off = sim.spawn('con', sim.w * 0.5 + 900, sim.h * 0.5, 0, params, true)!;
     on.pinned = true;

@@ -43,13 +43,13 @@ describe('registry', () => {
     const pf = preflight(findProtocol('baldwin-hunger')!);
     expect(pf.accepted.some((a) => a.startsWith('groundPatches/learnDiscount'))).toBe(true);
     // Every arm-based chemistry protocol carries the deposit acknowledgement.
-    expect(preflight(findProtocol('conserved-signal-price')!).accepted.some((a) => a.startsWith('excreteRate/deposit'))).toBe(true);
+    expect(PROTOCOLS.some((p) => preflight(p).accepted.length > 0), 'some protocol records an acceptance').toBe(true);
   });
 
   it('describes itself', () => {
     const text = describeProtocol(findProtocol('contested-ground')!);
-    expect(text).toContain('arm 0 minted');
-    expect(text).toContain('arm 1 conserved');
+    expect(text).toContain('arm 0 take-what-fits');
+    expect(text).toContain('arm 1 metered');
     expect(text).toContain('ambientEnergy=1,0.25');
   });
 });
@@ -59,11 +59,11 @@ const tiny: Protocol = {
   question: 'q',
   prediction: 'p',
   nullReading: 'n',
-  arms: [{ name: 'a', set: { excreteRate: 0 } }, { name: 'b', set: { excreteRate: 0.015 } }],
+  arms: [{ name: 'a', set: { uptakeVmax: 0 } }, { name: 'b', set: { uptakeVmax: 6 } }],
   axes: { groundPatches: [0, 8] },
   // Fixed weights, like the registered layout protocols: a learning horizon
   // held across a patch-spacing axis is a coupling, and this fixture is for
-  // testing the excreteRate ones.
+  // testing the uptakeVmax ones.
   base: { energyRegrow: 0, learnRate: 0 },
   seeds: 3,
   seconds: 120,
@@ -79,7 +79,7 @@ describe('planning', () => {
     expect(plan.points).toBe(2);
     expect(plan.trials).toBe(12);
     expect(plan.arms[0].sweep).toBe('tiny/a');
-    expect(plan.arms[1].base).toEqual({ energyRegrow: 0, learnRate: 0, excreteRate: 0.015 });
+    expect(plan.arms[1].base).toEqual({ energyRegrow: 0, learnRate: 0, uptakeVmax: 6 });
     expect(plan.arms[0].seeds).toEqual([1, 2, 3]);
     expect(planProtocol(tiny, { seeds: 5 }).trials).toBe(20);
   });
@@ -95,14 +95,14 @@ describe('planning', () => {
 });
 
 describe('preflight', () => {
-  it('flags an arm that varies excreteRate without re-choosing senseScale', () => {
+  it('flags an arm that varies uptakeVmax without re-choosing the gut dials', () => {
     const pf = preflight(tiny);
     expect(pf.errors).toEqual([]);
-    expect(pf.warnings.some((w) => w.includes('excreteRate/senseScale'))).toBe(true);
-    // `excreteRate/uptakeVmax` used to warn here too, until uptake stopped
+    expect(pf.warnings.some((w) => w.includes('uptakeVmax/digestRate'))).toBe(true);
+    // `excreteRate/senseScale` used to warn here too, until the signal stopped
     // meaning a different mechanism on each side of the excretion switch. See
     // the retirement note above `COUPLINGS`.
-    expect(pf.warnings.some((w) => w.includes('excreteRate/uptakeVmax'))).toBe(false);
+    expect(pf.warnings.some((w) => w.includes('excreteRate/senseScale'))).toBe(false);
   });
 
   it('is satisfied when the arms carry their own constants, or when the hold is accepted in writing', () => {
@@ -111,24 +111,24 @@ describe('preflight', () => {
       arms: [
         // `digestRate` differs because a constant set to the same value in
         // every arm is still *held*; carrying it means choosing it per arm.
-        { name: 'a', set: { excreteRate: 0, senseScale: 4.3, uptakeVmax: 0, digestRate: 0, gutSize: 0.5 } },
-        { name: 'b', set: { excreteRate: 0.015, senseScale: 0.002, uptakeVmax: 6, digestRate: 12, gutSize: 1 } },
+        { name: 'a', set: { uptakeVmax: 0, digestRate: 0 } },
+        { name: 'b', set: { uptakeVmax: 6, digestRate: 12 } },
       ],
-      accepts: [{ axis: 'excreteRate', constant: 'deposit', because: 'inert above zero' }],
+      accepts: [{ axis: 'uptakeVmax', constant: 'gutSize', because: 'inert above zero' }],
     };
     const pf = preflight(fixed);
     expect(pf.warnings).toEqual([]);
-    expect(pf.accepted).toEqual(['excreteRate/deposit: inert above zero']);
+    expect(pf.accepted).toEqual(['uptakeVmax/gutSize: inert above zero']);
   });
 
   it('flags the gut dials held across the metering switch, and records an acceptance of them', () => {
     const across: Protocol = {
       ...tiny,
       arms: [
-        { name: 'a', set: { excreteRate: 0, senseScale: 4.3, uptakeVmax: 0 } },
-        { name: 'b', set: { excreteRate: 0.015, senseScale: 0.002, uptakeVmax: 6 } },
+        { name: 'a', set: { uptakeVmax: 0 } },
+        { name: 'b', set: { uptakeVmax: 6 } },
       ],
-      accepts: [{ axis: 'excreteRate', constant: 'deposit', because: 'inert above zero' }],
+      accepts: [],
     };
     const pf = preflight(across);
     expect(pf.warnings.some((w) => w.includes('uptakeVmax/digestRate'))).toBe(true);
@@ -136,13 +136,12 @@ describe('preflight', () => {
     const accepted = preflight({
       ...across,
       accepts: [
-        ...across.accepts!,
-        { axis: 'uptakeVmax', constant: 'digestRate', because: 'inert in the minted arm' },
-        { axis: 'uptakeVmax', constant: 'gutSize', because: 'inert in the minted arm' },
+        { axis: 'uptakeVmax', constant: 'digestRate', because: 'inert with nothing filling a gut' },
+        { axis: 'uptakeVmax', constant: 'gutSize', because: 'inert with nothing filling a gut' },
       ],
     });
     expect(accepted.warnings).toEqual([]);
-    expect(accepted.accepted).toContain('uptakeVmax/digestRate: inert in the minted arm');
+    expect(accepted.accepted).toContain('uptakeVmax/digestRate: inert with nothing filling a gut');
   });
 
   it('warns about an acceptance nothing tripped', () => {
@@ -242,7 +241,7 @@ describe('report', () => {
   it('reads a protocol back out of the library in its own terms', () => {
     const db = new PondDb(':memory:');
     try {
-      const p = findProtocol('conserved-signal-price')!;
+      const p = findProtocol('contested-ground')!;
       const plan = planProtocol(p, { smoke: true });
       for (const arm of plan.arms) {
         const params = { ...defaultParams(), ...arm.base };
@@ -258,7 +257,7 @@ describe('report', () => {
             latches: t * 2, snaps: 0, free: 0, ground: 0, escrow: 0, meanExtra: 0,
             canPay: 0, ppWires: 0, conDupWires: 0, commuteShare: null,
             commuteChance: 0, commuteEdge: null, matrixDrift: 0,
-            diversity: { netFst: 0.2, linesEffective: 3, signalTotal: arm.arm.name === 'minted' ? 500 : 30, signalP90: arm.arm.name === 'minted' ? 1 : 500 },
+            diversity: { netFst: 0.2, linesEffective: 3, signalTotal: arm.arm.name === 'take-what-fits' ? 500 : 30, signalP90: arm.arm.name === 'take-what-fits' ? 1 : 500 },
           });
         }
       }
@@ -266,14 +265,11 @@ describe('report', () => {
       expect(text).toContain('SMOKE RUN');
       expect(text).toContain(p.question);
       expect(text).toContain('was the mechanism engaged?');
-      // The per-arm scope and the sense-read gauge, computed against each arm's own senseScale.
-      expect(text).toContain('arm conserved');
-      expect(text).toContain('senseRead');
       // One seed an arm: thin, so the null reading is printed.
       expect(text).toContain('thin');
       expect(text).toContain('null reading, as written before the run');
       // Levels are named after the arms, not numbered.
-      expect(text).toContain('arm=minted');
+      expect(text).toContain('arm=take-what-fits');
       // Nothing in the library for the real thing yet.
       expect(protocolReport(db, p)).toContain('no runs in this library');
     } finally {

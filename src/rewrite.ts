@@ -1,5 +1,5 @@
 import { CHEM_LEN, CRITIC_LEN, EMIT, E_OUT, PLASTIC_BASE, PLASTIC_LEN, refreshReadsField, STATE_DIMS, TASTE, T_OUT, createAgent, portWorld, slotsFor, stemFromPose, stemWorld, type Agent, type AgentKind, type PortRef, type PortSlot } from './agents.ts';
-import type { AgentStore } from './agent-store.ts';
+import { REACT_SPECIES, type AgentStore } from './agent-store.ts';
 import { DEBT_CAP_MAX, EXTRA_CAP } from './energy.ts';
 import { otherEnd, type Graph } from './graph.ts';
 import type { Params } from './params.ts';
@@ -1136,9 +1136,8 @@ function inheritChem(child: Agent, con: Agent, dup: Agent, chance: number, kappa
   /*
    * One unit of voice across all four channels, the ground included.
    *
-   * The ground is still in the budget although nothing reads its slot:
-   * farming moved to the expression head (`seedProduction`, `runExcretion`),
-   * where production trades against uptake on a simplex of its own. Dropping
+   * The ground is still in the budget although nothing reads its slot, and
+   * nothing does now that farming is gone with the excretion rows. Dropping
    * the slot here would renormalise every genome in the library, so it stays
    * — see `effEmit` — and a child's voice is divided four ways as its
    * parents' were.
@@ -1211,6 +1210,24 @@ export function commitRewrite(
   const conParent = rw.rule === 'commute' ? agents.get(rw.conId) : undefined;
   const dupParent = rw.rule === 'commute' ? agents.get(rw.dupId) : undefined;
   const eraParent = rw.rule === 'erase' ? agents.get(rw.eraId) : undefined;
+  /*
+   * The reactor the two were running, read before their slots are released.
+   *
+   * Children are built by `createAgent` on a fresh slot, so `B`, `C` and `D`
+   * start at zero and without this every body a rewrite ever made was born
+   * with a dead clock — `wave` reading −1, and an eat back into the fuel
+   * window ahead of it. The genome is inherited and the gut is spilled onto
+   * the ground; the phase its parents were at was the one thing simply lost.
+   * See `params.reactorSplit`.
+   */
+  const R = store.react;
+  const inherited = [0, 0, 0];
+  for (const parent of [agents.get(rw.a), agents.get(rw.b)]) {
+    if (!parent) continue;
+    const o = parent.slot * REACT_SPECIES;
+    for (let k = 0; k < REACT_SPECIES; k++) inherited[k] += R[o + k];
+  }
+  const born: Agent[] = [];
   for (const s of result.spawned) {
     const pose = poses[s.role];
     const ag = createAgent(s.id, s.kind, pose.x, pose.y, pose.heading, params, store);
@@ -1224,6 +1241,37 @@ export function commitRewrite(
       refreshReadsField(ag);
     }
     agents.set(s.id, ag);
+    born.push(ag);
+  }
+  /*
+   * Divide what the parents were running among the children, **per species**.
+   *
+   * Per species and not per child, which is the point: this reactor's phase is
+   * set by the *ratios* of B, C and D rather than by the size of the pools, so
+   * an even split hands every child the same phase and only scales it. A
+   * separate draw for each species gives siblings different ratios, which is
+   * different phases — the difference the broadcast coupling needs something
+   * to amplify.
+   *
+   * Conserved across the split. The pools are outside the pond's books either
+   * way, but a rewrite that quietly doubled a body's catalyst would be a free
+   * clock for anything that rewrote often.
+   */
+  if (born.length > 0 && (inherited[0] > 0 || inherited[1] > 0 || inherited[2] > 0)) {
+    const spread = Math.min(1, Math.max(0, params.reactorSplit));
+    const wts = new Array<number>(born.length);
+    for (let k = 0; k < REACT_SPECIES; k++) {
+      let sum = 0;
+      for (let i = 0; i < born.length; i++) {
+        const wgt = 1 + spread * (Math.random() * 2 - 1);
+        wts[i] = wgt > 0 ? wgt : 0;
+        sum += wts[i];
+      }
+      if (!(sum > 0)) continue;
+      for (let i = 0; i < born.length; i++) {
+        R[born[i].slot * REACT_SPECIES + k] = (inherited[k] * wts[i]) / sum;
+      }
+    }
   }
   inheritLeftoverWires(graph, result.net.wires, agents, w, h, params, time);
   graph.detachAgent(rw.a);

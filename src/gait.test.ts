@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
+import { SEED_SPECIES, seedChem } from './agents.ts';
+import { CHEM_SPECIES, SW_BASE, TX_A, TX_BASE, TX_C, TX_D, W_B, W_C } from './chem-layout.ts';
 import { REWRITE_SHARE } from './energy.ts';
 import { defaultParams, type Params } from './params.ts';
 import { loadPreset } from './presets.ts';
@@ -33,6 +35,14 @@ function gaitParams(): Params {
   const p = defaultParams();
   p.soupCount = 0;
   p.spawnInterval = 0;
+  /*
+   * Flat, for the same reason the regrowth below is on: the rig places a chain
+   * at coordinates it chose and needs every segment of it standing on food.
+   * On the shipped patchy dish a chain lies across a patch edge, half of it
+   * fuelled and half of it not, and what this file measures is then the
+   * accident of where the blobs fell rather than the clock.
+   */
+  p.groundPatches = 0;
   /*
    * The ground regrows and diffuses, because the reactor is fed by eating.
    * A body grazes the cell it is standing in, so without diffusion its own
@@ -179,7 +189,8 @@ describe('the reactor', () => {
      * `intake` is what places a body on that boundary — the share of what it
      * digests that it routes to its reactor rather than banking — so a
      * lineage that banks everything has no clock, and one that routes enough
-     * has a stroke. `metabolicFuel` carries the analysis this comes from.
+     * has a stroke. `src/pond/spectrum.ts` carries the analysis this comes
+     * from, and `npm run pond -- spectrum` prints it.
      */
     const p = gaitParams();
     const miser = lone({ ...p, intake: 0 });
@@ -226,6 +237,153 @@ describe('the reactor', () => {
   });
 });
 
+describe('the grip swing', () => {
+  it('lags the stroke by what the C -> D step sets', () => {
+    /*
+     * Two actuators off one reactor, and the whole value is in the angle
+     * between them.
+     *
+     * The rest length and the anchor both swing on `wave(C)`, so a body
+     * deforms and undeforms through the same shapes — a reciprocal cycle,
+     * which nets zero displacement however hard it is driven (Purcell). The
+     * grip swing is driven by **D** instead, and `dD/dt = k3*C - d*D` is a
+     * first-order lag, so it trails by `atan(w/d)`: 51 degrees at the bottom
+     * of the fuel window, 65 at the top, set by the chemistry.
+     *
+     * Measured here rather than asserted from the algebra, because the
+     * algebra is about the linearisation and this is the limit cycle. They
+     * agree to a degree or two, which is the point.
+     */
+    const p = gaitParams();
+    const sim = new Sim(4000, 4000);
+    loadPreset(sim, 'soup', p);
+    const a = sim.spawn('con', 2000, 2000, 0, p, true)!;
+    a.pinned = true;
+    const st = sim.agentStore;
+    const C: number[] = [];
+    const D: number[] = [];
+    for (let f = 0; f < 2400; f++) {
+      sim.step(1 / 60, p);
+      if (f > 900) {
+        C.push(st.gaitWave[a.slot]);
+        D.push(st.gaitGrip[a.slot]);
+      }
+    }
+    const centre = (v: number[]) => {
+      const m = v.reduce((x, y) => x + y, 0) / v.length;
+      return v.map((x) => x - m);
+    };
+    const c = centre(C);
+    const d = centre(D);
+    const rms = (v: number[]) => Math.sqrt(v.reduce((x, y) => x + y * y, 0) / v.length);
+    // Both have to be moving, or a phase between them means nothing.
+    expect(rms(c), 'the stroke did not swing').toBeGreaterThan(0.1);
+    expect(rms(d), 'the grip did not swing').toBeGreaterThan(0.05);
+    // The period, off C's upward zero crossings.
+    let ups = 0;
+    let first = -1;
+    let last = -1;
+    for (let i = 1; i < c.length; i++) {
+      if (c[i - 1] <= 0 && c[i] > 0) {
+        ups++;
+        if (first < 0) first = i;
+        last = i;
+      }
+    }
+    expect(ups, 'no cycles to measure a phase against').toBeGreaterThan(3);
+    const period = (last - first) / (ups - 1);
+    // Cross-correlate inside one period, or the peak aliases to lag + n*period.
+    let best = -Infinity;
+    let lag = 0;
+    for (let L = 0; L < Math.round(period); L++) {
+      let sum = 0;
+      for (let i = 0; i + L < c.length; i++) sum += c[i] * d[i + L];
+      sum /= c.length - L;
+      if (sum > best) {
+        best = sum;
+        lag = L;
+      }
+    }
+    const degrees = (lag / period) * 360;
+    expect(degrees, `D lagged C by ${degrees.toFixed(1)} deg`).toBeGreaterThan(35);
+    expect(degrees, `D lagged C by ${degrees.toFixed(1)} deg`).toBeLessThan(80);
+  });
+});
+
+describe('the actuators', () => {
+  it('lets a lineage choose the phase of its own stroke', () => {
+    /*
+     * `Sw` and `Gw` are what mixture of the reactor's three species each
+     * actuator reads. The three sit at fixed angles — B at +84 degrees, C at
+     * 0, D at −51 to −65 — so a weighted sum of them reaches any phase, and a
+     * body that changes its weights changes *when in its own cycle* it
+     * strokes. That is the "phase something can set" the Locomotion heading
+     * has wanted since it was written; before this it was set by `k3` and `d`
+     * and was the same for every body in the pond forever.
+     *
+     * Two pinned Cons on the same dish, identical but for `Sw`: one reading
+     * the catalyst, which is the seed, and one reading the primer. Their
+     * strokes should come apart by roughly B's lead over C.
+     */
+    const p = gaitParams();
+    const sim = new Sim(4000, 4000);
+    loadPreset(sim, 'soup', p);
+    const onC = sim.spawn('con', 1600, 2000, 0, p, true)!;
+    const onB = sim.spawn('con', 2400, 2000, 0, p, true)!;
+    onC.pinned = true;
+    onB.pinned = true;
+    // The seed is pure C; move the second onto pure B and nothing else.
+    onB.chem[SW_BASE + W_C] = 0;
+    onB.chem[SW_BASE + W_B] = 1;
+    const st = sim.agentStore;
+    const A: number[] = [];
+    const B: number[] = [];
+    for (let f = 0; f < 2400; f++) {
+      sim.step(1 / 60, p);
+      if (f > 900) {
+        A.push(st.gaitWave[onC.slot]);
+        B.push(st.gaitWave[onB.slot]);
+      }
+    }
+    const centre = (v: number[]) => {
+      const m = v.reduce((x, y) => x + y, 0) / v.length;
+      return v.map((x) => x - m);
+    };
+    const a = centre(A);
+    const b = centre(B);
+    const rms = (v: number[]) => Math.sqrt(v.reduce((x, y) => x + y * y, 0) / v.length);
+    expect(rms(a), 'the catalyst stroke did not swing').toBeGreaterThan(0.1);
+    expect(rms(b), 'the primer stroke did not swing').toBeGreaterThan(0.02);
+    let ups = 0;
+    let first = -1;
+    let last = -1;
+    for (let i = 1; i < a.length; i++) {
+      if (a[i - 1] <= 0 && a[i] > 0) {
+        ups++;
+        if (first < 0) first = i;
+        last = i;
+      }
+    }
+    expect(ups, 'no cycles to measure a phase against').toBeGreaterThan(3);
+    const period = (last - first) / (ups - 1);
+    // Inside one period, or the peak aliases to lag + n*period.
+    let best = -Infinity;
+    let lag = 0;
+    for (let L = 0; L < Math.round(period); L++) {
+      let sum = 0;
+      for (let i = 0; i + L < a.length; i++) sum += a[i] * b[i + L];
+      sum /= a.length - L;
+      if (sum > best) {
+        best = sum;
+        lag = L;
+      }
+    }
+    // B leads C, so C has to be shifted most of a cycle forward to meet it.
+    const degrees = (lag / period) * 360;
+    expect(degrees, `the two strokes sat ${degrees.toFixed(1)} deg apart`).toBeGreaterThan(200);
+  });
+});
+
 describe('the broadcast', () => {
   /*
    * The doc's §4.1 transmission presets, as genes: a Con broadcasts the
@@ -256,6 +414,28 @@ describe('the broadcast', () => {
     }
     return { C, D };
   }
+
+  it('gives every kind exactly one species to speak', () => {
+    /*
+     * One kind, one species — `docs/scratch.txt` §4.1, and the whole of the
+     * seeding rule. An Era sends the food it ate, a Con the catalyst, a Dup
+     * the inhibitor. No kind has a second channel, which is what makes this
+     * checkable in one loop rather than kind by kind.
+     *
+     * An Era used to send the primer as well. It ships the fast currency into
+     * one neighbour and makes that body the instability the net is slaved to;
+     * the gut is the slow one and the neighbour makes its own primer from it.
+     */
+    const p = defaultParams();
+    const want = { era: TX_A, con: TX_C, dup: TX_D };
+    for (const kind of ['era', 'con', 'dup'] as const) {
+      const chem = seedChem(kind, p);
+      const spoke: number[] = [];
+      for (let k = 0; k < CHEM_SPECIES; k++) if (chem[TX_BASE + k] > 0) spoke.push(k);
+      expect(spoke, `a ${kind} speaks exactly one species`).toEqual([want[kind]]);
+      expect(SEED_SPECIES[kind], 'the table and the seed agree').toBe(want[kind]);
+    }
+  });
 
   it('sends the catalyst from a Con and the inhibitor from a Dup', () => {
     const p = gaitParams();
@@ -459,20 +639,30 @@ describe('a chain', () => {
     expect(locked.headSwing, 'the broadcasting chain stopped oscillating').toBeGreaterThan(1);
   });
 
-  it('synchronises rather than travelling when the broadcast is turned up', () => {
+  it('keeps travelling when the broadcast is turned up, which the gate is for', () => {
     /*
-     * The upper regime, and it is worth pinning because the mechanism used to
-     * do the opposite. When the broadcast was gated on the wave and scaled in
-     * wave units, shouting through a chain drained the catalyst its senders
-     * ran on and every reactor flatlined. Mass action on the concentration is
-     * self-limiting instead — a body sends in proportion to what it has, so
-     * it cannot send itself empty — and the chain locks harder until the
-     * phase difference goes to nothing. That is the pond-wide pulse, and it
-     * is why the shipped rate is nearer the bottom of the range than the top.
+     * The upper regime, and what it does changed when `Gx` stopped shipping at
+     * zero.
+     *
+     * Ungated, shouting locks a chain *harder* until the phase difference goes
+     * to nothing: the pond-wide pulse this branch began by removing, and the
+     * reason the shipped rate sat near the bottom of its range. Measured at
+     * broadcast 3, the interior lag fell under 2 frames.
+     *
+     * A floor under the broadcast keeps the wave. A body below `Gx` says
+     * nothing at all rather than a little, so the trough of a cycle is silent
+     * and the front has a gap to travel into; at the shipped 0.1 the same loud
+     * chain holds 2.33 frames a wire. It is a narrow window — swept on this
+     * rig, 0.05 through 0.2 all travel and **0.3 flatlines the chain**,
+     * because a gate breaks the one property mass action was chosen for: a
+     * body sending in proportion to what it *has* cannot send itself empty,
+     * and one sending in proportion to `x - gate` can drive itself to the
+     * gate. That is the same failure the wave-gated form had, and it is why
+     * this ships at a third of where it breaks.
      */
     const loud = lockOf(3);
     expect(loud.spread, 'a loud chain did not lock at all').toBeLessThan(7);
-    expect(Math.abs(loud.lag), 'a loud chain still travelled').toBeLessThan(2);
+    expect(Math.abs(loud.lag), 'a loud chain stopped travelling').toBeGreaterThan(1.5);
     expect(loud.headSwing, 'a loud chain stopped oscillating').toBeGreaterThan(1);
   });
 });

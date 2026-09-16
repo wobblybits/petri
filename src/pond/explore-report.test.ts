@@ -20,7 +20,7 @@ function lcg(seed: number): () => number {
 }
 
 interface Planted {
-  /** `excreteRate`, the driver. */
+  /** `digestRate`, the driver. */
   excrete: number;
   /** `groundPatches`, the condition. */
   patches: number;
@@ -29,7 +29,7 @@ interface Planted {
 }
 
 /**
- * A library where `excreteRate` drives `bodies` — but only in a patchy dish.
+ * A library where `digestRate` drives `bodies` — but only in a patchy dish.
  * On a uniform dish it does nothing. That is the interaction, and only
  * `conditionalEffects` can see it.
  */
@@ -38,7 +38,7 @@ function library(rows: Planted[], tweak?: (p: Params, i: number) => void): PondD
   const r = lcg(7);
   rows.forEach((p, i) => {
     const params = defaultParams();
-    params.excreteRate = p.excrete;
+    params.digestRate = p.excrete;
     params.groundPatches = p.patches;
     tweak?.(params, i);
     const id = db.startRun({
@@ -150,16 +150,16 @@ describe('exploring a library', () => {
       expect(r.runs).toBe(60);
       // Only two parameters were ever moved; everything else is constant and
       // must be dropped, or the loadings are diluted by 78 columns of nothing.
-      expect(r.paramNames).toEqual(['excreteRate', 'groundPatches']);
+      expect(r.paramNames).toEqual(['digestRate', 'groundPatches']);
 
       // PLS: the parameters reach the outcomes at all.
       expect(r.cross[0].correlation).toBeGreaterThan(0.5);
       const named = r.cross.flatMap((c) => c.params.map((p) => p.name));
-      expect(named).toContain('excreteRate');
+      expect(named).toContain('digestRate');
 
       // The interaction, which is the only thing here PCA cannot see.
       const gated = r.conditionals.find(
-        (c) => c.driver === 'excreteRate' && c.condition === 'groundPatches' && c.outcome === 'bodies',
+        (c) => c.driver === 'digestRate' && c.condition === 'groundPatches' && c.outcome === 'bodies',
       );
       expect(gated).toBeDefined();
       // Drives bodies where there are patches, does nothing where there are not.
@@ -277,7 +277,7 @@ describe('exploring a library', () => {
       const r = exploreLibrary(db);
       expect(r.notes.join(' ')).toMatch(/moved as one dial/);
       // And they are one column now, not two.
-      expect(r.paramNames).toEqual(['excreteRate~groundPatches']);
+      expect(r.paramNames).toEqual(['digestRate~groundPatches']);
     } finally {
       db.close();
     }

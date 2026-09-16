@@ -36,7 +36,7 @@ describe('sampling', () => {
     // snapped and the stored parameter is the one that actually ran.
     expect(parseAxis('groundPatches').step).toBe(1);
     expect(parseAxis('groundPatches=0..64').step).toBe(1);
-    expect(parseAxis('excreteRate').step).toBeUndefined();
+    expect(parseAxis('digestRate').step).toBeUndefined();
     expect(latinHypercube([parseAxis('groundPatches=0..64')], 8, 5).every(
       (p) => Number.isInteger(p.groundPatches),
     )).toBe(true);
@@ -44,8 +44,8 @@ describe('sampling', () => {
     expect(parseAxis('uptakeKs').log).toBe(true);
     // A floor at zero is a switch, not a scale.
     expect(parseAxis('deposit').log).toBe(false);
-    expect(parseAxis('excreteRate=0.001..0.5')).toEqual({
-      key: 'excreteRate', min: 0.001, max: 0.5, log: true,
+    expect(parseAxis('digestRate=0.001..0.5')).toEqual({
+      key: 'digestRate', min: 0.001, max: 0.5, log: true,
     });
     expect(() => parseAxis('soupCount')).toThrow(/no declared range/);
     expect(() => parseAxis('diffuse=1..0')).toThrow(/backwards/);
@@ -77,8 +77,8 @@ describe('sampling', () => {
   });
 
   it('spreads a log axis evenly in the exponent, not the value', () => {
-    const axis = parseAxis('excreteRate=0.001..1');
-    const pts = latinHypercube([axis], 40, 3).map((p) => p.excreteRate);
+    const axis = parseAxis('digestRate=0.001..1');
+    const pts = latinHypercube([axis], 40, 3).map((p) => p.digestRate);
     // The lowest of the three decades, 0.001 to 0.01. Uniform sampling would
     // put about one per cent of its draws there; log-uniform puts a third.
     const below = pts.filter((v) => v < 0.01).length;

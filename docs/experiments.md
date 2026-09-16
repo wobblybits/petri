@@ -217,7 +217,7 @@ sends it. Whether that structures the soup or kills it is one comparison —
 `latch_p50` against `tank_life`. Well under, and a body reliably reaches a
 net before its tank runs out, so dependency is a pressure. Near or over, and
 dependency is a cull. `loneliness` is the same question asked of the tail.
-`docs/energy-chemistry-plan.md` §5 asks for this before `yDirect` moves far.
+This is asked for before `yDirect` moves far.
 
 Still not measured and wanted: the learned-weight norm on the GPU path at
 sample time (the host mirror is stale; only harvests drain it).

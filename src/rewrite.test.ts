@@ -1,3 +1,4 @@
+import { REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 // Seeded. The oscillator swims, and swimming draws coloured noise from
@@ -590,6 +591,58 @@ describe('heritable traits', () => {
     expect(decays.size, 'siblings recombine independently').toBeGreaterThan(1);
     expect(children.some((c) => c.requestDecay === dup.requestDecay)).toBe(false);
     expect(children.some((c) => c.requestDecay === con.requestDecay)).toBe(false);
+  });
+
+  it('divides the reactor its parents were running among the children', () => {
+    /*
+     * A child is built on a fresh slot, so without this it is born with `B`,
+     * `C` and `D` at zero: a dead clock reading `wave` −1, with an eat back
+     * into the fuel window ahead of it. The genome is inherited and the gut is
+     * spilled onto the ground; the phase was the one thing simply lost.
+     *
+     * Per species, which is the point. This reactor's phase is set by the
+     * ratios of B, C and D rather than by the size of the pools, so an even
+     * split would hand every child the same phase and only scale it.
+     */
+    const { sim, params } = oscillatorPair();
+    params.reactorSplit = 0.7;
+    const dup = [...sim.agents.values()].find((a) => a.kind === 'dup')!;
+    const con = [...sim.agents.values()].find((a) => a.kind === 'con')!;
+    const R = sim.agentStore.react;
+    // A running reactor on both parents, at different points in the cycle.
+    const put = (a: typeof dup, b: number, c: number, d: number) => {
+      const o = a.slot * REACT_SPECIES;
+      R[o + REACT_B] = b;
+      R[o + REACT_C] = c;
+      R[o + REACT_D] = d;
+    };
+    put(dup, 4, 0.5, 5);
+    put(con, 2, 1.5, 9);
+    const want = [6, 2, 14];
+
+    const before = new Set(sim.agents.keys());
+    const rw = beginRewrite(dup, con, sim.graph, sim.agents, sim.w, sim.h, 1);
+    sim.nextId = commitRewrite(rw, sim.agents, sim.graph, params, sim.nextId, sim.time, sim.w, sim.h, sim.agentStore);
+    const children = [...sim.agents.values()].filter((a) => !before.has(a.id));
+    expect(children).toHaveLength(4);
+
+    // Conserved, species by species: a rewrite that doubled a body's catalyst
+    // would be a free clock for anything that rewrote often.
+    for (let k = 0; k < REACT_SPECIES; k++) {
+      let sum = 0;
+      for (const c of children) sum += R[c.slot * REACT_SPECIES + k];
+      expect(sum, `species ${k} is conserved`).toBeCloseTo(want[k], 9);
+    }
+    // Born running rather than at a standstill.
+    const alive = children.filter((c) => R[c.slot * REACT_SPECIES + REACT_C] > 0);
+    expect(alive.length, 'every child has a clock').toBe(4);
+    // And born different: the ratio is the phase, and a separate draw per
+    // species is what makes the siblings' ratios differ.
+    const ratios = children.map((c) => {
+      const o = c.slot * REACT_SPECIES;
+      return R[o + REACT_C] / Math.max(1e-12, R[o + REACT_D]);
+    });
+    expect(new Set(ratios.map((r) => r.toFixed(6))).size, 'siblings differ in phase').toBeGreaterThan(1);
   });
 
   it('assorts a Dup child from one whole parent per trait, instead of blending like a Con child', () => {

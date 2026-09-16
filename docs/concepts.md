@@ -22,21 +22,69 @@ not also be asked to do. Nothing else belongs here; measurements go in
 - Sensing
 - Movement and steering
 - Signalling
-- Metabolism: eating, upkeep, excretion
+- Metabolism: eating. **Not filled, but three of the things it had to settle
+  are settled.** Upkeep is gone — it was one dial doing three jobs and
+  `docs/metabolism-spec.md` §7 has where each went. Excretion is gone with it:
+  a body ate a sample of all four channels and so had to be able to clear what
+  it could not convert, and a body that eats only the ground has nothing in its
+  gut it cannot digest. What is left to settle is that the reactor which *is* a
+  body's metabolism is written up under Net > Locomotion, because it is also
+  the gait's clock — one mechanic serving two headings, which is the thing this
+  document exists to make visible.
+
+  **Matter is the ground; signal is the other three channels; nothing crosses.**
+  A body eats ground, banks it, and feeds its reactor out of it at `intake`, a
+  rate it owns. It excretes nothing. A voice is minted and smelled and is not
+  matter, so the conservation books are one column. That is the whole of what
+  the four channels are for, and it is why there is no longer a fork between a
+  minted pond and a conserving one.
 - Memory
-- Learning
+- Learning. Lives in the three-factor rule on the state matrices: a TD error
+  from a per-body critic, times an eligibility trace on `phi'(v) * pre`. Only
+  `Wx`, `Wh`, `Wn` and `b` move within a life; every other gene moves by
+  breeding alone.
+
+  **The teacher is the one designed objective in this pond, and it is said out
+  loud here because everything else is emergent.** There is no fitness term and
+  selection is what survives — but a learner needs something to be taught by,
+  and this is it. What keeps it honest is that it is not a goal anybody chose:
+  `IN_FULL` is distance from `debtCap`, which is the system's own death
+  condition, so the reward is "how close am I to dying". `learnReward` blends
+  the *level* of that (`IN_FULL - 1`, which saturates — 31.7% of a live soup
+  sits at exactly zero reward) with its *rate* (the change per second, which
+  still reads for a body at its cap). It ships at 0.5, both.
+
+  **What that teacher can reach is one scalar wide.** `h` only becomes
+  behaviour through the six head matrices, which seed to zero with one
+  exception, so a fresh body's whole state-dependent behaviour is
+  `IN_DEMAND -> h[0] -> taste(ground)`. Widening that is the open question
+  under this heading, and it is not a matter of turning a learning rate up:
+  teaching a head needs a per-channel error the scalar reward does not supply,
+  and the mechanism that would work — perturb the head's output, correlate the
+  noise with the reward — is a policy-gradient estimator rather than an
+  extension of this rule. `inheritLearned` ships at 1, so what a body learns is
+  written into its children's genome: this pond is Lamarckian, deliberately.
+
 - Regulation: behaviour that follows state without learning
 - Death
 
 ## Net
 
 - Identity: what counts as one organism
-- Shape. Lives in wire physics. Tension is held by energy flowing along a
-  wire, so a net that moves no energy is slack. Not yet true: stiffness is a
-  free global constant. `Wire.flux` is the charge crossing a wire this frame,
-  a staging value today; a wire that holds it in transit for a time its rest
-  length sets is the float this heading and Locomotion's coupling would
-  share, and Locomotion now needs it.
+- Shape. Lives in wire physics, and **it is true now**. Tension is held by
+  energy flowing along a wire, so a net that moves no energy is slack:
+  `Wire.carried` is what the transport pass moved across a wire this frame and
+  `wireTug` pulls the wire in by up to that much of its own resting length. A
+  wire that moves nothing sits at exactly its rest.
+  **And the rest length is the wire's own** (`Wire.restBase`), not one global
+  every wire drifts to, so a net can have long and short wires — which is the
+  only morphology this heading ever had. That is also what makes the tension
+  term safe: `Sim.principalRedexReady` asks whether two principals are within
+  1.3 of *that wire's* rest, a ratio rather than a distance in pixels, so
+  shortening a wire is a change of shape and not a change of who breeds. It
+  was the absolute gate that retired `wireTug` the first time.
+  One consequence rather than a surprise: a carrying wire's ends sit closer, so
+  it reaches its gate sooner. Energy flowing makes things react.
 - Locomotion. Lives in the drag law, whose rate is `drag + grip * fullness`.
   A net moves itself by moving energy through itself: a transport kick is
   equal and opposite, and under one rate for every body it cancels at the
@@ -133,11 +181,13 @@ not also be asked to do. Nothing else belongs here; measurements go in
       r1  A -> B      r2  -> C (autocatalytic in C, saturating)
       r3  C -> D      r4  B + D ->
 
-  A is bought out of the body's own tank at a price, in proportion to how
-  full the tank is, and what leaves lands on the ground through the same road
-  rent uses, so metabolising is fertilising and nothing is destroyed. That is
-  the whole of the join: a net that works draws its tank down, a drawn-down
-  tank is what `spreadRequests` carries, and `flowCharges` answers it.
+  **A is the gut** — what the body has swallowed off the grid and not yet
+  used — so the reactor is fed by *eating* rather than by buying. `intake` is
+  the share of digested food a body routes to it. A body with a full tank and
+  an empty gut therefore has no clock, and running a metabolism needs no price
+  of its own because it is food the body did not bank. What crosses out of the
+  books should land on the ground through the same road rent uses, which is
+  `upkeepExcrete` and ships at 0; until it is on, the reactor is a sink.
 
   **A is steady.** Its row decouples — it is fed from outside and only feeds
   B — so it settles to `J/(k1 + decay)` whatever it started at and the
@@ -151,7 +201,8 @@ not also be asked to do. Nothing else belongs here; measurements go in
   against 0.483. And `q` can only be driven toward zero when the saturation
   is weak, because C's self-gain at the fixed point depends on nothing but
   `base` and `sigma * C*` — not on the fuel, not on the autocatalytic rate.
-  The reactor's parameter block carries the derivation.
+  `src/pond/spectrum.ts` carries the derivation and prints it;
+  `docs/metabolism-spec.md` §4 is the argument.
 
   The fuel window has both edges and that is the gate: starved, the reactor
   sits empty and still; fed, it runs a limit cycle whose period shortens as
@@ -159,16 +210,18 @@ not also be asked to do. Nothing else belongs here; measurements go in
   sits saturated and still again. Nothing had to be added to get "a starving
   body does not undulate" — it is where the Hopf boundary is.
 
-  The coupling is the doc's §4 transmission, directed and signed, and it
-  lives on the wire. A body broadcasts out of its principal port only, so it
-  has one mouth and up to two ears and an Era is a pacemaker leaf by
-  construction; what it broadcasts is the sign of `send` off the `Gc` head —
-  positive is the catalyst C, negative is the inhibitor D — and only while
-  its wave is *above* `gate`, which is the doc's own `H(x - G)`: a node
-  broadcasts what it has. Con seeds positive and Dup negative, so a chain is
-  a sequence of exciters and brakes. The wire carries each species as one
-  signed number both ends read (`Wire.fluxC`, `Wire.fluxD`), which is what
-  makes a transfer antisymmetric by construction.
+  The coupling is the doc's §4 transmission and it lives on the wire. A body
+  broadcasts out of its principal port only, so it has one mouth and up to two
+  ears and an Era is a leaf by construction. **One kind, one species**: `Tx`
+  says which of the four a body speaks, seeded A on an Era, C on a Con, D on a
+  Dup, and `Gx` how much it must hold first — the doc's own `H(x - G)`,
+  rectified rather than stepped, on the *concentration* and not on the wave,
+  so the impulse is in the chemistry. An Era sends the food it ate and the
+  interior makes its own primer from it; sending the primer instead ships the
+  fast currency into one neighbour and makes that body the instability the net
+  is slaved to. The wire carries each species as one signed number both ends
+  read (`Wire.fluxGut`, `fluxC`, `fluxD`), which is what makes a transfer
+  antisymmetric by construction.
 
   Measured on six pinned Cons wired principal to auxiliary, against a period
   of about 100 frames: uncoupled the interior offsets are 18, 0 and 0 frames
@@ -188,7 +241,26 @@ not also be asked to do. Nothing else belongs here; measurements go in
   conduction speeds the interior lag sat at 10 to 12 frames either way and
   the wire's own lag only made it less uniform, so the dial is gone.
 
-  It ships **on**: rate 15, broadcast 1, stroke 0.04. The stroke is a
+  **Two actuators, and the angle between them is the reactor's.** The rest
+  length and the anchor both swing on `wave(C)`, which is one degree of
+  freedom: a cycle that deforms and undeforms through the same shapes is
+  reciprocal and nets zero displacement, which is Purcell's scallop theorem and
+  the same objection that retired `wireTug`. So `grip` — the term that actually
+  turns a transport kick into travel — is swung by **D** instead, at
+  `gripSwing`. `dD/dt = k3*C - d*D` is a first-order lag, so D trails C by
+  `atan(w/d)`: 51 degrees at the bottom of the fuel window and 65 at the top,
+  measured at 53.5 on a lone fed body. Nobody chose those numbers. B leads C by
+  84 degrees, near quadrature, and is not used by anything yet.
+
+  **And the phase is a gene now.** `Sw` and `Gw` are what mixture of B, C and D
+  the stroke and the grip each read. The three sit at fixed angles to one
+  another, so a weighted sum of them reaches any phase — a lineage owns when in
+  its own cycle it strokes and when it grips, which is what this heading has
+  meant by "a phase something can *set*" since it was written. Seeded pure C
+  and pure D, which is what they were welded to; the globals `gaitSwell` and
+  `gripSwing` stay the magnitudes.
+
+  It ships **on**: rate 15, broadcast 1, stroke 0.04, grip swing 0.5. The stroke is a
   quarter of what the two-pool pathway could drive, and that is the honest
   cost of a relaxation oscillator: its transitions are fast, so it slews a
   rest length hard, and above 0.04 a freshly latched pair spikes past the
@@ -201,13 +273,13 @@ not also be asked to do. Nothing else belongs here; measurements go in
   own net. But that leaves the *wavelength* global too, and nothing about a
   net's own shape reaches it: the conduction delay used to be the one thing
   that did, and it was measured not to work. What a body owns is `intake`,
-  its broadcast sign and its gate. The reactor is also its own private
-  chemistry: it neither eats nor excretes any of the four field species, so
-  the only thing connecting it to the dish is the price it pays and the
-  fertiliser that price becomes — the doc's §6.1 has an Era pushing A and B
-  downstream, which would make a leaf a net's feeder and is not built. One
-  gate where the doc has four, so a Dup's inhibitor rides its catalyst's
-  rhythm rather than its own. A body at the end of a chain whose principal is
+  which species it speaks and how much it must hold to speak. The reactor is
+  no longer private: its A *is* the four field species, so a body's clock
+  comes out of the grid it is standing on, and an Era pushing food downstream
+  is what makes a leaf its net's feeder. At the shipping dials that push moves
+  a neighbour's influx by only about 8%, because digestion is twelve times
+  faster than the transport feeding it — so structure is a gradient here and
+  not yet a strong one. A body at the end of a chain whose principal is
   free only ever receives, and the catalyst it is fed runs to D, quenches its
   primer and stalls its loop — the doc's stoichiometry, and in a grown net it
   is a body waiting to latch. And an Era is

@@ -142,7 +142,7 @@ const HARVEST_ROOM: u32 = 0u;
 const HARVEST_TOTAL: u32 = 1u;
 const HARVEST_KS: u32 = 2u;
 const HARVEST_GOT: u32 = 2u;
-const HARVEST_STRIDE: u32 = 6u;
+const HARVEST_STRIDE: u32 = 3u;
 
 // Matches `FLOW_EPS` in energy.ts: below this a take is not worth a cell walk.
 const FLOW_EPS: f32 = 1e-9;
@@ -484,27 +484,21 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
   let b = gid.x;
   if (b >= P.nBlocks) { return; }
   let blk = hBlocks[b];
+  // One channel either way now: both paths eat the ground and nothing else,
+  // and they differ only in the rate law and where the host puts what they got.
+  let ch = u32(P.harvestCh);
   if (P.uptakeCap <= 0.0) {
-    // The single-species path: take what fits, from the ground, to saturation.
-    // What the pond runs by default, and what this kernel has always been.
-    let ch = u32(P.harvestCh);
+    // Take what fits, to saturation. What the pond runs at `uptakeVmax` 0.
     for (var e = 0u; e < blk.count; e++) {
       let ro = (blk.first + e) * HARVEST_STRIDE;
       var want = hFlow[ro + HARVEST_ROOM];
       hFlow[ro + HARVEST_GOT] = 0.0;
-      hFlow[ro + HARVEST_GOT + 1u] = 0.0;
-      hFlow[ro + HARVEST_GOT + 2u] = 0.0;
-      hFlow[ro + HARVEST_GOT + 3u] = 0.0;
       if (want <= FLOW_EPS) { continue; }
       let got = drain(blk, ch, want);
-      hFlow[ro + HARVEST_GOT + ch] = got;
+      hFlow[ro + HARVEST_GOT] = got;
       if (got <= 0.0) {
         for (var r = e + 1u; r < blk.count; r++) {
-          let z = (blk.first + r) * HARVEST_STRIDE;
-          hFlow[z + HARVEST_GOT] = 0.0;
-          hFlow[z + HARVEST_GOT + 1u] = 0.0;
-          hFlow[z + HARVEST_GOT + 2u] = 0.0;
-          hFlow[z + HARVEST_GOT + 3u] = 0.0;
+          hFlow[(blk.first + r) * HARVEST_STRIDE + HARVEST_GOT] = 0.0;
         }
         break;
       }
@@ -513,80 +507,53 @@ fn harvest(@builtin(global_invocation_id) gid: vec3u) {
   }
 
   /*
-   * The reaction table's four uptake rows, drawn as one mouthful.
+   * The metered mouthful: the ground, rate-limited, into the gut.
    *
-   * Densities are read once for the block, before anybody eats, so the order
-   * bodies are visited in cannot decide what any of them may draw. A body
-   * takes a sample of the water rather than four separate meals: `total` is
-   * the whole budget for the frame and each species may have at most its share
-   * of it, `total * density / stock`, so the shares sum to the budget however
-   * rich or filthy the cell is and nobody may eat only the good part. One
-   * gut, four species competing for it: `left` is the room after the species
-   * already taken, so a body that fills on the first thing it finds does not
-   * also take the rest. Species in index order, which is arbitrary and has to
-   * match `runHarvestPlan` exactly.
+   * The density is read once for the block, before anybody eats, so the order
+   * bodies are visited in cannot decide what any of them may draw. **One
+   * species.** A body used to take a sample of all four channels competing for
+   * one gut, which made a scent a meal as well as a message; matter is the
+   * ground and signal is the other three, and nothing crosses. That is why
+   * there is one affinity and one `got` rather than four of each. Kept in step
+   * with `runHarvestPlan` by hand.
    */
-  var density = vec4f(0.0);
+  var density = 0.0;
   let cells = f32(blk.wi * blk.wj);
   if (cells > 0.0) {
-    var sum = vec4f(0.0);
+    var sum = 0.0;
     for (var y = 0u; y < blk.wj; y++) {
       for (var x = 0u; x < blk.wi; x++) {
-        sum += src[(blk.fj + y) * P.cols + (blk.fi + x)];
+        sum += src[(blk.fj + y) * P.cols + (blk.fi + x)][ch];
       }
     }
     density = sum / cells;
   }
-  // Only what is actually there: a cell can sit below zero after a diffusion
-  // step, and the host counts the positive densities alone. Same line.
-  let stock = dot(max(density, vec4f(0.0)), vec4f(1.0));
+  var sN = density;
+  if (P.hillN != 1.0) { sN = pow(density, P.hillN); }
   for (var e = 0u; e < blk.count; e++) {
     let ro = (blk.first + e) * HARVEST_STRIDE;
     // `room` is room in the body's gut; the host computes it, because what a
     // body is holding undigested lives in the store and not on this side.
-    var left = hFlow[ro + HARVEST_ROOM];
+    let left = hFlow[ro + HARVEST_ROOM];
     let total = hFlow[ro + HARVEST_TOTAL];
-    // Read before the writeback overwrites them: `got` shares the affinities'
-    // slots.
-    let ks = vec4f(
-      hFlow[ro + HARVEST_KS],
-      hFlow[ro + HARVEST_KS + 1u],
-      hFlow[ro + HARVEST_KS + 2u],
-      hFlow[ro + HARVEST_KS + 3u],
-    );
-    for (var c = 0u; c < 4u; c++) {
-      var got = 0.0;
-      if (left > FLOW_EPS && total > 0.0 && density[c] > 0.0 && stock > 0.0) {
-        /*
-         * `total` stands in for `vmax` on every species: how fast a body can
-         * pull one out of the water is a transporter question, and a body
-         * standing in nothing but one species may spend its whole mouthful on
-         * it. What it can *do* with what it swallowed is the host's
-         * `runDigestion`, not this. Hill at `n`; 1 is plain Monod and does not
-         * pay for the two `pow` calls, and the host resolves a non-positive
-         * `hillN` to 1 before it is uploaded, so `!= 1.0` is the whole test.
-         * Kept in step with `runHarvestPlan` by hand.
-         */
-        var sN = density[c];
-        var kN = ks[c];
-        if (P.hillN != 1.0) {
-          sN = pow(density[c], P.hillN);
-          kN = pow(ks[c], P.hillN);
-        }
-        let rate = total * sN / (kN + sN);
-        // The proportional sample: this species' share of one budget, which
-        // is the ceiling however good the body's transporter for it is. Kept
-        // in step with `runHarvestPlan` by hand.
-        let share = total * density[c] / stock;
-        var want = min(rate, share);
-        if (left < want) { want = left; }
-        if (want > FLOW_EPS) {
-          got = drain(blk, c, want);
-          left -= got;
-        }
-      }
-      hFlow[ro + HARVEST_GOT + c] = got;
+    // Read before the writeback overwrites it: `got` shares the affinity's slot.
+    let ks = hFlow[ro + HARVEST_KS];
+    var got = 0.0;
+    if (left > FLOW_EPS && total > 0.0 && density > 0.0) {
+      /*
+       * `total` stands in for `vmax`: how fast a body can pull the ground out
+       * of the water is a transporter question. What it can *do* with what it
+       * swallowed is the host's `runDigestion`, not this. Hill at `n`; 1 is
+       * plain Monod and does not pay for the two `pow` calls, and the host
+       * resolves a non-positive `hillN` to 1 before it is uploaded.
+       */
+      var kN = ks;
+      if (P.hillN != 1.0) { kN = pow(ks, P.hillN); }
+      var want = total * sN / (kN + sN);
+      if (left < want) { want = left; }
+      if (want > FLOW_EPS) { got = drain(blk, ch, want); }
     }
+    hFlow[ro + HARVEST_GOT] = got;
   }
 }
 

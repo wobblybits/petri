@@ -6,9 +6,11 @@ import { SLIDERS, type Params } from '../params.ts';
  * A grid over two axes at five seeds spends thirty runs learning about two
  * dimensions. Thirty samples over ten axes learn about ten — Bergstra and
  * Bengio's argument, whose precondition is that only a few dimensions matter,
- * which is what this pond keeps demonstrating: `excreteRate` explained 68 to
- * 93 per cent of the variance in a sweep where `uptakeVmax` explained two to
- * eight and was unresolved.
+ * which is what this pond keeps demonstrating: in one sweep a single dial
+ * explained 68 to 93 per cent of the variance while `uptakeVmax` explained two
+ * to eight and was unresolved. (That dial was `excreteRate`, which no longer
+ * exists — nothing excretes — but the shape of the finding is why sampling
+ * beats a grid here.)
  *
  * The decisive practical difference is that samples **compose**. A grid point
  * informs its own grid and nothing else; a random draw joins every regression

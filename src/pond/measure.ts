@@ -1,4 +1,4 @@
-import { CHEM_LEN, CHEM_SPECIES, EMIT, GX_BASE, G_BASE, IN_DEMAND, TX_BASE, ROW_EXCRETE, STATE_DIMS, TASTE, T_OUT, W_IN, W_SELF, X_BASE } from '../chem-layout.ts';
+import { CHEM_LEN, CHEM_SPECIES, EMIT, GX_BASE, G_BASE, IN_DEMAND, TX_BASE, STATE_DIMS, TASTE, T_OUT, W_IN, W_SELF } from '../chem-layout.ts';
 import { EXTRA_CAP } from '../energy.ts';
 import { CH, CHANNELS } from '../fields.ts';
 import type { Params } from '../params.ts';
@@ -97,21 +97,18 @@ export interface Diversity {
   /** The same with founder lines as the groups, which is drift's own signature. */
   lineFst: number | null;
   /**
-   * Commutes per latch — `docs/energy-chemistry-plan.md` §8's tripwire on
+   * Commutes per latch — the tripwire on
    * whether nets are doing internal work or merely re-acquiring structure.
    */
   commutesPerLatch: number | null;
   /**
    * Standing stock of the three signalling species across the whole field.
    *
-   * The number that says whether anybody is saying anything. It matters most
-   * when reading `excreteRate`, because that dial trades two things against
-   * each other and reproduction only shows one of them: excretion is what puts
-   * signal into the world *and* what empties a body's tank, and the minted
-   * deposit is off whenever it is on. So a rate low enough to leave the pond
-   * fertile can also be low enough to leave it silent, and a pond nobody can
-   * hear is not a cheaper version of a signalling one — it is a different
-   * simulation with the same parameters.
+   * The number that says whether anybody is saying anything. It used to carry
+   * more than that: a body paid for its voice out of its tank, so a rate low
+   * enough to leave the pond fertile could also leave it silent, and the two
+   * could not be read apart from reproduction alone. A voice is minted now and
+   * costs a body nothing, so this is a plain census of how loud the pond is.
    *
    * The ground is excluded for the reason `maxSignal` excludes it: it is the
    * substance rather than something anyone is saying.
@@ -428,7 +425,8 @@ export function measureDiversity(sim: Sim, params?: Params): Diversity {
    * `X`'s *uptake* bases stay with the raw material, and that is not an
    * oversight: `seedProduction` sets all four to the same half on every kind,
    * so a locus there does start life identical everywhere. What a body makes
-   * is kind-specific; what it can digest is not.
+   * is kind-specific; what it can digest is not, and since a body eats the
+   * ground and nothing else there is no digestion gene left to be either.
    *
    * The head *bases* only. Both matrices still seed to zero like every other,
    * and belong with the raw material.
@@ -436,7 +434,6 @@ export function measureDiversity(sim: Sim, params?: Params): Diversity {
   const kindSeeded = new Set([G_BASE]);
   for (let c = 0; c < CHEM_SPECIES; c++) kindSeeded.add(TX_BASE + c);
   for (let c = 0; c < CHEM_SPECIES; c++) kindSeeded.add(GX_BASE + c);
-  for (let c = 0; c < CHEM_SPECIES; c++) kindSeeded.add(X_BASE + ROW_EXCRETE + c);
   const drifted: number[] = [];
   for (let k = TASTE + 4; k < CHEM_LEN; k++) if (!kindSeeded.has(k)) drifted.push(k);
   const seeded: number[] = [];

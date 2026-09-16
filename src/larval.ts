@@ -2,12 +2,13 @@
  * How long a body spends alone before it joins anything.
  *
  * The question this answers is whether trophic dependency is survivable. A
- * fresh spawn carries `EXTRA_CAP / upkeep` seconds of tank — about 83 at the
- * defaults — and `yDirect = 0` makes a body that cannot reach a net's
- * generosity a body that dies. If the median time to first latch is well
+ * fresh spawn used to carry `EXTRA_CAP / upkeep` seconds of tank — about 83
+ * when there was a standing rent to drain it; with `upkeep` at 0 what bounds
+ * a larva is the starvation window, about 29 s without food. `yDirect = 0`
+ * makes a body that cannot reach a net's generosity a body that dies. If the median time to first latch is well
  * under the tank, obligate dependency *structures* the soup; if it is not,
  * obligate dependency simply kills it, and the plan says to measure this
- * before `yDirect` moves far (`docs/energy-chemistry-plan.md` §5).
+ * before `yDirect` moves far.
  *
  * The measure is a histogram rather than a list because a ten-minute pond
  * makes tens of thousands of bodies and only three numbers are ever read off

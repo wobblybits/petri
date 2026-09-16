@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import shader from './genome.wgsl?raw';
 import {
   B_STATE, CHEM_LEN, EMIT, E_OUT, F_BASE, F_OUT, GAIT_ANCHOR_MAX,
-  G_BASE, G_OUT, TX_BASE,
+  G_BASE, G_OUT, KS_BASE, TX_BASE,
   HEAD_SCALE, IN_DIMS, L_BASE, L_OUT,
   LEARN_CRITIC, LEARN_PREV_V, LEARN_STRIDE, LEARN_TRACE,
-  P_BASE, P_OUT, PLASTIC_LEN, X_OUT, SENSE_SCALE, STATE_DIMS, TASTE, T_OUT, W_IN, W_NET, W_SELF,
+  P_BASE, P_OUT, PLASTIC_LEN, SENSE_SCALE, STATE_DIMS, TASTE, T_OUT, W_IN, W_NET, W_SELF,
 } from '../chem-layout.ts';
 import { refreshReadsField } from '../agents.ts';
 import type { AgentKind } from '../agents.ts';
@@ -84,7 +84,7 @@ describe('the genome shader matches the genome layout', () => {
       'STATE_DIMS', 'IN_DIMS', 'EMIT', 'TASTE', 'E_OUT', 'T_OUT', 'W_IN', 'W_SELF',
       'W_NET', 'B_STATE', 'F_OUT', 'F_BASE', 'P_OUT', 'P_BASE', 'L_OUT', 'L_BASE',
       'G_OUT', 'G_BASE',
-      'OUT_STRIDE', 'PLASTIC_LEN', 'LEARN_TRACE', 'LEARN_CRITIC', 'LEARN_PREV_V',
+      'OUT_STRIDE', 'PLASTIC_LEN', 'LEARN_TRACE', 'LEARN_CRITIC', 'LEARN_PREV_V', 'LEARN_PREV_FULL',
       'LEARN_STRIDE',
     ]);
     expect(declared.filter((d) => !known.has(d)), 'undocumented shader constant').toEqual([]);
@@ -105,7 +105,7 @@ describe('the genome shader matches the genome layout', () => {
       'n', 'chemLen', 'senseScale', 'groundScale',
       'sCruise', 'sTurn', 'sAlign', 'sSep', 'sThrust', 'sRecoil', 'energyCh',
       'learnRate', 'learnCritic', 'learnTrace', 'learnDiscount', 'maxWeight',
-      'sAnchor', 'pad1', 'pad2', 'pad3',
+      'sAnchor', 'learnReward', 'dtInv', 'pad3',
     ]);
     // A uniform buffer's size has to be a whole number of sixteen-byte
     // blocks, which is what the pads are for.
@@ -130,13 +130,12 @@ describe('the genome shader matches the genome layout', () => {
      * gene the host reads straight off `chem`, so the assertion is that the
      * shader's furthest read is where those begin.
      *
-     * The chemistry block between `X_OUT` and `G_OUT` is the part in the
-     * middle the shader still steps over: added by
-     * `docs/energy-chemistry-plan.md` phase 0 and read by nothing on either
-     * side until phase 3. Its own reach is checked separately.
+     * `ks` is the one chemistry gene left between the locomotion heads and the
+     * gait's: the eight expression rows that used to sit here are gone, and it
+     * is a plain gene the host reads inside the harvest.
      */
-    expect(L_BASE + 2).toBe(X_OUT);
-    expect(X_OUT).toBeLessThan(G_OUT);
+    expect(L_BASE + 2).toBe(KS_BASE);
+    expect(KS_BASE).toBeLessThan(G_OUT);
     expect(G_BASE + 1).toBe(TX_BASE);
     expect(TX_BASE).toBeLessThan(CHEM_LEN);
   });

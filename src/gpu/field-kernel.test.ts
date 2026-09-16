@@ -16,7 +16,6 @@ import {
 import { defaultParams } from '../params.ts';
 import { loadPreset } from '../presets.ts';
 import { Sim } from '../sim.ts';
-import { CHEM_SPECIES } from '../chem-layout.ts';
 
 /**
  * The field shaders' arithmetic, checked against `Fields`.
@@ -657,7 +656,7 @@ describe('field shader arithmetic', () => {
      *
      * Also the guard on the ordering claim: metered, everyone in the block
      * gets the *same* rate, so a body's share stops depending on its id — which
-     * is the artifact `docs/energy-chemistry-plan.md` §4 exists to remove.
+     * is the artifact metered uptake exists to remove.
      */
     const params = defaultParams();
     params.ambientEnergy = 1;
@@ -741,13 +740,14 @@ describe('field shader arithmetic', () => {
 
   it('draws a sampled mouthful the way runHarvestPlan does', () => {
     /*
-     * The metered half of `harvest`, transcribed: one budget a body, shared
-     * across four species by the block's composition, each species at most
-     * its share and at most its Monod rate, `left` the gut room decremented
-     * as it goes, index order, `FLOW_EPS` between species. Run against
-     * `runHarvestPlan` on the same plan and the same field, and compared on
-     * what each body got of each species — which is what lands in the gut on
+     * The metered half of `harvest`, transcribed: one budget a body, one
+     * species — the ground — at its Monod rate and at most the room in its
+     * gut. Run against `runHarvestPlan` on the same plan and the same field,
+     * and compared on what each body got, which is what lands in the gut on
      * the host and what `creditHarvest` reads back from `hFlow` on the device.
+     *
+     * The other three channels are painted on anyway, exactly so that the
+     * mirror would break if either side started eating them again.
      */
     const params = defaultParams();
     params.soupCount = 6;
@@ -785,7 +785,7 @@ describe('field shader arithmetic', () => {
     // The shader, on a copy of the field.
     const src = Float32Array.from(f.data);
     const FLOW_EPS = 1e-9;
-    const got = new Float64Array(plan.nEntries * CHANNELS);
+    const got = new Float64Array(plan.nEntries);
     for (let b = 0; b < plan.nBlocks; b++) {
       const bo = b * 6;
       const fi = plan.blocks[bo];
@@ -794,49 +794,41 @@ describe('field shader arithmetic', () => {
       const wj = plan.blocks[bo + 3];
       const first = plan.blocks[bo + 4];
       const count = plan.blocks[bo + 5];
-      const density = [0, 0, 0, 0];
+      let density = 0;
       const cells = wi * wj;
       if (cells > 0) {
         for (let y = 0; y < wj; y++) {
           for (let x = 0; x < wi; x++) {
-            const k = ((fj + y) * f.cols + (fi + x)) * CHANNELS;
-            for (let c = 0; c < CHANNELS; c++) density[c] += src[k + c];
+            density += src[((fj + y) * f.cols + (fi + x)) * CHANNELS + CH.energy];
           }
         }
-        for (let c = 0; c < CHANNELS; c++) density[c] /= cells;
+        density /= cells;
       }
-      let stock = 0;
-      for (let c = 0; c < CHANNELS; c++) stock += Math.max(density[c], 0);
       for (let e = 0; e < count; e++) {
         const ro = (first + e) * HARVEST_STRIDE;
-        let left = plan.rooms[ro + HARVEST_ROOM];
+        const left = plan.rooms[ro + HARVEST_ROOM];
         const total = plan.rooms[ro + HARVEST_TOTAL];
-        const ks = [0, 1, 2, 3].map((c) => plan.rooms[ro + HARVEST_KS + c]);
-        for (let c = 0; c < CHANNELS; c++) {
-          let g = 0;
-          if (left > FLOW_EPS && total > 0 && density[c] > 0 && stock > 0) {
-            const rate = (total * density[c]) / (ks[c] + density[c]);
-            const share = (total * density[c]) / stock;
-            let want = Math.min(rate, share);
-            if (left < want) want = left;
-            if (want > FLOW_EPS) {
-              // `drain`: raster order over the block, channel `c`.
-              for (let y = 0; y < wj && want > FLOW_EPS; y++) {
-                for (let x = 0; x < wi && want > FLOW_EPS; x++) {
-                  const k = ((fj + y) * f.cols + (fi + x)) * CHANNELS + c;
-                  const have = src[k];
-                  if (have <= 0) continue;
-                  const take = have < want ? have : want;
-                  src[k] = have - take;
-                  g += take;
-                  want -= take;
-                }
+        const ks = plan.rooms[ro + HARVEST_KS];
+        let g = 0;
+        if (left > FLOW_EPS && total > 0 && density > 0) {
+          let want = (total * density) / (ks + density);
+          if (left < want) want = left;
+          if (want > FLOW_EPS) {
+            // `drain`: raster order over the block, the ground's channel.
+            for (let y = 0; y < wj && want > FLOW_EPS; y++) {
+              for (let x = 0; x < wi && want > FLOW_EPS; x++) {
+                const k = ((fj + y) * f.cols + (fi + x)) * CHANNELS + CH.energy;
+                const have = src[k];
+                if (have <= 0) continue;
+                const take = have < want ? have : want;
+                src[k] = have - take;
+                g += take;
+                want -= take;
               }
-              left -= g;
             }
           }
-          got[(first + e) * CHANNELS + c] = g;
         }
+        got[first + e] = g;
       }
     }
 
@@ -847,11 +839,16 @@ describe('field shader arithmetic', () => {
     let drew = 0;
     for (let e = 0; e < plan.nEntries; e++) {
       const slot = plan.slots[e];
-      for (let c = 0; c < CHANNELS; c++) {
-        const host = GUT[slot * CHEM_SPECIES + c] - before[slot * CHEM_SPECIES + c];
-        expect(host, `entry ${e} species ${c}`).toBeCloseTo(got[e * CHANNELS + c], 7);
-        drew += host;
-      }
+      const host = GUT[slot] - before[slot];
+      expect(host, `entry ${e}`).toBeCloseTo(got[e], 7);
+      drew += host;
+    }
+    // Nothing reached the other three channels on either side: the mirror has
+    // to agree about that or the two disagree about what is food.
+    for (const ch of [CH.conP, CH.dupP, CH.aux]) {
+      let moved = 0;
+      for (let k = ch; k < f.data.length; k += CHANNELS) moved += Math.abs(src[k] - f.data[k]);
+      expect(moved, `channel ${ch} was touched`).toBe(0);
     }
     expect(drew, 'the mirror should have had something to compare').toBeGreaterThan(0);
     // And the field itself, cell for cell.

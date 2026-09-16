@@ -13,7 +13,7 @@ import { CHEM_LEN } from './agents.ts';
  * Weights that change while a body is alive.
  *
  * The rule is three-factor Hebbian gated by a temporal-difference error from
- * the body's own critic; see `docs/plasticity-plan.md`. What these check is
+ * the body's own critic. What these check is
  * not that the arithmetic is some particular arithmetic, but the four
  * properties the design actually rests on: that it is off when it is off,
  * that the teacher is the tank and nothing else, that nothing ever fades,
@@ -108,6 +108,34 @@ describe('plasticity: the teacher is the tank', () => {
     // what drives every weight here.
     expect(sim.agentStore.plasticOn[full.slot], 'a full body has nothing to learn from').toBe(0);
     expect(anyNonZero(learnedSpan(sim, full.slot))).toBe(false);
+  });
+
+  it('teaches a full body that is losing, which the level signal cannot', () => {
+    /*
+     * The level signal is `IN_FULL - 1`: zero when full, so a body at its cap
+     * has no gradient however its fortunes are moving. Measured in a live
+     * soup, 31.7% of bodies sit there. The rate signal is the change in
+     * `IN_FULL` per second, and it reads for exactly those bodies.
+     *
+     * Two bodies held near the top of their tanks, one steady and one sliding
+     * down. Under the rate teacher the sliding one has something to learn
+     * from and the steady one does not — which is the dead zone closing.
+     */
+    const sim = new Sim(600, 400);
+    const params = still();
+    params.learnRate = 0.01;
+    params.learnReward = 1;
+    const steady = sim.spawn('con', 200, 200, 0, params, true)!;
+    const sliding = sim.spawn('con', 400, 200, 0, params, true)!;
+    for (let f = 0; f < 60; f++) {
+      steady.extra = EXTRA_CAP;
+      // From full to about a third, over the window. Never zero, so the
+      // no-history sentinel is not what is being read.
+      sliding.extra = EXTRA_CAP * (1 - f / 90);
+      sim.step(1 / 60, params);
+    }
+    expect(anyNonZero(learnedSpan(sim, sliding.slot)), 'a body losing ground should learn').toBe(true);
+    expect(anyNonZero(learnedSpan(sim, steady.slot)), 'a body holding steady at full should not').toBe(false);
   });
 
   it('gives the critic something to say', () => {

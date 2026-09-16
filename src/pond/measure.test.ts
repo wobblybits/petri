@@ -3,7 +3,6 @@ import { CHEM_LEN, TASTE } from '../chem-layout.ts';
 import { defaultParams } from '../params.ts';
 import { loadPreset } from '../presets.ts';
 import { Sim } from '../sim.ts';
-import { layGround } from './ground.ts';
 import { measureDiversity, shannon } from './measure.ts';
 import { effects, type TrialRow } from './analyze.ts';
 
@@ -221,8 +220,12 @@ describe('foraging', () => {
      * The calibration that makes the number mean anything: on a uniform dish
      * every position is the same position, so a body cannot be anywhere
      * better than average and the ratio has to be exactly 1 whatever it does.
+     * Said out loud, because the shipped dish is patchy — which is the pond
+     * this statistic exists to read, and the reason it cannot be its own
+     * calibration.
      */
     const params = defaultParams();
+    params.groundPatches = 0;
     params.soupCount = 80;
     params.spawnInterval = 0;
     const sim = new Sim(1600, 1200, 128);
@@ -234,25 +237,31 @@ describe('foraging', () => {
 
   it('rises when bodies sit on the food and falls when they miss it', () => {
     const params = defaultParams();
+    params.groundPatches = 1; // one patch, at the centre by construction
     params.soupCount = 0;
     params.spawnInterval = 0;
     params.energyRegrow = 0;
     params.diffuse = 0;
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', params);
-    layGround(sim, 1); // one patch, at the centre by construction
+
     const cx = sim.w * 0.5;
     const cy = sim.h * 0.5;
     for (let i = 0; i < 6; i++) sim.spawn('con', cx + i - 3, cy, 0, params, true);
     const on = measureDiversity(sim).forageRatio!;
-    // Concentrating the dish's mass in one place and standing in it should
-    // read as hugely better than average, which is what makes the statistic
-    // able to see a pond that has found its food.
-    expect(on).toBeGreaterThan(50);
+    /*
+     * One patch holds the whole dish's mass over a quarter of its area, so a
+     * body standing in it is on four times the average — and the statistic
+     * reads it as such. Four and not fifty because a patch is a blob with an
+     * extent rather than a point: the number this test can see is bounded by
+     * how concentrated the ground is allowed to get, which is the same
+     * constant that decides whether a body can stand on a patch at all.
+     */
+    expect(on).toBeGreaterThan(3.5);
 
     const away = new Sim(1600, 1200, 128);
     loadPreset(away, 'soup', params);
-    layGround(away, 1);
+
     for (let i = 0; i < 6; i++) away.spawn('con', cx + 700 + i, cy, 0, params, true);
     expect(measureDiversity(away).forageRatio!).toBeLessThan(0.01);
   });

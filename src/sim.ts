@@ -1,4 +1,4 @@
-import { GX_BASE, TX_A, TX_B, TX_BASE, TX_C, TX_D } from './chem-layout.ts';
+import { GW_BASE, GX_BASE, SW_BASE, TX_A, TX_B, TX_BASE, TX_C, TX_D } from './chem-layout.ts';
 import { REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
 import {
   boundRadius,
@@ -19,10 +19,6 @@ import {
   stemOffset,
   B_STATE,
   CHEM_LEN,
-  CHEM_SPECIES,
-  ROW_COUNT,
-  ROW_EXCRETE,
-  ROW_UPTAKE,
   F_BASE,
   F_OUT,
   GAIT_ANCHOR_MAX,
@@ -48,7 +44,6 @@ import {
   W_NET,
   W_SELF,
   emitVector,
-  expressVector,
   tasteVector,
   effTaste,
   flockGain,
@@ -64,7 +59,7 @@ import { queryHit, queryDiscHit, SLOP, type Hit } from './collide.ts';
 import { closestTOnSegment, segmentsIntersect, WIRE_RADIUS, wireBowBudget, bounceOffDisk } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
-import { DIGEST_ORDER, CH, CHANNELS, FERTILISE_CH, FIELD_CELL, FIELD_CELLS, Fields, worldBoundRadius } from './fields.ts';
+import { CH, FERTILISE_CH, FIELD_CELL, FIELD_CELLS, Fields, worldBoundRadius } from './fields.ts';
 import { Graph, ropeIsLive, wrapPos, type Wire } from './graph.ts';
 import { LarvalWindow } from './larval.ts';
 import type { Params } from './params.ts';
@@ -104,7 +99,6 @@ import {
   spreadRequestsFast,
   tickUpkeepFast,
   WireAdjacency,
-  payOut,
 } from './energy.ts';
 import { audio } from './audio/engine.ts';
 import type { CollisionEvent, LiveContact, PanView, RewriteEvent } from './audio/types.ts';
@@ -864,22 +858,14 @@ export class Sim {
   }
 
   /** Its own, not `excreteScratch`: a death can land inside any pass. */
-  private readonly deathScratch = new Float64Array(CHEM_SPECIES);
 
   /** Put one body's undigested holdings back on the ground it is standing on. */
   private spillGut(slot: number, x: number, y: number): void {
     const GUT = this.agentStore.gut;
-    const go = slot * CHEM_SPECIES;
-    const w = this.deathScratch;
-    let held = 0;
-    for (let c = 0; c < CHEM_SPECIES; c++) {
-      const v = GUT[go + c];
-      w[c] = v > 0 ? v : 0;
-      held += w[c];
-    }
-    if (held <= 0) return;
-    GUT.fill(0, go, go + CHEM_SPECIES);
-    this.energy.addSpeciesAt(x, y, w);
+    const held = GUT[slot];
+    if (!(held > 0)) return;
+    GUT[slot] = 0;
+    this.energy.addAt(x, y, held);
   }
 
   wire(aId: number, aSlot: 'p' | 'l' | 'r', bId: number, bSlot: 'p' | 'l' | 'r', params: Params): void {
@@ -928,6 +914,7 @@ export class Sim {
    * suite and the experiment harness drive; the app runs `stepAsync`.
    */
   step(dt: number, params: Params, view?: PanView | null): void {
+    this.frameDt = dt;
     const t = this.openFrame(dt, params, view);
     if (this.solveFarNative(params, t)) {
       this.lastFarPath = 'wasm';
@@ -1008,6 +995,7 @@ export class Sim {
      */
     this.energyCell = params.energyCell;
     this.energyAmbient = params.ambientEnergy;
+    this.energyPatches = params.groundPatches;
     /*
      * Latched here for the same reason the two above it are: `kill` is public
      * and takes no `Params` — the designer and the pond library both call it —
@@ -1077,7 +1065,7 @@ export class Sim {
     //   cap 1.25, rent first: 20 / 38 / 46     cap 1.25, rent last: 20 / 39 / 46
     // Rent-last is only safe *because* of the headroom: at cap == share it
     // leaves every body a hair in debt the moment it commutes.
-    this.energy.configure(params.energyCell, params.ambientEnergy);
+    this.energy.configure(params.energyCell, params.ambientEnergy, params.groundPatches);
     /*
      * On the GPU path the grazing itself happened at the end of the last
      * frame, in the shader, against the field the shader owns. All that is
@@ -1142,27 +1130,22 @@ export class Sim {
       }
     }
     /*
-     * The body reaction table, in three passes: express, digest, excrete.
+     * The body reaction table, in two passes: express, then digest.
      *
-     * Farming used to be a fourth pass here — `farmRate` times the emit head's
-     * ground slot, tank to ground, for any body expressing one. §3's table has
-     * always held that the four excretion rows subsume it, and since
-     * `seedProduction` an Era's whole production half *is* the ground row, so
-     * `runExcretion` is that pass: at `excreteRate`, for every kind at once,
-     * with mass action in place of a flat rate. One production path rather
-     * than three.
+     * There used to be a third, `runExcretion`, which laid a body's excretion
+     * rows onto the field out of its tank. It existed because a body swallowed
+     * a sample of all four channels and had to be able to clear what it could
+     * not convert or clog and starve. A body eats the ground and nothing else
+     * now, so there is nothing in a gut that its owner cannot digest, and the
+     * necessity went with it. **Matter in is ground and matter out is ground;
+     * a signal is emitted and smelled, never eaten and never excreted.**
      */
-    this.refreshExpression(params, t);
     this.runDigestion(params, t);
-    this.runExcretion(params, t);
-    Sim.phase('excrete');
+    Sim.phase('digest');
     for (const id of this.contactDamage(params, t)) this.kill(id);
     for (const id of tickUpkeepFast(this.agents.values(), this.agentStore, t, params.upkeep, this.energy, {
       rentBack: params.upkeepExcrete,
       eraRatio: params.eraUpkeepRatio,
-      // The same condition `refreshExpression` returns early on; see
-      // `UpkeepOptions.expressed`.
-      expressed: this.expressed,
     })) {
       this.kill(id);
     }
@@ -1207,7 +1190,7 @@ export class Sim {
      */
     this.tuneChannels(params);
     if (!this.fieldOnGpu) {
-      if (this.scentMints(params) && !this.scentWriteNative(params)) this.deposit(params);
+      if (!this.scentWriteNative(params)) this.deposit(params);
       Sim.phase('scentWrite');
       this.fields.diffuse(params.diffuse);
       Sim.phase('field:diffuse1');
@@ -3110,6 +3093,7 @@ export class Sim {
     if (params) {
       this.energyCell = params.energyCell;
       this.energyAmbient = params.ambientEnergy;
+      this.energyPatches = params.groundPatches;
     }
     this.worldPinned = true;
     this.worldX = cx;
@@ -3133,7 +3117,7 @@ export class Sim {
      * in which the sparse path runs at all.
      */
     this.energy.bind(this.fields);
-    this.energy.configure(this.energyCell, this.energyAmbient);
+    this.energy.configure(this.energyCell, this.energyAmbient, this.energyPatches);
     this.energy.seedGround();
   }
 
@@ -3144,6 +3128,7 @@ export class Sim {
    */
   private energyCell = 40;
   private energyAmbient = 1;
+  private energyPatches = 0;
 
   /**
    * Tell the field what each channel is, from the sliders, every frame.
@@ -3336,11 +3321,9 @@ export class Sim {
      * possible answers.
      */
     const scratch = this.portScratch;
-    // The minted voice, or nothing at all: under the reaction table a body's
-    // output leaves its tank through `runExcretion` and the conserving deposit
-    // instead. See `scentMints`.
-    const mints = this.scentMints(params);
-    for (let i = 0; mints && i < n; i++) {
+    // A voice is minted. It is not matter and it never was — nothing eats it,
+    // nothing excretes it, and the conservation books do not count it.
+    for (let i = 0; i < n; i++) {
       const a = list[i];
       if (a.locked) continue;
       const ports = a.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
@@ -3714,6 +3697,8 @@ export class Sim {
         critic: params.learnCritic,
         trace: params.learnTrace,
         discount: params.learnDiscount,
+        reward: params.learnReward,
+        dtInv: this.frameDt > 0 ? 1 / this.frameDt : 0,
         maxWeight: CHEM_TASTE_MAX,
       })
     ) {
@@ -3794,8 +3779,7 @@ export class Sim {
    * On the GPU path the learning row is device-resident and the host's copy
    * is fresh only for rewrite parents — `syncLearn` reads back a handful a
    * frame because a handful a frame is all the simulation needs. Anything
-   * that *measures* what the pond has learned has to ask for the rest, and
-   * `docs/plasticity-plan.md` phase 5 says so in as many words.
+   * that *measures* what the pond has learned has to ask for the rest.
    *
    * This is that ask. The headless harvest calls it before storing a net,
    * because `plasticAll` and `criticAll` are two of the things a stored net
@@ -4305,6 +4289,9 @@ export class Sim {
     }
   }
 
+  /** The three species' bounded waves for one body, reused. See `speciesWaves`. */
+  private readonly waveScratch = new Float64Array(3);
+
   /** Rate steps the drag table divides itself into. See `dampVelocities`. */
   private static readonly GRIP_STEPS = 256;
 
@@ -4338,7 +4325,7 @@ export class Sim {
    * The oscillation is the loop `B -> C -> D -| B`, which is a three-stage
    * negative feedback carrying a positive self-loop on C. Whether it
    * oscillates at all is a narrow question and the doc's own constants answer
-   * it wrongly; `metabolicFuel` carries the stability analysis and the two
+   * it wrongly; `src/pond/spectrum.ts` carries the stability analysis and the two
    * conditions that matter.
    *
    * **The fuel window has both edges, and that is the gate.** Starved, the
@@ -4353,7 +4340,10 @@ export class Sim {
   private advanceGait(params: Params, dt: number): void {
     const store = this.agentStore;
     const R = store.react;
+    const CHEM = store.chemAll;
+    const WV = this.waveScratch;
     const WAVE = store.gaitWave;
+    const GRIPW = store.gaitGrip;
     const GA = store.gaitAnchor;
     const ANCHOR = store.anchor;
     const rate = params.metabolicRate;
@@ -4361,6 +4351,7 @@ export class Sim {
       for (const agent of this.agents.values()) {
         ANCHOR[agent.slot] = 0;
         WAVE[agent.slot] = 0;
+        GRIPW[agent.slot] = 0;
       }
       return;
     }
@@ -4407,9 +4398,12 @@ export class Sim {
       // depletion. Reset by any primer at all, so it measures a continuous
       // window and a body that eats once is spared.
       STARVE[s] = B > STARVE_EPS ? 0 : STARVE[s] + dt;
-      const w = (2 * C) / (waveK + C) - 1;
+      speciesWaves(B, C, D, k2, k3, dec, waveK, WV);
+      const g = s * CHEM_LEN;
+      const w = actuatorOf(CHEM, g + SW_BASE, WV);
       WAVE[s] = w;
       ANCHOR[s] = GA[s] * w;
+      GRIPW[s] = actuatorOf(CHEM, g + GW_BASE, WV);
     }
 
     /*
@@ -4439,7 +4433,6 @@ export class Sim {
      */
     const spread = params.metabolicDiffuse;
     if (spread > 0) {
-      const CHEM = store.chemAll;
       const GUT = store.gut;
       const PW = store.portWire;
       const agents = this.agents;
@@ -4450,12 +4443,8 @@ export class Sim {
       for (const wire of wires.values()) {
         const A = agents.get(wire.a.id);
         const B = agents.get(wire.b.id);
-        const fg = wire.fluxGut;
         if (!A || !B || A === B) {
-          fg[0] = 0;
-          fg[1] = 0;
-          fg[2] = 0;
-          fg[3] = 0;
+          wire.fluxGut = 0;
           wire.fluxB = 0;
           wire.fluxC = 0;
           wire.fluxD = 0;
@@ -4466,10 +4455,29 @@ export class Sim {
         // A principal end is a mouth; an auxiliary one is only an ear.
         const ga = wire.a.slot === 'p' ? sa * CHEM_LEN : -1;
         const gb = wire.b.slot === 'p' ? sb * CHEM_LEN : -1;
-        // The doc's A, four wide because the gut is: each field species is
-        // rectified against the same gate and moves on its own.
-        for (let c = 0; c < CHEM_SPECIES; c++) {
-          fg[c] = crossing(GUT, CHEM, sa, sb, ga, gb, CHEM_SPECIES, c, TX_A, CAP[sb] * gutSize, k);
+        // The doc's A: the ground, which is the one thing a gut holds.
+        wire.fluxGut = crossing(GUT, CHEM, sa, sb, ga, gb, 1, 0, TX_A, CAP[sb] * gutSize, k);
+        /*
+         * **And it kicks, the way every other transfer of matter does.**
+         *
+         * `recoil` was reachable from exactly one place — the demand
+         * gradient's `flowChargesFast` — so `extra` moving between neighbours
+         * shoved them apart and an Era pushing food down its principal moved
+         * the same substance along the same wire and shoved nothing. One road
+         * moved matter and kicked, the other moved matter and did not.
+         *
+         * It is also the impulse the gait can be *timed by*. A cyclic grip
+         * only pays if it is phase-locked to whatever delivers the impulse,
+         * and the demand gradient is not: measured on the worm bench, the
+         * reactor ran a real travelling wave (6.6 frames a segment, 0.67
+         * agreeing) and `gripSwing` still cost, because the kicks arrive on
+         * the economy's clock and the grip swings on the chemistry's. This
+         * transfer is the one that swings with the reactor.
+         */
+        if (wire.fluxGut !== 0) {
+          const send = wire.fluxGut > 0 ? A : B;
+          const recv = wire.fluxGut > 0 ? B : A;
+          this.recoil(send, recv, Math.abs(wire.fluxGut));
         }
         wire.fluxB = crossing(R, CHEM, sa, sb, ga, gb, REACT_SPECIES, REACT_B, TX_B, REACT_CAP, k);
         wire.fluxC = crossing(R, CHEM, sa, sb, ga, gb, REACT_SPECIES, REACT_C, TX_C, REACT_CAP, k);
@@ -4479,7 +4487,6 @@ export class Sim {
         const s = agent.slot;
         const id = agent.id;
         const o = s * REACT_SPECIES;
-        const go = s * CHEM_SPECIES;
         for (let port = 0; port < 3; port++) {
           const wid = PW[s * 3 + port];
           if (wid < 0) continue;
@@ -4487,18 +4494,19 @@ export class Sim {
           if (!wire) continue;
           // Signed `a` toward `b`, and this body is one of the two.
           const sign = wire.a.id === id ? -1 : 1;
-          const fg = wire.fluxGut;
-          for (let c = 0; c < CHEM_SPECIES; c++) if (fg[c] !== 0) GUT[go + c] += sign * fg[c];
+          if (wire.fluxGut !== 0) GUT[s] += sign * wire.fluxGut;
           if (wire.fluxB !== 0) R[o + REACT_B] += sign * wire.fluxB;
           if (wire.fluxC !== 0) R[o + REACT_C] += sign * wire.fluxC;
           if (wire.fluxD !== 0) R[o + REACT_D] += sign * wire.fluxD;
         }
         // The wave follows the catalyst, so a body that has just been driven
         // strokes as what it now is rather than what it was.
-        const C = R[o + REACT_C];
-        const w = (2 * C) / (waveK + C) - 1;
+        speciesWaves(R[o + REACT_B], R[o + REACT_C], R[o + REACT_D], k2, k3, dec, waveK, WV);
+        const g = s * CHEM_LEN;
+        const w = actuatorOf(CHEM, g + SW_BASE, WV);
         WAVE[s] = w;
         ANCHOR[s] = GA[s] * w;
+        GRIPW[s] = actuatorOf(CHEM, g + GW_BASE, WV);
       }
       // Something arrived in a gut, so the digestion pass has work again.
       this.gutLive = true;
@@ -4558,7 +4566,8 @@ export class Sim {
     // slider and `anchor` by the head's own clamp — so this is the largest
     // rate any body can ask for, and anything past it saturates rather than
     // reading off the end.
-    const hi = base + Math.max(0, grip) + (gait ? GAIT_ANCHOR_MAX : 0);
+    const swing = gait ? Math.max(0, params.gripSwing) : 0;
+    const hi = base + Math.max(0, grip) * (1 + swing) + (gait ? GAIT_ANCHOR_MAX : 0);
     const span = hi > 1e-9 ? hi : 1;
     for (let i = 0; i <= steps; i++) {
       // Built over a rate that is already non-negative: a negative total is
@@ -4569,6 +4578,7 @@ export class Sim {
     const EXTRA = store.extra;
     const CAP = store.energyCap;
     const ANCHOR = store.anchor;
+    const GRIPW = store.gaitGrip;
     for (const agent of this.agents.values()) {
       const s = agent.slot;
       if (LOCKED[s] || PINNED[s]) continue;
@@ -4577,7 +4587,12 @@ export class Sim {
       const cap = CAP[s];
       const raw = cap > 0 ? EXTRA[s] / cap : 0;
       const full = raw <= 0 ? 0 : raw >= 1 ? 1 : raw;
-      const rate = base + grip * full + ANCHOR[s];
+      /*
+       * `grip * full` is the standing asymmetry that turns a transport kick
+       * into travel; the swing is the cyclic one, from D. Two actuators at a
+       * phase the chemistry sets — see `params.gripSwing`.
+       */
+      const rate = base + grip * full * (1 + swing * GRIPW[s]) + ANCHOR[s];
       const r = rate <= 0 ? 0 : rate >= span ? span : rate;
       const u = (r / span) * steps;
       const i = u < steps ? u | 0 : steps - 1;
@@ -5551,10 +5566,22 @@ export class Sim {
     const len = this.wireSimulatesRope(wire)
       ? this.graph.curveLength(wire, this.agents, this.w, this.h)
       : this.graph.stemSpan(wire, this.agents, this.w, this.h);
-    // Not the rest-length sit: the collapse hauls them the rest of the way.
-    // Still skip a cable that has barely started to take, so the pull is a
-    // close and not a fling.
-    return len <= params.wireMinRest * 1.3;
+    /*
+     * Not the rest-length sit: the collapse hauls them the rest of the way.
+     * Still skip a cable that has barely started to take, so the pull is a
+     * close and not a fling.
+     *
+     * **Against the wire's own rest, not the world's.** This used to read
+     * `params.wireMinRest * 1.3`, one global distance in pixels — so every
+     * wire in the pond had to arrive at the same length before its ends could
+     * rewrite, and anything that shortened or lengthened a wire was competing
+     * with breeding for the same variable. That is the second half of why
+     * `wireTug` came out: not that it pulled, but that pulling moved the wire
+     * away from the one number the rewrite gate was measured against. A ratio
+     * against `restBase` is scale-free, so a short wire is simply a short
+     * wire and a tension term can move `rest` without deciding who breeds.
+     */
+    return len <= wire.restBase * 1.3;
   }
 
   /**
@@ -5704,24 +5731,18 @@ export class Sim {
     for (let e = 0; e < plan.nEntries; e++) {
       const slot = plan.slots[e];
       if (IDS[slot] !== plan.ids[e]) continue;
-      // One row per entry, one `got` per species. Metered, each lands in the
-      // gut as itself and `runDigestion` decides what any of it is worth;
-      // unmetered, only the ground's is ever non-zero and it is money the
-      // moment it is swallowed, which is what this has always done.
-      const ro = e * HARVEST_STRIDE + HARVEST_GOT;
+      // One row per entry, one `got`: a body eats the ground and nothing else.
+      // Metered it lands in the gut and `runDigestion` decides what becomes
+      // tank and what becomes primer; unmetered it is money the moment it is
+      // swallowed, which is what this has always done.
+      const g = got[e * HARVEST_STRIDE + HARVEST_GOT];
       if (metered) {
-        const go = slot * CHEM_SPECIES;
-        for (let c = 0; c < CHEM_SPECIES; c++) {
-          const g = got[ro + c];
-          if (g > 0) {
-            GUT[go + c] += g;
-            this.gutLive = true;
-          }
+        if (g > 0) {
+          GUT[slot] += g;
+          this.gutLive = true;
         }
         continue;
       }
-      let g = 0;
-      for (let c = 0; c < CHANNELS; c++) g += got[ro + c];
       if (!(g > 0)) continue;
       const cap = CAP[slot];
       const next = EXTRA[slot] + g;
@@ -5793,7 +5814,7 @@ export class Sim {
      * Commutes per latch, cumulative — the tripwire on whether polluting the
      * two principal channels is cheap.
      *
-     * `docs/energy-chemistry-plan.md` §8. Latching is proximity plus an arc
+     * Latching is proximity plus an arc
      * test and scent never gates it, and net reduction is confluent, so a net
      * is a fixed budget of evolutionary events spent down: scent cannot touch
      * that budget, only how nets acquire new structure. Well above 1 means
@@ -6043,9 +6064,19 @@ export class Sim {
     // No `quantum` here: each sender uses its own, seeded from the parameter
     // at birth exactly as `transportRecoil` is, so a net's rhythm can be a
     // property of the net rather than of the dish.
-    flowChargesFast(list, this.agentStore, adj, (from, to, amount) => this.recoil(from, to, amount), {
-      grid: this.energy,
-    });
+    flowChargesFast(
+      list,
+      this.agentStore,
+      adj,
+      (from, to, amount) => {
+        this.recoil(from, to, amount);
+        // What the wire between them carried, for `wireTug`. A body has three
+        // ports and a port holds one wire, so the wire is three lookups away.
+        const w = this.graph.wireBetween(from.id, to.id);
+        if (w) w.carried += amount;
+      },
+      { grid: this.energy },
+    );
     Sim.phase('pulse:flow');
     this.updateState(list, adj, params);
     Sim.phase('state');
@@ -6150,6 +6181,7 @@ export class Sim {
     const TRACE = store.traceAll;
     const CRITIC = store.criticAll;
     const PREV_V = store.prevValue;
+    const PREV_FULL = store.prevFull;
     const PLASTIC_ON = store.plasticOn;
     const post = this.learnPost;
     const pre = this.learnPre;
@@ -6158,6 +6190,8 @@ export class Sim {
     const etaC = params.learnCritic;
     const lam = params.learnTrace;
     const discount = params.learnDiscount;
+    const mix = params.learnReward;
+    const invDt = this.frameDt > 0 ? 1 / this.frameDt : 0;
     const MAXW = CHEM_TASTE_MAX;
     for (let i = 0; i < n; i++) {
       const slot = slotOf[i];
@@ -6394,12 +6428,15 @@ export class Sim {
        * useful coincidence from any other, and everything that fires
        * together grows together until it all saturates.
        *
-       * The cost is the body's **own** tank: `x4` is `IN_FULL`, clamped to
-       * [0,1], so `x4 - 1` is zero when full and -1 when empty. Local, by
-       * decision. `x6` is the same shortfall relaxed over the wire graph and
-       * is the other candidate teacher — it would make the net's condition
-       * the thing a body learns about rather than its own — and swapping
-       * them is this one line, since both are already in `x`.
+       * The cost is the body's **own** tank, two ways, blended by
+       * `learnReward`. `x4 - 1` is the *level*: zero when full, -1 when empty,
+       * and it saturates — a third of a live soup sits at exactly zero and has
+       * no gradient. The *rate* is the change in `x4` per second, clipped to
+       * the same range, which still reads for a body at its cap. Local either
+       * way, by decision. `x6` is the same shortfall relaxed over the wire
+       * graph and is the other candidate teacher — it would make the net's
+       * condition the thing a body learns about rather than its own — and
+       * swapping it in is one line, since it is already in `x`.
        *
        * Nothing here decays except the trace, which is a credit window and
        * not a memory. A learned weight is the body's for life and travels
@@ -6415,7 +6452,24 @@ export class Sim {
           CRITIC[cro + 2] * H[ho + 2] +
           CRITIC[cro + 3] * H[ho + 3] +
           CRITIC[cro + 4];
-        const dlt = x4 - 1 + discount * value - PREV_V[slot];
+        const lvl = x4 - 1;
+        /*
+         * A zero `prev` is "no history": the slot is fresh, and without this a
+         * body's first frame reads a full-scale rate and is rewarded for
+         * existing. A genuinely empty body loses nothing by it — its rate that
+         * frame is about zero anyway — and `extra` is a float, so landing on
+         * exactly zero is otherwise rare. The device buffer is zeroed and
+         * never seeded per body, so this is the sentinel both paths can share.
+         */
+        const was = PREV_FULL[slot];
+        let rate = 0;
+        if (was > 0) {
+          rate = (x4 - was) * invDt;
+          rate = rate <= -1 ? -1 : rate >= 1 ? 1 : rate;
+        }
+        PREV_FULL[slot] = x4;
+        const reward = lvl + mix * (rate - lvl);
+        const dlt = reward + discount * value - PREV_V[slot];
         PREV_V[slot] = value;
         /*
          * The critic's own update is an ordinary delta rule. Its estimate a
@@ -6782,16 +6836,6 @@ export class Sim {
     );
   }
 
-  /** Four species' worth of excretion, per body, per frame. */
-  private readonly excreteScratch = new Float64Array(CHEM_SPECIES);
-  /**
-   * Whether the last `refreshExpression` filled the vectors, which is the one
-   * predicate for "is anything expressed". Passed to whoever reads the rows
-   * outside this pass (`tickUpkeepFast`) rather than re-derived from eight
-   * floats a body: `expressVector` always writes a unit-sum vector, so the
-   * rows themselves cannot say whether they were written this frame.
-   */
-  private expressed = false;
   /**
    * Whether anything in the pond is holding something undigested.
    *
@@ -6800,117 +6844,40 @@ export class Sim {
    * roster, and the only thing that must never happen — a gut nothing drains
    * — needs it to be under-set, which nothing here does.
    */
+  /** This frame's step, for the passes that are called without it. */
+  private frameDt = 1 / 60;
+
   private gutLive = false;
   private readonly starving: number[] = [];
 
-  /**
-   * Materialise every body's expression vector for the frame.
-   *
-   * Its own pass because four things read it and they are gated on three
-   * different dials: `runDigestion`'s uptake rows (`uptakeVmax`),
-   * `runExcretion`'s excretion rows (`excreteRate`), and rent's `payOut` and
-   * `upkeepRateOf` (`upkeepExcrete`). It was computed inside `runExcretion`
-   * at first, which meant a pond with metered uptake and no excretion read an
-   * all-zero expression and could digest nothing it swallowed.
-   *
-   * Computed on the host on both field paths — it is a pure function of `chem`
-   * and `h`, and `unpackGenome` brings `h` back every frame, so the genome
-   * shader needs no new output slot and no new binding for any of the reaction
-   * table. That pass is already at eight storage buffers of a guaranteed eight.
-   */
-  private refreshExpression(params: Params, t: number): void {
-    this.expressed = params.excreteRate > 0 || params.uptakeVmax > 0 || params.upkeepExcrete > 0;
-    if (!this.expressed) return;
-    const store = this.agentStore;
-    const CHEM = store.chemAll;
-    const H = store.hAll;
-    const EX = store.expressAll;
-    const perRow = params.rowCost * t;
-    const back = params.upkeepExcrete;
-    for (const a of this.agents.values()) {
-      const s = a.slot;
-      const o = s * ROW_COUNT;
-      expressVector(CHEM, s * CHEM_LEN, H, s * STATE_DIMS, EX, o);
-      if (!(perRow > 0) || a.locked) continue;
-      /*
-       * The fixed cost of running a reaction at all — §3's first way to buy
-       * the superadditivity division of labour needs, and which a linear
-       * budget cannot supply. Running two rows costs `2c` and running one
-       * costs `c`, so a specialist keeps what a generalist spends on breadth.
-       *
-       * Counted on rows that are *expressed*, which relu makes an exact
-       * question: a pre-activation at or below zero is a row switched off, and
-       * driving one there is how a lineage specialises. A body whose `X` is
-       * all zero takes `expressVector`'s flat fallback and pays for all eight
-       * — it is expressing evenly, not expressing nothing, and charging it
-       * nothing would make "say nothing, act as a generalist" free and
-       * strictly best at any cost. The seed is not that body: `seedProduction`
-       * gives it the rows it makes and the four it eats with, so a seeded Con
-       * or Dup pays for six of eight and a seeded Era for five, which is the
-       * breadth each of them actually runs.
-       *
-       * Excreted on the same terms as upkeep, and for the same reason: what
-       * left a tank has to arrive somewhere or a dial nobody turned on is
-       * quietly destroying matter.
-       */
-      let rows = 0;
-      for (let r = 0; r < ROW_COUNT; r++) if (EX[o + r] > 0) rows++;
-      if (rows === 0) continue;
-      const was = a.extra;
-      a.extra = Math.max(a.debtCap, was - perRow * rows);
-      if (back > 0) {
-        const paid = Math.max(0, was) - Math.max(0, a.extra);
-        if (paid > 0) payOut(this.energy, EX, s, a.x, a.y, paid * back);
-      }
-    }
-  }
 
   /**
-   * The gut: what a body swallowed becomes what a body has, or does not.
+   * The gut: what a body swallowed becomes what a body has.
    *
-   * The harvest is a *sample of the water* — a body cannot decline the part of
-   * the mixture it has no use for — so a body is necessarily holding species
-   * it may not be able to touch. This is where that is settled, and it is the
-   * whole reason the gut exists: waste is the gap between the sample and the
-   * recipe, and nothing has to nominate it.
+   * One reaction, `r1`, and it splits two ways. What `intake` asks for goes to
+   * the reactor as primer; the rest is banked, as far as the tank has room.
+   * What neither takes stays in the gut, where it goes on bounding the next
+   * mouthful — which is satiety, and it is three mechanisms deep rather than a
+   * clamp: a body that cannot bank cannot clear its gut, so it cannot eat.
    *
-   * Three rules, and each is one line:
-   *
-   * - **The ground converts raw.** `CH.energy` needs no machinery and no
-   *   permission, which is what makes it the ground rather than a signal.
-   * - **The other three need the row.** A body's uptake row for a species is
-   *   its recipe for that species — `ROW_COUNT` in the factor so a row at an
-   *   eighth, which is what every seeded uptake row is, converts at exactly
-   *   the global rate, and clamped at one because a recipe is a capability and
-   *   not an amplifier. A body expressing nothing on a row converts none of
-   *   that species and holds it until excretion takes it away.
-   * - **Catabolism spends ground.** `catCoSubstrate` is how many units of
-   *   `CH.energy` one unit of another species is converted *with*, drawn from
-   *   the gut and banked with what it unlocked — spent as a licence, not
-   *   destroyed. A reagent, not a catalyst: it is a budget shared
-   *   across the three rows rather than a factor on their rate, so a body with
-   *   a little ground has to choose what to spend it on and one unit cannot
-   *   unlock everything. Continuous from zero, so a body with a little
-   *   capability still does better than one with none and selection has a
-   *   slope to climb rather than a cliff. Nothing is destroyed — the paired
-   *   ground lands in the tank alongside what it unlocked — so it still buys
-   *   access and never amplification.
-   *
-   * Bounded by room in the tank, which is what makes satiety three mechanisms
-   * deep rather than a clamp: a full body cannot digest, so its gut fills, so
-   * it cannot eat. And bounded that way rather than by discarding, because
-   * matter that had nowhere to go would have to be destroyed to fit.
+   * It used to be four species and three rules. The harvest was a *sample of
+   * the water*, so a body held species it could not touch; an uptake row was
+   * its recipe for each, `catCoSubstrate` made the ground a reagent the others
+   * were converted with, and whatever a body could not convert waited for
+   * excretion to clear it. A body eats the ground and nothing else now. There
+   * is nothing in a gut its owner cannot digest, so there is no waste, no
+   * recipe to express, no co-substrate to pair, and no excretion pass — the
+   * three rules collapse into the one reaction above.
    */
   private runDigestion(params: Params, t: number): void {
     const rate = params.digestRate;
     // Nothing has ever been swallowed, which is every frame of a pond running
-    // at `uptakeVmax` 0 — the whole of the shipped default. Guarded rather
+    // at `uptakeVmax` 0. Guarded rather
     // than walked, for the reason `HarvestPlan.build` guards on `meter`: a
     // per-body pass that always finds zero is still a per-body pass.
     if (!(rate > 0) || !this.gutLive) return;
     const store = this.agentStore;
     const GUT = store.gut;
-    const EX = store.expressAll;
     const EXTRA = store.extra;
     const CAP = store.energyCap;
     const R = store.react;
@@ -6931,7 +6898,6 @@ export class Sim {
      * a price; this is its reciprocal, and it is one dial instead of two.
      */
     const yieldB = params.metabolicYield;
-    const co = params.catCoSubstrate;
     /*
      * The reactor's pools are in its own units and outside the pond's books —
      * a reactor turns its pool over many times per unit of matter, so the two
@@ -6949,109 +6915,82 @@ export class Sim {
     let live = false;
     for (const a of this.agents.values()) {
       const s = a.slot;
-      const go = s * CHEM_SPECIES;
       if (store.gutTotal(s) <= 0) continue;
       live = true;
       /*
-       * Room for what is *banked*, widened by the share that is not. A body
-       * routing a quarter of its food to its reactor can digest a third more
-       * than its tank has room for, and one routing all of it is bounded only
-       * by its gut. Without this a full tank stops digestion outright, so a
-       * well-fed body would starve its own clock — which is backwards, and it
-       * is what makes `intake` a routing decision rather than a tax.
+       * **The tank bounds what is banked; the reactor's share flows anyway.**
+       *
+       * Digestion used to stop outright at a full tank, which was satiety
+       * three mechanisms deep — a full body cannot digest, so its gut fills,
+       * so it cannot eat. That worked while the tank had a continuous outflow
+       * to keep it off the ceiling, and it had two: the standing rent and the
+       * excretion rows. Both are gone, so every body would fill, stop
+       * digesting and lose its clock — a well-fed body starving its own
+       * metabolism, which is backwards.
+       *
+       * So the two halves of `r1` are bounded separately. What `intake` routes
+       * to the reactor is consumed the moment it is made and needs no room;it
+       * is only the banked half that has to fit. A sated body therefore keeps
+       * exactly the clock its `intake` pays for and banks nothing, and what it
+       * does not digest stays in its gut, where it goes on bounding the next
+       * mouthful. Nothing spills and nothing is destroyed.
        */
-      const share = INTAKE[s];
-      const banked = share >= 1 ? 0 : 1 - share;
-      let room = CAP[s] - EXTRA[s];
-      if (banked > 0) {
-        if (room <= 0) continue;
-        room /= banked;
-      } else if (room < 0) {
-        room = 0;
-      }
-      if (share >= 1) room = Infinity;
-      const xo = s * ROW_COUNT + ROW_UPTAKE;
+      // A gut holds ground and a body can always digest ground, so the recipe
+      // rows the uptake half used to gate this on have nothing left to say.
+      const have = GUT[s];
+      if (have <= 0) continue;
       /*
-       * The ground is a *reagent*, not a catalyst.
-       *
-       * §6b says the other three are converted *with* `CH.energy`, and a
-       * factor that only scales a rate says "in the presence of", which is a
-       * catalyst — one unit of ground in the gut licensed unlimited scent, and
-       * converting scent is how a body keeps a unit of ground. So the ground
-       * is spent here: `co` units of it per unit of species converted, drawn
-       * from what this body is holding and unable to license a second thing.
-       *
-       * `pair` is that budget and it is shared across the three rows, which is
-       * the constraint the ratio could not express: a body with a little
-       * ground must choose what to spend it on. At `co` 0 it is unbounded and
-       * the ground is not drawn at all, which is what phase 3 shipped.
-       *
-       * Nothing is destroyed — the paired ground lands in the tank alongside
-       * what it unlocked, exactly as it would have on its own row. What it
-       * cannot do is unlock a second thing. Conservation is untouched and it
-       * still buys access rather than amplification.
+       * Mass action, as an exponential rather than a product, so a rate above
+       * one frame's worth cannot take more than the body is holding. Snapped
+       * to empty below `EXTRA_FULL_EPS`, because mass action never reaches
+       * zero on its own and `gutLive` would then never clear: a gut holding a
+       * crumb forever is a roster walk forever.
        */
-      let pair = co > 0 ? GUT[go + CH.energy] : Infinity;
-      let moved = 0;
-      // The three signalling species, then the ground: see `DIGEST_ORDER` for
-      // why the co-substrate has to be paired off before it is digested.
-      for (let k = 0; k < DIGEST_ORDER.length && room > 0; k++) {
-        const c = DIGEST_ORDER[k];
-        const have = GUT[go + c];
-        if (have <= 0) continue;
-        const ground = c === CH.energy;
-        let use = 1;
-        if (!ground) {
-          const row = ROW_COUNT * EX[xo + c];
-          use = row > 1 ? 1 : row;
-        }
-        if (!(use > 0)) continue;
-        /*
-         * Mass action, as an exponential rather than a product, so a rate
-         * above one frame's worth cannot take more than the body is holding.
-         * `full` is the ground's factor and every row at or above the flat
-         * seed's, hoisted; only a row with a partial recipe pays for an `exp`.
-         *
-         * Snapped to empty below `EXTRA_FULL_EPS`, because mass action never
-         * reaches zero on its own and `gutLive` would then never clear: a gut
-         * holding a crumb forever is a roster walk forever. The crumb lands in
-         * the tank like the rest of it; nothing is destroyed.
-         */
-        let take = use >= 1 ? have * full : have * (1 - Math.exp(-rate * use * t));
-        if (have - take < EXTRA_FULL_EPS) take = have;
-        // What it costs in ground, and what is left to pay with.
-        let spend = 0;
-        if (!ground && co > 0) {
-          if (take * co > pair) take = pair / co;
-          spend = take * co;
-        }
-        if (take + spend > room) {
-          const k2 = room / (take + spend);
-          take *= k2;
-          spend *= k2;
-        }
-        if (!(take > 0)) continue;
-        GUT[go + c] = have - take;
-        if (spend > 0) {
-          GUT[go + CH.energy] -= spend;
-          pair -= spend;
-        }
-        room -= take + spend;
-        moved += take + spend;
-      }
-      if (moved > 0) {
+      let take = have * full;
+      if (have - take < EXTRA_FULL_EPS) take = have;
+      /*
+       * **`intake` is a rate, not a share: how fast this body feeds its
+       * reactor, in matter per second.**
+       *
+       * It used to be a share of the mouthful, and removing the tank's drains
+       * is what exposed that as the wrong quantity. While rent and the
+       * excretion rows drained the tank a body's throughput was small, and a
+       * quarter of it happened to be about what the reactor consumed; with
+       * neither, throughput is whatever the ground supplies, and a quarter of
+       * that put every reactor past the top of its fuel window — saturated and
+       * still, which is the glutted end rather than the fed one.
+       *
+       * A share makes the clock a property of the dish. A rate makes it a
+       * property of the body: the influx `j` that decides whether a body
+       * paces, relays or sits saturated is `intake * metabolicYield /
+       * metabolicRate`, and every term in that is the body's own or the
+       * world's constant. `docs/metabolism-spec.md` §1 asks for exactly this
+       * and calls it first among the four — a period that is a consequence of
+       * what a lineage controls.
+       *
+       * Still fed by *eating*: it can only route what it has digested, so a
+       * body with a full tank and an empty gut has no clock however high it
+       * sets this.
+       */
+      const want = INTAKE[s] * t;
+      let toReactor = take < want ? take : want;
+      if (toReactor < 0) toReactor = 0;
+      let toBank = take - toReactor;
+      const room = Math.max(0, CAP[s] - EXTRA[s]);
+      if (toBank > room) toBank = room;
+      const moved = toReactor + toBank;
+      if (!(moved > 0)) continue;
+      GUT[s] = have - moved;
+      if (toReactor > 0) {
         // Split, not taxed: what feeds the reactor is food the body did not
         // bank, so running a metabolism costs exactly what it consumes and
         // needs no price of its own.
-        const toReactor = share > 0 ? (share >= 1 ? moved : moved * share) : 0;
-        if (toReactor > 0) {
-          const r = s * REACT_SPECIES + REACT_B;
-          const b = R[r] + toReactor * yieldB;
-          R[r] = b > REACT_CAP ? REACT_CAP : b;
-          if (back > 0) payOut(grid, EX, s, X[s], Y[s], toReactor * back);
-        }
-        EXTRA[s] += moved - toReactor;
+        const r = s * REACT_SPECIES + REACT_B;
+        const b = R[r] + toReactor * yieldB;
+        R[r] = b > REACT_CAP ? REACT_CAP : b;
+        if (back > 0) grid.addAt(X[s], Y[s], toReactor * back);
       }
+      if (toBank > 0) EXTRA[s] += toBank;
     }
     /*
      * Read before this pass moved anything, so a pond that has just finished
@@ -7063,122 +7002,7 @@ export class Sim {
     this.gutLive = live;
   }
 
-  /**
-   * The reaction table's excretion rows: gut and tank -> field, conserved.
-   *
-   * Mass action on everything the body holds, gut and tank together, split by
-   * the excretion rows — which is where "absolute honesty" comes from. A body
-   * near empty excretes near nothing however loudly its genome would like to:
-   * the simplex bounds what you can say relative to what else you say, and
-   * conservation bounds it outright. Neither implies the other and they
-   * compound.
-   *
-   * Two sources, one operation. A body wanting to put out species `c` takes it
-   * from the gut if it is holding any — it is already that species, and it is
-   * in the way — and synthesises the shortfall out of the tank, which is what
-   * this has always done and is where the three signal species come from at
-   * all. Mass is conserved either way; what the gut buys is that clearing
-   * waste is *free*, where saying the same thing out of stock costs.
-   *
-   * That the tank half survives is not a compromise. Per-species conservation
-   * is a stronger property than §5 asks for and it is one the pond cannot
-   * afford: nothing in a conserved dish creates `conP`, so a pond whose only
-   * input is ground would be permanently silent. Bodies conserve *matter*.
-   * Turning matter into a different molecule is what a metabolism is.
-   *
-   * What the gut half adds is the necessity. What a body cannot convert
-   * occupies the room that bounds its next mouthful, and the only way out of
-   * the gut is here — so a body must express the excretion row for whatever it
-   * cannot digest, or clog and starve holding food it cannot use. The rows
-   * stop being purely a preference about what to broadcast and become, for
-   * that species, a clearance rate. Nothing declares what a body's waste is;
-   * the shape of what it is stuck with does.
-   *
-   * `ROW_COUNT` in the rate so that a row at an eighth — the flat fallback,
-   * and what every seeded *uptake* row still is — runs at exactly
-   * `excreteRate`; a seeded Era's ground row at `ERA_GROUND_SHARE` runs at
-   * four times it. Every dial in this file reduces to a number you can say out
-   * loud at the seed.
-   *
-   * Through `addSpeciesAt` and therefore through the *conserving* deposit, not
-   * the scent path's density scatter. That is the whole difference: a signal
-   * is a density that may be clipped at the rim, and this is matter that
-   * cannot be. `scentMints` is what stops the two running at once.
-   */
-  private runExcretion(params: Params, t: number): void {
-    if (!(params.excreteRate > 0)) return;
-    const store = this.agentStore;
-    const EX = store.expressAll;
-    const OUT = store.excreteAll;
-    const GUT = store.gut;
-    const EXTRA = store.extra;
-    const LOCKED = store.locked;
-    const X = store.x;
-    const Y = store.y;
-    const w = this.excreteScratch;
-    const rate = params.excreteRate * t * ROW_COUNT;
-    for (const a of this.agents.values()) {
-      const s = a.slot;
-      const eo = s * ROW_COUNT + ROW_EXCRETE;
-      const oo = s * CHEM_SPECIES;
-      const go = s * CHEM_SPECIES;
-      // Mass action on everything the body is holding, digested or not: a body
-      // with more to give gives more, and one with nothing gives nothing.
-      const banked = EXTRA[s] > 0 ? EXTRA[s] : 0;
-      const have = banked + store.gutTotal(s);
-      if (LOCKED[s] || have <= 0) {
-        OUT.fill(0, oo, oo + CHEM_SPECIES);
-        continue;
-      }
-      let owed = 0;
-      for (let c = 0; c < CHEM_SPECIES; c++) {
-        const amt = rate * EX[eo + c] * have;
-        w[c] = amt;
-        // What the gut cannot cover has to be built out of stock.
-        const gut = GUT[go + c];
-        owed += amt > gut ? amt - gut : 0;
-      }
-      /*
-       * A long frame, or a rate above one, can ask for more stock than the
-       * body has. The synthesised part scales down and the gut part does not:
-       * clearing what is already in the way is not something poverty should be
-       * able to prevent, and it is the half a clogged body most needs.
-       */
-      const k = owed > banked ? (owed > 0 ? banked / owed : 0) : 1;
-      let total = 0;
-      let spent = 0;
-      for (let c = 0; c < CHEM_SPECIES; c++) {
-        const gut = GUT[go + c];
-        const amt = w[c];
-        const fromGut = amt > gut ? gut : amt;
-        const made = (amt - fromGut) * k;
-        const out = fromGut + made;
-        w[c] = out;
-        if (fromGut > 0) GUT[go + c] = gut - fromGut;
-        spent += made;
-        total += out;
-      }
-      if (spent > 0) EXTRA[s] -= spent;
-      if (total <= 0) {
-        OUT.fill(0, oo, oo + CHEM_SPECIES);
-        continue;
-      }
-      for (let c = 0; c < CHEM_SPECIES; c++) OUT[oo + c] = w[c];
-      this.energy.addSpeciesAt(X[s], Y[s], w);
-    }
-  }
-
-  /**
-   * Whether the scent path still mints.
-   *
-   * The two ways matter reaches the field are mutually exclusive by
-   * construction: either a body's voice is minted at `params.deposit` and its
-   * tank is untouched, or it is excreted from the tank and conserved. Running
-   * both would deposit the same expression twice and mint half of it.
-   */
-  private scentMints(params: Params): boolean {
-    return !(params.excreteRate > 0);
-  }
+  
 
   private tickRewrites(params: Params, dt: number): void {
     const done: Rewrite[] = [];
@@ -7399,6 +7223,45 @@ function rewriteAudio(
  * by the far end of each of its three wires, so a quarter is what makes an
  * overdraw impossible and lets the apply need no clamp of its own.
  */
+/**
+ * The three reactor species, each in units its own balance makes natural, and
+ * each through the same bounded signed map as the stroke has always used.
+ *
+ * `B · k₂/(k₃+d)`, `C`, and `D · d/k₃` all sit near one at a fixed point —
+ * they are what each species would be if the loop stopped — so one
+ * `metabolicWave` serves all three and no species needs a constant of its own.
+ * Written into `out` in the reactor's order, B then C then D.
+ */
+function speciesWaves(
+  B: number,
+  C: number,
+  D: number,
+  cat: number,
+  reset: number,
+  decay: number,
+  waveK: number,
+  out: Float64Array,
+): void {
+  const bc = reset + decay > 0 ? (B * cat) / (reset + decay) : 0;
+  const dc = reset > 0 ? (D * decay) / reset : 0;
+  out[0] = (2 * bc) / (waveK + bc) - 1;
+  out[1] = (2 * C) / (waveK + C) - 1;
+  out[2] = (2 * dc) / (waveK + dc) - 1;
+}
+
+/**
+ * One actuator's reading: its own mixture of the three, bounded.
+ *
+ * The weights are a direction in (B, C, D) and the globals — `gaitSwell` for
+ * the stroke, `gripSwing` for the grip — are how hard it is pulled. Clamped to
+ * the same `[-1, 1]` a single species gave, so everything downstream keeps the
+ * bounds it was written against however a lineage mixes.
+ */
+function actuatorOf(chem: Float32Array, base: number, w: Float64Array): number {
+  const v = chem[base] * w[0] + chem[base + 1] * w[1] + chem[base + 2] * w[2];
+  return v <= -1 ? -1 : v >= 1 ? 1 : v;
+}
+
 function crossing(
   pool: Float64Array,
   CHEM: Float32Array,

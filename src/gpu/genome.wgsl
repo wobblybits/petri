@@ -34,8 +34,8 @@ const P_BASE: u32 = 122u;
 const L_OUT: u32 = 124u;
 const L_BASE: u32 = 132u;
 // The gait head sits past the chemistry genes, at the end of the genome.
-const G_OUT: u32 = 178u;
-const G_BASE: u32 = 182u;
+const G_OUT: u32 = 135u;
+const G_BASE: u32 = 139u;
 // `chem-layout.ts`'s GAIT_ANCHOR_MAX, transcribed with the offsets above.
 // The transmission and gate vectors past it are plain genes, not heads, so
 // the shader neither computes nor carries them; `Sim.advanceGait` reads them
@@ -50,7 +50,8 @@ const PLASTIC_LEN: u32 = 64u;
 const LEARN_TRACE: u32 = 64u;
 const LEARN_CRITIC: u32 = 128u;
 const LEARN_PREV_V: u32 = 133u;
-const LEARN_STRIDE: u32 = 134u;
+const LEARN_PREV_FULL: u32 = 134u;
+const LEARN_STRIDE: u32 = 135u;
 
 // Floats written per body: h(4), emit(4), taste(4), then the seven heads.
 const OUT_STRIDE: u32 = 19u;
@@ -76,8 +77,9 @@ struct GenomeParams {
   learnDiscount: f32,
   maxWeight: f32,
   sAnchor: f32,
-  pad1: f32,
-  pad2: f32,
+  // The teacher: 0 all level, 1 all rate. See `params.learnReward`.
+  learnReward: f32,
+  dtInv: f32,
   pad3: f32,
 }
 
@@ -300,7 +302,21 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
     let cr = lb + LEARN_CRITIC;
     let value = learn[cr] * h.x + learn[cr + 1u] * h.y + learn[cr + 2u] * h.z
       + learn[cr + 3u] * h.w + learn[cr + 4u];
-    let dlt = x4 - 1.0 + G.learnDiscount * value - learn[lb + LEARN_PREV_V];
+    /*
+     * The teacher, two ways. The *level* `x4 - 1` saturates — a body at its
+     * cap reads zero and has no gradient — and the *rate* still reads for it.
+     * `dtInv` is this frame's step, so the rate is tanks per second, clipped
+     * to the level's own range. Kept in step with `Sim.updateState` by hand.
+     */
+    let lvl = x4 - 1.0;
+    // A zero `prev` is "no history" — see `Sim.updateState`, which shares the
+    // sentinel because this buffer is zeroed and never seeded per body.
+    let wasFull = learn[lb + LEARN_PREV_FULL];
+    var rate = 0.0;
+    if (wasFull > 0.0) { rate = clamp((x4 - wasFull) * G.dtInv, -1.0, 1.0); }
+    learn[lb + LEARN_PREV_FULL] = x4;
+    let reward = lvl + G.learnReward * (rate - lvl);
+    let dlt = reward + G.learnDiscount * value - learn[lb + LEARN_PREV_V];
     learn[lb + LEARN_PREV_V] = value;
     // The critic's own delta rule: its last estimate was a dot product with
     // last frame's `h`, so last frame's `h` is the gradient.

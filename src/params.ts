@@ -2,7 +2,7 @@ import { FIELD_CELL } from './fields.ts';
 // Derived, not copied. These three are the values the pond has always run at,
 // and they live where the economy that uses them lives; writing the numbers
 // again here is exactly the duplication `chem-layout.ts` exists to warn about.
-import { BODY_VALUE, ERA_CAP_RATIO, ERA_UPKEEP_RATIO } from './energy.ts';
+import { ERA_CAP_RATIO, ERA_UPKEEP_RATIO, REWRITE_SHARE } from './energy.ts';
 import { SENSE_SCALE } from './chem-layout.ts';
 
 export interface Params {
@@ -148,6 +148,45 @@ export interface Params {
    * over-packed net reconfigures instead of straining forever.
    */
   wireSnap: number;
+  /**
+   * How far a wire carrying energy pulls its own ends together, 0 to 1.
+   *
+   * `concepts.md`'s Shape heading has asked for this since it was written —
+   * *tension is held by energy flowing along a wire, so a net that moves no
+   * energy is slack* — and the honest note under it has always been "not yet
+   * true". This is the term that makes it true. One transport packet across a
+   * wire this frame shortens it by half of this; a busy wire approaches all of
+   * it; a wire that moves nothing sits at exactly its `restBase`.
+   *
+   * **It was built once before and withdrawn, and both objections are now
+   * answered.** The first was that the pull and the grip were driven by the
+   * same packet at the same instant, so the loop they traced in (length, grip)
+   * closed on a line and its area — which is the net displacement — was
+   * nothing. `gripSwing` is the grip now, driven by the reactor's D and 53
+   * degrees off the stroke, so the loop has area. The second was that it spent
+   * the wire's rest length, which is what decides whether two bodies ever meet:
+   * turned up far enough to swim it held every pair too tight to rewrite. That
+   * was true while `Sim.principalRedexReady` measured against one global
+   * `wireMinRest`. It measures against `Wire.restBase` now, which is the
+   * wire's own, so shortening a wire is a change of shape and not a change of
+   * who breeds.
+   *
+   * **Measured on the worm bench, and it is the largest locomotion effect this
+   * project has found:** at a matched grip swing the worm travels 0.66 px/s
+   * with this off and 2.62 with it at 0.3 — and 4.22 with the grip swing off
+   * as well. Three to four times, from a term that costs nothing because the
+   * transport it reads was happening anyway.
+   *
+   * One consequence to know rather than discover. A tugged wire's ends sit
+   * closer, and `principalRedexReady` compares the *actual* span against
+   * `restBase * 1.3` — so a wire that is carrying energy reaches its rewrite
+   * gate sooner. Energy flowing makes things react, which reads as more churn:
+   * over three seeds at 90 s the pond stands at fewer bodies and fewer wires
+   * with this on. Depth does not resolve at three seeds, and the seed spread
+   * is larger than the effect, so that is a thing to look at rather than a
+   * number to trust.
+   */
+  wireTug: number;
   /**
    * Energy per second of penetration depth, charged to both bodies in a
    * contact. 0 = collisions are free.
@@ -501,26 +540,98 @@ export interface Params {
   metabolicDiffuse: number;
   /**
    * How much of a species a fresh body has to be holding before it broadcasts
-   * any of it, in that species' own units. Seeds all four of `Gx` and is
-   * heritable per species from there.
+   * any of it, **as a fraction of that species' own resting level**. Seeds all
+   * four of `Gx` and is heritable per species from there.
    *
-   * The doc's §4 `H(x_j - G_j)`, rectified rather than a step. It seeds at
-   * zero, so a fresh body broadcasts in proportion to what it holds and the
-   * pulse comes from the concentration's own swing; a threshold is something
-   * a lineage evolves toward when being quiet at the trough pays.
+   * The doc's §4 `H(x_j - G_j)`, rectified rather than a step. It shipped at
+   * zero and gated nothing, and the reason was the units: one flat number
+   * across four pools whose scales differ by orders — the catalyst sits near
+   * 1, the inhibitor at `k3/d` times that, the primer at `(k3+d)/k2` — is
+   * either inert or shut, never a gate. `seedGait` scales it per species now,
+   * so this means one thing: *stay quiet below this much of your own resting
+   * level*.
+   *
+   * The broadcast was already a pulse — mass action sends most at a peak and
+   * least at a trough. This gives the pulse a **floor**, so a body at its
+   * trough says nothing at all rather than a little, and that is what keeps a
+   * front from filling the gap behind it.
+   *
+   * **It is what stops a loud chain collapsing into synchrony.** Ungated,
+   * turning the broadcast up locks a chain harder until the phase difference
+   * goes to nothing — the pond-wide pulse this branch began by removing, and
+   * the reason the broadcast rate sat near the bottom of its range. At 0.1 the
+   * same chain holds 2.33 frames a wire.
+   *
+   * **The window is narrow and the far edge is measured.** 0.05 through 0.2
+   * all travel; **0.3 flatlines the chain**, because a gate breaks the
+   * property mass action was chosen for — a body sending in proportion to what
+   * it *has* cannot send itself empty, and one sending in proportion to
+   * `x - gate` can drive itself down to the gate. That is the same failure the
+   * old wave-gated broadcast had. It ships at a third of where it breaks.
    */
   metabolicGate: number;
   /**
-   * What share of the food it digests a fresh body routes to its reactor
-   * rather than banking in its tank. Heritable from there.
+   * How fast a body feeds its reactor, in matter per second. The one thing
+   * about its own clock a lineage owns, and heritable like every other trait.
    *
-   * The doc's §8 per-agent `J`, and the one thing about the reactor a lineage
-   * owns. It decides where in the fuel window a body sits, and the window has
-   * both edges: starved, the reactor sits empty and still; fed, it runs a
-   * limit cycle whose period shortens as the fuel rises; glutted, it sits
-   * saturated and still again.
+   * A *rate*, not a share of what it digested. A share makes the period a
+   * property of the dish — a body on rich ground routes more and saturates,
+   * one on poor ground starves — and it only looked right while the tank had
+   * a continuous outflow keeping throughput small. A rate makes the period a
+   * property of the body, which is what `docs/metabolism-spec.md` §1 asks for
+   * first.
+   *
+   * The influx the reactor sees is `intake * metabolicYield / metabolicRate`,
+   * and the fuel window in those units is 0.55 to 3.05 — so this oscillates
+   * between about **0.017 and 0.095**, and outside it a body is quiet below
+   * and saturated above. Measured on a lone pinned Con: 0.10 gives a 1.54 s
+   * period, 0.06 gives 2.13 s and the widest swing, 0.04 gives 2.43 s, and
+   * 0.25 is glutted and still. It ships at 0.06, mid-window.
+   *
+   * Still fed by eating: a body can only route what it has digested, so a full
+   * tank and an empty gut is no clock at all however high this is set.
    */
   intake: number;
+  /**
+   * How far the reset inhibitor **D** swings a body's grip, either way.
+   *
+   * `grip` makes a body's drag depend on how full it is, and that is the only
+   * thing that turns a stroke into travel: a transport kick is equal and
+   * opposite, so it cancels at the centre of mass unless the two ends damp
+   * differently. This modulates that difference with the gait, so a body grips
+   * hardest at one point in its cycle and slips at another — which is what an
+   * inchworm does, and what a standing difference in fullness cannot do on its
+   * own.
+   *
+   * **Driven by D and not by C, and that is the whole point.** The rest length
+   * and the anchor both swing on `wave(C)`, so they are one degree of freedom:
+   * a cycle that deforms and undeforms through the same shapes is reciprocal,
+   * and a reciprocal cycle nets zero displacement — Purcell's scallop theorem,
+   * and the reason `wireTug` was withdrawn ("one degree of freedom and a
+   * race"). A second actuator has to be *out of phase* with the first, and the
+   * reactor already supplies that: `dD/dt = k₃C − dD` is a first-order lag, so
+   * D trails C by `atan(ω/d)` — **51° at the bottom of the fuel window and 65°
+   * at the top**, set by the chemistry and by nothing anybody dialled.
+   *
+   * D is read in catalyst units, `D · d / k₃`, which is what D would be if the
+   * loop stopped — so it shares `metabolicWave` as its half-point and needs no
+   * constant of its own.
+   *
+   * At 0.5 a full body's grip runs between half and one and a half times
+   * `grip` over a cycle. At 1 it falls to nothing at the trough.
+   *
+   * **It only pays once something times the kicks.** A cyclic grip has to be
+   * phase-locked to whatever delivers the impulse, and until the gait's own
+   * broadcast recoiled (`Sim.advanceGait`) the only impulse in the pond came
+   * from the demand gradient — the economy's clock, not the chemistry's. An
+   * uncorrelated zero-mean modulation on a steady asymmetry is a *loss*,
+   * because travel goes as `1/k` and that is convex. Measured on the worm
+   * bench, which is deterministic so these are exact: with the broadcast
+   * inert, 4.22 px/s at swing 0 falling to 1.88 at 1. With it kicking, 3.97 at
+   * 0 and **5.09 at 0.75** — a 28% gain, with an optimum rather than a slope.
+   * It ships at 0.5, one notch conservative of that.
+   */
+  gripSwing: number;
   /**
    * How far the gait swings a wire's rest length, as a fraction of it.
    * 0 = the wire ignores the clock, which is the pond before this.
@@ -641,7 +752,29 @@ export interface Params {
    * and scaling zero is zero.
    */
   fertilise: number;
-  /** Extra drained per second. 0 = off. Hitting −1 kills the agent. */
+  /**
+   * A standing rent on the tank, per second. **Ships at 0**, and what it was
+   * doing has three homes now.
+   *
+   * It was one dial doing three jobs. *The standing cost* is the reactor's own
+   * outflow: a body must keep eating to hold its pools against `metabolicDecay`
+   * and one that stops dies on the starvation window, which on a bare dish
+   * fired first anyway (28.8 s against the rent's 69.0 s). *The Era's income*
+   * was this rent paid negative, which mattered when a producer had no other
+   * income; now that the reactor is fed by eating, an Era's income is its
+   * uptake, and measured across three seeds the Era share does not move when
+   * the rent goes (28.9% to 30.8%). *Rationing rewrites* belongs to the
+   * rewrite's own price, and that is `bodyValue`.
+   *
+   * What the rent was also doing, unbilled, was **holding nets shallow**: it
+   * charges every body in a net whether or not that body is doing anything, so
+   * depth costs and a lineage that grows one bleeds. Turning it off with
+   * `bodyValue` at `REWRITE_SHARE`, measured over three seeds at 90 s: depth
+   * 0.49 -> 1.11, drift 0.172 -> 0.257, lines 364 -> 309. Fewer lineages,
+   * deeper, and further apart.
+   *
+   * Hitting `debtCap` still kills; nothing else charges rent to do it.
+   */
   upkeep: number;
   /**
    * Extra per second per unit of speed, charged for moving.
@@ -894,12 +1027,36 @@ export interface Params {
    * and latches somewhere else. That is the point rather than a side effect:
    * it makes an agent that has been through a net different from one that
    * has not, and it is how one net's experience reaches another.
-   *
-   * See `docs/plasticity-plan.md`.
    */
   learnRate: number;
   /** How fast the critic itself learns to predict. Its own delta rule. */
   learnCritic: number;
+  /**
+   * What a body is taught by: the level of its tank, or the rate it is filling
+   * at. 0 is all level, 1 is all rate.
+   *
+   * **This is the one designed objective in the pond, and it should be said
+   * out loud.** Everything else here is emergent — there is no fitness term
+   * and selection is what survives — but a learner needs a teacher, and this
+   * is it. What keeps it honest is that it is not arbitrary: `IN_FULL` is
+   * distance from `debtCap`, which is the system's own death condition, so
+   * the reward is "how close am I to dying" rather than a goal anybody chose.
+   *
+   * The level signal is `IN_FULL - 1`, in `[-1, 0]`. It can say *you are
+   * short* and never *you are doing well*, and it saturates: measured in a
+   * live soup at 60 s, the median body reads 0.342 but **31.7% sit at exactly
+   * 1**, so a third of the pond has a reward of zero and no gradient at all.
+   * Learning stops exactly where behaviour is succeeding.
+   *
+   * The rate signal is the change in `IN_FULL` per second, clipped to the same
+   * `[-1, 1]`. A body at its cap that is spending still reads negative, and
+   * one that is gaining reads positive, so the dead zone goes. It is also very
+   * nearly the potential-based shaping of the level signal — with a discount
+   * near one, `gamma*PHI' - PHI` is the difference — which is the classical
+   * result that says shaping this way cannot change which policy is best,
+   * only how fast it is found.
+   */
+  learnReward: number;
   /**
    * Eligibility trace decay, per frame. Not weight decay — nothing here
    * forgets. This is the credit window: how far back a weight is still
@@ -909,6 +1066,36 @@ export interface Params {
   learnTrace: number;
   /** Discount on the critic's own prediction, per frame. */
   learnDiscount: number;
+  /**
+   * How unevenly a rewrite's children divide the reactor their parents were
+   * running, 0 to 1.
+   *
+   * **A rewrite used to throw the clock away.** Children are built by
+   * `createAgent`, which takes a fresh slot with `B`, `C` and `D` at zero, and
+   * nothing carried the parents' across — so every body ever made by a rewrite
+   * was born with a dead reactor reading `wave` −1, and had to eat its way
+   * back into the fuel window before it could stroke at all. The genome was
+   * inherited and the gut was spilled back onto the ground; the one thing that
+   * was simply lost was the phase its parents were at.
+   *
+   * The pools are outside the pond's books, so dividing them is free. What it
+   * buys is two things. Children are born **running**, at their parents'
+   * point in the cycle rather than from a standstill. And at anything above
+   * zero they are born *different*: the split is drawn per species, so two
+   * children get different `B : C : D` ratios, and the phase of this reactor
+   * is set by those ratios rather than by the size of the pools. An even split
+   * would hand every child the same phase.
+   *
+   * That matters because symmetry has to break somewhere. Identical bodies do
+   * develop a phase gradient under the broadcast — measured on the worm bench,
+   * 6.6 frames a segment with two thirds of pairs agreeing — but they develop
+   * it from whatever difference the coupling can amplify, and a rewrite that
+   * hands its children identical states gives it nothing to work on.
+   *
+   * At 0 an even split. At 1 a child's share of a species runs from nothing to
+   * twice its even share.
+   */
+  reactorSplit: number;
   /**
    * How much of what a parent learned is consolidated into its children's
    * genome, 0 to 1.
@@ -922,7 +1109,7 @@ export interface Params {
   inheritLearned: number;
 
   /*
-   * Chemistry. See `docs/energy-chemistry-plan.md`; every one of these ships
+   * Chemistry. Every one of these ships
    * at the value that reduces to the behaviour before it existed, which is
    * the same discipline `fertilise` and `reactFeed` follow.
    */
@@ -953,16 +1140,6 @@ export interface Params {
    */
   uptakeKs: number;
   /**
-   * Fixed cost, per second, of expressing a reaction row at all.
-   *
-   * One of the two dials that decide whether nets differentiate. A linear
-   * budget with concave payoffs — and Monod saturation is concave — puts the
-   * optimum in the interior and makes everyone a generalist; specialisation
-   * needs `f(1) > 2 f(1/2)`, which concavity forbids. A fixed cost per row
-   * supplies the superadditivity: two rows cost `2c`, one costs `c`.
-   */
-  rowCost: number;
-  /**
    * Hill coefficient on uptake. The other superadditivity dial.
    *
    * At 1 this is plain Monod. Above 1 the response is convex at low
@@ -991,28 +1168,40 @@ export interface Params {
    */
   yEra: number;
   /**
-   * How much of ordinary upkeep is put back into the field rather than
-   * destroyed, 0 to 1 — as the body's own excretion mix, through `payOut`,
-   * so a Con pays its rent in `conP` and `aux` and only an Era pays in ground.
-   * The gait's pathway and the row cost leave by the same road.
+   * How much of what crosses out of the pond's books is put back onto the
+   * ground rather than destroyed, 0 to 1.
    *
-   * 0 is today: rent vanishes. 1 makes bodies conservative — no reaction a
-   * body runs creates or destroys matter — which is the invariant that makes
-   * selection honest. It is a dial rather than a constant because turning it
-   * on changes the pond's standing stock, and the plan's discipline is that
-   * nothing changes behaviour until somebody has looked. Above zero it also
-   * turns `refreshExpression` on, because the mix is read off the rows.
+   * With `upkeep` at 0 there is no rent left for it to govern, so what it
+   * decides is the food `intake` routes to the reactor — the reactor's pools
+   * are in their own units and outside the books, so that food leaves them.
+   * At 1 it lands back on the ground the body is standing on.
+   *
+   * **0 is today, so the reactor is a sink.** 1 makes bodies conservative — no
+   * reaction a body runs creates or destroys matter — which is the invariant
+   * that makes selection honest, and `docs/metabolism-spec.md` §3.2 says so
+   * while the dial says otherwise. It used to lay this down as the body's own
+   * *excretion mix*, which for a Con is signal rather than food, and that is
+   * why turning it on cost the pond; nothing excretes now and it returns as
+   * ground. Measured over three seeds at 90 s it is no longer a cost and no
+   * longer a clear gain either — the seed spread is wider than the effect.
    */
   upkeepExcrete: number;
   /**
    * What a body's existence is worth when it dies, `EXTRA_CAP` today.
    *
-   * At `REWRITE_SHARE` (1) the commute-then-annihilate cycle stops minting:
-   * today it makes `2 * (EXTRA_CAP - REWRITE_SHARE)` = 0.5 out of nothing,
-   * which the comment on `BODY_VALUE` has always described as the metabolism
-   * rather than a slip. With uptake rate-limited, a net's income no longer
-   * has to be proportional to its rewrite rate, which is the argument for
-   * taking it — but taking it moves the pond, so it is a dial and not an edit.
+   * **Ships at `REWRITE_SHARE` (1), so the commute-then-annihilate cycle no
+   * longer mints.** At `BODY_VALUE` (`EXTRA_CAP`, 1.25) it made
+   * `2 * (EXTRA_CAP - REWRITE_SHARE)` = 0.5 out of nothing every cycle, which
+   * was the metabolism rather than a slip: a standing rent drained
+   * continuously, so a net that kept rewriting fed itself and a net that sat
+   * still starved. With the rent gone (`upkeep`) that mint has nothing to
+   * balance and rewriting would be free energy. Conserved is the other half
+   * of the same change and the two move together.
+   *
+   * Below 1 the cycle *costs* `2 * (1 - bodyValue)`, which is where a brake on
+   * rewriting belongs — on the rewrite's own price, rather than on a standing
+   * charge against every body whether it rewrites or not. Nothing needs one
+   * today; the dial is here for when something does.
    */
   bodyValue: number;
   /**
@@ -1043,93 +1232,33 @@ export interface Params {
    */
   eraUpkeepRatio: number;
   /**
-   * Rate at which a body puts out its excretion rows, per second per unit it
-   * holds in gut and tank together, for a row at an eighth. What the gut holds
-   * of a species leaves first and is free; the shortfall is synthesised from
-   * the tank. This is also the farming dial: an Era's whole production half
-   * is the ground row, so at this rate it lays ground, which is what
-   * `farmRate` used to be.
-   *
-   * **Zero is today, and turning it on is a switch rather than a slider.**
-   * Today a body's voice is *minted*: `effEmit` is multiplied by
-   * `params.deposit`, which is five, and nothing is taken out of the tank —
-   * with `CH.energy` firewalled out of that path precisely because five units
-   * of food a frame out of nothing would be absurd. Above zero, all four
-   * species leave the body conserved and the minted deposit stops: the
-   * firewall becomes a stoichiometry rather than a special case, and a poor
-   * body physically cannot shout.
-   *
-   * `docs/energy-chemistry-plan.md` §3 and §8. Expect the measured signalling
-   * constants to move with it — signal amplitude drops by about the deposit
-   * multiplier, so `SENSE_SCALE` and the steering dead zone were measured
-   * against a world that no longer exists. Remeasure rather than rescale.
-   */
-  excreteRate: number;
-  /**
    * What one unit of a signal reading is worth on the way into `x`.
    *
    * A `Params` field rather than the `SENSE_SCALE` constant it defaults to,
-   * because the number is a property of *how signal reaches the field*, and
-   * `excreteRate` changes that completely. `SENSE_SCALE` was measured as the
-   * p90 reading at a body's own position — 4.16, 4.24 and 4.53 over soups of
-   * 60, 400 and 2000 — and remeasured on this build it still reads 4.26, 4.60
-   * and 5.19, so the constant is right for the pond it was measured in.
+   * because the number is a property of *how signal reaches the field*.
+   * `SENSE_SCALE` was measured as the p90 reading at a body's own position —
+   * 4.16, 4.24 and 4.53 over soups of 60, 400 and 2000 — and remeasured on
+   * this build it still reads 4.26, 4.60 and 5.19.
    *
-   * **Under conserved excretion it reads about 0.002**, measured the same way
-   * at the same three sizes: 0.0016, 0.0017, 0.0024. Not the ~5x the plan's §8
-   * predicted, and the extra three orders are worth understanding rather than
-   * absorbing. Two things compound. The minted deposit is unbounded in time —
-   * nothing is taken out of a tank to pay for it — so the field accumulates to
-   * whatever decay allows, while excretion is bounded by what the bodies
-   * actually hold. And the scent path lays a *density*, scaled by cell area,
-   * where a conserved add lays a *quantity*; a unit of matter spread over a
-   * million-cell dish simply does not read like a unit of shouting.
-   *
-   * Left at the minted value, because moving it would move the pond that
-   * ships. A run with `excreteRate` on wants this near 0.002 or its sense
-   * genes are reading a signal three orders below the range `phi` can resolve.
+   * It was wrong for a while and is right again without being touched. A body
+   * used to be able to pay for its voice out of its tank, and that stopped the
+   * mint: the field then held about 0.002 at the same three sizes, three
+   * orders down, because a minted deposit is unbounded in time while an
+   * excreted one is bounded by what the bodies hold, and because the scent
+   * path lays a *density* where a conserved add lays a *quantity*. Nothing
+   * excretes now, so a voice is always minted, and 4.3 is the value for the
+   * pond that ships.
    */
   senseScale: number;
-  /**
-   * How many units of ground one unit of a signalling species is converted
-   * *with*, spent out of the body's own gut. See `docs/energy-chemistry-plan.md`
-   * §6b and `Sim.runDigestion`.
-   *
-   * 0 is what phase 3 shipped: an uptake row eats its species raw, which is
-   * "eating scent" and is the thing §6b calls wrong. Above it the ground is a
-   * reagent, not a catalyst — a body converts species 0, 1 and 3 into energy
-   * only by pairing them with ground it has swallowed, one budget across the
-   * three, so a body with a little ground must choose what to spend it on and
-   * one unit cannot unlock everything. Energy is the co-substrate everyone
-   * can already use, and the others are mass nobody can touch without it.
-   *
-   * A dial and continuous, because that is what keeps the gradient: every
-   * unit of ground a body swallows unlocks a proportional unit of something
-   * else, so a body with a little capability for a species does a little
-   * better than one with none and selection has a slope to climb. Forcing a
-   * hard requirement is what makes machinery worthless until complete, which
-   * is the trap §6b is written around.
-   *
-   * It buys access, never amplification — conservation still holds, the
-   * ground spent lands in the tank alongside what it unlocked. What a
-   * catabolist gains is a pool its competitors cannot reach, and the pool is
-   * largest exactly where other bodies are dense and the ground is grazed out.
-   * The slider stops at 1, which is a choice about how expensive scent should
-   * be and not a bound in the mechanism.
-   */
-  catCoSubstrate: number;
   /**
    * How fast the gut turns into the tank, per second, per species.
    *
    * Mass action on what a body is holding, so a gut empties on an exponential
    * and never overshoots; the last crumb snaps to zero so that it does empty.
-   * The ground converts at this rate flat — it is the thing everyone can use
-   * raw, which is what makes it the ground — and the other three convert at
-   * this rate scaled by the body's uptake row for that species, and only as
-   * far as the ground in its gut will pair with them (`catCoSubstrate`). A
-   * body whose recipe cannot touch a species converts none of it, and it
-   * stays in the gut occupying the room that bounds the next mouthful until
-   * excretion clears it.
+   * One species, flat: a body eats the ground and the ground is the thing
+   * everyone can use raw, which is what makes it the ground. There used to be
+   * a per-species recipe and a co-substrate to pair it with, and both went
+   * when a mouthful stopped being a sample of the water.
    *
    * Bounded by room in the tank, because a full body has nowhere to put what
    * it digests, and matter that had nowhere to go would have to be destroyed.
@@ -1158,7 +1287,7 @@ export interface Params {
   gutSize: number;
   /**
    * How many patches the ground is laid down in, at the same total mass.
-   * 0 spreads it over the whole disk, which is what every preset does.
+   * 0 spreads it over the whole disk, which is what every preset used to do.
    *
    * A `Params` field rather than a runner flag so that it can be a *sweep
    * axis*: "does the pond develop differently when food is somewhere rather
@@ -1170,12 +1299,18 @@ export interface Params {
    * question; against a uniform one at the same total it compares structure,
    * which is. For less food, move `ambientEnergy`.
    *
-   * Read once, at setup, by `pond/ground.ts` — and note what the pond already
-   * does with it: `Fields.grow` skips a cell at zero, so a patch grazed bare
-   * only comes back by diffusion from a living neighbour, and a region cleared
-   * outright stays dead. That is regeneration with a history rather than a
-   * refill timer, which is most of what §6 wants from a reaction-diffusion
-   * ground, for free.
+   * Read by `Energy.configure` every frame and acted on when it changes, so
+   * moving the slider re-lays the dish under whatever is standing on it. It
+   * used to be read once at setup by the headless runner alone, which is why
+   * the page had never seen a patch and why a half-saturation constant like
+   * `ksg` was inert: on a uniform dish every body faces the same density
+   * everywhere, and a scavenger and a grazer are the same animal.
+   *
+   * Note what the pond already does with the structure: `Fields.grow` skips a
+   * cell at zero, so a patch grazed bare only comes back by diffusion from a
+   * living neighbour, and a region cleared outright stays dead. That is
+   * regeneration with a history rather than a refill timer, which is most of
+   * what §6 wants from a reaction-diffusion ground, for free.
    */
   groundPatches: number;
 }
@@ -1209,6 +1344,7 @@ export function defaultParams(): Params {
     wireTaut: 1.08,
     wireSnap: 3,
     contactCost: 0,
+    wireTug: 0.3,
     wireMinRest: 48,
     wireShrink: 0.2,
     eraMass: 0.45,
@@ -1234,8 +1370,9 @@ export function defaultParams(): Params {
     metabolicWave: 1.2,
     metabolicWork: 0.05,
     metabolicDiffuse: 1,
-    metabolicGate: 0,
-    intake: 0.25,
+    metabolicGate: 0.1,
+    intake: 0.06,
+    gripSwing: 0.5,
     gaitSwell: 0.04,
     flockAlign: 5.5,
     flockSep: 48,
@@ -1249,7 +1386,7 @@ export function defaultParams(): Params {
     energyDiffuse: 0.05,
     energyRegrow: 0.04,
     fertilise: 0,
-    upkeep: 0.015,
+    upkeep: 0,
     swimCost: 0,
     forageAsk: 0,
     rescueTo: 0.9,
@@ -1262,25 +1399,24 @@ export function defaultParams(): Params {
     transportThrust: 0,
     learnRate: 0.02,
     learnCritic: 0.2,
+    learnReward: 0.5,
     learnTrace: 0.99,
     learnDiscount: 0.99,
+    reactorSplit: 0.7,
     inheritLearned: 1,
     uptakeVmax: 2,
     uptakeKs: 0.25,
-    rowCost: 0,
     hillN: 1,
     yDirect: 1,
     yEra: 1,
     upkeepExcrete: 0,
-    bodyValue: BODY_VALUE,
+    bodyValue: REWRITE_SHARE,
     eraCapRatio: ERA_CAP_RATIO,
     eraUpkeepRatio: ERA_UPKEEP_RATIO,
-    excreteRate: 1,
     senseScale: SENSE_SCALE,
-    catCoSubstrate: 0,
     digestRate: 12,
     gutSize: 1,
-    groundPatches: 0,
+    groundPatches: 24,
   };
 }
 
@@ -1322,15 +1458,17 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'metabolicBase', label: 'Basal enzyme', min: 0, max: 0.2, step: 0.0005 },
   { key: 'metabolicWave', label: 'Stroke half-point', min: 0.1, max: 12, step: 0.1 },
   { key: 'metabolicWork', label: 'Stroke cost', min: 0, max: 1, step: 0.005 },
-  { key: 'intake', label: 'Fuel intake (seed)', min: 0.2, max: 6, step: 0.1 },
+  { key: 'intake', label: 'Fuel intake rate (seed)', min: 0, max: 0.2, step: 0.002 },
   { key: 'metabolicDiffuse', label: 'Broadcast', min: 0, max: 8, step: 0.02 },
   { key: 'metabolicGate', label: 'Speak above (seed)', min: 0, max: 6, step: 0.05 },
+  { key: 'gripSwing', label: 'Grip swing (D)', min: 0, max: 1, step: 0.02 },
   { key: 'gaitSwell', label: 'Gait swell', min: 0, max: 0.8, step: 0.01 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
   { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },
   { key: 'snapRadius', label: 'Snap reach', min: 4, max: 48, step: 1 },
   { key: 'snapArc', label: 'Snap arc', min: 0.08, max: 1.2, step: 0.02 },
   { key: 'wireShrink', label: 'Wire shrink', min: 0.1, max: 3, step: 0.05 },
+  { key: 'wireTug', label: 'Wire tug (flux)', min: 0, max: 1, step: 0.02 },
   { key: 'wireMinRest', label: 'Wire min length', min: 8, max: 48, step: 1 },
   { key: 'springK', label: 'Spring stiffness', min: 0, max: 80, step: 0.5 },
   { key: 'springDamp', label: 'Rope damp', min: 0, max: 120, step: 1 },
@@ -1372,12 +1510,13 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'transportQuantum', label: 'Transport quantum', min: 0, max: 1, step: 0.05 },
   { key: 'learnRate', label: 'Learn rate', min: 0, max: 0.02, step: 0.0005 },
   { key: 'learnCritic', label: 'Learn critic', min: 0, max: 0.2, step: 0.005 },
+  { key: 'learnReward', label: 'Teacher: level -> rate', min: 0, max: 1, step: 0.05 },
   { key: 'learnTrace', label: 'Learn trace decay', min: 0.5, max: 0.995, step: 0.005 },
   { key: 'learnDiscount', label: 'Learn discount', min: 0.5, max: 0.995, step: 0.005 },
+  { key: 'reactorSplit', label: 'Reactor split at rewrite', min: 0, max: 1, step: 0.05 },
   { key: 'inheritLearned', label: 'Inherit learned', min: 0, max: 1, step: 0.05 },
   { key: 'uptakeVmax', label: 'Uptake rate', min: 0, max: 4, step: 0.05 },
   { key: 'uptakeKs', label: 'Uptake half-sat', min: 0.01, max: 2, step: 0.01 },
-  { key: 'rowCost', label: 'Expression row cost', min: 0, max: 0.02, step: 0.0005 },
   { key: 'hillN', label: 'Hill coefficient', min: 1, max: 4, step: 0.1 },
   { key: 'yDirect', label: 'Direct uptake yield', min: 0, max: 1, step: 0.05 },
   { key: 'yEra', label: 'Era uptake yield', min: 0, max: 4, step: 0.05 },
@@ -1385,9 +1524,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'bodyValue', label: 'Body value', min: 0.5, max: 2, step: 0.05 },
   { key: 'eraCapRatio', label: 'Era tank ratio', min: 1, max: 4, step: 0.1 },
   { key: 'eraUpkeepRatio', label: 'Era upkeep ratio', min: -1, max: 2, step: 0.05 },
-  { key: 'excreteRate', label: 'Excrete rate', min: 0, max: 2, step: 0.02 },
   { key: 'senseScale', label: 'Sense scale', min: 0.001, max: 8, step: 0.001 },
-  { key: 'catCoSubstrate', label: 'Catabolism needs ground', min: 0, max: 1, step: 0.05 },
   { key: 'digestRate', label: 'Digest rate', min: 0, max: 40, step: 0.5 },
   { key: 'gutSize', label: 'Gut size', min: 0.1, max: 4, step: 0.1 },
   { key: 'groundPatches', label: 'Ground patches', min: 0, max: 128, step: 1 },

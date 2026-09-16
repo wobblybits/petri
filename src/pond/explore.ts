@@ -21,7 +21,7 @@
  *      trade off, so there is no single best.
  *   4. **Conditional effects**, because the other three are linear and additive
  *      and the interesting couplings here are none of those things.
- *      `senseScale` is not correlated with `excreteRate`; it *means* something
+ *      `digestRate` is not correlated with `uptakeVmax`; it *means* something
  *      different depending on it. A linear method reports such a parameter as
  *      weak and says nothing about the conditionality, which is exactly the
  *      wrong conclusion and exactly the mistake this pipeline exists to stop.
@@ -394,8 +394,8 @@ export interface Conditional {
  * that exists in half the parameter space and not the other half. Split the
  * runs at the median of the condition, correlate the driver with the outcome
  * within each half, and report the difference. A large swing is an
- * interaction, and it is exactly the shape of `senseScale` mattering only
- * where `excreteRate` has switched the minting off.
+ * interaction, and it is exactly the shape of `digestRate` mattering only
+ * where `uptakeVmax` has put something in a gut to digest.
  *
  * A median split rather than a fitted product term because it needs no
  * assumption about the shape of the dependence — a threshold, a switch and a

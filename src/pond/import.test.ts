@@ -28,7 +28,7 @@ function seed(path: string, count: number, opts: { parents?: boolean } = {}): nu
   try {
     for (let i = 0; i < count; i++) {
       const params = defaultParams();
-      params.excreteRate = 0.01 * i;
+      params.digestRate = 0.01 * i;
       const id = db.startRun({
         seed: i,
         seconds: 60,
@@ -42,7 +42,7 @@ function seed(path: string, count: number, opts: { parents?: boolean } = {}): nu
         commit: null,
         note: `run ${i}`,
         sweep: 'x',
-        point: { excreteRate: 0.01 * i },
+        point: { digestRate: 0.01 * i },
       });
       db.addSample(id, {
         t: 10, bodies: 100 + i, wires: 50, lines: 3, bornMean: 1, bornMax: 2, spawned: 0,

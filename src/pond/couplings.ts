@@ -40,25 +40,17 @@ export interface Coupling {
 }
 
 /*
- * Retired: `excreteRate` x `uptakeVmax`.
+ * Retired, all three: `excreteRate` x `senseScale`, x `deposit`, and x the
+ * producer's income.
  *
- * The species uptake rows used to follow `excreteRate`, so `uptakeVmax` metered
- * the ground alone in one arm and four species in the other — a different
- * mechanism at each level of the axis. Uptake is now one budget shared across
- * the four by what is standing in the cell, which is what the switch was
- * bought for, so `uptakeVmax` means the same thing at every level and the pair
- * is no longer coupled. Kept as a note because a coupling that quietly stops
- * being one is as misleading as one that is missed.
+ * They were the couplings of a pond where a body paid for its voice out of its
+ * tank, so the signal field was matter and its scale moved three orders
+ * between the two regimes. A body eats the ground and excretes nothing now, so
+ * a signal is always minted, `excreteRate` is gone, and there is no second
+ * regime for anything to be coupled across. Kept as a note because a coupling
+ * that quietly stops being one is as misleading as one that is missed.
  */
 export const COUPLINGS: readonly Coupling[] = [
-  {
-    axis: 'excreteRate',
-    constant: 'senseScale',
-    why:
-      'minted signal reads p90 ~4.3 at a body, conserved excretion ~0.002; ' +
-      'one scale leaves one arm reading three orders outside what phi can resolve',
-    fix: 'senseScale 4.3 when excreteRate is 0, ~0.002 when it is on; run the two regimes as arms',
-  },
   {
     axis: 'uptakeVmax',
     constant: 'digestRate',
@@ -72,12 +64,6 @@ export const COUPLINGS: readonly Coupling[] = [
     constant: 'gutSize',
     why: 'nothing fills a gut at uptakeVmax 0, so gutSize bounds nothing there and bounds every mouthful above it',
     fix: 'read gutSize within a metered arm, never across the uptakeVmax 0 boundary',
-  },
-  {
-    axis: 'excreteRate',
-    constant: 'deposit',
-    why: 'the minted deposit is off whenever excretion is on, so deposit is inert above zero',
-    fix: 'do not sweep deposit against excreteRate; it only exists in the minted arm',
   },
   {
     axis: 'groundPatches',
@@ -131,15 +117,6 @@ export const COUPLINGS: readonly Coupling[] = [
     why: 'fertilise scales the regrowth rate, and scaling zero is zero',
     fix: 'fertilise is only readable where energyRegrow is non-zero',
     unless: { key: 'fertilise', is: 0 },
-  },
-  {
-    axis: 'eraUpkeepRatio',
-    constant: 'excreteRate',
-    why:
-      'a seeded Era earns ~0.003/s from the producer discount at -0.2 and nothing at all at 1, ' +
-      'and excreteRate is what it spends making ground; above its income it starves',
-    fix: 'choose excreteRate against the producer income each arm actually has',
-    unless: { key: 'excreteRate', is: 0 },
   },
   {
     axis: 'grip',

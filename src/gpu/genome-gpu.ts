@@ -297,7 +297,7 @@ export class GenomeGpu {
     groundScale: number,
     energyCh: number,
     senseScale: number,
-    learn: { rate: number; critic: number; trace: number; discount: number; maxWeight: number },
+    learn: { rate: number; critic: number; trace: number; discount: number; maxWeight: number; reward: number; dtInv: number },
   ): Promise<boolean> {
     if (!this.submit(samples, n, nei, groundScale, energyCh, senseScale, learn)) return false;
     return this.collect();
@@ -311,7 +311,7 @@ export class GenomeGpu {
     groundScale: number,
     energyCh: number,
     senseScale: number,
-    learn: { rate: number; critic: number; trace: number; discount: number; maxWeight: number },
+    learn: { rate: number; critic: number; trace: number; discount: number; maxWeight: number; reward: number; dtInv: number },
   ): boolean {
     const device = this.device;
     if (!this.ready || !device || !this.pipeline) return false;
@@ -340,6 +340,8 @@ export class GenomeGpu {
       f32[14] = learn.discount;
       f32[15] = learn.maxWeight;
       f32[16] = HEAD_SCALE.anchor;
+      f32[17] = learn.reward;
+      f32[18] = learn.dtInv;
       device.queue.writeBuffer(this.uniform!, 0, u);
       device.queue.writeBuffer(this.hPrev!, 0, this.hData.buffer, this.hData.byteOffset, n * 4 * 4);
       device.queue.writeBuffer(
@@ -427,7 +429,7 @@ export class GenomeGpu {
    * moved to the device — usually zero.
    *
    * That is fine for the simulation and wrong for anything that *measures*
-   * it. `docs/plasticity-plan.md` phase 5 says as much: an instrument either
+   * it: an instrument either
    * reads this back deliberately or is quietly sampling rewrite parents. This
    * is the deliberate read — the headless harvest uses it before storing a
    * net, since a stored genome without what its bodies learned is a record of

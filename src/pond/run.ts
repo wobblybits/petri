@@ -7,7 +7,6 @@ import { fieldGpu } from '../gpu/field-gpu.ts';
 import { genomeGpu } from '../gpu/genome-gpu.ts';
 import { nativeSolver } from '../native/solver.ts';
 import { captureNets, plantNet, type CapturedNet } from './capture.ts';
-import { layGround } from './ground.ts';
 import { measureDiversity, type Diversity } from './measure.ts';
 import { openWebGpu } from './webgpu-node.ts';
 import { encodeNet } from './net-blob.ts';
@@ -163,14 +162,6 @@ export async function runPond(
         throw new Error(`pond: --gpu on, but no device: ${open.error ?? fieldGpu.lastError}`);
       }
     }
-    /*
-     * After the device is open, not before. A non-uniform ground crosses as
-     * deferred conserved adds, and `deferAdds` is switched on by
-     * `openFieldGpu` — laid down earlier it would land in the host's mirror,
-     * which the shader does not read, and the GPU pond would start barren.
-     */
-    layGround(sim, params.groundPatches);
-
     if (spec.seeds.length > 0) {
       const cx = sim.w * 0.5;
       const cy = sim.h * 0.5;

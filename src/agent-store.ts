@@ -1,5 +1,5 @@
 import { KIND_CON, KIND_DUP, KIND_ERA } from './native/solver.ts';
-import { CHEM_LEN, CHEM_SPECIES, CRITIC_LEN, PLASTIC_LEN, ROW_COUNT, STATE_DIMS as STATE_W } from './chem-layout.ts';
+import { CHEM_LEN, CRITIC_LEN, PLASTIC_LEN, STATE_DIMS as STATE_W } from './chem-layout.ts';
 import type { AgentKind } from './agents.ts';
 
 /*
@@ -144,6 +144,13 @@ export class AgentStore {
    */
   starve!: Float64Array;
   gaitWave!: Float64Array;
+  /**
+   * This frame's grip multiplier, from the reset inhibitor **D**.
+   *
+   * `-1` to `+1`, the same bounded signed form as `gaitWave`, and driven by a
+   * different species on purpose. See `Sim.advanceGait`.
+   */
+  gaitGrip!: Float64Array;
   gaitAnchor!: Float64Array;
   anchor!: Float64Array;
   /** Whole units this body sends in one transfer. See `params.transportQuantum`. */
@@ -251,25 +258,6 @@ export class AgentStore {
   emitAll!: Float64Array;
   tasteAll!: Float64Array;
   /**
-   * This frame's expression vector: how the body divides one unit of chemical
-   * effort across the reaction table's `ROW_COUNT` rows. See `expressVector`
-   * and `docs/energy-chemistry-plan.md` §3.
-   *
-   * Materialised here for the same reason `emitAll` is — two passes want it in
-   * the same frame, excretion and uptake, and recomputing thirty-two
-   * multiply-adds a body twice is the shape of cost this store exists to
-   * remove.
-   *
-   * Computed on the host on **both** field paths, because it is a pure
-   * function of `chem` and `h` and `unpackGenome` brings `h` back every frame.
-   * That is what keeps the whole reaction table off the genome shader: it
-   * needs no new binding and no new output slot, and the arithmetic is a
-   * rounding error beside the passes that already run here.
-   */
-  expressAll!: Float64Array;
-  /** What this body excreted this frame, per species. Absolute, not a rate. */
-  excreteAll!: Float64Array;
-  /**
    * What this body has swallowed and not yet turned into anything, per species.
    *
    * The tank used to be the only thing inside a body, and it is one scalar: a
@@ -280,12 +268,13 @@ export class AgentStore {
    * transmutation, and it is why waste meant nothing here: there was no such
    * thing as an un-metabolised substance inside a body.
    *
-   * This is that substance. The harvest swallows a sample of the water it
-   * cannot choose (see `runHarvestPlan`), so a body necessarily takes in
-   * species it may have no use for; `Sim.runDigestion` moves out what its
-   * recipe can convert, and `Sim.runExcretion` dumps the rest back as itself.
-   * Waste is therefore *defined* rather than declared — it is the gap between
-   * the sample and the recipe — and no gene has to nominate it.
+   * This is that substance: what a body has swallowed and not yet digested.
+   * It used to be a sample of all four channels, so a body took in species it
+   * had no use for and `Sim.runExcretion` dumped the rest back. A body eats
+   * the ground and nothing else now, so a gut holds one thing and its owner
+   * can always digest it — which is why there is no excretion pass at all.
+   * Only `CH.energy` is ever non-zero; the other three slots are waiting to be
+   * taken out (`docs/metabolism-spec.md` §8).
    *
    * Not on the genome shader, and not in the net blob — unlike `h`, which
    * `capture` carries. A net taken out of the pond and put back starts hungry
@@ -330,6 +319,11 @@ export class AgentStore {
   /** The critic's weights on `h`, and its bias. See `CRITIC_LEN`. */
   criticAll!: Float64Array;
   /** Last frame's value estimate, for the temporal-difference error. */
+  /**
+   * Last frame's `IN_FULL`, for the rate half of the teacher. See
+   * `params.learnReward`.
+   */
+  prevFull!: Float64Array;
   prevValue!: Float64Array;
   /**
    * Whether this body has learned anything at all yet.
@@ -537,6 +531,7 @@ export class AgentStore {
     this.intake[slot] = 0;
     this.starve[slot] = 0;
     this.gaitWave[slot] = 0;
+    this.gaitGrip[slot] = 0;
     this.gaitAnchor[slot] = 0;
     this.anchor[slot] = 0;
     this.transportQuantum[slot] = 0;
@@ -557,21 +552,20 @@ export class AgentStore {
     this.traceAll.fill(0, slot * PLASTIC_LEN, slot * PLASTIC_LEN + PLASTIC_LEN);
     this.criticAll.fill(0, slot * CRITIC_LEN, slot * CRITIC_LEN + CRITIC_LEN);
     this.prevValue[slot] = 0;
+    this.prevFull[slot] = 0;
     this.plasticOn[slot] = 0;
     this.markLearn(slot);
     this.emitAll.fill(0, slot * 4, slot * 4 + 4);
     this.tasteAll.fill(0, slot * 4, slot * 4 + 4);
-    this.expressAll.fill(0, slot * ROW_COUNT, slot * ROW_COUNT + ROW_COUNT);
-    this.excreteAll.fill(0, slot * CHEM_SPECIES, slot * CHEM_SPECIES + CHEM_SPECIES);
-    this.gut.fill(0, slot * CHEM_SPECIES, slot * CHEM_SPECIES + CHEM_SPECIES);
+    this.gut[slot] = 0;
   }
 
-  /** Everything this body is holding undigested, across all four species. */
+  /**
+   * What this body is holding undigested. One number: a body eats the ground
+   * and nothing else, so there is one thing a gut can hold.
+   */
   gutTotal(slot: number): number {
-    const o = slot * CHEM_SPECIES;
-    let n = 0;
-    for (let c = 0; c < CHEM_SPECIES; c++) n += this.gut[o + c];
-    return n;
+    return this.gut[slot];
   }
 
   private growTo(newCapacity: number): void {
@@ -634,6 +628,7 @@ export class AgentStore {
     this.intake = growF64(this.intake);
     this.starve = growF64(this.starve);
     this.gaitWave = growF64(this.gaitWave);
+    this.gaitGrip = growF64(this.gaitGrip);
     this.gaitAnchor = growF64(this.gaitAnchor);
     this.anchor = growF64(this.anchor);
     this.transportQuantum = growF64(this.transportQuantum);
@@ -674,6 +669,7 @@ export class AgentStore {
     if (this.criticAll) newCritic.set(this.criticAll.subarray(0, live * CRITIC_LEN));
     this.criticAll = newCritic;
     this.prevValue = growF64(this.prevValue);
+    this.prevFull = growF64(this.prevFull);
     this.plasticOn = growU8(this.plasticOn);
     const newEmit = new Float64Array(newCapacity * 4);
     if (this.emitAll) newEmit.set(this.emitAll.subarray(0, live * 4));
@@ -681,14 +677,8 @@ export class AgentStore {
     const newTaste = new Float64Array(newCapacity * 4);
     if (this.tasteAll) newTaste.set(this.tasteAll.subarray(0, live * 4));
     this.tasteAll = newTaste;
-    const newExpress = new Float64Array(newCapacity * ROW_COUNT);
-    if (this.expressAll) newExpress.set(this.expressAll.subarray(0, live * ROW_COUNT));
-    this.expressAll = newExpress;
-    const newExcrete = new Float64Array(newCapacity * CHEM_SPECIES);
-    if (this.excreteAll) newExcrete.set(this.excreteAll.subarray(0, live * CHEM_SPECIES));
-    this.excreteAll = newExcrete;
-    const newGut = new Float64Array(newCapacity * CHEM_SPECIES);
-    if (this.gut) newGut.set(this.gut.subarray(0, live * CHEM_SPECIES));
+    const newGut = new Float64Array(newCapacity);
+    if (this.gut) newGut.set(this.gut.subarray(0, live));
     this.gut = newGut;
 
     this.capacity = newCapacity;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CH, CHANNELS } from './fields.ts';
 import { TASTE, bareBody, seedChem, type Agent } from './agents.ts';
-import { defaultParams } from './params.ts';
+import { defaultParams, type Params } from './params.ts';
 import { Sim, mixScent } from './sim.ts';
 import { nativeSolver } from './native/solver.ts';
 
@@ -43,9 +43,22 @@ function scarLeftOf(sim: Sim, x: number): void {
   }
 }
 
+/**
+ * Flat ground under every one of these: this file *is* a ground layout — it
+ * scrapes a scar across the dish and asks a body to leave it — and it can only
+ * mean that against a dish that was full everywhere else. The shipped patchy
+ * dish would put the scar wherever the blobs were not, and a body already
+ * standing on nothing has nothing to swim out of.
+ */
+function tasteParams(): Params {
+  const params = defaultParams();
+  params.groundPatches = 0;
+  return params;
+}
+
 describe('the ground as something to smell', () => {
   it('reads a full cell as 1, whatever the capacity is set to', () => {
-    const params = defaultParams();
+    const params = tasteParams();
     const a = bareBody(seedChem('con', params));
     a.chem[TASTE + CH.energy] = 1;
     for (let k = 0; k < 4; k++) if (k !== CH.energy) a.chem[TASTE + k] = 0;
@@ -61,7 +74,7 @@ describe('the ground as something to smell', () => {
   });
 
   it('is silent about a world with no ground in it', () => {
-    const params = defaultParams();
+    const params = tasteParams();
     params.ambientEnergy = 0;
     params.spawnInterval = 0;
     const sim = new Sim(10000, 10000);
@@ -75,7 +88,7 @@ describe('the ground as something to smell', () => {
 
   it('swims out of a scar toward ground that still has something in it', async () => {
     await nativeSolver.init();
-    const params = defaultParams();
+    const params = tasteParams();
     params.spawnInterval = 0;
     params.upkeep = 0;
     params.rewriteDuration = 0;
@@ -112,7 +125,7 @@ describe('the ground as something to smell', () => {
   });
 
   it('lets avoidance work too, since taste is signed', () => {
-    const params = defaultParams();
+    const params = tasteParams();
     const a = bareBody(seedChem('con', params));
     for (let k = 0; k < 4; k++) a.chem[TASTE + k] = 0;
     a.chem[TASTE + CH.energy] = -2;

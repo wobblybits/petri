@@ -1,6 +1,6 @@
 import { defaultParams, type Params } from './params.ts';
 import { rewriteCost } from './energy.ts';
-import { CHANNELS } from './fields.ts';
+import { CH, CHANNELS } from './fields.ts';
 import type { Sim } from './sim.ts';
 
 /**
@@ -36,7 +36,7 @@ import type { Sim } from './sim.ts';
  * one place it runs, and it sets its own rate. That is the same arrangement
  * learning has, and for the same reason.
  *
- * `uptakeVmax` and `excreteRate` are pinned for a third reason, and it is
+ * `uptakeVmax` is pinned for a third reason, and it is
  * about isolation rather than noise. They switch the *whole* food path: above
  * zero a mouthful is a sample of four species landing in a gut, which a
  * recipe then digests, and what a body says leaves its tank conserved instead
@@ -46,7 +46,20 @@ import type { Sim } from './sim.ts';
  * *eating* says so by turning them on — `chemistry.test.ts` does, and it is
  * the file that owns them.
  *
- * Everything else is the shipping default, deliberately: pinning four dials
+ * `groundPatches` is pinned for a fourth reason, and it is the plainest of
+ * the four: it decides *where the food is*. The shipped dish gathers its mass
+ * into blobs over a quarter of the disk, so three quarters of it is bare —
+ * which means a body spawned at a coordinate a test picked is, four times out
+ * of five, standing on nothing. Every assertion about a body that eats, and
+ * every assertion about a body that moves without being steered, is then
+ * about whether that coordinate happened to land in a patch. Flat is not the
+ * pond; it is the control, and it is what an isolated mechanic needs
+ * underneath it for the same reason a bench pins everything but its axis.
+ *
+ * A test about foraging says so by asking for patches: `pond/ground.test.ts`
+ * and the forage measures in `pond/measure.test.ts` do, and they own it.
+ *
+ * Everything else is the shipping default, deliberately: pinning five dials
  * to keep a measurement honest is different from running the suite against a
  * pond nobody ships.
  */
@@ -55,7 +68,7 @@ export function fixedParams(): Params {
   params.learnRate = 0;
   params.metabolicRate = 0;
   params.uptakeVmax = 0;
-  params.excreteRate = 0;
+  params.groundPatches = 0;
   return params;
 }
 
@@ -71,7 +84,9 @@ export function channelTotal(sim: Sim, ch: number): number {
 export function fieldTotal(sim: Sim): number {
   const d = sim.fields.data;
   let s = 0;
-  for (let k = 0; k < d.length; k++) s += d[k];
+  // The ground alone. A signal is not matter: nothing eats it, nothing
+  // excretes it, and `params.deposit` mints it out of nothing on purpose.
+  for (let k = CH.energy; k < d.length; k += CHANNELS) s += d[k];
   return s;
 }
 
@@ -96,11 +111,12 @@ export function fieldTotal(sim: Sim): number {
  * costs shares up front; an erase or an annihilation is free to start and
  * pays out on commit.
  *
- * The whole field, every channel: rent leaves through the excretion rows, so
- * a Con pays it in `conP` and `aux`, and a total that counted the ground
- * alone would read that as matter going missing. Matter is matter whatever
- * molecule it is in. And the gut, which is in neither a tank nor the ground
- * and is not nothing — see `Sim.totalGut`.
+ * The field's **ground channel only**. A body eats the ground and nothing
+ * else, and it excretes nothing at all, so the three signalling channels never
+ * hold matter — they are minted by `params.deposit` and smelled, and counting
+ * them would read every shout as creation. One substance, one column. And the
+ * gut, which is in neither a tank nor the ground and is not nothing — see
+ * `Sim.totalGut`.
  */
 export function pondMatter(sim: Sim, bodyValue: number): number {
   let held = 0;

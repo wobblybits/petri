@@ -36,7 +36,7 @@ import {
   WireAdjacency,
 } from './energy.ts';
 import { Sim } from './sim.ts';
-import { type Params } from './params.ts';
+import { defaultParams, type Params } from './params.ts';
 import { loadPreset } from './presets.ts';
 import { CH } from './fields.ts';
 
@@ -233,7 +233,7 @@ describe('harvest slots', () => {
   });
 
   /*
-   * Monod uptake. `docs/energy-chemistry-plan.md` §4.
+   * Monod uptake.
    *
    * Two claims worth a test each: at `cap` 0 nothing whatsoever changes, and
    * above it the id-order artifact — older bodies systematically eating first
@@ -990,7 +990,7 @@ describe('EnergyGrid.forEachStored', () => {
 
 describe('conservation', () => {
   /*
-   * `docs/energy-chemistry-plan.md` §5, as one assertion:
+   * Conservation, as one assertion:
    *
    *   > The dish is driven — feed in, kill out, patterned.
    *   > The bodies are conservative — no reaction a body runs creates or
@@ -1130,11 +1130,23 @@ describe('conservation', () => {
     expect(worst / before, `drifted ${worst} of ${before}`).toBeLessThan(3e-4);
   });
 
-  it('destroys the rent when upkeepExcrete is off, which is today', () => {
-    // The dial's other end, so the test above cannot pass by the invariant
-    // being vacuous. Rent vanishing is what the pond does now.
+  it('destroys what the reactor was fed when upkeepExcrete is off, which is today', () => {
+    /*
+     * The dial's other end, so the test above cannot pass by the invariant
+     * being vacuous.
+     *
+     * It used to be the rent that vanished here. There is no rent — `upkeep`
+     * ships at 0 — so what crosses out of the books now is the food `intake`
+     * routes to the reactor, whose pools are in their own units and outside
+     * them. That is the same road and the same dial, and at 0 it is destroyed
+     * rather than paid onto the ground. The reactor has to be on for there to
+     * be anything to destroy, which is what the suite's default pins off.
+     */
     const p = conservativeParams();
     p.upkeepExcrete = 0;
+    const shipped = defaultParams();
+    p.metabolicRate = shipped.metabolicRate;
+    p.uptakeVmax = shipped.uptakeVmax;
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', p);
     const before = pondMatter(sim, p.bodyValue);
