@@ -45,9 +45,19 @@ function learnParams(): Params {
   // are the same numbers on both sides of the comparison.
   params.groundPatches = 0;
   params.energyRegrow = 0;
+  params.energyDiffuse = 0;
   params.decay = 0;
   params.diffuse = 0;
   params.deposit = 0;
+  /*
+   * Rich enough that thirty frames of grazing cannot dent it. The bodies below
+   * are pinned in place but they still eat, and once the shipped
+   * `ambientEnergy` halved they were pulling their own cells down inside the
+   * run — so the two ponds' harvests, which are different kernels, started
+   * from the same dish and ended on different ones, and what this compares is
+   * the learning rule rather than the harvest.
+   */
+  params.ambientEnergy = 20;
   // The reactor swings every wire's rest length, which moves bodies and is not
   // what this is asking about.
   params.metabolicRate = 0;

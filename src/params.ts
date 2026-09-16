@@ -672,6 +672,18 @@ export interface Params {
    * Free energy in an unvisited cell. A cell holds a whole extra, so an agent
    * arriving on untouched ground fills in one step and the grid, not the
    * charging rate, is what the net is competing over.
+   *
+   * **Halved, with `energyRegrow` and `energyDiffuse`, so that the patches
+   * stay visible.** The three of them together decide whether the dish the
+   * seed lays down survives being lived on, and at the old settings it did not:
+   * measured over three seeds, a dish that starts 70% bare with a spatial
+   * coefficient of variation of 1.64 was flat inside thirty seconds and stayed
+   * that way — 15% bare and cv 1.50 at two minutes, *below* what it was seeded
+   * with. Diffusion put a crumb in every cell and regrowth, which is
+   * proportional to what is already there, inflated every crumb to capacity.
+   * A patchy seed and a uniform pond.
+   *
+   * See `energyDiffuse` for the three settings measured and what each bought.
    */
   ambientEnergy: number;
   /**
@@ -683,6 +695,32 @@ export interface Params {
    * it, and nothing to forage toward. This is the number that decides how far
    * a grazed patch can draw on its neighbours, and so how big a dead zone a
    * net can make before it has to move.
+   *
+   * **This, `energyRegrow` and `ambientEnergy` are one setting in three
+   * numbers**, and they were set when the dish was uniform and nothing about
+   * them showed. On a patchy dish they decide whether the patches survive
+   * being lived on. Three seeds, two minutes, 400 founders — `bare` is the
+   * share of the disk under a twentieth of capacity, `cv` the spatial
+   * coefficient of variation of the ground, `forage` whether bodies stand on
+   * better-than-average ground:
+   *
+   *     ambient/regrow/diffuse   bare    cv   bodies  lines  forage
+   *     1.0  / .04 / .05         0.15  1.50     623    192    1.19
+   *     0.5  / .02 / .006        0.28  2.94     425    172    1.65
+   *     0.4  / .01 / .002        0.37  3.50     386    142    1.09
+   *
+   * The middle row ships. The seeded dish is cv 1.64, so the old settings end
+   * *below* what they started with — washed flat — while these end well above
+   * it: the structure at two minutes is not the seed surviving, it is grazing
+   * carving new holes faster than the ground closes them.
+   *
+   * The bottom row is not simply more of a good thing, which is why it is here
+   * and not shipped. It has the barest dish and the highest contrast and the
+   * *worst* foraging — under 1, so bodies are on worse ground than average —
+   * and it loses a quarter of the founder lines. Past some point there is not
+   * enough food to be worth finding, the clusters are evident and nothing is
+   * standing on them. The middle row is where the contrast doubles and the
+   * bodies are most clearly *on* it.
    */
   /**
    * Gray-Scott feed and kill, between the two signal channels. Both 0 = off.
@@ -721,6 +759,12 @@ export interface Params {
    * recolonised from a neighbour — grazing to the floor makes a scar that
    * heals from its rim at the speed `energyDiffuse` sets. 0 turns the ground
    * back into the seam of ore it used to be.
+   *
+   * Halved with the other two; the table on `energyDiffuse` is the measurement
+   * for all three. This is the one that does the filling: diffusion only has
+   * to put a crumb in a cell, and logistic growth — proportional to what is
+   * already there — takes the crumb the rest of the way to capacity. Lowering
+   * the spread alone leaves every cell reached and then filled.
    */
   energyRegrow: number;
   /**
@@ -1446,11 +1490,11 @@ export function defaultParams(): Params {
     soupCount: 10000,
     spawnInterval: 0.5,
     energyCell: 40,
-    ambientEnergy: 1.0,
+    ambientEnergy: 0.5,
     reactFeed: 0,
     reactKill: 0,
-    energyDiffuse: 0.05,
-    energyRegrow: 0.04,
+    energyDiffuse: 0.006,
+    energyRegrow: 0.02,
     fertilise: 0,
     upkeep: 0,
     swimCost: 0,

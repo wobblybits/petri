@@ -727,6 +727,16 @@ describe('steering: WASM against the JS reference', () => {
     // The gait is a second source of motion and not one of the ports under
     // test, so it comes off with the swim noise.
     params.metabolicRate = 0;
+    /*
+     * And the ground is flat here, which `fixedParams` already pins — said
+     * again by name because the *richness* matters too and does not come from
+     * there. A leaner dish makes a body's steering depend more sharply on
+     * where it is standing, which is the same divergence amplifier the gait
+     * and the tank's grip on flocking were taken off for: the two copies run
+     * forward independently, so anything that couples steering to state
+     * multiplies a one-bit disagreement instead of leaving it local.
+     */
+    params.ambientEnergy = 4;
     params.wireShrink = 0.9;
     params.sense = 220;
     params.stepSpeed = 30;

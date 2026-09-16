@@ -31,6 +31,14 @@ import {
  * down to the bit — and the one about refusal.
  */
 
+/**
+ * `frames` is frames, not seconds — 400 of them is under seven seconds, and
+ * what every caller needs out of it is a pond with at least one net in it to
+ * store. That is a *marginal* thing to ask of a short pond, and it got more
+ * marginal when `ambientEnergy` halved: two of these were asking 60 bodies for
+ * 120 frames, which is two seconds, and came back with nothing to capture. Any
+ * caller that only needs "a net" should ask for the 120/400 pond the rest use.
+ */
 function learningPond(soup: number, frames: number): { sim: Sim; params: Params } {
   const params = fixedParams();
   params.soupCount = soup;
@@ -83,7 +91,7 @@ describe('net blob', () => {
   });
 
   it('names the header dimensions this build compiled with', () => {
-    const { sim } = learningPond(60, 120);
+    const { sim } = learningPond(120, 400);
     const header = readHeader(encodeNet(captureNets(sim)[0].data));
     expect(header.layout).toEqual({
       chem: CHEM_LEN,
@@ -101,7 +109,7 @@ describe('net blob', () => {
   });
 
   it('refuses a blob whose genome layout has moved', () => {
-    const { sim } = learningPond(60, 120);
+    const { sim } = learningPond(120, 400);
     const blob = encodeNet(captureNets(sim)[0].data);
     const len = new DataView(blob.buffer, blob.byteOffset, blob.byteLength).getUint32(0, true);
     const header = JSON.parse(new TextDecoder().decode(blob.subarray(4, 4 + len)));
@@ -127,7 +135,7 @@ describe('net blob', () => {
     // `sqlite3` hands back from its shared read buffer: a view at whatever
     // offset the row landed on. A `Float64Array` cannot be built over an odd
     // one, so the decoder has to notice.
-    const { sim } = learningPond(60, 200);
+    const { sim } = learningPond(120, 400);
     const net = captureNets(sim)[0];
     const blob = encodeNet(net.data);
     const shifted = new Uint8Array(blob.byteLength + 3);
