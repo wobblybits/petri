@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { REACT_A, REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
+import { REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
 import { REWRITE_SHARE } from './energy.ts';
 import { defaultParams, type Params } from './params.ts';
 import { loadPreset } from './presets.ts';
@@ -22,14 +22,25 @@ import { pondMatter } from './test-params.ts';
  * question and not one the suite can answer.
  */
 
-/** A dish with nothing in it but the reactor: no dish drive, no immigrants. */
+/**
+ * A dish with nothing in it but the reactor: no dish drive, no immigrants.
+ *
+ * It keeps the shipping food path, which it has to: the reactor is fed by
+ * *eating* now, so a dish with uptake off has no fuel and no clock at all.
+ * That is the point of the change and it is what this file is here to check.
+ */
 function gaitParams(): Params {
   const p = defaultParams();
   p.soupCount = 0;
   p.spawnInterval = 0;
-  p.energyRegrow = 0;
+  /*
+   * The ground regrows and diffuses, because the reactor is fed by eating.
+   * A body grazes the cell it is standing in, so without diffusion its own
+   * patch never refills and it drops below the fuel window inside a minute —
+   * measured, and it is correct behaviour rather than a bad rig, but it makes
+   * a bad rig for watching a clock.
+   */
   p.decay = 0;
-  p.diffuse = 0;
   p.deposit = 0;
   p.snapRadius = 0;
   p.stepSpeed = 0;
@@ -42,10 +53,11 @@ function gaitParams(): Params {
   return p;
 }
 
+/** The doc's four: A is the gut, then the reactor's own three. */
 function speciesOf(sim: Sim, slot: number): { A: number; B: number; C: number; D: number } {
   const o = slot * REACT_SPECIES;
   const r = sim.agentStore.react;
-  return { A: r[o + REACT_A], B: r[o + REACT_B], C: r[o + REACT_C], D: r[o + REACT_D] };
+  return { A: sim.agentStore.gutTotal(slot), B: r[o + REACT_B], C: r[o + REACT_C], D: r[o + REACT_D] };
 }
 
 describe('the gait ships on', () => {
@@ -77,8 +89,13 @@ describe('the gait ships on', () => {
 });
 
 describe('the reactor', () => {
-  /** One fed, pinned body, watched for long enough to catch several cycles. */
-  function lone(p: Params, fullness = 1, frames = 1500) {
+  /**
+   * One pinned body on regrowing ground, watched long enough to catch several
+   * cycles. It is *not* fed by hand: the reactor runs on what it eats, and
+   * forcing the tank full would stop digestion — a body with no room to bank
+   * cannot convert, which is the satiety the chemistry plan builds three deep.
+   */
+  function lone(p: Params, frames = 1500) {
     const sim = new Sim(4000, 4000);
     loadPreset(sim, 'soup', p);
     const a = sim.spawn('con', 2000, 2000, 0, p, true)!;
@@ -91,7 +108,6 @@ describe('the reactor', () => {
     let first = -1;
     let last = -1;
     for (let f = 0; f < frames; f++) {
-      a.extra = a.energyCap * fullness;
       sim.step(1 / 60, p);
       const w = store.gaitWave[a.slot];
       if (f > frames * 0.4) {
@@ -110,64 +126,88 @@ describe('the reactor', () => {
              period: crossings > 1 ? (last - first) / (crossings - 1) / 60 : null };
   }
 
-  it('runs a limit cycle in B, C and D while A sits steady', () => {
+  it('runs a limit cycle in B, C and D, on food it has eaten', () => {
     /*
-     * The shape of the doc's reactor, and the thing its own python never
-     * checks. A is fed from outside and only feeds B, so its row decouples
-     * and it settles to `J / (k1 + decay)` whatever it started at; the
-     * oscillation is the loop B -> C -> D -| B. If A moved with the cycle
-     * this would be a different system than the one the constants were
-     * chosen for.
+     * The doc's reactor, and the consolidation: A is the gut, so the fuel is
+     * what the body swallowed off the grid rather than something it bought
+     * out of its tank. The oscillation is the loop B -> C -> D -| B.
      */
     const p = gaitParams();
     const r = lone(p);
     expect(r.crossings, 'the reactor settled instead of oscillating').toBeGreaterThan(2);
     expect(r.swing, 'the wave barely moved').toBeGreaterThan(1);
-
-    const before = speciesOf(r.sim, r.a.slot);
-    for (let f = 0; f < 120; f++) {
-      r.a.extra = r.a.energyCap;
-      r.sim.step(1 / 60, p);
-    }
-    const after = speciesOf(r.sim, r.a.slot);
-    // A within a whisker of where it was, across two seconds that carried a
-    // whole cycle of the other three.
-    expect(Math.abs(after.A - before.A), 'the fuel moved with the cycle').toBeLessThan(0.02 * before.A + 1e-6);
-    expect(before.A, 'the fuel never arrived').toBeGreaterThan(0.1);
-    // And it sits where the algebra says: J / (k1 + decay).
-    const want = (p.metabolicSupply * 1 * 1) / (p.metabolicFuel + p.metabolicDecay);
-    expect(after.A).toBeCloseTo(want, 1);
-    expect(after.B + after.C + after.D, 'the loop is empty').toBeGreaterThan(0.5);
+    const now = speciesOf(r.sim, r.a.slot);
+    expect(now.B + now.C + now.D, 'the loop is empty').toBeGreaterThan(0.5);
   });
 
-  it('has a fuel window with both edges', () => {
+  it('has no clock at all when there is nothing to eat', () => {
     /*
-     * The gate, and nothing had to be added to get it. A starving body sits
-     * below the Hopf boundary and is still; a fed one runs the cycle; and the
-     * period shortens as the fuel rises, so a full body strokes faster than a
-     * lean one. `metabolicFuel` carries the stability analysis this comes
-     * from and `metabolicSupply` places the tank on it.
+     * The whole of what the consolidation bought. The reactor used to buy its
+     * fuel out of the tank, so a body with a full tank on bare ground kept
+     * its gait; now the fuel *is* the gut, so the same body has no clock. The
+     * gait depends on eating rather than on having.
      */
     const p = gaitParams();
-    const starved = lone(p, 0.12);
-    const lean = lone(p, 0.5);
-    const fed = lone(p, 1);
-    expect(starved.swing, 'a starving body undulated').toBeLessThan(0.2);
-    expect(lean.swing, 'a half-full body was still').toBeGreaterThan(1);
-    expect(fed.swing, 'a fed body was still').toBeGreaterThan(1);
-    expect(fed.period!, 'a fed body did not stroke faster than a lean one').toBeLessThan(lean.period!);
+    p.energyRegrow = 0;
+    p.ambientEnergy = 0;
+    const sim = new Sim(1600, 1200, 128);
+    loadPreset(sim, 'soup', p);
+    sim.fields.data.fill(0);
+    const a = sim.spawn('con', sim.w * 0.5, sim.h * 0.5, 0, p, true)!;
+    a.pinned = true;
+    const store = sim.agentStore;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let f = 0; f < 900; f++) {
+      // A full tank throughout, and still nothing to run on.
+      a.extra = a.energyCap;
+      sim.step(1 / 60, p);
+      if (f > 600) {
+        const w = store.gaitWave[a.slot];
+        lo = Math.min(lo, w);
+        hi = Math.max(hi, w);
+      }
+    }
+    expect(store.gutTotal(a.slot), 'something was in the gut on a bare dish').toBeLessThan(1e-6);
+    expect(hi - lo, 'a body with a full tank and no food still had a clock').toBeLessThan(0.05);
   });
 
-  it('buys its fuel out of the tank and puts the price on the dish', () => {
+  it('has a fuel window, and a body routing nothing to its reactor is still', () => {
     /*
-     * The join to the economy, and the rule that makes it one: the reactor
-     * spends, and what it spends leaves through the same road rent does. A
-     * body that metabolises hard fertilises the cell it is standing in, so
-     * the pond's total does not move.
+     * The gate, and nothing had to be added to get it. Below the Hopf
+     * boundary the reactor sits empty and still; inside it runs the cycle.
+     * `intake` is what places a body on that boundary — the share of what it
+     * digests that it routes to its reactor rather than banking — so a
+     * lineage that banks everything has no clock, and one that routes enough
+     * has a stroke. `metabolicFuel` carries the analysis this comes from.
+     */
+    const p = gaitParams();
+    const miser = lone({ ...p, intake: 0 });
+    const fed = lone(p);
+    expect(miser.swing, 'a body routing nothing to its reactor undulated').toBeLessThan(0.2);
+    expect(fed.swing, 'a fed body was still').toBeGreaterThan(1);
+  });
+
+  it('puts what it routed to the reactor onto the dish', () => {
+    /*
+     * The join to the economy. The reactor's pools are in its own units and
+     * outside the pond's books — a reactor turns its pool over many times per
+     * unit of matter — so what crosses the boundary is the food a body routed
+     * into it, and that leaves through the same road rent uses. Metabolising
+     * is fertilising, and the dish's total does not move.
      */
     const p = gaitParams();
     p.upkeepExcrete = 1;
     p.bodyValue = REWRITE_SHARE;
+    /*
+     * The dish's drive off. `energyRegrow` is logistic growth and it *mints*
+     * — "the dish is driven, the bodies are conservative" is the split the
+     * chemistry plan commits to, and this assertion is about the second half.
+     * Diffusion stays on, because it only moves what is already there, and
+     * five seconds of grazing does not exhaust a cell that started at ambient.
+     */
+    p.energyRegrow = 0;
+    p.fertilise = 0;
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', p);
     const a = sim.spawn('con', sim.w * 0.5, sim.h * 0.5, 0, p, true)!;
@@ -179,7 +219,7 @@ describe('the reactor', () => {
       sim.step(1 / 60, p);
       worst = Math.max(worst, Math.abs(pondMatter(sim, p.bodyValue) - before));
     }
-    expect(a.extra, 'the reactor bought nothing').toBeLessThan(a.energyCap);
+    expect(sim.agentStore.react[a.slot * REACT_SPECIES + REACT_B], 'the reactor was never fed').toBeGreaterThan(0);
     // Float32 cells summed across the whole field, which is the floor
     // `chemistry.test.ts` gives its own conservation assertions.
     expect(worst).toBeLessThan(before * 1e-5);
@@ -338,17 +378,10 @@ describe('a chain', () => {
       sim.graph.connect(sim.agents, { id: bodies[i]!.id, slot: 'p' }, { id: bodies[i + 1]!.id, slot: 'l' }, sim.w, sim.h, p, sim.time);
     }
     const store = sim.agentStore;
-    const feed = () => {
-      for (const a of sim.agents.values()) a.extra = a.energyCap;
-    };
-    for (let f = 0; f < 900; f++) {
-      feed();
-      sim.step(1 / 60, p);
-    }
+    for (let f = 0; f < 900; f++) sim.step(1 / 60, p);
     const cross: number[][] = bodies.map(() => []);
     const was = bodies.map((b) => store.gaitWave[b!.slot]);
     for (let f = 0; f < 900; f++) {
-      feed();
       sim.step(1 / 60, p);
       for (let i = 0; i < n; i++) {
         const w = store.gaitWave[bodies[i]!.slot];
@@ -371,7 +404,19 @@ describe('a chain', () => {
         if (best !== null && best < period) d.push(best);
       }
       d.sort((x, y) => x - y);
-      if (d.length) lags.push(d[d.length >> 1]);
+      /*
+       * Signed, and wrapped onto (-period/2, period/2]. The phase runs
+       * negative at the shipped rate — an excitatory input advances a limit
+       * cycle rather than delaying it, so the receiver fires slightly before
+       * the sender and the pattern travels against the signal. Matching to
+       * the nearest *earlier* crossing would read that as a lag of nearly a
+       * whole period.
+       */
+      if (d.length) {
+        let v = d[d.length >> 1];
+        if (v > period / 2) v -= period;
+        lags.push(v);
+      }
     }
     /*
      * Interior wires only. The last body's principal is free, so it only ever
@@ -385,7 +430,6 @@ describe('a chain', () => {
     const spread = Math.max(...inner) - Math.min(...inner);
     let swing = { lo: Infinity, hi: -Infinity };
     for (let f = 0; f < 300; f++) {
-      feed();
       sim.step(1 / 60, p);
       const w = store.gaitWave[bodies[0]!.slot];
       swing = { lo: Math.min(swing.lo, w), hi: Math.max(swing.hi, w) };
@@ -393,67 +437,42 @@ describe('a chain', () => {
     return { lag, period, inner, spread, headSwing: swing.hi - swing.lo };
   }
 
-  it('free-runs uncoupled and locks with a lag when it is coupled', () => {
+  it('free-runs uncoupled and locks with a phase when it is broadcasting', () => {
     const free = lockOf(0);
     const locked = lockOf(defaultParams().metabolicDiffuse);
 
     /*
      * A lock is a *consistent* phase difference, not a small one. Uncoupled,
      * the offsets between neighbours are whatever the seeded catalyst levels
-     * left and they never converge, so they are scattered: measured, the
-     * interior wires read 18, 0 and 0 frames against a period of 101. Coupled
-     * at the shipped rate they read 10, 9 and 9 against 99. So the spread is
-     * what says whether the chain locked, and the lag says what it locked at.
+     * and each body's own grazing left, and they never converge: measured,
+     * the interior wires read 26, 27 and -21 frames against a period of 161.
+     * At the shipped rate they read 3, 7 and 4. So the spread says whether
+     * the chain locked and the phase says what it locked at.
      */
-    expect(free.spread, 'uncoupled bodies held a consistent offset anyway').toBeGreaterThan(8);
-    expect(locked.spread, 'the chain did not lock').toBeLessThan(4);
+    expect(free.spread, 'uncoupled bodies held a consistent offset anyway').toBeGreaterThan(15);
+    expect(locked.spread, 'the chain did not lock').toBeLessThan(7);
 
-    // And what it locked at is a wave: a tenth of a cycle a wire, which is
-    // neither synchrony nor a free run.
-    expect(locked.lag, 'no lag, so no wave').toBeGreaterThan(2);
-    expect(locked.lag, 'the chain synchronised instead of travelling').toBeLessThan(locked.period * 0.25);
-    expect(locked.headSwing, 'the coupled chain stopped oscillating').toBeGreaterThan(1);
+    // And what it locked at is a wave: several per cent of a cycle a wire,
+    // which is neither synchrony nor a free run.
+    expect(Math.abs(locked.lag), 'no phase, so no wave').toBeGreaterThan(2);
+    expect(Math.abs(locked.lag), 'the chain synchronised instead of travelling').toBeLessThan(locked.period * 0.25);
+    expect(locked.headSwing, 'the broadcasting chain stopped oscillating').toBeGreaterThan(1);
   });
 
-  it('flatlines when the broadcast is turned up past the reactor', () => {
+  it('synchronises rather than travelling when the broadcast is turned up', () => {
     /*
-     * The upper edge, and it is the reactor's. Broadcasting spends the very
-     * catalyst the sender's own loop runs on, so a chain shouted through
-     * loudly enough stops oscillating altogether rather than locking harder.
-     * That is why `metabolicDiffuse` ships nearer the bottom of its band than
-     * the top, and it is the reason there is a band at all.
+     * The upper regime, and it is worth pinning because the mechanism used to
+     * do the opposite. When the broadcast was gated on the wave and scaled in
+     * wave units, shouting through a chain drained the catalyst its senders
+     * ran on and every reactor flatlined. Mass action on the concentration is
+     * self-limiting instead — a body sends in proportion to what it has, so
+     * it cannot send itself empty — and the chain locks harder until the
+     * phase difference goes to nothing. That is the pond-wide pulse, and it
+     * is why the shipped rate is nearer the bottom of the range than the top.
      */
-    const p = gaitParams();
-    p.metabolicDiffuse = 8;
-    const sim = new Sim(4000, 4000);
-    loadPreset(sim, 'soup', p);
-    const bodies: ReturnType<Sim['spawn']>[] = [];
-    for (let i = 0; i < 6; i++) {
-      const a = sim.spawn('con', 1200 + i * 60, 2000, 0, p, true)!;
-      a.pinned = true;
-      bodies.push(a);
-    }
-    for (let i = 0; i + 1 < 6; i++) {
-      sim.graph.connect(sim.agents, { id: bodies[i]!.id, slot: 'p' }, { id: bodies[i + 1]!.id, slot: 'l' }, sim.w, sim.h, p, sim.time);
-    }
-    const store = sim.agentStore;
-    const feed = () => {
-      for (const a of sim.agents.values()) a.extra = a.energyCap;
-    };
-    for (let f = 0; f < 1800; f++) {
-      feed();
-      sim.step(1 / 60, p);
-    }
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (let f = 0; f < 300; f++) {
-      feed();
-      sim.step(1 / 60, p);
-      const w = store.gaitWave[bodies[0]!.slot];
-      lo = Math.min(lo, w);
-      hi = Math.max(hi, w);
-    }
-    // Against about 1.4 at the shipped rate, on the same chain.
-    expect(hi - lo, 'the chain survived being shouted through').toBeLessThan(0.5);
+    const loud = lockOf(3);
+    expect(loud.spread, 'a loud chain did not lock at all').toBeLessThan(7);
+    expect(Math.abs(loud.lag), 'a loud chain still travelled').toBeLessThan(2);
+    expect(loud.headSwing, 'a loud chain stopped oscillating').toBeGreaterThan(1);
   });
 });

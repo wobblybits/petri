@@ -71,14 +71,17 @@ export interface Wire {
    */
   ropePath: RopePath;
   /**
-   * Catalyst and inhibitor crossing this wire this frame, each signed `a`
+   * Each of the four species crossing this wire this frame, signed `a`
    * toward `b`.
    *
    * The wire is the bucket, and these are what is in it. `Sim.advanceGait`
    * writes them once per wire and every body then reads the wires on its own
    * ports, so the two ends of a transfer read one number and cannot disagree
-   * about it. Two, because a Con broadcasts C and a Dup broadcasts D, and the
-   * two ends of one wire need not be the same kind of thing.
+   * about it. A vector, because what a body broadcasts is a vector over the
+   * doc's four species and the two ends of one wire need not be the same kind
+   * of thing: an Era pushes the fuel and primer it ate, a Con the catalyst, a
+   * Dup the inhibitor. `fluxGut` is the doc's A, which is four wide because
+   * the gut is — a leaf feeding its net passes on whatever it swallowed.
    *
    * They persist across frames rather than being recomputed, because the wire
    * *conducts* rather than teleporting: each relaxes toward what the firing
@@ -91,6 +94,8 @@ export interface Wire {
    * reservoir — so a wire that snaps or is rewritten away owes nobody a
    * spill, and the pond's conservation does not have to know wires exist.
    */
+  fluxGut: Float64Array;
+  fluxB: number;
   fluxC: number;
   fluxD: number;
 }
@@ -468,16 +473,6 @@ export class Graph {
     return PW[at + 1] >= 0 && PW[at + 2] >= 0;
   }
 
-  /** True when `a` and `b` already share a wire. FAR discs skip those pairs. */
-  sharesWire(aId: number, bId: number): boolean {
-    if (aId === bId) return false;
-    for (const slot of ['p', 'l', 'r'] as const) {
-      const w = this.wireAt({ id: aId, slot });
-      if (w && (w.a.id === bId || w.b.id === bId)) return true;
-    }
-    return false;
-  }
-
   leftover(port: PortRef, dying: Set<number>): PortRef | null {
     const w = this.wireAt(port);
     if (!w) return null;
@@ -496,7 +491,7 @@ export class Graph {
     if (!this.isFree(a) || !this.isFree(b)) return null;
     const id = this.nextWireId++;
     const len = Math.max(1, latchLen);
-    const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full', fluxC: 0, fluxD: 0 };
+    const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full', fluxGut: new Float64Array(4), fluxB: 0, fluxC: 0, fluxD: 0 };
     this.wires.set(id, wire);
     this.setWireAt(a.id, a.slot, id);
     this.setWireAt(b.id, b.slot, id);

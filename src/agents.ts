@@ -1,5 +1,5 @@
 import { extraCapFor } from './energy.ts';
-import { REACT_A, REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
+import { REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
 import {
   CHEM_LEN,
   CHEM_SPECIES,
@@ -9,8 +9,13 @@ import {
   E_OUT,
   F_BASE,
   G_BASE,
-  GC_BASE,
+  GX_BASE,
   HEAD_SCALE,
+  TX_A,
+  TX_B,
+  TX_BASE,
+  TX_C,
+  TX_D,
   KS_BASE,
   L_BASE,
   IN_DEMAND,
@@ -553,6 +558,25 @@ export function cloneAgent(a: Agent): Agent {
   // next caller (a designer ghost, a rollback) would get it silently.
   clone.h.set(a.h);
   clone.sense.set(a.sense);
+  /*
+   * The reactor and the gut, for the same reason and with a sharper edge.
+   * An empty vat is not a neutral one: the wave is `2C/(K+C) - 1`, so a body
+   * holding no catalyst reads -1 rather than 0, and -1 is a real stroke and a
+   * real change to its drag. Dropping these gave a clone a different drag law
+   * from the body it was cloned from, which is exactly how the native-parity
+   * tests caught it — 0.70px of divergence in a scene budgeted for 0.002.
+   */
+  const ro = a.slot * REACT_SPECIES;
+  const co = clone.slot * REACT_SPECIES;
+  for (let k = 0; k < REACT_SPECIES; k++) clone.store.react[co + k] = a.store.react[ro + k];
+  const ao = a.slot * CHEM_SPECIES;
+  const bo = clone.slot * CHEM_SPECIES;
+  for (let k = 0; k < CHEM_SPECIES; k++) clone.store.gut[bo + k] = a.store.gut[ao + k];
+  clone.store.intake[clone.slot] = a.store.intake[a.slot];
+  clone.store.starve[clone.slot] = a.store.starve[a.slot];
+  clone.store.gaitWave[clone.slot] = a.store.gaitWave[a.slot];
+  clone.store.gaitAnchor[clone.slot] = a.store.gaitAnchor[a.slot];
+  clone.store.anchor[clone.slot] = a.store.anchor[a.slot];
   refreshReadsField(clone);
   clone.stun = a.stun;
   clone.drive = a.drive;
@@ -665,21 +689,49 @@ export function boundRadius(agent: Agent): number {
   return agentSize(agent.kind) * 1.12 * agent.scale;
 }
 
+/** Area and perimeter of the unit Con/Dup triangle (`triangleLocal` at s=1). */
+const TRI_AREA = 1.312;
+const TRI_PERIM = 1.64 + 2 * Math.hypot(1.6, 0.82);
+
 /**
- * Radius of the disc with the same area as the Con/Dup triangle, as a
- * multiple of `agentSize`. The glyph is 1.312 s^2 for s = 16 * scale, so the
- * equal-area radius is s * sqrt(1.312 / PI).
+ * Radius of the disc that stands in for the Con/Dup triangle, as a multiple
+ * of `agentSize`.
+ *
+ * Matched on the *contact* region, not on the glyph. What a contact radius
+ * has to reproduce is how far two bodies come to rest, and that is the
+ * Minkowski sum A + (-B), whose boundary is exactly where two centres touch.
+ * Averaged over relative heading its area is
+ *
+ *     2 * TRI_AREA + TRI_PERIM^2 / (2 PI)
+ *
+ * (the mixed-area term of a rotational average), and the disc pair that
+ * excludes the same area has radius sqrt(that / 4 PI) = 0.7457 s.
+ *
+ * The glyph-area radius, sqrt(TRI_AREA / PI) = 0.6462 s, was the same
+ * arithmetic applied to the wrong region: it matches the area one body
+ * covers, which is not the area a pair of them keeps clear. It ran 13% small
+ * — two Con/Dup rested 20.7 px apart where SAT rests them 23.6 px apart on
+ * average — and the net stepped outward the moment the camera crossed the
+ * LOD line and the pair started running SAT instead.
  */
-export const TRI_DISC_RATIO = Math.sqrt(1.312 / Math.PI);
+export const TRI_DISC_RATIO = Math.sqrt(
+  (2 * TRI_AREA + (TRI_PERIM * TRI_PERIM) / (2 * Math.PI)) / (4 * Math.PI),
+);
 
 /**
  * Contact radius for the tiers that collide discs instead of SAT polygons.
  *
- * `boundRadius` is the circumscribed bound, which for a triangle is ~1.7x too
- * fat to use as a contact radius: a net that settles at ~22 px under SAT is
- * held ~36 px apart by bound discs, so it visibly inflates the moment the
- * camera crosses the LOD line. Equal area is the closest single radius to
- * where SAT actually settles, which is what keeps the tiers agreeing.
+ * `boundRadius` is the circumscribed bound, which for a triangle is ~1.5x too
+ * fat to use as a contact radius. This is the disc that keeps as much room
+ * clear as the triangle does, so a pair rests where SAT would rest and the
+ * net does not change size when the camera crosses the LOD line. A disc
+ * cannot have a heading, so it cannot reproduce the 15.3-33.6 px spread two
+ * headings give SAT; it sits at the mean of that, 23.9 px against SAT's 23.6,
+ * so the tiers agree on the average pair and not on any particular one.
+ *
+ * Callers must add `SKIN` twice, as SAT does. It is not folded in here
+ * because the same radius sizes broad-phase cells and the world bound, and
+ * neither wants a contact skin.
  */
 export function discRadius(agent: Agent): number {
   if (agent.kind === 'era') return ERA_RADIUS * agent.scale;
@@ -1100,23 +1152,35 @@ const GAIT_ANCHOR_ERA = 0.02;
 const GAIT_ANCHOR_NODE = 0.25;
 
 /**
- * What a kind does to the far end of its principal wire while it fires, at
- * the seed. A Con excites — draws the neighbour's charge into its burst and
- * sets it off — and a Dup inhibits — gives the neighbour charge and holds it
- * quiet: the sketch's excitatory routing element and inhibitory brake, as a
- * seed a lineage drifts from rather than a rule it is held to. An Era
- * excites: it has nothing but a principal, so it is the pacemaker at the end
- * of a limb, and a wave in this coupling starts at leaves and runs toward
- * the root.
+ * What each kind broadcasts down its principal wire, at the seed: the doc's
+ * §4.1 transmission presets, as genes a lineage drifts from rather than a
+ * rule it is held to.
+ *
+ * A Con broadcasts the catalyst C and drives excitation down the mesh; a Dup
+ * broadcasts the inhibitor D and resets the wave front. An Era broadcasts the
+ * *fuel and the primer*, which is §6.1: it has nothing but a principal, so it
+ * can only push, and what it pushes is what it ate. That is what makes a leaf
+ * a net's feeder rather than one more oscillator, and it is the first thing
+ * in this simulation that gives a net a metabolic reason to have one.
+ *
+ * Note which way that runs. A Con's or a Dup's principal faces *out* of the
+ * net toward a redex, so its signal travels toward whatever it is about to
+ * rewrite with; an Era's principal is its only attachment, so its food
+ * travels inward. Neither is a rule — both are where a fresh body starts.
  */
-const GAIT_SEND_CON = 1;
-const GAIT_SEND_DUP = -1;
-const GAIT_SEND_ERA = 1;
+const SEED_SEND = 1;
 
 function seedGait(c: Float32Array, kind: AgentKind, params: Params): void {
   c[G_BASE] = kind === 'era' ? GAIT_ANCHOR_ERA : GAIT_ANCHOR_NODE;
-  c[GC_BASE] = kind === 'con' ? GAIT_SEND_CON : kind === 'dup' ? GAIT_SEND_DUP : GAIT_SEND_ERA;
-  c[GC_BASE + 1] = params.metabolicGate;
+  if (kind === 'era') {
+    c[TX_BASE + TX_A] = SEED_SEND;
+    c[TX_BASE + TX_B] = SEED_SEND;
+  } else if (kind === 'con') {
+    c[TX_BASE + TX_C] = SEED_SEND;
+  } else {
+    c[TX_BASE + TX_D] = SEED_SEND;
+  }
+  for (let k = 0; k < CHEM_SPECIES; k++) c[GX_BASE + k] = params.metabolicGate;
 }
 
 /**
@@ -1364,7 +1428,6 @@ export function createAgent(
    * made before it.
    */
   const r = slot * REACT_SPECIES;
-  store.react[r + REACT_A] = 0.5;
   store.react[r + REACT_B] = 1;
   store.react[r + REACT_C] = 0.2 + (mix / 4294967296) * 2;
   store.react[r + REACT_D] = 2;

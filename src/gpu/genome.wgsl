@@ -36,14 +36,11 @@ const L_BASE: u32 = 132u;
 // The gait head sits past the chemistry genes, at the end of the genome.
 const G_OUT: u32 = 178u;
 const G_BASE: u32 = 182u;
-// The coupling head: send, then gate.
-const GC_OUT: u32 = 183u;
-const GC_BASE: u32 = 191u;
-// `chem-layout.ts`'s GAIT_ANCHOR_MAX, GAIT_SEND_MAX and GAIT_GATE_MAX,
-// transcribed with the offsets above.
+// `chem-layout.ts`'s GAIT_ANCHOR_MAX, transcribed with the offsets above.
+// The transmission and gate vectors past it are plain genes, not heads, so
+// the shader neither computes nor carries them; `Sim.advanceGait` reads them
+// straight off `chem` the way `uptakeKsOf` reads the uptake affinities.
 const GAIT_ANCHOR_MAX: f32 = 8.0;
-const GAIT_SEND_MAX: f32 = 4.0;
-const GAIT_GATE_MAX: f32 = 1.0;
 
 // The learning row, from `chem-layout.ts`: learned deltas on the state
 // matrices, then their eligibility traces, then the critic, then last
@@ -55,8 +52,8 @@ const LEARN_CRITIC: u32 = 128u;
 const LEARN_PREV_V: u32 = 133u;
 const LEARN_STRIDE: u32 = 134u;
 
-// Floats written per body: h(4), emit(4), taste(4), then the nine heads.
-const OUT_STRIDE: u32 = 21u;
+// Floats written per body: h(4), emit(4), taste(4), then the seven heads.
+const OUT_STRIDE: u32 = 19u;
 
 struct GenomeParams {
   n: u32,
@@ -79,8 +76,8 @@ struct GenomeParams {
   learnDiscount: f32,
   maxWeight: f32,
   sAnchor: f32,
-  sSend: f32,
-  sGate: f32,
+  pad1: f32,
+  pad2: f32,
   pad3: f32,
 }
 
@@ -284,10 +281,6 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
   // The gait's grip. Signed both ways: a body that lets go where its
   // neighbour holds walks the other way.
   outv[o + 18u] = clampf(headAt(g, G_OUT, G_BASE, 0u, h) * G.sAnchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
-  // The coupling: whether this body excites or inhibits down its principal
-  // wire while it fires, and how discharged it has to be to fire it.
-  outv[o + 19u] = clampf(headAt(g, GC_OUT, GC_BASE, 0u, h) * G.sSend, -GAIT_SEND_MAX, GAIT_SEND_MAX);
-  outv[o + 20u] = clampf(headAt(g, GC_OUT, GC_BASE, 1u, h) * G.sGate, -GAIT_GATE_MAX, GAIT_GATE_MAX);
 
   /*
    * What this body learns from the frame it has just had. A line-for-line

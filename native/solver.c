@@ -123,12 +123,12 @@ typedef v128_t v128;
 #define SLOP 0.35f
 #define SKIN 0.85f
 #define ERA_R 8.0f
-/* Radius of the disc with the same area as a Con/Dup glyph: the triangle is
- * 1.312 * s^2 for s = 16 * scale, so r = s * sqrt(1.312 / PI). The
- * circumscribed bound the SAT broad phase needs is ~1.73x that, and using it
- * as a contact radius makes a net visibly inflate the moment the camera
- * crosses the LOD line into disc-only contacts. */
-#define TRI_DISC_R 10.3395f
+/* Radius of the disc that stands in for a Con/Dup glyph, matched on the area
+ * the pair keeps clear rather than the area one body covers: for s = 16,
+ * r = s * sqrt((2A + P^2 / 2PI) / 4PI) with A = 1.312 s^2 and P = 5.2358 s.
+ * See TRI_DISC_RATIO in src/agents.ts, which is the same number and carries
+ * the derivation; the two are packed into the same field and must agree. */
+#define TRI_DISC_R 11.9305f
 #define CONTACT_COMP 4.0e-6f
 #define SPAN_COMP 3.0e-6f
 #define LINK_COMP 2.0e-6f
@@ -163,8 +163,6 @@ static float hits[MAX_HITS * HIT_STRIDE];
 static int g_hits = 0;
 static int32_t adj_off[MAX_BODIES + 1];
 static int32_t adj_nei[MAX_WIRES * 2];
-static int32_t disc_nei[MAX_BODIES * 3];
-static uint8_t disc_nfill[MAX_BODIES];
 static int32_t decl_comp[MAX_BODIES];
 static uint8_t steer_flags[MAX_BODIES];
 static uint8_t port_free[MAX_BODIES];
@@ -416,38 +414,11 @@ static void integrate(int n, float h) {
   }
 }
 
-static void fill_disc_nei(int n, int n_wires, int stride) {
-  memset(disc_nfill, 0, (size_t)n);
-  for (int i = 0; i < n; i++) {
-    disc_nei[i * 3] = -1;
-    disc_nei[i * 3 + 1] = -1;
-    disc_nei[i * 3 + 2] = -1;
-  }
-  if (n_wires <= 0 || stride <= 0) return;
-  for (int w = 0; w < n_wires; w++) {
-    int a = (int)wires[w * stride];
-    int b = (int)wires[w * stride + 1];
-    if (a < 0 || b < 0 || a >= n || b >= n || a == b) continue;
-    if (disc_nfill[a] < 3) {
-      disc_nei[a * 3 + disc_nfill[a]] = b;
-      disc_nfill[a]++;
-    }
-    if (disc_nfill[b] < 3) {
-      disc_nei[b * 3 + disc_nfill[b]] = a;
-      disc_nfill[b]++;
-    }
-  }
-}
-
-/* Cheap tiers collide discs where NEAR collides SAT polygons. Equal area is
- * the closest single radius to where SAT actually settles. */
+/* Cheap tiers collide discs where NEAR collides SAT polygons. Callers add
+ * SKIN twice, as sat_hit pads its projections, so the two rest in the same
+ * place. */
 static float disc_radius(int i) {
   return kind[i] == 0 ? ERA_R * scale[i] : TRI_DISC_R * scale[i];
-}
-
-static int disc_wired(int i, int j) {
-  int o = i * 3;
-  return disc_nei[o] == j || disc_nei[o + 1] == j || disc_nei[o + 2] == j;
 }
 
 /* Candidate pairs for the far tier, held across one frame's substeps. */
@@ -456,16 +427,14 @@ static int g_far_pairs = 0;
 /*
  * `rebuild` says whether this substep has to lay the broad phase again.
  *
- * Two things hang off it, and both are one frame's work rather than one
- * substep's.
+ * The candidate pairs are one frame's work rather than one substep's.
  *
- * `disc_nei` is which bodies a body is wired to, so that a pair the span
- * constraint owns is not also shoved apart by a contact. It is a function of
- * the wire list and nothing else, and the host repacks that once a frame — so
- * inside the substep loop it is constant, and laying it eight times was laying
- * it seven times for nothing.
+ * It used to lay a wired-neighbour table here too, so that a pair the span
+ * constraint owned was not also shoved apart by a contact. That exemption is
+ * gone: SAT never had it, so it was one more way the tier a body landed in
+ * decided how far it sat from its neighbour.
  *
- * The candidate pairs are the larger half. `collect_pairs` walks every body
+ * `collect_pairs` walks every body
  * for a bounding box, counting-sorts them into cells, and then emits every
  * pair sharing a cell or a neighbouring one — with no distance test, which is
  * `disc`'s own job below. At fifty thousand bodies in a full dish that is
@@ -480,11 +449,10 @@ static int g_far_pairs = 0;
  * two pixels a frame. The list is a superset, never a filter — every pair in
  * it is still distance-tested below, every substep.
  */
-static void disc(int n, int n_wires, float h, int rebuild) {
+static void disc(int n, float h, int rebuild) {
   memset(delta, 0, (size_t)n * 2 * sizeof(float));
   int np = g_far_pairs;
   if (rebuild || np <= 0) {
-    fill_disc_nei(n, n_wires, WIRE_FAR);
     float maxr = 0.f;
     for (int i = 0; i < n; i++) {
       float r = bodies[i * STRIDE + FAR_RADIUS];
@@ -502,14 +470,12 @@ static void disc(int n, int n_wires, float h, int rebuild) {
     float dx = pj[FAR_X] - pi[FAR_X];
     float dy = pj[FAR_Y] - pi[FAR_Y];
     float dist = sqrtf(dx * dx + dy * dy);
-    float keep = pi[FAR_RADIUS] + pj[FAR_RADIUS];
+    float keep = pi[FAR_RADIUS] + pj[FAR_RADIUS] + SKIN * 2.f;
     if (dist >= keep) continue;
     if (dist < 1e-6f) {
       dx = 1.f;
       dy = 0.f;
       dist = 1.f;
-    } else if (disc_wired(i, j)) {
-      continue;
     }
     float depth = keep - dist - SLOP;
     if (depth <= 0.f) continue;
@@ -2173,7 +2139,7 @@ void solver_flock(int n, float align, float sep, float dt, float turn_rate, floa
 /** How many pairs the cache holds, or -1 when it is not valid. */
 int solver_flock_pairs(void) { return fp_valid ? fp_count : -1; }
 
-static int near_contacts(int n, int n_wires, float h, int reset_hits, int rebuild_pairs) {
+static int near_contacts(int n, float h, int reset_hits, int rebuild_pairs) {
   if (reset_hits) g_hits = 0;
   if (n <= 0 || h <= 0.f) return 0;
   if (n > MAX_BODIES) n = MAX_BODIES;
@@ -2183,7 +2149,6 @@ static int near_contacts(int n, int n_wires, float h, int reset_hits, int rebuil
   // Same argument as `disc`: the wire table is one frame's topology, and
   // this rebuilds its pair list on exactly the frames it needs the table.
   if (rebuild_pairs || np <= 0) {
-    fill_disc_nei(n, n_wires, WIRE_NEAR);
     float maxr = 0.f;
     for (int i = 0; i < n; i++) {
       float r = bodies[i * STRIDE + FAR_RADIUS];
@@ -2202,11 +2167,10 @@ static int near_contacts(int n, int n_wires, float h, int reset_hits, int rebuil
       solve_sat_contact(i, j, h);
       continue;
     }
-    if (disc_wired(i, j)) continue;
     float dx = pj[FAR_X] - pi[FAR_X];
     float dy = pj[FAR_Y] - pi[FAR_Y];
     float dist = sqrtf(dx * dx + dy * dy);
-    float keep = disc_radius(i) + disc_radius(j);
+    float keep = disc_radius(i) + disc_radius(j) + SKIN * 2.f;
     if (dist >= keep || dist < 1e-6f) continue;
     float depth = keep - dist - SLOP;
     if (depth <= 0.f) continue;
@@ -2281,7 +2245,7 @@ void solver_step_far(int n, int n_wires, float dt, int substeps) {
   float h = dt / (float)substeps;
   for (int s = 0; s < substeps; s++) {
     integrate(n, h);
-    disc(n, n_wires, h, s == 0);
+    disc(n, h, s == 0);
     apply(n);
     if (n_wires > 0) span(n, n_wires, h);
     finalize(n, h);
@@ -2331,7 +2295,10 @@ int solver_near_disc(int n, float h) {
     float dx = pj[FAR_X] - pi[FAR_X];
     float dy = pj[FAR_Y] - pi[FAR_Y];
     float dist = sqrtf(dx * dx + dy * dy);
-    float keep = pi[FAR_RADIUS] + pj[FAR_RADIUS];
+    /* disc_radius, not FAR_RADIUS: the NEAR pack carries the circumscribed
+     * bound there for the SAT broad phase, which is half again too fat to
+     * rest on. near_contacts' own disc branch does the same. */
+    float keep = disc_radius(i) + disc_radius(j) + SKIN * 2.f;
     if (dist >= keep || dist < 1e-6f) continue;
     float depth = keep - dist - SLOP;
     if (depth <= 0.f) continue;
@@ -2366,7 +2333,7 @@ void solver_near_finalize(int n, int n_wires, float h, float rope_keep, int held
 }
 
 int solver_near_contacts(int n, int n_wires, float h) {
-  return near_contacts(n, n_wires, h, 1, 1);
+  return near_contacts(n, h, 1, 1);
 }
 
 void solver_step_near(int n, int n_wires, float dt, int substeps,
@@ -2385,7 +2352,7 @@ void solver_step_near(int n, int n_wires, float dt, int substeps,
     refresh_poses(n);
     solve_wires_batched(n, n_wires, h);
     solve_grab(held, gx, gy, h);
-    near_contacts(n, n_wires, h, 0, !have_pairs);
+    near_contacts(n, h, 0, !have_pairs);
     have_pairs = 1;
     finalize(n, h);
     grab_cap(n, held, grab_max);

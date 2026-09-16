@@ -59,9 +59,10 @@ struct Wire {
 // going to cover an asymptote.
 @group(0) @binding(4) var<storage, read_write> cellCount: array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read_write> cellBodies: array<u32>;
-// Wire indices touching each body, built once per step. Both disc and span used
-// to scan the whole wire list per body, which is the same quadratic in a second
-// costume -- and with a wire for every other body, the larger half of it.
+// Wire indices touching each body, built once per step, so `span` does not
+// scan the whole wire list per body -- the same quadratic in a second costume,
+// and with a wire for every other body, the larger half of it. `disc` shared
+// it until wired pairs stopped being exempt from contact.
 @group(0) @binding(6) var<storage, read_write> nei: array<u32>;
 @group(0) @binding(7) var<storage, read_write> neiCount: array<atomic<u32>>;
 
@@ -69,6 +70,12 @@ struct Wire {
 const CELL_CAP: u32 = 64u;
 /** An agent has three ports, so three wires. The fourth slot is slack. */
 const NEI_CAP: u32 = 4u;
+/**
+ * Contact skin, the same 0.85 px `SKIN` that `native/solver.c` defines and
+ * `src/collide.ts` exports. SAT pads its projections by it, so a disc that
+ * stands in for SAT has to carry it too or the pair rests 1.7 px in.
+ */
+const SKIN: f32 = 0.85;
 
 const PI: f32 = 3.14159265;
 const TAU: f32 = 6.2831853;
@@ -178,18 +185,10 @@ fn disc(@builtin(global_invocation_id) gid: vec3u) {
   if (pi.locked >= 0.5 || pi.invMass <= 0.0) { return; }
   var push = vec2f(0.0, 0.0);
   let alpha = params.contactComp / max(1e-12, params.h * params.h);
-  // Span owns wired gaps. Bound discs are fatter than SAT, so colliding a
-  // neighbour the chord is holding fights the rest length.
-  // The wired partners, read off the prebuilt table instead of rescanning
-  // every wire. NEI_CAP entries because three ports cannot make a fourth.
-  var nb = array<u32, 4>(0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu);
-  let ncnt = min(atomicLoad(&neiCount[i]), NEI_CAP);
-  for (var k = 0u; k < ncnt; k++) {
-    let wire = wires[nei[i * NEI_CAP + k]];
-    let ia = u32(i32(wire.a));
-    let ib = u32(i32(wire.b));
-    nb[k] = select(ia, ib, ia == i);
-  }
+  // Wired pairs collide like any other. They used to be skipped here, on the
+  // grounds that the span already owned the gap -- but SAT never skipped them,
+  // so a latched pair changed how far apart it sat the moment the camera
+  // promoted it, which is the one thing the tiers may not do.
   // Cell size is at least the widest contact gap in the pack, so anything
   // close enough to touch is at most one cell away on each axis.
   let cc = cellXY(pi.x, pi.y);
@@ -209,14 +208,11 @@ fn disc(@builtin(global_invocation_id) gid: vec3u) {
         let pj = parts[j];
         var d = vec2f(pj.x - pi.x, pj.y - pi.y);
         var dist = length(d);
-        let keep = pi.radius + pj.radius;
+        let keep = pi.radius + pj.radius + SKIN * 2.0;
         if (dist >= keep) { continue; }
-        let wired = j == nb[0] || j == nb[1] || j == nb[2] || j == nb[3];
         if (dist < 1e-6) {
           d = vec2f(select(-1.0, 1.0, i < j), 0.0);
           dist = 1.0;
-        } else if (wired) {
-          continue;
         }
         let depth = keep - dist - params.slop;
         if (depth <= 0.0) { continue; }

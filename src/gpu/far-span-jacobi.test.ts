@@ -183,7 +183,7 @@ function runGpuOrder(frames: number, underRelax: boolean, scene: () => Scene = m
   for (let f = 0; f < frames; f++) {
     for (let s = 0; s < FAR_SUBSTEPS; s++) {
       farIntegrate(data, n, h);
-      farDisc(data, n, h, delta, wires, nWires);
+      farDisc(data, n, h, delta);
       farApply(data, n, delta);
       spanJacobi(data, n, h, wires, nWires, delta, underRelax);
       farApply(data, n, delta);
@@ -200,7 +200,7 @@ function runReference(frames: number, scene: () => Scene = mesh): number {
   for (let f = 0; f < frames; f++) {
     for (let s = 0; s < FAR_SUBSTEPS; s++) {
       farIntegrate(data, n, h);
-      farDisc(data, n, h, delta, wires, nWires);
+      farDisc(data, n, h, delta);
       farApply(data, n, delta);
       farSpan(data, n, h, wires, nWires, delta);
       farFinalize(data, n, h);

@@ -320,21 +320,35 @@ export interface Params {
    */
   metabolicRate: number;
   /**
-   * How hard a discharged body pulls substrate out of its own tank, per
-   * second at full discharge.
+   * What a unit of digested food is worth in the reactor, as `B` per unit of
+   * tank energy. The doc's `r1` yield.
    *
-   * This is the join to the economy, and the reason the pathway is not a
-   * shadow of it. A body buys substrate with `extra` in proportion to how
-   * *discharged* it is, which is how a real cell regulates glycolytic flux —
-   * not by how much it is holding but by how little of its charge is left.
-   * So a net that is working draws on its tank, and a tank drawn down is what
-   * `spreadRequests` carries and `flowCharges` answers.
-   *
-   * What leaves the tank lands on the ground through the same `excreteRate`
-   * path upkeep already uses, so nothing is destroyed. A body that
-   * metabolises hard is a body that fertilises the cell it is standing in.
+   * `runDigestion` splits what it converts between the tank and the reactor,
+   * and `intake` is the share each body routes to its own. This is the
+   * conversion on that share, and it is large because a reactor turns its
+   * pool over many times per unit of matter consumed — that is what a
+   * *currency* is. It replaces `metabolicSupply` and `metabolicCost`, which
+   * were the same conversion written as a purchase: the reactor used to buy
+   * fuel out of the tank, so food ran grid -> gut -> tank -> reactor and the
+   * tank sat in the middle of a round trip. Now the cost of running a
+   * metabolism is the food it did not bank, which needs no price at all.
    */
-  metabolicSupply: number;
+  metabolicYield: number;
+  /**
+   * Seconds a body's primer may stay at absolute depletion before it dies.
+   * 0 = nothing starves to death.
+   *
+   * The doc's §7.2, and it is what lets `upkeep` go. A standing charge was
+   * the only thing that could push a tank past its floor, so rent was the
+   * only thing in the pond that killed anything; the metabolism draws in
+   * proportion to what a body is holding, so it empties a body and then
+   * stops. This makes running out *be* the death.
+   *
+   * Long against a burst and short against a life: a fed body's primer never
+   * comes near the threshold between bursts, and a body with nothing to eat
+   * reaches it within a second or two and then has this long to find food.
+   */
+  starveTime: number;
   /*
    * The reactor's rate constants, in the doc's own order. `docs/scratch.txt`
    * §3 gives four reactions over a four-chemical state vector, and §8 says
@@ -343,7 +357,7 @@ export interface Params {
    * means across its own net. What a body owns is its intake — see `intake`,
    * which is §8's per-agent `J`.
    *
-   *     r1  A -> B            metabolicFuel   * A
+   *     r1  A -> B            digestion, at the recipe's own rate
    *     r2  -> C              metabolicCat    * B * (base + C) / (1 + sigma*C)
    *     r3  C -> D            metabolicReset  * C
    *     r4  B + D ->          metabolicQuench * B * D
@@ -383,7 +397,6 @@ export interface Params {
    * python's `base` 0.02 and `sigma` 0.5 leaves `q` stuck near a fifth of
    * `k3 + d`. That is why both ship small.
    */
-  metabolicFuel: number;
   metabolicCat: number;
   metabolicReset: number;
   metabolicQuench: number;
@@ -441,54 +454,65 @@ export interface Params {
    * nothing else.
    */
   metabolicWork: number;
-  metabolicCost: number;
   /**
-   * How fast a broadcasting body pushes its signal down its principal wire,
-   * per second per unit of `send` above its gate. 0 = every body's reactor is
-   * its own.
+   * How fast a body broadcasts down its principal wire, per second per unit
+   * of what it is holding above the gate. 0 = every body's reactor is its
+   * own.
    *
-   * The doc's §4 transmission rate, and it is directed and signed. A body
-   * broadcasts out of its principal port only, so it has one mouth and up to
-   * two ears; what it sends is the sign of `send` off the `Gc` head —
-   * positive is the catalyst C, negative is the inhibitor D — and it sends
-   * only while its wave is above `gate`, which is while it is holding
-   * catalyst. Con seeds positive and Dup negative, so a chain is a sequence
-   * of exciters and brakes.
+   * The doc's §4 transmission rate. *Which* species a body broadcasts is its
+   * `Tx` gene, seeded by kind — a Con sends the catalyst, a Dup the
+   * inhibitor, an Era the fuel and the primer it ate — and this is the one
+   * global scale on all of them. Mass action on the concentration, so the
+   * impulse is in the chemistry: a body sends most at its catalyst's peak
+   * and nothing at its trough, with no clock and no threshold needed to make
+   * it a pulse.
    *
-   * **The band is narrow and both edges are the reactor's.** Measured on six
-   * pinned Cons wired principal-to-auxiliary, against a period of about 100
-   * frames: below about 0.5 there is no lock and the bodies free-run at
-   * whatever phases they were seeded with; from 0.5 to 3 the interior wires
-   * hold a steady 9 to 12 frames, which is a tenth of a cycle a wire and is
-   * a travelling wave; at 5 the senders start to run down, because
-   * broadcasting spends the catalyst they need; and at 8 every reactor in the
-   * chain flatlines. It ships at 1, where the lock is clean and the swing is
-   * barely below an uncoupled body's.
+   * **There are three regimes and the middle one is the wave.** Measured on
+   * six Cons wired principal to auxiliary, grazing regrowing ground rather
+   * than fed by hand, against a period of about 161 frames, reading the
+   * signed phase difference per interior wire and its spread:
    *
-   * A body at the end of a chain whose principal is free only ever *receives*,
-   * and it is driven into the inhibited state: the catalyst it is fed runs
+   *     0     26, 27, -21   spread 48 — no lock; they never converge
+   *     0.1   14, 20, -3    spread 23 — partial
+   *     0.4   8, 11, 1      spread 10 — partial
+   *     1     3, 7, 4       spread  4 — a wave, a few per cent of a cycle a wire
+   *     3     -3, 2, 1      spread  5 — synchrony
+   *     8     -12, -2, -2   spread 10 — the senders start to run down
+   *
+   * It ships at 1, the cleanest lock that still carries a phase. The upper
+   * edge is the reactor's: broadcasting spends the very catalyst the sender's
+   * loop runs on, so a chain shouted through loudly enough stops travelling
+   * and then stops oscillating.
+   *
+   * The band moved when the reactor started being fed by eating rather than
+   * by a hand-forced tank, and the old figures are not comparable: a
+   * force-fed body runs its reactor hotter than one grazing for itself.
+   *
+   * A body at the end of a chain whose principal is free only ever *receives*
+   * and can be driven into the inhibited state: the catalyst it is fed runs
    * to D, D quenches the primer, and its own loop stalls. That is the doc's
    * stoichiometry rather than a tuning failure, and in a grown net it is a
    * body waiting to latch rather than a resting state.
    *
    * The slow coupling is already there and costs nothing: two wired bodies
-   * both buy fuel out of tanks that `flowCharges` moves energy between, so
-   * their reactors are coupled through the economy whether this is set or
-   * not.
+   * eat from ground that `flowCharges` and the harvest both reach, so their
+   * reactors are coupled through the economy whether this is set or not.
    */
   metabolicDiffuse: number;
   /**
-   * The wave level a fresh body has to be *above* before it broadcasts
-   * anything, on the wave's own [-1, 1]. Seeds the `gate` row of `Gc` and is
-   * heritable from there. 0 is the upper half of the cycle.
+   * How much of a species a fresh body has to be holding before it broadcasts
+   * any of it, in that species' own units. Seeds all four of `Gx` and is
+   * heritable per species from there.
    *
-   * The doc's §4 `H(x_j - G_j)`: a node broadcasts what it has, so it speaks
-   * while its catalyst is high and is silent while it is spent.
+   * The doc's §4 `H(x_j - G_j)`, rectified rather than a step. It seeds at
+   * zero, so a fresh body broadcasts in proportion to what it holds and the
+   * pulse comes from the concentration's own swing; a threshold is something
+   * a lineage evolves toward when being quiet at the trough pays.
    */
   metabolicGate: number;
   /**
-   * What a fresh body's fuel intake starts at, as a multiple of
-   * `metabolicSupply`. Heritable from there.
+   * What share of the food it digests a fresh body routes to its reactor
+   * rather than banking in its tank. Heritable from there.
    *
    * The doc's §8 per-agent `J`, and the one thing about the reactor a lineage
    * owns. It decides where in the fuel window a body sits, and the window has
@@ -1199,8 +1223,8 @@ export function defaultParams(): Params {
     angDrag: 2.4,
     grip: 2,
     metabolicRate: 15,
-    metabolicSupply: 3,
-    metabolicFuel: 2,
+    metabolicYield: 480,
+    starveTime: 25,
     metabolicCat: 0.266,
     metabolicReset: 1,
     metabolicQuench: 0.0283,
@@ -1209,10 +1233,9 @@ export function defaultParams(): Params {
     metabolicBase: 0.001,
     metabolicWave: 1.2,
     metabolicWork: 0.05,
-    metabolicCost: 0.01,
     metabolicDiffuse: 1,
     metabolicGate: 0,
-    intake: 1,
+    intake: 0.25,
     gaitSwell: 0.04,
     flockAlign: 5.5,
     flockSep: 48,
@@ -1242,7 +1265,7 @@ export function defaultParams(): Params {
     learnTrace: 0.99,
     learnDiscount: 0.99,
     inheritLearned: 1,
-    uptakeVmax: 0,
+    uptakeVmax: 2,
     uptakeKs: 0.25,
     rowCost: 0,
     hillN: 1,
@@ -1252,7 +1275,7 @@ export function defaultParams(): Params {
     bodyValue: BODY_VALUE,
     eraCapRatio: ERA_CAP_RATIO,
     eraUpkeepRatio: ERA_UPKEEP_RATIO,
-    excreteRate: 0,
+    excreteRate: 1,
     senseScale: SENSE_SCALE,
     catCoSubstrate: 0,
     digestRate: 12,
@@ -1289,8 +1312,8 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'angDrag', label: 'Spin damp', min: 0, max: 8, step: 0.05 },
   { key: 'grip', label: 'Grip (tank)', min: -4, max: 12, step: 0.05 },
   { key: 'metabolicRate', label: 'Metabolic rate', min: 0, max: 20, step: 0.1 },
-  { key: 'metabolicSupply', label: 'Fuel intake', min: 0, max: 12, step: 0.05 },
-  { key: 'metabolicFuel', label: 'A to B (k1)', min: 0.05, max: 8, step: 0.05 },
+  { key: 'metabolicYield', label: 'Fuel yield', min: 0, max: 1200, step: 10 },
+  { key: 'starveTime', label: 'Starve window (s)', min: 0, max: 120, step: 1 },
   { key: 'metabolicCat', label: 'Autocatalysis (k2)', min: 0.01, max: 4, step: 0.002 },
   { key: 'metabolicReset', label: 'C to D (k3)', min: 0.05, max: 4, step: 0.01 },
   { key: 'metabolicQuench', label: 'Quench (k4)', min: 0, max: 0.4, step: 0.0005 },
@@ -1299,10 +1322,9 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'metabolicBase', label: 'Basal enzyme', min: 0, max: 0.2, step: 0.0005 },
   { key: 'metabolicWave', label: 'Stroke half-point', min: 0.1, max: 12, step: 0.1 },
   { key: 'metabolicWork', label: 'Stroke cost', min: 0, max: 1, step: 0.005 },
-  { key: 'metabolicCost', label: 'Fuel price', min: 0, max: 0.1, step: 0.002 },
   { key: 'intake', label: 'Fuel intake (seed)', min: 0.2, max: 6, step: 0.1 },
-  { key: 'metabolicDiffuse', label: 'Broadcast', min: 0, max: 8, step: 0.05 },
-  { key: 'metabolicGate', label: 'Speak above (seed)', min: -1, max: 1, step: 0.02 },
+  { key: 'metabolicDiffuse', label: 'Broadcast', min: 0, max: 8, step: 0.02 },
+  { key: 'metabolicGate', label: 'Speak above (seed)', min: 0, max: 6, step: 0.05 },
   { key: 'gaitSwell', label: 'Gait swell', min: 0, max: 0.8, step: 0.01 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
   { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },

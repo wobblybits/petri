@@ -924,8 +924,8 @@ export const CHEM_SLOPE_MAX = 1;
 
 export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: number }> = {
   /*
-   * How hard a body pulls fuel into its reactor, as a multiple of
-   * `metabolicSupply`. The doc's §8 per-agent `J`.
+   * What share of the food it digests a body routes to its reactor rather
+   * than banking in its tank. The doc's §8 per-agent `J`.
    *
    * The reactor has a fuel window with both edges: starved it sits empty and
    * still, fed it runs a limit cycle whose period shortens as the fuel rises,
@@ -934,7 +934,7 @@ export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: n
    * is a gene and not a constant, and it is the first thing about a
    * lineage's metabolism that selection can reach.
    */
-  intake: { min: 0.2, max: 6, mutate: 0.15 },
+  intake: { min: 0.02, max: 0.9, mutate: 0.05 },
   requestDecay: { min: 0.5, max: 0.98, mutate: 0.03 },
   energyCap: { min: EXTRA_CAP * 0.5, max: EXTRA_CAP * 2, mutate: EXTRA_CAP * 0.1 },
   /*

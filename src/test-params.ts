@@ -36,14 +36,26 @@ import type { Sim } from './sim.ts';
  * one place it runs, and it sets its own rate. That is the same arrangement
  * learning has, and for the same reason.
  *
- * Everything else is the shipping default, deliberately: pinning two dials to
- * keep a measurement honest is different from running the suite against a
+ * `uptakeVmax` and `excreteRate` are pinned for a third reason, and it is
+ * about isolation rather than noise. They switch the *whole* food path: above
+ * zero a mouthful is a sample of four species landing in a gut, which a
+ * recipe then digests, and what a body says leaves its tank conserved instead
+ * of being minted. Almost every assertion in this suite about a tank, a
+ * commute's stake or a rescue was written against the take-what-fits path,
+ * and the two paths are not small variations on each other. A test about
+ * *eating* says so by turning them on — `chemistry.test.ts` does, and it is
+ * the file that owns them.
+ *
+ * Everything else is the shipping default, deliberately: pinning four dials
+ * to keep a measurement honest is different from running the suite against a
  * pond nobody ships.
  */
 export function fixedParams(): Params {
   const params = defaultParams();
   params.learnRate = 0;
   params.metabolicRate = 0;
+  params.uptakeVmax = 0;
+  params.excreteRate = 0;
   return params;
 }
 

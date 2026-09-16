@@ -13,6 +13,12 @@
  * the impulse is not 1/1e-6.
  */
 export const FAR_SLOP = 0.35;
+/**
+ * Contact skin, the `SKIN` of `src/collide.ts` and `native/solver.c`. SAT pads
+ * its projections by it, so the disc tiers add it too and a pair rests in the
+ * same place whichever tier it lands in.
+ */
+export const FAR_SKIN = 0.85;
 export const FAR_CONTACT_COMP = 4.0e-6;
 export const FAR_SPAN_COMP = 3.0e-6;
 export const FAR_STRIDE = 12;
@@ -48,8 +54,6 @@ export const FW = {
 
 const PI = Math.PI;
 const TAU = Math.PI * 2;
-const EMPTY_WIRES = new Float32Array(0);
-let discNei = new Int32Array(0);
 let deltaScratch = new Float32Array(0);
 
 function wrapAngle(a: number): number {
@@ -98,45 +102,17 @@ export function farIntegrate(data: Float32Array, n: number, h: number): void {
 }
 
 /**
- * Wired-neighbour table, three slots per body — an agent has three ports, so
- * that is the whole of it. Built once per pass: scanning the wire list inside
- * the body loop made the cheap tier O(bodies x wires).
+ * Disc contacts, the cheap tier's stand-in for SAT. `FAR.radius` carries
+ * `discRadius`, which is sized on the room a pair keeps clear, and the skin
+ * goes on here the way `sat_hit` pads its projections.
+ *
+ * Every pair, including wired ones. They were exempt until the exemption was
+ * found to be the LOD line's other half: SAT collides a latched pair, so a
+ * cheap tier that does not changes the net's size with the camera.
  */
-function fillDiscNeighbours(n: number, wires: Float32Array, nWires: number): Int32Array {
-  if (discNei.length < n * 3) discNei = new Int32Array(Math.max(48, n * 6));
-  discNei.fill(-1, 0, n * 3);
-  for (let w = 0; w < nWires; w++) {
-    const o = w * FAR_WIRE_STRIDE;
-    const a = wires[o + FW.a] | 0;
-    const b = wires[o + FW.b] | 0;
-    if (a < 0 || b < 0 || a >= n || b >= n || a === b) continue;
-    for (let k = 0; k < 3; k++) {
-      if (discNei[a * 3 + k] < 0) {
-        discNei[a * 3 + k] = b;
-        break;
-      }
-    }
-    for (let k = 0; k < 3; k++) {
-      if (discNei[b * 3 + k] < 0) {
-        discNei[b * 3 + k] = a;
-        break;
-      }
-    }
-  }
-  return discNei;
-}
-
-export function farDisc(
-  data: Float32Array,
-  n: number,
-  h: number,
-  delta: Float32Array,
-  wires: Float32Array = EMPTY_WIRES,
-  nWires = 0,
-): void {
+export function farDisc(data: Float32Array, n: number, h: number, delta: Float32Array): void {
   const alpha = FAR_CONTACT_COMP / Math.max(1e-12, h * h);
   delta.fill(0, 0, n * 2);
-  const nei = fillDiscNeighbours(n, wires, nWires);
   for (let i = 0; i < n; i++) {
     const oi = i * FAR_STRIDE;
     if (data[oi + FAR.locked] >= 0.5 || data[oi + FAR.invMass] <= 0) continue;
@@ -144,11 +120,6 @@ export function farDisc(
     const iy = data[oi + FAR.y];
     const wA = data[oi + FAR.invMass];
     const ri = data[oi + FAR.radius];
-    // Span already owns the gap on a wire; colliding the pair as well just
-    // fights the chord.
-    const n0 = nei[i * 3];
-    const n1 = nei[i * 3 + 1];
-    const n2 = nei[i * 3 + 2];
     let px = 0;
     let py = 0;
     for (let j = 0; j < n; j++) {
@@ -157,18 +128,14 @@ export function farDisc(
       let dx = data[oj + FAR.x] - ix;
       let dy = data[oj + FAR.y] - iy;
       let dist = Math.hypot(dx, dy);
-      const keep = ri + data[oj + FAR.radius];
+      const keep = ri + data[oj + FAR.radius] + FAR_SKIN * 2;
       if (dist >= keep) continue;
-      const wired = j === n0 || j === n1 || j === n2;
-      // Coincident: span has no normal, so a sanitize pile would stay a pile
-      // if we skipped these the way we skip a healthy wired gap. Index order
-      // so both bodies do not pick the same world axis and translate together.
+      // Coincident: index order so both bodies do not pick the same world axis
+      // and translate together.
       if (dist < 1e-6) {
         dx = i < j ? 1 : -1;
         dy = 0;
         dist = 1;
-      } else if (wired) {
-        continue;
       }
       const depth = keep - dist - FAR_SLOP;
       if (depth <= 0) continue;
@@ -302,7 +269,7 @@ export function stepFarKernel(
   const delta = deltaScratch;
   for (let s = 0; s < substeps; s++) {
     farIntegrate(data, n, h);
-    farDisc(data, n, h, delta, wires, nWires);
+    farDisc(data, n, h, delta);
     farApply(data, n, delta);
     if (nWires > 0) farSpan(data, n, h, wires, nWires, delta);
     farFinalize(data, n, h);

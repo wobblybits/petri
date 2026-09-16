@@ -1,5 +1,5 @@
-import { GAIT_GATE_MAX, GAIT_SEND_MAX, GC_BASE, GC_OUT } from './chem-layout.ts';
-import { REACT_A, REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
+import { GX_BASE, TX_A, TX_B, TX_BASE, TX_C, TX_D } from './chem-layout.ts';
+import { REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
 import {
   boundRadius,
   discRadius,
@@ -235,6 +235,15 @@ type RedexEscrow = {
 
 /** Most either metabolite may pile up to. A pathway is not a warehouse. */
 const REACT_CAP = 256;
+
+/**
+ * Primer below this is "absolute depletion" for the doc's §7.2 death clock.
+ *
+ * Well under a fed body's trough, which measures about 1.8 at the shipped
+ * constants, so a body that is merely between bursts is never counted as
+ * starving — the clock only runs for one that has genuinely run out.
+ */
+const STARVE_EPS = 0.05;
 /**
  * Largest reaction step taken at once. The pathway is stiff where its
  * activator spikes, and explicit Euler past about this rings at the step
@@ -1156,6 +1165,25 @@ export class Sim {
       expressed: this.expressed,
     })) {
       this.kill(id);
+    }
+    /*
+     * The doc's §7.2: a body whose primer has been empty for longer than
+     * `starveTime` dies. The same `kill` rent uses, because it is the same
+     * death — what changed is what counts as having run out. Rent could push
+     * a tank past a floor and so was the only thing in the pond that killed
+     * anything; the metabolism draws in proportion to what a body holds, so
+     * it empties a body and then stops, and without this nothing would ever
+     * finish one off.
+     */
+    const window = params.starveTime;
+    if (window > 0) {
+      const STARVE = this.agentStore.starve;
+      const doomed = this.starving;
+      doomed.length = 0;
+      for (const agent of this.agents.values()) {
+        if (STARVE[agent.slot] > window) doomed.push(agent.id);
+      }
+      for (let i = 0; i < doomed.length; i++) this.kill(doomed[i]);
     }
     Sim.phase('upkeep');
     /*
@@ -4244,9 +4272,10 @@ export class Sim {
       const B = list[j];
       if (poseHeld(A) && poseHeld(B)) return;
       const detailed = this.agentDetailed(A.id) || this.agentDetailed(B.id);
-      // Bound discs are fatter than SAT triangles. A wired pair is already
-      // held by the chord; colliding them shoves the net apart of the rest.
-      if (!detailed && this.graph.sharesWire(A.id, B.id)) return;
+      // Wired pairs collide on both branches. The cheap one used to skip
+      // them, on the grounds that the wire already held the gap — but the
+      // detailed branch never skipped them, so a latched pair sat differently
+      // depending on where the camera was.
       const hit = detailed
         ? queryHit(A, B, this.w, this.h)
         : queryDiscHit(A, B, this.w, this.h);
@@ -4285,41 +4314,37 @@ export class Sim {
   /**
    * One step of the body's reactor, and what this frame's stroke comes to.
    *
-   * Four chemicals in a well-stirred vat, which is `docs/scratch.txt` §3 and
-   * `docs/mka-plan.md` §2:
+   * Three chemicals in a well-stirred vat, and a fourth that is the gut.
+   * `docs/scratch.txt` §3 gives four; A, its primary fuel, is what the body
+   * has swallowed off the grid and not yet used, so it is `store.gut` and the
+   * reaction that consumes it is digestion:
    *
-   *     r1   A -> B          metabolicFuel   * A
+   *     r1   A -> B          `Sim.runDigestion`, at the recipe's own rate
    *     r2   -> C            metabolicCat    * B * (base + C) / (1 + sigma*C)
    *     r3   C -> D          metabolicReset  * C
    *     r4   B + D ->        metabolicQuench * B * D
-   *     J    extra -> A      metabolicSupply * intake * fullness, at a price
-   *     work A ->            metabolicWork * gaitSwell * |wave|
+   *     work B ->            metabolicWork * gaitSwell * |wave|
    *
-   * with a uniform outflow on all four. A is *primary fuel* and it is steady:
-   * it is bought out of the body's own tank and it settles within a second to
-   * whatever the fuel supply supports, so the oscillation lives entirely in
-   * the loop B -> C -> D -| B. C is the saturated catalyst, and it is both
-   * what the stroke reads and what a Con passes down its wire.
+   * with a uniform outflow on all three. **The reactor is fed by eating, not
+   * by buying.** It used to purchase fuel out of the tank at a price, so food
+   * ran grid -> gut -> tank -> reactor and the tank sat in the middle of a
+   * round trip; now `runDigestion` splits what it converts between the tank
+   * and B, and `intake` is the share a body routes to its reactor. Two things
+   * follow. A body with a full tank and an empty gut has no clock, so the
+   * gait depends on eating rather than on having. And the cost of running a
+   * metabolism needs no price of its own, because it is food the body did not
+   * bank — `metabolicSupply` and `metabolicCost` are gone.
    *
-   * `metabolicSupply` is where this joins the economy rather than shadowing
-   * it. Fuel is bought in proportion to how full the tank is, so a working
-   * net draws its tank down, a drawn-down tank is what `spreadRequests`
-   * carries, and `flowCharges` answers it. What leaves the tank lands on the
-   * ground through the same `upkeepExcrete` road rent uses, so metabolising
-   * is fertilising and the pond's total does not move.
+   * The oscillation is the loop `B -> C -> D -| B`, which is a three-stage
+   * negative feedback carrying a positive self-loop on C. Whether it
+   * oscillates at all is a narrow question and the doc's own constants answer
+   * it wrongly; `metabolicFuel` carries the stability analysis and the two
+   * conditions that matter.
    *
    * **The fuel window has both edges, and that is the gate.** Starved, the
    * reactor sits empty and still; fed, it runs a limit cycle whose period
-   * shortens as the fuel rises; glutted, it sits saturated and still again.
-   * Measured on the equations alone at the shipped constants, with the fuel
-   * `J` swept: still below 0.7, a full relaxation cycle from 0.8 to about
-   * 3.5, and still again past 4. The period runs 2.9 s of pond time at the
-   * bottom of the window to 1.6 s at the top. Nothing had to be added to get
-   * "a starving body does not undulate" — it is where the Hopf boundary is.
-   *
-   * Whether the reactor oscillates at all is a narrow question and the doc's
-   * own constants answer it wrongly; `metabolicFuel` carries the stability
-   * analysis and the two conditions that matter.
+   * shortens as the fuel rises; over-fed, it saturates and goes still again.
+   * Nothing had to be added to get "a starving body does not undulate".
    *
    * The wave is `2C/(metabolicWave + C) - 1`: bounded, signed, and no
    * arbitrary normalisation, so a body empty of catalyst reads -1 and a
@@ -4328,12 +4353,9 @@ export class Sim {
   private advanceGait(params: Params, dt: number): void {
     const store = this.agentStore;
     const R = store.react;
-    const INTAKE = store.intake;
     const WAVE = store.gaitWave;
     const GA = store.gaitAnchor;
     const ANCHOR = store.anchor;
-    const EXTRA = store.extra;
-    const CAP = store.energyCap;
     const rate = params.metabolicRate;
     if (!(rate > 0)) {
       for (const agent of this.agents.values()) {
@@ -4343,7 +4365,6 @@ export class Sim {
       return;
     }
 
-    const k1 = params.metabolicFuel;
     const k2 = params.metabolicCat;
     const k3 = params.metabolicReset;
     const k4 = params.metabolicQuench;
@@ -4351,16 +4372,8 @@ export class Sim {
     const dec = params.metabolicDecay;
     const base = params.metabolicBase;
     const waveK = params.metabolicWave > 0 ? params.metabolicWave : 1e-6;
-    const supply = params.metabolicSupply;
     const workRate = params.metabolicWork * params.gaitSwell;
-    const price = params.metabolicCost;
-    /*
-     * `upkeepExcrete`, and not `excreteRate`: the spend below is rent by
-     * another name, and rent's dial is this one. `excreteRate` is the
-     * reaction table's, a rate in its own units rather than a fraction.
-     */
-    const back = params.upkeepExcrete;
-    const grid = this.energy;
+    const STARVE = store.starve;
     const h = rate * dt;
     const steps = Math.max(1, Math.ceil(h / REACT_H));
     const hs = h / steps;
@@ -4368,35 +4381,18 @@ export class Sim {
     for (const agent of this.agents.values()) {
       const s = agent.slot;
       const o = s * REACT_SPECIES;
-      let A = R[o + REACT_A];
       let B = R[o + REACT_B];
       let C = R[o + REACT_C];
       let D = R[o + REACT_D];
-      const cap = CAP[s];
-      const pull = supply * INTAKE[s];
-      let spent = 0;
       for (let k = 0; k < steps; k++) {
-        // Bought, not conjured, and bounded by what the tank can pay for: a
-        // body with nothing left buys nothing and its reactor winds down.
-        const have = EXTRA[s] - spent;
-        const fullness = cap > 0 ? (have <= 0 ? 0 : have >= cap ? 1 : have / cap) : 0;
-        const want = pull * fullness * hs;
-        const afford = price > 0 ? have / price : want;
-        const buy = want <= 0 || afford <= 0 ? 0 : want > afford ? afford : want;
-        spent += buy * price;
-
-        const r1 = k1 * A;
         const r2 = (k2 * B * (base + C)) / (1 + sig * C);
         const r3 = k3 * C;
         const r4 = k4 * B * D;
         const w = (2 * C) / (waveK + C) - 1;
         const work = workRate * (w < 0 ? -w : w);
-        A = A + buy + (-r1 - dec * A - work) * hs;
-        B = B + (r1 - r4 - dec * B) * hs;
+        B = B + (-r4 - dec * B - work) * hs;
         C = C + (r2 - r3 - dec * C) * hs;
         D = D + (r3 - dec * D) * hs;
-        if (A < 0) A = 0;
-        else if (A > REACT_CAP) A = REACT_CAP;
         if (B < 0) B = 0;
         else if (B > REACT_CAP) B = REACT_CAP;
         if (C < 0) C = 0;
@@ -4404,99 +4400,86 @@ export class Sim {
         if (D < 0) D = 0;
         else if (D > REACT_CAP) D = REACT_CAP;
       }
-      R[o + REACT_A] = A;
       R[o + REACT_B] = B;
       R[o + REACT_C] = C;
       R[o + REACT_D] = D;
-      if (spent > 0) {
-        EXTRA[s] -= spent;
-        // The same road out as rent, and the same mix: what left the tank
-        // lands on the dish as whatever this body makes, so metabolising is
-        // fertilising and the pond's total is unchanged. This pass runs
-        // before `refreshExpression`, so the rows are last frame's — one
-        // frame stale, which is what the harvest plan lives with too.
-        if (back > 0) payOut(grid, store.expressAll, s, store.x[s], store.y[s], spent * back);
-      }
+      // The doc's §7.2 clock: how long this body has been at absolute
+      // depletion. Reset by any primer at all, so it measures a continuous
+      // window and a body that eats once is spared.
+      STARVE[s] = B > STARVE_EPS ? 0 : STARVE[s] + dt;
       const w = (2 * C) / (waveK + C) - 1;
       WAVE[s] = w;
       ANCHOR[s] = GA[s] * w;
     }
 
     /*
-     * The coupling: what a firing body passes down its wire, and which way.
+     * The coupling: what a body broadcasts down its wire, and which species.
      *
      * The doc's §4.1 transmission presets, as genes rather than a rule keyed
-     * on kind: a Con broadcasts the catalyst C and drives excitation down the
-     * mesh, a Dup broadcasts the inhibitor D and resets the wave front. Which
-     * of the two a body does is the sign of `send` off the `Gc` head, seeded
-     * positive on a Con and negative on a Dup, and a lineage is free to swap
-     * it. A body broadcasts out of its principal port only, so it has one
-     * mouth and up to two ears, and an Era — nothing but a principal — is a
-     * pacemaker leaf without a rule saying so.
+     * on kind. A Con broadcasts the catalyst C and drives excitation down the
+     * mesh; a Dup broadcasts the inhibitor D and resets the wave front; an
+     * **Era broadcasts A and B — the food it ate and the primer it made** —
+     * which is §6.1, and it is what makes a leaf its net's feeder rather than
+     * one more oscillator. A body broadcasts out of its principal port only,
+     * so it has one mouth and up to two ears, and an Era has nothing but a
+     * principal.
      *
      * Rectified rather than a Heaviside step, which is what the doc's own
      * python does and is the better reading: a step rings under explicit
-     * Euler and gives a gate nothing to move along.
+     * Euler and gives a gate nothing to move along. Mass action on the
+     * concentration, so the impulse is in the chemistry — a body sends most
+     * at its catalyst's peak and nothing at its trough, with no clock and no
+     * threshold needed to make it a pulse.
      *
-     * Bipartite on purpose. A wire pass computes each wire's two fluxes once
-     * and writes them on the wire; a body pass reads the three wires on its
-     * own ports. So the two ends of a transfer read one number and cannot
+     * Bipartite on purpose. A wire pass computes each wire's fluxes once and
+     * writes them on the wire; a body pass reads the three wires on its own
+     * ports. So the two ends of a transfer read one number and cannot
      * disagree about it, and nothing is written to a body until every wire
      * has spoken, so the order of the wire map cannot matter.
-     *
-     * What crosses is what was asked, bounded once on the net by a quarter
-     * of the source's stock and a quarter of the sink's room — a body's
-     * species can be drawn on by at most four transfers a frame, so nothing
-     * overdraws and the pass moves matter without creating it.
-     *
-     * There is no conduction delay any more, and taking it out was measured.
-     * Under the two-pool pathway a wire that relaxed toward the ask over
-     * `rest / speed` was the only thing that turned a one-frame cascade into
-     * a travelling wave. This reactor supplies its own delay: a body driven
-     * with catalyst takes about a tenth of a cycle to shift its phase,
-     * because the catalyst has to run through D and quench the primer before
-     * the loop answers. Measured across the whole range of conduction speeds
-     * the interior lag sat at 10 to 12 frames either way, and the wire's own
-     * lag only made it *less* uniform — so the dial did nothing but blur the
-     * thing it was built for, and it is gone. What that costs is named under
-     * Locomotion in `docs/concepts.md`: the wavelength is now set by global
-     * rates, and nothing about a net's own shape reaches it.
      */
     const spread = params.metabolicDiffuse;
     if (spread > 0) {
-      const SEND = store.gaitSend;
-      const GATE = store.gaitGate;
+      const CHEM = store.chemAll;
+      const GUT = store.gut;
       const PW = store.portWire;
       const agents = this.agents;
       const wires = this.graph.wires;
       const k = spread * dt;
+      const CAP = store.energyCap;
+      const gutSize = params.gutSize;
       for (const wire of wires.values()) {
         const A = agents.get(wire.a.id);
         const B = agents.get(wire.b.id);
+        const fg = wire.fluxGut;
         if (!A || !B || A === B) {
+          fg[0] = 0;
+          fg[1] = 0;
+          fg[2] = 0;
+          fg[3] = 0;
+          wire.fluxB = 0;
           wire.fluxC = 0;
           wire.fluxD = 0;
           continue;
         }
         const sa = A.slot;
         const sb = B.slot;
-        // Signed `a` toward `b`. A wire between two principals is a redex and
-        // is asked by both of its ends; what crosses is the net of the asks.
-        const askA = wire.a.slot === 'p' ? broadcast(SEND, GATE, WAVE, sa, k) : 0;
-        const askB = wire.b.slot === 'p' ? broadcast(SEND, GATE, WAVE, sb, k) : 0;
-        let wantC = 0;
-        let wantD = 0;
-        if (askA > 0) wantC += askA;
-        else wantD -= askA;
-        if (askB > 0) wantC -= askB;
-        else wantD += askB;
-        wire.fluxC = limit(R, sa, sb, REACT_C, wantC);
-        wire.fluxD = limit(R, sa, sb, REACT_D, wantD);
+        // A principal end is a mouth; an auxiliary one is only an ear.
+        const ga = wire.a.slot === 'p' ? sa * CHEM_LEN : -1;
+        const gb = wire.b.slot === 'p' ? sb * CHEM_LEN : -1;
+        // The doc's A, four wide because the gut is: each field species is
+        // rectified against the same gate and moves on its own.
+        for (let c = 0; c < CHEM_SPECIES; c++) {
+          fg[c] = crossing(GUT, CHEM, sa, sb, ga, gb, CHEM_SPECIES, c, TX_A, CAP[sb] * gutSize, k);
+        }
+        wire.fluxB = crossing(R, CHEM, sa, sb, ga, gb, REACT_SPECIES, REACT_B, TX_B, REACT_CAP, k);
+        wire.fluxC = crossing(R, CHEM, sa, sb, ga, gb, REACT_SPECIES, REACT_C, TX_C, REACT_CAP, k);
+        wire.fluxD = crossing(R, CHEM, sa, sb, ga, gb, REACT_SPECIES, REACT_D, TX_D, REACT_CAP, k);
       }
       for (const agent of agents.values()) {
         const s = agent.slot;
         const id = agent.id;
         const o = s * REACT_SPECIES;
+        const go = s * CHEM_SPECIES;
         for (let port = 0; port < 3; port++) {
           const wid = PW[s * 3 + port];
           if (wid < 0) continue;
@@ -4504,6 +4487,9 @@ export class Sim {
           if (!wire) continue;
           // Signed `a` toward `b`, and this body is one of the two.
           const sign = wire.a.id === id ? -1 : 1;
+          const fg = wire.fluxGut;
+          for (let c = 0; c < CHEM_SPECIES; c++) if (fg[c] !== 0) GUT[go + c] += sign * fg[c];
+          if (wire.fluxB !== 0) R[o + REACT_B] += sign * wire.fluxB;
           if (wire.fluxC !== 0) R[o + REACT_C] += sign * wire.fluxC;
           if (wire.fluxD !== 0) R[o + REACT_D] += sign * wire.fluxD;
         }
@@ -4514,6 +4500,8 @@ export class Sim {
         WAVE[s] = w;
         ANCHOR[s] = GA[s] * w;
       }
+      // Something arrived in a gut, so the digestion pass has work again.
+      this.gutLive = true;
     }
   }
 
@@ -6158,8 +6146,6 @@ export class Sim {
     const TT = store.transportThrust;
     const TR = store.transportRecoil;
     const GA = store.gaitAnchor;
-    const SEND = store.gaitSend;
-    const GATE = store.gaitGate;
     const PLASTIC = store.plasticAll;
     const TRACE = store.traceAll;
     const CRITIC = store.criticAll;
@@ -6394,10 +6380,6 @@ export class Sim {
       // Signed both ways on purpose: a body that lets go where its neighbour
       // holds walks the other way, and that is a lineage's to choose.
       GA[slot] = clamp(headAt(CHEM, g, G_OUT, G_BASE, 0, H, ho, S) * HEAD_SCALE.anchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
-      // The coupling: whether this body excites or inhibits down its principal
-      // wire while it fires, and how discharged it has to be to fire it.
-      SEND[slot] = clamp(headAt(CHEM, g, GC_OUT, GC_BASE, 0, H, ho, S) * HEAD_SCALE.send, -GAIT_SEND_MAX, GAIT_SEND_MAX);
-      GATE[slot] = clamp(headAt(CHEM, g, GC_OUT, GC_BASE, 1, H, ho, S) * HEAD_SCALE.gate, -GAIT_GATE_MAX, GAIT_GATE_MAX);
 
       /*
        * What this body learns from the frame it has just had.
@@ -6601,8 +6583,6 @@ export class Sim {
       store.transportThrust[slot] = out[o + 16];
       store.transportRecoil[slot] = out[o + 17];
       store.gaitAnchor[slot] = out[o + 18];
-      store.gaitSend[slot] = out[o + 19];
-      store.gaitGate[slot] = out[o + 20];
     }
   }
 
@@ -6821,6 +6801,7 @@ export class Sim {
    * — needs it to be under-set, which nothing here does.
    */
   private gutLive = false;
+  private readonly starving: number[] = [];
 
   /**
    * Materialise every body's expression vector for the frame.
@@ -6932,7 +6913,38 @@ export class Sim {
     const EX = store.expressAll;
     const EXTRA = store.extra;
     const CAP = store.energyCap;
+    const R = store.react;
+    const INTAKE = store.intake;
+    /*
+     * What a body routes to its reactor instead of banking, and what a unit
+     * of banked food is worth in reactor units.
+     *
+     * This is the doc's `r1`, `A -> B`, and the whole of the reactor's supply.
+     * It used to *buy* its fuel out of the tank at `metabolicCost`, so food
+     * ran grid -> gut -> tank -> reactor and the tank sat in the middle of a
+     * round trip; the split is what cuts the tank out of it. A body with a
+     * full tank and an empty gut now has no clock.
+     *
+     * The yield is a unit conversion and it is large, because a reactor turns
+     * its pool over many times per unit of matter — that is what a currency
+     * is. The old `metabolicCost` of 0.01 was the same conversion written as
+     * a price; this is its reciprocal, and it is one dial instead of two.
+     */
+    const yieldB = params.metabolicYield;
     const co = params.catCoSubstrate;
+    /*
+     * The reactor's pools are in its own units and outside the pond's books —
+     * a reactor turns its pool over many times per unit of matter, so the two
+     * scales differ by orders. What crosses the boundary is the routed food,
+     * and it leaves through the same road rent uses, so metabolising is
+     * fertilising and the dish's total does not move. At `upkeepExcrete` 0 it
+     * is destroyed instead, which is what the old buy-from-the-tank path did
+     * with the price it charged; the conservation suite turns it on.
+     */
+    const back = params.upkeepExcrete;
+    const grid = this.energy;
+    const X = store.x;
+    const Y = store.y;
     const full = 1 - Math.exp(-rate * t);
     let live = false;
     for (const a of this.agents.values()) {
@@ -6940,8 +6952,24 @@ export class Sim {
       const go = s * CHEM_SPECIES;
       if (store.gutTotal(s) <= 0) continue;
       live = true;
+      /*
+       * Room for what is *banked*, widened by the share that is not. A body
+       * routing a quarter of its food to its reactor can digest a third more
+       * than its tank has room for, and one routing all of it is bounded only
+       * by its gut. Without this a full tank stops digestion outright, so a
+       * well-fed body would starve its own clock — which is backwards, and it
+       * is what makes `intake` a routing decision rather than a tax.
+       */
+      const share = INTAKE[s];
+      const banked = share >= 1 ? 0 : 1 - share;
       let room = CAP[s] - EXTRA[s];
-      if (room <= 0) continue;
+      if (banked > 0) {
+        if (room <= 0) continue;
+        room /= banked;
+      } else if (room < 0) {
+        room = 0;
+      }
+      if (share >= 1) room = Infinity;
       const xo = s * ROW_COUNT + ROW_UPTAKE;
       /*
        * The ground is a *reagent*, not a catalyst.
@@ -7011,7 +7039,19 @@ export class Sim {
         room -= take + spend;
         moved += take + spend;
       }
-      if (moved > 0) EXTRA[s] += moved;
+      if (moved > 0) {
+        // Split, not taxed: what feeds the reactor is food the body did not
+        // bank, so running a metabolism costs exactly what it consumes and
+        // needs no price of its own.
+        const toReactor = share > 0 ? (share >= 1 ? moved : moved * share) : 0;
+        if (toReactor > 0) {
+          const r = s * REACT_SPECIES + REACT_B;
+          const b = R[r] + toReactor * yieldB;
+          R[r] = b > REACT_CAP ? REACT_CAP : b;
+          if (back > 0) payOut(grid, EX, s, X[s], Y[s], toReactor * back);
+        }
+        EXTRA[s] += moved - toReactor;
+      }
     }
     /*
      * Read before this pass moved anything, so a pond that has just finished
@@ -7345,48 +7385,59 @@ function rewriteAudio(
  * accessors are the whole cost — see the note on reading `chemAll` directly.
  */
 /**
- * What one end of a wire is broadcasting this frame, signed by *which*
- * species: positive is catalyst C, negative is inhibitor D, and the magnitude
- * is the rate either way.
+ * What crosses a wire for one species this frame, signed from `a` toward `b`.
  *
- * Zero unless the reactor is *above* its gate, which is the doc's own
- * `H(x_j - G_j)`: a node broadcasts what it has, so it broadcasts while its
- * catalyst is high. One gate and not four, so a Dup's inhibitor rides the
- * same wave its catalyst does — D is made from C, so it is right to within
- * the C -> D lag, and the doc's per-species gate vector is what would close
- * that gap.
+ * The doc's §4: a node broadcasts out of its principal port at `Tx[slot]`
+ * times however much it is holding above its gate `Gx[slot]`, which is
+ * `H(x - G)` with the step softened into a rectifier. `ga` and `gb` are each
+ * end's genome offset, or -1 when that end is not a principal. `pool` is the
+ * array the species lives in and `stride` its width, because the doc's A is
+ * the gut and the other three are the reactor.
  *
- * The ask only, unbounded — the wire's own conduction and the two ends' room
- * are applied to the net of both ends' asks, in `Sim.advanceGait`.
+ * Bounded once on the net by a quarter of the source's stock and a quarter of
+ * the sink's room: a body's species can be drawn on by its own broadcast and
+ * by the far end of each of its three wires, so a quarter is what makes an
+ * overdraw impossible and lets the apply need no clamp of its own.
  */
-function broadcast(
-  SEND: Float64Array,
-  GATE: Float64Array,
-  WAVE: Float64Array,
-  s: number,
+function crossing(
+  pool: Float64Array,
+  CHEM: Float32Array,
+  sa: number,
+  sb: number,
+  ga: number,
+  gb: number,
+  stride: number,
+  species: number,
+  slot: number,
+  cap: number,
   k: number,
 ): number {
-  const drive = WAVE[s] - GATE[s];
-  if (!(drive > 0)) return 0;
-  return SEND[s] * drive * k;
-}
-
-/**
- * A wire's flux for one species, clipped to what is actually at either end:
- * a quarter of the source's stock and a quarter of the sink's room. A body's
- * species can be drawn on by its own broadcast and by the far end of each of
- * its three wires, so a quarter is what makes an overdraw impossible.
- */
-function limit(R: Float64Array, sa: number, sb: number, species: number, f: number): number {
+  const ia = sa * stride + species;
+  const ib = sb * stride + species;
+  let f = 0;
+  if (ga >= 0) {
+    const rate = CHEM[ga + TX_BASE + slot];
+    if (rate > 0) {
+      const drive = pool[ia] - CHEM[ga + GX_BASE + slot];
+      if (drive > 0) f += rate * drive * k;
+    }
+  }
+  if (gb >= 0) {
+    const rate = CHEM[gb + TX_BASE + slot];
+    if (rate > 0) {
+      const drive = pool[ib] - CHEM[gb + GX_BASE + slot];
+      if (drive > 0) f -= rate * drive * k;
+    }
+  }
   if (f > 0) {
-    const have = R[sa * REACT_SPECIES + species] * 0.25;
-    const room = (REACT_CAP - R[sb * REACT_SPECIES + species]) * 0.25;
+    const have = pool[ia] * 0.25;
+    const room = (cap - pool[ib]) * 0.25;
     const lim = have < room ? have : room;
     return f > lim ? (lim > 0 ? lim : 0) : f;
   }
   if (f < 0) {
-    const have = R[sb * REACT_SPECIES + species] * 0.25;
-    const room = (REACT_CAP - R[sa * REACT_SPECIES + species]) * 0.25;
+    const have = pool[ib] * 0.25;
+    const room = (cap - pool[ia]) * 0.25;
     const lim = have < room ? have : room;
     return -f > lim ? (lim > 0 ? -lim : 0) : f;
   }

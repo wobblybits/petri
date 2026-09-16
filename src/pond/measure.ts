@@ -1,4 +1,4 @@
-import { CHEM_LEN, CHEM_SPECIES, EMIT, GC_BASE, G_BASE, IN_DEMAND, ROW_EXCRETE, STATE_DIMS, TASTE, T_OUT, W_IN, W_SELF, X_BASE } from '../chem-layout.ts';
+import { CHEM_LEN, CHEM_SPECIES, EMIT, GX_BASE, G_BASE, IN_DEMAND, TX_BASE, ROW_EXCRETE, STATE_DIMS, TASTE, T_OUT, W_IN, W_SELF, X_BASE } from '../chem-layout.ts';
 import { EXTRA_CAP } from '../energy.ts';
 import { CH, CHANNELS } from '../fields.ts';
 import type { Params } from '../params.ts';
@@ -433,7 +433,9 @@ export function measureDiversity(sim: Sim, params?: Params): Diversity {
    * The head *bases* only. Both matrices still seed to zero like every other,
    * and belong with the raw material.
    */
-  const kindSeeded = new Set([G_BASE, GC_BASE, GC_BASE + 1]);
+  const kindSeeded = new Set([G_BASE]);
+  for (let c = 0; c < CHEM_SPECIES; c++) kindSeeded.add(TX_BASE + c);
+  for (let c = 0; c < CHEM_SPECIES; c++) kindSeeded.add(GX_BASE + c);
   for (let c = 0; c < CHEM_SPECIES; c++) kindSeeded.add(X_BASE + ROW_EXCRETE + c);
   const drifted: number[] = [];
   for (let k = TASTE + 4; k < CHEM_LEN; k++) if (!kindSeeded.has(k)) drifted.push(k);

@@ -287,27 +287,36 @@ export const G_OUT = KS_BASE + CHEM_SPECIES;
 export const G_BASE = G_OUT + STATE_DIMS;
 
 /**
- * `Gc`, state -> coupling, and its bases. Two rows: `send`, then `gate`.
+ * `Tx`, the transmission vector, and `Gx`, the gate vector: one gene per
+ * species each, both plain heritable genes rather than heads off `h`.
  *
- * What this body does to the far end of its principal wire while it fires.
- * `send` is signed: positive draws the far end's ATP into this body's burst,
- * which discharges the far end and sets it off (excite); negative pushes this
- * body's ATP out to it, which holds it charged and quiet (inhibit). `gate` is
- * the wave level the pathway has to be *below* to be firing, on the same
- * [-1, 1] as `gaitWave`. Read by the coupling pass in `Sim.advanceGait`; see
- * `docs/mka-plan.md` §2.
+ * The doc's §4.1 transmission matrix and §4's threshold gate, which §8 lists
+ * among the per-agent parameters. `Tx[c]` is how fast this body broadcasts
+ * species `c` down its principal wire; `Gx[c]` is the concentration it has to
+ * be holding before it broadcasts any. Seeded by kind and free to drift:
+ * an Era pushes fuel and primer downstream, a Con broadcasts the catalyst, a
+ * Dup broadcasts the inhibitor.
  *
- * Its own segment rather than two more rows on `G`, because `net-blob.ts`
- * refuses a stored net whose segment changed length and seeds one it never
- * had. The nets under `nets/` keep loading, and arrive seeded for their kind.
- *
- * A head, so a lineage can make what it sends depend on its state — and so
- * the learned weights that shape `h` reach the gate without a second
- * learning rule. Row-major, like every head: `GC_OUT + row * STATE_DIMS + d`.
+ * Genes and not a head, which is a change of position and the reason is
+ * arithmetic. Two rows off `h` cost ten floats; eight would cost forty, and
+ * the doc wants all eight. `ks`, the uptake affinity, already makes the same
+ * trade with the same argument: which transporter a body has is not a thing
+ * that should move with its mood. What a body *broadcasts* does move with its
+ * mood, because the rate is `Tx[c] * (x_c - Gx[c])` and the concentration is
+ * the swinging part — the impulse is in the chemistry, not in the gene.
  */
-export const GC_OUT = G_BASE + 1;
-export const GC_BASE = GC_OUT + 2 * STATE_DIMS;
-export const CHEM_LEN = GC_BASE + 2;
+export const TX_BASE = G_BASE + 1;
+/**
+ * Slots in `Tx` and `Gx`, the doc's four: A is the gut, then the reactor's
+ * three. `TX_A` moves swallowed food down a wire, which is §6.1's Era pushing
+ * fuel into the net it hangs off.
+ */
+export const TX_A = 0;
+export const TX_B = 1;
+export const TX_C = 2;
+export const TX_D = 3;
+export const GX_BASE = TX_BASE + CHEM_SPECIES;
+export const CHEM_LEN = GX_BASE + CHEM_SPECIES;
 
 /**
  * The genome as a list of named segments, in memory order.
@@ -352,8 +361,8 @@ export const CHEM_SEGMENTS: readonly ChemSegment[] = [
   { name: 'ks', at: KS_BASE, len: CHEM_SPECIES },
   { name: 'G', at: G_OUT, len: STATE_DIMS },
   { name: 'g0', at: G_BASE, len: 1 },
-  { name: 'Gc', at: GC_OUT, len: 2 * STATE_DIMS },
-  { name: 'gc0', at: GC_BASE, len: 2 },
+  { name: 'Tx', at: TX_BASE, len: CHEM_SPECIES },
+  { name: 'Gx', at: GX_BASE, len: CHEM_SPECIES },
 ];
 
 /**
@@ -419,13 +428,6 @@ export const LEARN_STRIDE = LEARN_PREV_V + 1;
  * the layout rather than on `Sim`.
  */
 export const GAIT_ANCHOR_MAX = 8;
-/**
- * Widest `send` the coupling head may ask for, as a multiple of
- * `metabolicDiffuse`, and the gate's range — the wave is in [-1, 1], so a gate
- * past either end is always open or never.
- */
-export const GAIT_SEND_MAX = 4;
-export const GAIT_GATE_MAX = 1;
 
 export const HEAD_SCALE = {
   align: 8,
@@ -436,9 +438,6 @@ export const HEAD_SCALE = {
   turn: 2,
   /** Same natural unit as the `grip` slider: one gene is one 1/s of drag. */
   anchor: 2,
-  /** One gene is one `metabolicDiffuse` of coupling, and one gene of gate is one wave. */
-  send: 1,
-  gate: 1,
 } as const;
 
 /**

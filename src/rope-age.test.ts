@@ -14,6 +14,8 @@ function fakeWire(over: Partial<Wire> = {}): Wire {
     id: 1,
     a: { id: 1, slot: 'p' },
     b: { id: 2, slot: 'p' },
+    fluxGut: new Float64Array(4),
+    fluxB: 0,
     fluxC: 0,
     fluxD: 0,
     collapse: 0,

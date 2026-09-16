@@ -1,7 +1,14 @@
 import { ERA_RADIUS, boundRadius, discRadius, triangleWorld, type Agent } from './agents.ts';
 import { wrapDeltaVec, type Vec2 } from './wrap.ts';
 
-const SKIN = 0.85;
+/**
+ * Contact skin. SAT pads every projection by it and the disc tiers add it
+ * twice, so the two rest in the same place. Exported because three other
+ * copies of the contact — the WASM solver, the GPU kernel and its twin — have
+ * to carry the same number, and a mirror that drops it moves the pond by
+ * 1.7 px the moment the camera changes which tier a body is in.
+ */
+export const SKIN = 0.85;
 export const SLOP = 0.35;
 
 export interface Hit {
@@ -119,14 +126,15 @@ function shapeAt(agent: Agent, x: number, y: number): Shape {
  * Disc overlap, the cheap stand-in for `queryHit`. Same separation-axis
  * convention, cheap enough to run on every pair the broadphase reports.
  *
- * The radius is the glyph-area disc, not the SAT bound: this is the same
- * contact seen at a coarser tier, so it has to settle where SAT settles or
- * the net changes size when the camera crosses the LOD line.
+ * `discRadius` rather than the SAT bound, and `SKIN` twice the way `queryHit`
+ * pads its projections: this is the same contact seen at a coarser tier, so
+ * it has to settle where SAT settles or the net changes size when the camera
+ * crosses the LOD line. Both halves matter — the skin alone is 1.7 px of it.
  */
 export function queryDiscHit(A: Agent, B: Agent, w: number, h: number): Hit | null {
   const d = wrapDeltaVec(A.x, A.y, B.x, B.y, w, h);
   const rA = discRadius(A);
-  const minDist = rA + discRadius(B);
+  const minDist = rA + discRadius(B) + SKIN * 2;
   const dist = Math.hypot(d.x, d.y);
   if (dist >= minDist) return null;
   if (dist < 1e-6) {

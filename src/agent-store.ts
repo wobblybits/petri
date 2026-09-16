@@ -28,16 +28,26 @@ CODE_KIND[KIND_DUP] = 'dup';
 CODE_KIND[KIND_CON] = 'con';
 
 /**
- * Species in a body's reactor: A, B, C, D, in the doc's order.
+ * The reactor's own species: B, C, D. Three, not the doc's four, because **A
+ * is the gut** — the doc's primary fuel is what a body has swallowed and not
+ * yet used, which this pond already had a four-species array for.
+ *
+ * That is the whole of the consolidation. The reactor used to *buy* its fuel
+ * out of the tank, so food went grid -> gut -> tank -> reactor and the tank
+ * sat in the middle of a round trip. Now digestion splits what it converts
+ * between the tank and the reactor, and the gut is A. Two consequences worth
+ * naming: a body with a full tank and an empty gut has no clock, so the gait
+ * depends on *eating* rather than on *having*; and what a body routes to its
+ * reactor is food it did not bank, so the cost of running a metabolism needs
+ * no price — it is the food itself.
  *
  * Here rather than on `Sim` because the store has to know the stride to
  * allocate `react`, which is the same reason `chem-layout.ts` exists.
  */
-export const REACT_SPECIES = 4;
-export const REACT_A = 0;
-export const REACT_B = 1;
-export const REACT_C = 2;
-export const REACT_D = 3;
+export const REACT_SPECIES = 3;
+export const REACT_B = 0;
+export const REACT_C = 1;
+export const REACT_D = 2;
 
 export class AgentStore {
   capacity = 0;
@@ -98,13 +108,13 @@ export class AgentStore {
   /**
    * The gait, and the reactor that is its clock.
    *
-   * `react` is the body's four-chemical vat, four floats a body in the doc's
-   * own order — A primary fuel, B active primer, C saturated catalyst, D
-   * reset inhibitor (`docs/scratch.txt` §3). A is bought out of the tank at a
-   * price, which is where this joins the economy; B, C and D are the loop,
-   * and C is both what the stroke reads and what a Con passes down its wire.
-   * `intake` is how hard this body pulls fuel, and is the one part of the
-   * reactor a lineage owns. `gaitAnchor` is the amplitude the `G` head reads
+   * `react` is the body's vat: B active primer, C saturated catalyst, D
+   * reset inhibitor (`docs/scratch.txt` §3). The doc's fourth, A the primary
+   * fuel, is `gut` — what this body has swallowed off the grid and not yet
+   * used — so the reactor is fed by eating rather than by buying. B, C and D
+   * are the loop, and C is both what the stroke reads and what a Con passes
+   * down its wire. `intake` is the share of digested food a body routes to
+   * its reactor instead of banking, and is the one part a lineage owns. `gaitAnchor` is the amplitude the `G` head reads
    * off `h`, and `anchor` is what it comes to this frame:
    * `gaitAnchor * gaitWave`, added to this body's drag rate.
    *
@@ -121,15 +131,20 @@ export class AgentStore {
    */
   react!: Float64Array;
   intake!: Float64Array;
+  /**
+   * Seconds this body's primer has been at absolute depletion, reset the
+   * moment any arrives. The doc's §7.2 death: a node whose fuel stays empty
+   * for longer than `starveTime` enters functional cell death.
+   *
+   * It is what lets rent go. A standing charge was the only thing that could
+   * push a tank past its floor and so the only thing that killed anything;
+   * the metabolism draws in proportion to what a body is holding, so it
+   * empties a body and then stops. This makes running out *be* the death,
+   * which is one rule for one job and is the doc's own.
+   */
+  starve!: Float64Array;
   gaitWave!: Float64Array;
   gaitAnchor!: Float64Array;
-  /**
-   * The coupling head, `Gc`, as it reads this frame: whether this body
-   * excites (+) or inhibits (−) the far end of its principal wire while it
-   * fires, and the wave level below which it counts as firing.
-   */
-  gaitSend!: Float64Array;
-  gaitGate!: Float64Array;
   anchor!: Float64Array;
   /** Whole units this body sends in one transfer. See `params.transportQuantum`. */
   transportQuantum!: Float64Array;
@@ -520,10 +535,9 @@ export class AgentStore {
     const r = slot * REACT_SPECIES;
     for (let k = 0; k < REACT_SPECIES; k++) this.react[r + k] = 0;
     this.intake[slot] = 0;
+    this.starve[slot] = 0;
     this.gaitWave[slot] = 0;
     this.gaitAnchor[slot] = 0;
-    this.gaitSend[slot] = 0;
-    this.gaitGate[slot] = 0;
     this.anchor[slot] = 0;
     this.transportQuantum[slot] = 0;
     this.csHeading[slot] = 0;
@@ -618,10 +632,9 @@ export class AgentStore {
     if (this.react) nextReact.set(this.react.subarray(0, live * REACT_SPECIES));
     this.react = nextReact;
     this.intake = growF64(this.intake);
+    this.starve = growF64(this.starve);
     this.gaitWave = growF64(this.gaitWave);
     this.gaitAnchor = growF64(this.gaitAnchor);
-    this.gaitSend = growF64(this.gaitSend);
-    this.gaitGate = growF64(this.gaitGate);
     this.anchor = growF64(this.anchor);
     this.transportQuantum = growF64(this.transportQuantum);
     // Three a body, and -1 rather than 0 is the free marker, so a fresh tail

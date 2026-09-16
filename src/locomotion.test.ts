@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { defaultParams, type Params } from './params.ts';
+import type { Params } from './params.ts';
+import { fixedParams } from './test-params.ts';
 import { applyTransportRecoil, Sim } from './sim.ts';
 
 /**
@@ -26,7 +27,7 @@ import { applyTransportRecoil, Sim } from './sim.ts';
 
 /** A dish with nothing in it but the drag law: no swimming, flocking or spawning. */
 function stillParams(): Params {
-  const params = defaultParams();
+  const params = fixedParams();
   params.spawnInterval = 0;
   params.stepSpeed = 0;
   params.turnRate = 0;

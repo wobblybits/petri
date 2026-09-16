@@ -16,6 +16,7 @@ import { CHEM_SLOPE_MAX } from './rewrite.ts';
 import { CH } from './fields.ts';
 import { CHEM_TASTE_MAX } from './rewrite.ts';
 import { defaultParams } from './params.ts';
+import { fixedParams } from './test-params.ts';
 import { loadPreset } from './presets.ts';
 import { Sim } from './sim.ts';
 
@@ -30,7 +31,7 @@ import { Sim } from './sim.ts';
  */
 
 function pond(): { sim: Sim; params: ReturnType<typeof defaultParams> } {
-  const params = defaultParams();
+  const params = fixedParams();
   params.spawnInterval = 0;
   const sim = new Sim(800, 600);
   // The oscillator, not a soup: it is built to rewrite, so births arrive in a
@@ -100,7 +101,7 @@ describe('scent genome', () => {
    * which needs a Sim because it needs neighbours).
    */
   it('maps state to what it says through E, and to what it listens for through T', () => {
-    const params = defaultParams();
+    const params = fixedParams();
     const chem = seedChem('con', params);
     // Shift voice toward ch1 as h0 rises, and listen for ch1 less as h2 rises.
     chem[E_OUT + CH.dupP * STATE_DIMS + 0] = 1;
@@ -169,7 +170,7 @@ describe('scent genome', () => {
     // Every matrix seeds to zero except the food pathway, so a fresh body
     // computes h = phi(0) = 0 and its output is its bases. That is what makes
     // a spawned agent arrive unevolved, which is the point of seeding at all.
-    const params = defaultParams();
+    const params = fixedParams();
     const a = bareBody(seedChem('con', params));
     expect(effEmit(a, CH.conP)).toBeCloseTo(1, 6);
     expect(effEmit(a, CH.dupP)).toBeCloseTo(0, 6);
@@ -177,7 +178,7 @@ describe('scent genome', () => {
   });
 
   it('never lets a body emit onto the ground, whatever its genes say', () => {
-    const params = defaultParams();
+    const params = fixedParams();
     const chem = seedChem('con', params);
     chem[EMIT + CH.energy] = 9;
     for (let d = 0; d < STATE_DIMS; d++) chem[E_OUT + CH.energy * STATE_DIMS + d] = 9;
@@ -190,7 +191,7 @@ describe('scent genome', () => {
 
 
   it('never lets a modulated emit go negative', () => {
-    const params = defaultParams();
+    const params = fixedParams();
     // `request` no longer reaches emit directly — it is an input to `h`, and
     // `h` is what `E` reads. Set the state, not the input.
     const a = bareBody(seedChem('con', params), { h: [1, 0, 0, 0] });
@@ -213,7 +214,7 @@ describe('scent genome', () => {
    * and the one that was off by default was the redundant one.
    */
   it('spends one unit of voice however it is distributed', () => {
-    const params = defaultParams();
+    const params = fixedParams();
     for (const kind of ['con', 'dup', 'era'] as const) {
       const c = seedChem(kind, params);
       let sum = 0;
@@ -226,7 +227,7 @@ describe('scent genome', () => {
     // Not asserting that it *does* in any given run — only that nothing in the
     // pipeline clamps avoidance away, since a body fleeing what it smells is
     // the main behaviour the old switch could not express.
-    const params = defaultParams();
+    const params = fixedParams();
     const c = seedChem('con', params);
     c[TASTE] = -2;
     expect(Math.min(...Array.from(c.subarray(TASTE, TASTE + 4)))).toBeLessThan(0);
