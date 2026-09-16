@@ -71,25 +71,28 @@ export interface Wire {
    */
   ropePath: RopePath;
   /**
-   * ATP crossing this wire this frame, signed `a` toward `b`.
+   * Catalyst and inhibitor crossing this wire this frame, each signed `a`
+   * toward `b`.
    *
-   * The wire is the bucket, and this is what is in it. `Sim.advanceGait`
-   * writes it once per wire and every body then reads the wires on its own
+   * The wire is the bucket, and these are what is in it. `Sim.advanceGait`
+   * writes them once per wire and every body then reads the wires on its own
    * ports, so the two ends of a transfer read one number and cannot disagree
-   * about it.
+   * about it. Two, because a Con broadcasts C and a Dup broadcasts D, and the
+   * two ends of one wire need not be the same kind of thing.
    *
-   * It persists across frames rather than being recomputed, because the wire
-   * *conducts* rather than teleporting: this relaxes toward what the firing
+   * They persist across frames rather than being recomputed, because the wire
+   * *conducts* rather than teleporting: each relaxes toward what the firing
    * end is asking for with a time constant of `rest / metabolicSpeed`, so a
    * long wire carries a front slowly and a short one quickly. That delay per
    * hop is what makes a chain's cascade a travelling wave instead of the
    * frame-rate entrainment it was when the transfer landed whole.
    *
-   * Nothing is *stored* here — it is an amount moved per frame, not a
+   * Nothing is *stored* here — they are amounts moved per frame, not a
    * reservoir — so a wire that snaps or is rewritten away owes nobody a
    * spill, and the pond's conservation does not have to know wires exist.
    */
-  flux: number;
+  fluxC: number;
+  fluxD: number;
 }
 
 export type RopePath = 'full' | 'no-shape' | 'span';
@@ -493,7 +496,7 @@ export class Graph {
     if (!this.isFree(a) || !this.isFree(b)) return null;
     const id = this.nextWireId++;
     const len = Math.max(1, latchLen);
-    const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full', flux: 0 };
+    const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full', fluxC: 0, fluxD: 0 };
     this.wires.set(id, wire);
     this.setWireAt(a.id, a.slot, id);
     this.setWireAt(b.id, b.slot, id);

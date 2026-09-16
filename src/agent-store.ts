@@ -27,6 +27,18 @@ CODE_KIND[KIND_ERA] = 'era';
 CODE_KIND[KIND_DUP] = 'dup';
 CODE_KIND[KIND_CON] = 'con';
 
+/**
+ * Species in a body's reactor: A, B, C, D, in the doc's order.
+ *
+ * Here rather than on `Sim` because the store has to know the stride to
+ * allocate `react`, which is the same reason `chem-layout.ts` exists.
+ */
+export const REACT_SPECIES = 4;
+export const REACT_A = 0;
+export const REACT_B = 1;
+export const REACT_C = 2;
+export const REACT_D = 3;
+
 export class AgentStore {
   capacity = 0;
   /**
@@ -84,13 +96,16 @@ export class AgentStore {
   transportThrust!: Float64Array;
   transportRecoil!: Float64Array;
   /**
-   * The gait, and the metabolism that is now its clock.
+   * The gait, and the reactor that is its clock.
    *
-   * `sub` is the pathway's upstream metabolite, bought out of the tank.
-   * `atp` is the charged part of a conserved adenylate pool of `adenylate`,
-   * so `adp` is `adenylate - atp` and is never stored — the pool is currency
-   * and cannot be minted, only cycled. `gaitAnchor` is the amplitude the `G`
-   * head reads off `h`, and `anchor` is what it comes to this frame:
+   * `react` is the body's four-chemical vat, four floats a body in the doc's
+   * own order — A primary fuel, B active primer, C saturated catalyst, D
+   * reset inhibitor (`docs/scratch.txt` §3). A is bought out of the tank at a
+   * price, which is where this joins the economy; B, C and D are the loop,
+   * and C is both what the stroke reads and what a Con passes down its wire.
+   * `intake` is how hard this body pulls fuel, and is the one part of the
+   * reactor a lineage owns. `gaitAnchor` is the amplitude the `G` head reads
+   * off `h`, and `anchor` is what it comes to this frame:
    * `gaitAnchor * gaitWave`, added to this body's drag rate.
    *
    * `gaitWave` is the bare `cos(phase)`, with no amplitude in it, and is what
@@ -104,9 +119,8 @@ export class AgentStore {
    * `anchor` and `grip` leave of the velocity that correction induces, which
    * costs no second mechanism.
    */
-  sub!: Float64Array;
-  atp!: Float64Array;
-  adenylate!: Float64Array;
+  react!: Float64Array;
+  intake!: Float64Array;
   gaitWave!: Float64Array;
   gaitAnchor!: Float64Array;
   /**
@@ -503,9 +517,9 @@ export class AgentStore {
     this.assort[slot] = 0;
     this.transportThrust[slot] = 0;
     this.transportRecoil[slot] = 0;
-    this.sub[slot] = 0;
-    this.atp[slot] = 0;
-    this.adenylate[slot] = 0;
+    const r = slot * REACT_SPECIES;
+    for (let k = 0; k < REACT_SPECIES; k++) this.react[r + k] = 0;
+    this.intake[slot] = 0;
     this.gaitWave[slot] = 0;
     this.gaitAnchor[slot] = 0;
     this.gaitSend[slot] = 0;
@@ -600,9 +614,10 @@ export class AgentStore {
     this.assort = growF64(this.assort);
     this.transportThrust = growF64(this.transportThrust);
     this.transportRecoil = growF64(this.transportRecoil);
-    this.sub = growF64(this.sub);
-    this.atp = growF64(this.atp);
-    this.adenylate = growF64(this.adenylate);
+    const nextReact = new Float64Array(newCapacity * REACT_SPECIES);
+    if (this.react) nextReact.set(this.react.subarray(0, live * REACT_SPECIES));
+    this.react = nextReact;
+    this.intake = growF64(this.intake);
     this.gaitWave = growF64(this.gaitWave);
     this.gaitAnchor = growF64(this.gaitAnchor);
     this.gaitSend = growF64(this.gaitSend);

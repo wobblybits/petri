@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { REACT_A, REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
 import { REWRITE_SHARE } from './energy.ts';
 import { defaultParams, type Params } from './params.ts';
 import { loadPreset } from './presets.ts';
@@ -6,23 +7,22 @@ import { Sim } from './sim.ts';
 import { pondMatter } from './test-params.ts';
 
 /*
- * The gait: an ADP-activated pathway in every body, and the one actuator it
- * drives.
+ * The gait: a four-chemical reactor in every body, what it broadcasts down a
+ * wire, and the one actuator it drives.
  *
- * These exist because the pathway ships switched off — see `metabolicRate`,
- * which is at zero until a sweep says what it should be — and a mechanism at
- * its neutral value is a mechanism nothing else in the suite touches. Every
- * other test either predates the pathway or names it in a control and turns
- * it off. So this file is the only place it runs, and each of these turns it
- * on by hand rather than inheriting a default that is one sweep away from
- * moving.
+ * The reactor is `docs/scratch.txt` §3 — A primary fuel, B active primer, C
+ * saturated catalyst, D reset inhibitor — and `Sim.advanceGait` has the
+ * reactions. It runs in the shipping pond, so this file is the only place in
+ * the suite that leaves it on: `fixedParams` pins it off for everything else,
+ * the way it already pins learning, because a second spender makes every
+ * assertion about a tank probabilistic.
  *
- * All four are change detectors on the mechanism and none is a measure of
- * behaviour: whether the pond walks, and how far, is a `npm run pond`
+ * These are change detectors on the mechanism and none is a measure of
+ * behaviour. Whether the pond walks, and how far, is a `npm run pond`
  * question and not one the suite can answer.
  */
 
-/** A dish with nothing in it but the pathway: no dish drive, no immigrants. */
+/** A dish with nothing in it but the reactor: no dish drive, no immigrants. */
 function gaitParams(): Params {
   const p = defaultParams();
   p.soupCount = 0;
@@ -39,35 +39,28 @@ function gaitParams(): Params {
   p.flockSep = 0;
   p.declutter = 0;
   p.learnRate = 0;
-  // The pathway, at the value the slider ships as its middle rather than the
-  // zero the params ship. Everything below is about what it does when it is
-  // running, so it has to be running.
-  p.metabolicRate = 6;
   return p;
+}
+
+function speciesOf(sim: Sim, slot: number): { A: number; B: number; C: number; D: number } {
+  const o = slot * REACT_SPECIES;
+  const r = sim.agentStore.react;
+  return { A: r[o + REACT_A], B: r[o + REACT_B], C: r[o + REACT_C], D: r[o + REACT_D] };
 }
 
 describe('the gait ships on', () => {
   it('runs at the shipped default, and is exactly one at zero', () => {
-    /*
-     * The pathway shipped at zero for two months while the question "what
-     * rate should it be" waited on a sweep it was never going to get. It runs
-     * now, at 15 — a period of about three seconds, which `metabolicRate`'s
-     * own arithmetic says is a stroke a couple of seconds long — with
-     * coupling 8 and conduction 90, the two values the chain was measured to
-     * lock at.
-     *
-     * The neutral behaviour is still worth pinning, because it is what every
-     * test that is not about the gait runs at: `fixedParams` turns the rate
-     * off, and at zero `advanceGait` returns with the wave and the anchor
-     * untouched, so `strokeOf` is exactly 1 — not nearly, exactly, because it
-     * is a multiplier on a rest length and a wire that starts satisfied has
-     * to stay that way to the last bit.
-     */
     const shipped = defaultParams();
-    expect(shipped.metabolicRate, 'the gait ships off again').toBeGreaterThan(0);
-    expect(shipped.metabolicDiffuse, 'the coupling ships off').toBeGreaterThan(0);
-    expect(shipped.metabolicSpeed, 'conduction ships instant, which entrains').toBeGreaterThan(0);
+    expect(shipped.metabolicRate, 'the reactor ships off again').toBeGreaterThan(0);
+    expect(shipped.metabolicDiffuse, 'the broadcast ships off').toBeGreaterThan(0);
 
+    /*
+     * The neutral behaviour is still worth pinning, because it is what every
+     * test that is not about the gait runs at: at zero `advanceGait` returns
+     * with the wave and the anchor untouched, so `strokeOf` is exactly 1 —
+     * not nearly, exactly, because it is a multiplier on a rest length and a
+     * wire that starts satisfied has to stay that way to the last bit.
+     */
     const p = gaitParams();
     p.metabolicRate = 0;
     const sim = new Sim(4000, 4000);
@@ -78,69 +71,99 @@ describe('the gait ships on', () => {
     for (let f = 0; f < 60; f++) sim.step(1 / 60, p);
     const store = sim.agentStore;
     expect(store.gaitWave[a.slot]).toBe(0);
-    expect(store.gaitWave[b.slot]).toBe(0);
     expect(store.anchor[a.slot]).toBe(0);
-    expect(store.anchor[b.slot]).toBe(0);
     expect(sim.graph.strokeOf(wire.a, wire.b, sim.agents, store.gaitWave, p)).toBe(1);
   });
 });
 
-describe('the pathway', () => {
-  it('oscillates once it is switched on, rather than settling', () => {
-    /*
-     * What makes it a clock the body owns rather than a charge it walks to.
-     * The pathway either relaxes to a steady adenylate charge or runs round a
-     * limit cycle, and only the second is a gait — so the wave has to cross
-     * zero, and cross it back, more than the once any transient gets for free.
-     *
-     * The band that does is narrow and is `metabolicRegen`'s own note to
-     * explain; this is the assertion that says which side of it the shipped
-     * value is on. It was on the wrong side twice: at `regen` 1 the wave sat
-     * at exactly −1 from the first second and the gait had never once moved,
-     * and at 4 it sat just as still at nearly full charge.
-     *
-     * Long enough to catch a period. At a rate of 6 the cycle runs about 7 s,
-     * so ten seconds is one turn and a bit — enough for two crossings and not
-     * enough to be reading a transient as a cycle.
-     */
-    const p = gaitParams();
+describe('the reactor', () => {
+  /** One fed, pinned body, watched for long enough to catch several cycles. */
+  function lone(p: Params, fullness = 1, frames = 1500) {
     const sim = new Sim(4000, 4000);
     loadPreset(sim, 'soup', p);
     const a = sim.spawn('con', 2000, 2000, 0, p, true)!;
-    const wave = sim.agentStore.gaitWave;
-    let crossings = 0;
+    a.pinned = true;
+    const store = sim.agentStore;
     let lo = Infinity;
     let hi = -Infinity;
-    let was = wave[a.slot];
-    for (let f = 0; f < 1200; f++) {
-      // Fed, so this is the pathway's own dynamics and not a body starving:
-      // `buys its substrate out of the tank` is the test about the tank.
-      a.extra = a.energyCap;
+    let crossings = 0;
+    let was = 0;
+    let first = -1;
+    let last = -1;
+    for (let f = 0; f < frames; f++) {
+      a.extra = a.energyCap * fullness;
       sim.step(1 / 60, p);
-      const now = wave[a.slot];
-      if ((was <= 0 && now > 0) || (was >= 0 && now < 0)) crossings++;
-      if (f > 600) {
-        lo = Math.min(lo, now);
-        hi = Math.max(hi, now);
+      const w = store.gaitWave[a.slot];
+      if (f > frames * 0.4) {
+        lo = Math.min(lo, w);
+        hi = Math.max(hi, w);
+        const now = w > 0 ? 1 : 0;
+        if (was === 0 && now === 1) {
+          crossings++;
+          if (first < 0) first = f;
+          last = f;
+        }
+        was = now;
       }
-      was = now;
     }
-    expect(crossings, 'the pathway settled instead of oscillating').toBeGreaterThan(1);
-    // And swings, rather than shivering about a steady charge. The full range
-    // is 2; a body that has settled reads a few thousandths.
-    expect(hi - lo, 'the wave barely moved').toBeGreaterThan(1);
+    return { sim, a, swing: hi - lo, lo, hi, crossings,
+             period: crossings > 1 ? (last - first) / (crossings - 1) / 60 : null };
+  }
+
+  it('runs a limit cycle in B, C and D while A sits steady', () => {
+    /*
+     * The shape of the doc's reactor, and the thing its own python never
+     * checks. A is fed from outside and only feeds B, so its row decouples
+     * and it settles to `J / (k1 + decay)` whatever it started at; the
+     * oscillation is the loop B -> C -> D -| B. If A moved with the cycle
+     * this would be a different system than the one the constants were
+     * chosen for.
+     */
+    const p = gaitParams();
+    const r = lone(p);
+    expect(r.crossings, 'the reactor settled instead of oscillating').toBeGreaterThan(2);
+    expect(r.swing, 'the wave barely moved').toBeGreaterThan(1);
+
+    const before = speciesOf(r.sim, r.a.slot);
+    for (let f = 0; f < 120; f++) {
+      r.a.extra = r.a.energyCap;
+      r.sim.step(1 / 60, p);
+    }
+    const after = speciesOf(r.sim, r.a.slot);
+    // A within a whisker of where it was, across two seconds that carried a
+    // whole cycle of the other three.
+    expect(Math.abs(after.A - before.A), 'the fuel moved with the cycle').toBeLessThan(0.02 * before.A + 1e-6);
+    expect(before.A, 'the fuel never arrived').toBeGreaterThan(0.1);
+    // And it sits where the algebra says: J / (k1 + decay).
+    const want = (p.metabolicSupply * 1 * 1) / (p.metabolicFuel + p.metabolicDecay);
+    expect(after.A).toBeCloseTo(want, 1);
+    expect(after.B + after.C + after.D, 'the loop is empty').toBeGreaterThan(0.5);
   });
 
-  it('buys its substrate out of the tank and puts the price on the dish', () => {
+  it('has a fuel window with both edges', () => {
     /*
-     * The join to the economy, and the rule that makes it one: the pathway
+     * The gate, and nothing had to be added to get it. A starving body sits
+     * below the Hopf boundary and is still; a fed one runs the cycle; and the
+     * period shortens as the fuel rises, so a full body strokes faster than a
+     * lean one. `metabolicFuel` carries the stability analysis this comes
+     * from and `metabolicSupply` places the tank on it.
+     */
+    const p = gaitParams();
+    const starved = lone(p, 0.12);
+    const lean = lone(p, 0.5);
+    const fed = lone(p, 1);
+    expect(starved.swing, 'a starving body undulated').toBeLessThan(0.2);
+    expect(lean.swing, 'a half-full body was still').toBeGreaterThan(1);
+    expect(fed.swing, 'a fed body was still').toBeGreaterThan(1);
+    expect(fed.period!, 'a fed body did not stroke faster than a lean one').toBeLessThan(lean.period!);
+  });
+
+  it('buys its fuel out of the tank and puts the price on the dish', () => {
+    /*
+     * The join to the economy, and the rule that makes it one: the reactor
      * spends, and what it spends leaves through the same road rent does. A
      * body that metabolises hard fertilises the cell it is standing in, so
      * the pond's total does not move.
-     *
-     * With every other source and sink off, so the only thing running is the
-     * pathway. `upkeepExcrete` is the road; at zero the spend would simply be
-     * destroyed, which is a different test and not this one.
      */
     const p = gaitParams();
     p.upkeepExcrete = 1;
@@ -156,96 +179,21 @@ describe('the pathway', () => {
       sim.step(1 / 60, p);
       worst = Math.max(worst, Math.abs(pondMatter(sim, p.bodyValue) - before));
     }
-    // Something has to have been spent, or this is a test about a still body.
-    expect(a.extra, 'the pathway bought nothing').toBeLessThan(a.energyCap);
+    expect(a.extra, 'the reactor bought nothing').toBeLessThan(a.energyCap);
     // Float32 cells summed across the whole field, which is the floor
     // `chemistry.test.ts` gives its own conservation assertions.
     expect(worst).toBeLessThan(before * 1e-5);
   });
 });
 
-describe('the stroke', () => {
-  it('is the mean of a wire’s two ends, floored well above nothing', () => {
-    /*
-     * A wire is one muscle rather than two arguing, so a phase difference
-     * across it shortens the stroke instead of tearing it in half. Written on
-     * the wave directly, because the point is the arithmetic and not the
-     * pathway that produced it.
-     */
-    const p = gaitParams();
-    p.gaitSwell = 0.3;
-    const sim = new Sim(4000, 4000);
-    loadPreset(sim, 'soup', p);
-    const a = sim.spawn('con', 1960, 2000, 0, p, true)!;
-    const b = sim.spawn('con', 2040, 2000, 0, p, true)!;
-    const wire = sim.graph.connect(sim.agents, { id: a.id, slot: 'l' }, { id: b.id, slot: 'r' }, sim.w, sim.h, p, sim.time)!;
-    const wave = sim.agentStore.gaitWave;
-    const strokeOf = (): number => sim.graph.strokeOf(wire.a, wire.b, sim.agents, wave, p);
-
-    wave[a.slot] = 1;
-    wave[b.slot] = 1;
-    expect(strokeOf()).toBeCloseTo(1.3, 12);
-    // Opposed ends cancel: the muscle between them is doing nothing.
-    wave[a.slot] = 1;
-    wave[b.slot] = -1;
-    expect(strokeOf()).toBeCloseTo(1, 12);
-    // And a wire hauling its ends into contact is a rewrite, so the floor
-    // holds however hard both ends pull.
-    p.gaitSwell = 4;
-    wave[a.slot] = -1;
-    wave[b.slot] = -1;
-    expect(strokeOf()).toBe(0.4);
-  });
-
-  it('leaves a fresh wire satisfied at the length it latched at', () => {
-    /*
-     * The span a wire is observed to have is the *contracted* one when its
-     * bodies are mid-stroke. `connect` divides the stroke back out of the
-     * length it seeds the shrink ramp with, so that the first `syncRest`
-     * hands the solver the span the wire is actually at.
-     *
-     * Without that, `rest` stepped by the whole stroke on the frame after
-     * every latch — a near-rigid span constraint asked to resolve a fifth of
-     * a wire's length in one substep, which reads as a kick, and which is the
-     * thing `connect`'s own comment is careful about for the shrink ramp.
-     */
-    const p = gaitParams();
-    p.gaitSwell = 0.3;
-    // The breath rides on top of the stroke and would blur the comparison by
-    // a few per cent; it is `wireBreathe`'s own tests' business, not this one.
-    p.wireBreathe = 0;
-    const sim = new Sim(4000, 4000);
-    loadPreset(sim, 'soup', p);
-    const a = sim.spawn('con', 1960, 2000, 0, p, true)!;
-    const b = sim.spawn('con', 2040, 2000, 0, p, true)!;
-    // Let the two pathways run apart, so the wire is latched by bodies that
-    // are genuinely out of phase rather than both sitting at the seed.
-    for (let f = 0; f < 40; f++) sim.step(1 / 60, p);
-
-    const wire = sim.graph.connect(sim.agents, { id: a.id, slot: 'l' }, { id: b.id, slot: 'r' }, sim.w, sim.h, p, sim.time)!;
-    const span = wire.rest;
-    const stroke = sim.graph.strokeOf(wire.a, wire.b, sim.agents, sim.agentStore.gaitWave, p);
-    // Or this asserts nothing: at a stroke of 1 every arrangement agrees.
-    expect(Math.abs(stroke - 1), 'the two ends were in phase, so there was no step to make').toBeGreaterThan(0.01);
-    sim.graph.syncRest(sim.time, p, sim.agents, sim.agentStore.gaitWave, undefined);
-    expect(wire.rest).toBeCloseTo(span, 6);
-    // Which is a different number from the one the double-application gave.
-    expect(Math.abs(wire.rest - span * stroke)).toBeGreaterThan(span * 0.005);
-  });
-});
-
-describe('the coupling', () => {
+describe('the broadcast', () => {
   /*
-   * Directed, signed, and on the wire. A body acts out of its principal port
-   * only; what it does is `send` off the `Gc` head, positive drawing the far
-   * end's ATP into its own burst and negative pushing its own ATP out; and
-   * the wire carries the transfer as one signed number both ends read. See
-   * `docs/mka-plan.md` §2.
-   *
-   * Two fed, pinned bodies on one wire, and the slots chosen by hand, because
-   * which end is the principal is the whole of the claim.
+   * The doc's §4.1 transmission presets, as genes: a Con broadcasts the
+   * catalyst C, a Dup broadcasts the inhibitor D, and a body broadcasts out
+   * of its principal port only. The wire carries each species as one signed
+   * number both ends read.
    */
-  function pair(kindA: 'con' | 'dup' | 'era', slotA: 'p' | 'l', kindB: 'con' | 'dup', slotB: 'p' | 'l', p: Params) {
+  function pair(kindA: 'con' | 'dup', slotA: 'p' | 'l', kindB: 'con' | 'dup', slotB: 'p' | 'l', p: Params) {
     const sim = new Sim(4000, 4000);
     loadPreset(sim, 'soup', p);
     const a = sim.spawn(kindA, 1960, 2000, 0, p, true)!;
@@ -256,57 +204,57 @@ describe('the coupling', () => {
     return { sim, a, b, wire };
   }
 
-  function run(sim: Sim, a: { extra: number; energyCap: number }, b: { extra: number; energyCap: number }, wire: { flux: number }, p: Params) {
-    let toward = 0;
-    let away = 0;
+  function totals(sim: Sim, a: { extra: number; energyCap: number }, b: { extra: number; energyCap: number }, wire: { fluxC: number; fluxD: number }, p: Params) {
+    let C = 0;
+    let D = 0;
     for (let f = 0; f < 900; f++) {
       a.extra = a.energyCap;
       b.extra = b.energyCap;
       sim.step(1 / 60, p);
-      if (wire.flux > 0) toward += wire.flux;
-      if (wire.flux < 0) away -= wire.flux;
+      C += wire.fluxC;
+      D += wire.fluxD;
     }
-    return { toward, away };
+    return { C, D };
   }
 
-  it('acts out of the principal port, and only that way', () => {
+  it('sends the catalyst from a Con and the inhibitor from a Dup', () => {
     const p = gaitParams();
-    // A Con's principal on the wire's `a` end draws `b`'s charge in, so the
-    // flux, signed `a` toward `b`, is negative and never positive.
     {
       const { sim, a, b, wire } = pair('con', 'p', 'con', 'l', p);
-      const { toward, away } = run(sim, a, b, wire, p);
-      expect(away, 'the principal end drew nothing').toBeGreaterThan(0);
-      expect(toward, 'the auxiliary end acted').toBe(0);
+      const t = totals(sim, a, b, wire, p);
+      expect(t.C, 'the Con sent no catalyst').toBeGreaterThan(0);
+      expect(t.D, 'the Con sent inhibitor').toBe(0);
     }
-    // Mirrored: the principal on `b` draws from `a`, so the flux is positive.
+    {
+      const { sim, a, b, wire } = pair('dup', 'p', 'con', 'l', p);
+      const t = totals(sim, a, b, wire, p);
+      expect(t.D, 'the Dup sent no inhibitor').toBeGreaterThan(0);
+      expect(t.C, 'the Dup sent catalyst').toBe(0);
+    }
+  });
+
+  it('broadcasts out of the principal port, and only that way', () => {
+    const p = gaitParams();
+    // The principal on `a` sends toward `b`, so the flux is positive.
+    {
+      const { sim, a, b, wire } = pair('con', 'p', 'con', 'l', p);
+      const t = totals(sim, a, b, wire, p);
+      expect(t.C).toBeGreaterThan(0);
+    }
+    // Mirrored: the principal on `b` sends toward `a`, so it is negative.
     {
       const { sim, a, b, wire } = pair('con', 'l', 'con', 'p', p);
-      const { toward, away } = run(sim, a, b, wire, p);
-      expect(toward).toBeGreaterThan(0);
-      expect(away).toBe(0);
+      const t = totals(sim, a, b, wire, p);
+      expect(t.C).toBeLessThan(0);
     }
   });
 
-  it('is a brake on a Dup and a spark on a Con, from the same port', () => {
-    // Same geometry, same port, the other kind at the acting end: the sign
-    // flips, because a Dup seeds `send` negative and pushes its own charge
-    // out through its principal to hold the far end quiet.
-    const p = gaitParams();
-    const { sim, a, b, wire } = pair('dup', 'p', 'con', 'l', p);
-    const { toward, away } = run(sim, a, b, wire, p);
-    expect(toward, 'the Dup gave nothing').toBeGreaterThan(0);
-    expect(away, 'the Dup drew').toBe(0);
-  });
-
-  it('moves charge between the two ends of one wire, and conserves it', () => {
+  it('moves catalyst between the two ends of one wire, and mints none', () => {
     /*
-     * The wire is the bucket: one signed number, read by both ends, so what
-     * leaves one body is exactly what arrives at the other. The pathway is
-     * slowed to nothing so that the coupling is the only thing moving ATP
-     * — at 1e-9 its one tick still showed at the twelfth digit — and the
-     * sender is set fully discharged by hand so it is firing, the receiver
-     * fully charged so there is something to draw.
+     * The wire is the bucket: one signed number per species, read by both
+     * ends, so what leaves one body is exactly what arrives at the other.
+     * The reactor is slowed to nothing so the broadcast is the only thing
+     * moving C, and the sender's catalyst is set by hand so it is speaking.
      */
     const p = gaitParams();
     p.metabolicRate = 1e-15;
@@ -317,57 +265,67 @@ describe('the coupling', () => {
     // Two frames so the heads have been read off the genome at least once.
     sim.step(1 / 60, p);
     sim.step(1 / 60, p);
-    const pool = store.adenylate[a.slot];
-    store.atp[a.slot] = 0;
-    store.atp[b.slot] = store.adenylate[b.slot];
-    store.atp[lone.slot] = 0;
+    const oa = a.slot * REACT_SPECIES + REACT_C;
+    const ob = b.slot * REACT_SPECIES + REACT_C;
+    const ol = lone.slot * REACT_SPECIES + REACT_C;
+    store.react[oa] = 6;
+    store.react[ob] = 0;
+    store.react[ol] = 6;
     sim.step(1 / 60, p);
-    const drawn = -wire.flux;
-    expect(drawn).toBeGreaterThan(0);
-    expect(store.atp[a.slot]).toBeCloseTo(drawn, 12);
-    expect(store.atp[a.slot] + store.atp[b.slot]).toBeCloseTo(store.adenylate[b.slot], 12);
-    expect(store.atp[lone.slot], 'an unwired body was touched').toBeCloseTo(0, 12);
-    // And the wave follows the charge in the same frame.
-    expect(store.gaitWave[a.slot]).toBeCloseTo((2 * drawn - pool) / pool, 12);
+    const moved = wire.fluxC;
+    expect(moved).toBeGreaterThan(0);
+    expect(store.react[ob]).toBeCloseTo(moved, 12);
+    expect(store.react[oa] + store.react[ob]).toBeCloseTo(6, 9);
+    expect(store.react[ol], 'an unwired body was touched').toBeCloseTo(6, 9);
 
-    // And nothing at all with the coupling dial at zero — nothing but the
-    // pathway's own vanishing tick, which is what the zero is close to.
+    // And nothing at all with the broadcast dial at zero.
     p.metabolicDiffuse = 0;
-    store.atp[a.slot] = 0;
-    store.atp[b.slot] = store.adenylate[b.slot];
+    store.react[oa] = 6;
+    store.react[ob] = 0;
     sim.step(1 / 60, p);
-    expect(store.atp[a.slot]).toBeCloseTo(0, 12);
+    expect(store.react[ob]).toBeCloseTo(0, 9);
   });
 });
 
-describe('conduction', () => {
-  /*
-   * What makes a coupled chain a wave rather than a pulse.
-   *
-   * A wire conducts with a time constant of its own rest length over
-   * `metabolicSpeed`, so a firing body's draw on its neighbour ramps up
-   * instead of landing whole in one frame, and each hop costs a fixed time.
-   * A fixed phase difference per wire along a chain is a travelling wave,
-   * which along a body is peristalsis — and it is what `gaitLag` used to set
-   * as a global constant before the metabolism replaced the clock and left
-   * nothing in its place.
-   *
-   * Three regimes, and the point is that they are three: no coupling at all
-   * is no lock, instant coupling is synchrony, and a finite speed is the wave
-   * in between. The bounds are loose because this is a change detector on
-   * the mechanism and not a measure of the pond; the numbers it was written
-   * against are in `metabolicSpeed`.
-   */
-  function lockOf(speed: number, coupling: number, minRest = 48): { lag: number; period: number } {
+describe('the stroke', () => {
+  it('is the mean of a wire’s two ends, floored well above nothing', () => {
     const p = gaitParams();
-    // Faster than this file's own default, so a 600-frame window holds three
-    // or four cycles: the period goes as `1/metabolicRate`, and at 6 it is
-    // 7.3 s, which is one crossing and nothing to take a median over.
-    p.metabolicRate = 15;
-    p.metabolicSpeed = speed;
+    const sim = new Sim(4000, 4000);
+    loadPreset(sim, 'soup', p);
+    const a = sim.spawn('con', 1960, 2000, 0, p, true)!;
+    const b = sim.spawn('con', 2040, 2000, 0, p, true)!;
+    const wire = sim.graph.connect(sim.agents, { id: a.id, slot: 'l' }, { id: b.id, slot: 'r' }, sim.w, sim.h, p, sim.time)!;
+    const wave = sim.agentStore.gaitWave;
+    wave[a.slot] = 1;
+    wave[b.slot] = -1;
+    expect(sim.graph.strokeOf(wire.a, wire.b, sim.agents, wave, p)).toBeCloseTo(1, 12);
+    wave[a.slot] = 1;
+    wave[b.slot] = 1;
+    expect(sim.graph.strokeOf(wire.a, wire.b, sim.agents, wave, p)).toBeCloseTo(1 + p.gaitSwell, 12);
+    // Floored: a wire hauling its ends into contact is a rewrite, not a gait.
+    const deep = { ...p, gaitSwell: 4 };
+    wave[a.slot] = -1;
+    wave[b.slot] = -1;
+    expect(sim.graph.strokeOf(wire.a, wire.b, sim.agents, wave, deep)).toBe(0.4);
+  });
+});
+
+describe('a chain', () => {
+  /*
+   * What the broadcast is for. Six pinned Cons wired principal to auxiliary,
+   * so every body's one mouth faces the next body's ear, started at the
+   * scattered catalyst levels `createAgent` seeds and fed throughout.
+   *
+   * Uncoupled they free-run at whatever phases they were seeded with.
+   * Coupled they lock with a lag per wire, and a fixed phase difference per
+   * wire along a chain is a travelling wave — which along a body is
+   * peristalsis. The bounds are loose because this is a change detector and
+   * not a measure; the numbers it was written against are in
+   * `metabolicDiffuse`.
+   */
+  function lockOf(coupling: number, n = 6) {
+    const p = gaitParams();
     p.metabolicDiffuse = coupling;
-    p.wireMinRest = minRest;
-    const n = 6;
     const sim = new Sim(4000, 4000);
     loadPreset(sim, 'soup', p);
     const bodies: ReturnType<Sim['spawn']>[] = [];
@@ -376,43 +334,31 @@ describe('conduction', () => {
       a.pinned = true;
       bodies.push(a);
     }
-    // Principal to auxiliary all the way down, so every body's one mouth
-    // faces the next body's ear and the chain has a direction.
     for (let i = 0; i + 1 < n; i++) {
       sim.graph.connect(sim.agents, { id: bodies[i]!.id, slot: 'p' }, { id: bodies[i + 1]!.id, slot: 'l' }, sim.w, sim.h, p, sim.time);
     }
     const store = sim.agentStore;
-    // Scattered charges and stores, so a lock has to be achieved rather than
-    // assumed: identical bodies burst in unison by construction.
-    for (let i = 0; i < n; i++) {
-      store.atp[bodies[i]!.slot] = p.adenylate * (0.2 + (0.7 * ((i * 7919) % 11)) / 11);
-      store.sub[bodies[i]!.slot] = 0.3 + (0.5 * ((i * 104729) % 7)) / 7;
-    }
     const feed = () => {
       for (const a of sim.agents.values()) a.extra = a.energyCap;
     };
-    for (let f = 0; f < 600; f++) {
+    for (let f = 0; f < 900; f++) {
       feed();
       sim.step(1 / 60, p);
     }
-    // Downward zero crossings: the frame each body starts firing.
     const cross: number[][] = bodies.map(() => []);
     const was = bodies.map((b) => store.gaitWave[b!.slot]);
-    for (let f = 0; f < 600; f++) {
+    for (let f = 0; f < 900; f++) {
       feed();
       sim.step(1 / 60, p);
       for (let i = 0; i < n; i++) {
-        const now = store.gaitWave[bodies[i]!.slot];
-        if (was[i] >= 0 && now < 0) cross[i].push(f);
-        was[i] = now;
+        const w = store.gaitWave[bodies[i]!.slot];
+        if (was[i] <= 0 && w > 0) cross[i].push(f);
+        was[i] = w;
       }
     }
     const first = cross[0];
-    expect(first.length, 'the head of the chain never fired').toBeGreaterThan(1);
+    expect(first.length, 'the head of the chain never cycled').toBeGreaterThan(1);
     const period = (first[first.length - 1] - first[0]) / (first.length - 1);
-    // Per wire, the median over cycles of how long after this body its
-    // neighbour follows. Matched to the nearest earlier crossing so a lag
-    // near a whole period is not read as a negative one.
     const lags: number[] = [];
     for (let i = 1; i < n; i++) {
       const d: number[] = [];
@@ -427,36 +373,87 @@ describe('conduction', () => {
       d.sort((x, y) => x - y);
       if (d.length) lags.push(d[d.length >> 1]);
     }
-    expect(lags.length, 'no wire had a comparable pair of crossings').toBeGreaterThan(2);
-    return { lag: lags.reduce((x, y) => x + y, 0) / lags.length, period };
+    /*
+     * Interior wires only. The last body's principal is free, so it only ever
+     * receives: the catalyst it is fed runs to D, D quenches its primer, and
+     * its own loop stalls. That is the doc's stoichiometry and it is a real
+     * thing about a chain's loose end, but it is not what the lock is about.
+     */
+    const inner = lags.slice(0, n - 3);
+    expect(inner.length, 'no interior wire had a comparable pair of crossings').toBeGreaterThan(1);
+    const lag = inner.reduce((x, y) => x + y, 0) / inner.length;
+    const spread = Math.max(...inner) - Math.min(...inner);
+    let swing = { lo: Infinity, hi: -Infinity };
+    for (let f = 0; f < 300; f++) {
+      feed();
+      sim.step(1 / 60, p);
+      const w = store.gaitWave[bodies[0]!.slot];
+      swing = { lo: Math.min(swing.lo, w), hi: Math.max(swing.hi, w) };
+    }
+    return { lag, period, inner, spread, headSwing: swing.hi - swing.lo };
   }
 
-  it('is no lock uncoupled, synchrony instant, and a wave at a finite speed', () => {
-    const free = lockOf(90, 0);
-    const instant = lockOf(0, 8);
-    const wave = lockOf(90, 8);
+  it('free-runs uncoupled and locks with a lag when it is coupled', () => {
+    const free = lockOf(0);
+    const locked = lockOf(defaultParams().metabolicDiffuse);
 
-    // Uncoupled, the bodies are free runners: the offset between neighbours
-    // is whatever their scattered starts left, which is most of a period.
-    expect(free.lag, 'uncoupled bodies locked anyway').toBeGreaterThan(free.period * 0.2);
+    /*
+     * A lock is a *consistent* phase difference, not a small one. Uncoupled,
+     * the offsets between neighbours are whatever the seeded catalyst levels
+     * left and they never converge, so they are scattered: measured, the
+     * interior wires read 18, 0 and 0 frames against a period of 101. Coupled
+     * at the shipped rate they read 10, 9 and 9 against 99. So the spread is
+     * what says whether the chain locked, and the lag says what it locked at.
+     */
+    expect(free.spread, 'uncoupled bodies held a consistent offset anyway').toBeGreaterThan(8);
+    expect(locked.spread, 'the chain did not lock').toBeLessThan(4);
 
-    // Instant, they lock in phase — the pond-wide pulse this branch began by
-    // removing, and what the coupling did before it had to cross a wire.
-    expect(instant.lag, 'instant coupling did not synchronise').toBeLessThan(4);
-
-    // Conducting, they lock with a lag: a fixed phase difference per wire.
-    expect(wave.lag, 'no lag, so no wave').toBeGreaterThan(instant.lag + 3);
-    expect(wave.lag, 'the chain did not lock at all').toBeLessThan(wave.period * 0.25);
+    // And what it locked at is a wave: a tenth of a cycle a wire, which is
+    // neither synchrony nor a free run.
+    expect(locked.lag, 'no lag, so no wave').toBeGreaterThan(2);
+    expect(locked.lag, 'the chain synchronised instead of travelling').toBeLessThan(locked.period * 0.25);
+    expect(locked.headSwing, 'the coupled chain stopped oscillating').toBeGreaterThan(1);
   });
 
-  it('takes longer over a longer wire', () => {
-    // The delay is the wire's own length over the speed, so the same chain
-    // held at twice the rest length carries its wave more slowly. This moves
-    // `wireMinRest` for the whole pond, which is the only way to move it —
-    // see `metabolicSpeed` on what that does and does not say about a
-    // lineage.
-    const short = lockOf(90, 8, 48);
-    const long = lockOf(90, 8, 96);
-    expect(long.lag, 'wire length did not change the lag').toBeGreaterThan(short.lag * 1.3);
+  it('flatlines when the broadcast is turned up past the reactor', () => {
+    /*
+     * The upper edge, and it is the reactor's. Broadcasting spends the very
+     * catalyst the sender's own loop runs on, so a chain shouted through
+     * loudly enough stops oscillating altogether rather than locking harder.
+     * That is why `metabolicDiffuse` ships nearer the bottom of its band than
+     * the top, and it is the reason there is a band at all.
+     */
+    const p = gaitParams();
+    p.metabolicDiffuse = 8;
+    const sim = new Sim(4000, 4000);
+    loadPreset(sim, 'soup', p);
+    const bodies: ReturnType<Sim['spawn']>[] = [];
+    for (let i = 0; i < 6; i++) {
+      const a = sim.spawn('con', 1200 + i * 60, 2000, 0, p, true)!;
+      a.pinned = true;
+      bodies.push(a);
+    }
+    for (let i = 0; i + 1 < 6; i++) {
+      sim.graph.connect(sim.agents, { id: bodies[i]!.id, slot: 'p' }, { id: bodies[i + 1]!.id, slot: 'l' }, sim.w, sim.h, p, sim.time);
+    }
+    const store = sim.agentStore;
+    const feed = () => {
+      for (const a of sim.agents.values()) a.extra = a.energyCap;
+    };
+    for (let f = 0; f < 1800; f++) {
+      feed();
+      sim.step(1 / 60, p);
+    }
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let f = 0; f < 300; f++) {
+      feed();
+      sim.step(1 / 60, p);
+      const w = store.gaitWave[bodies[0]!.slot];
+      lo = Math.min(lo, w);
+      hi = Math.max(hi, w);
+    }
+    // Against about 1.4 at the shipped rate, on the same chain.
+    expect(hi - lo, 'the chain survived being shouted through').toBeLessThan(0.5);
   });
 });

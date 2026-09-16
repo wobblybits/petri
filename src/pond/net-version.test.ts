@@ -386,7 +386,7 @@ describe('migration', () => {
 describe('the scalar list', () => {
   /*
    * The genome is not the only append-only list in a blob. `SCALAR_FIELDS`
-   * grew an `adenylate` and the decoder went on reading by fixed index, so
+   * grew an `intake` and the decoder went on reading by fixed index, so
    * every net stored before that field existed came back shifted by one from
    * body one onward, with the tail reading off the end of the section. Both
    * nets in `nets/` are such blobs, and planted they arrived with each
@@ -397,7 +397,7 @@ describe('the scalar list', () => {
    * decoder uses them.
    */
   function asSixField(net: NetData): Uint8Array {
-    const six = SCALAR_FIELDS.filter((f) => f !== 'adenylate') as ScalarField[];
+    const six = SCALAR_FIELDS.filter((f) => f !== 'intake') as ScalarField[];
     expect(six.length).toBe(SCALAR_FIELDS.length - 1);
     return encodeNetAs(net, currentLayout(), CHEM_SEGMENTS, PLASTIC_BASE, {}, six);
   }
@@ -406,10 +406,10 @@ describe('the scalar list', () => {
     const { sim, params } = learningPond(120, 400);
     const net = captureNets(sim)[0].data;
     const blob = asSixField(net);
-    expect(storedScalars(readHeader(blob))).not.toContain('adenylate');
+    expect(storedScalars(readHeader(blob))).not.toContain('intake');
 
     const old = decodeNet(blob);
-    expect(old.scalars).not.toContain('adenylate');
+    expect(old.scalars).not.toContain('intake');
     // Every body, not just the first: reading at this build's width shifted
     // everything after body zero, which is why body zero looked fine.
     for (let i = 0; i < net.bodies.length; i++) {
@@ -423,16 +423,16 @@ describe('the scalar list', () => {
       expect(is.assort, `body ${i} assort`).toBe(was.assort);
       // Not carried, so not invented: NaN is the decoder's marker and
       // `migrateNet` is what seeds it.
-      expect(is.adenylate, `body ${i} adenylate`).toBeNaN();
+      expect(is.intake, `body ${i} intake`).toBeNaN();
     }
 
     // Migratable, with the note, and seeded to what a fresh body would carry.
     const c = compatibility(readHeader(blob));
-    expect(c).toEqual({ kind: 'migratable', notes: ['adenylate seeded (new in this build)'] });
+    expect(c).toEqual({ kind: 'migratable', notes: ['intake seeded (new in this build)'] });
     const { net: now, notes } = prepareNet(old, params);
-    expect(notes).toEqual(['adenylate seeded (new in this build)']);
+    expect(notes).toEqual(['intake seeded (new in this build)']);
     expect(isCurrent(now)).toBe(true);
-    for (const b of now.bodies) expect(b.adenylate).toBe(params.adenylate);
+    for (const b of now.bodies) expect(b.intake).toBe(params.intake);
     // And it encodes again as a current net.
     expect(compatibility(readHeader(encodeNet(now)))).toEqual({ kind: 'exact' });
   });
@@ -452,14 +452,14 @@ describe('the scalar list', () => {
   it('plants the checked-in nets with every scalar inside its own gene range', () => {
     // The end of the chain this was found at: the two nets in the library are
     // six-scalar blobs, and before the fix most of their bodies had no usable
-    // adenylate pool, so `advanceGait` skipped them and a planted net stood
+    // intake pool, so `advanceGait` skipped them and a planted net stood
     // still whatever the dials said.
     const params = defaultParams();
     for (const name of listFixtures()) {
       const { net } = loadFixture(name, params);
       for (const b of net.bodies) {
-        expect(b.adenylate, `${name} adenylate`).toBeGreaterThanOrEqual(TRAIT_RANGE.adenylate.min);
-        expect(b.adenylate, `${name} adenylate`).toBeLessThanOrEqual(TRAIT_RANGE.adenylate.max);
+        expect(b.intake, `${name} intake`).toBeGreaterThanOrEqual(TRAIT_RANGE.intake.min);
+        expect(b.intake, `${name} intake`).toBeLessThanOrEqual(TRAIT_RANGE.intake.max);
         expect(b.energyCap, `${name} energyCap`).toBeGreaterThan(0);
         expect(b.debtCap, `${name} debtCap`).toBeLessThan(0);
         expect(b.requestDecay, `${name} requestDecay`).toBeGreaterThanOrEqual(TRAIT_RANGE.requestDecay.min);

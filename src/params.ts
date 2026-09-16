@@ -335,169 +335,168 @@ export interface Params {
    * metabolises hard is a body that fertilises the cell it is standing in.
    */
   metabolicSupply: number;
-  /**
-   * The pathway's basal rate — what it runs at with no ADP to activate it.
+  /*
+   * The reactor's rate constants, in the doc's own order. `docs/scratch.txt`
+   * §3 gives four reactions over a four-chemical state vector, and §8 says
+   * they are global: the stoichiometry and the pace are laws of the world,
+   * and a lineage that changed them locally would change what a wavelength
+   * means across its own net. What a body owns is its intake — see `intake`,
+   * which is §8's per-agent `J`.
    *
-   * Without it zero is an absorbing state: the autocatalytic step is
-   * `sub * adp^2`, which is zero when the pool is fully charged, so a body
-   * that ever reaches full charge stops metabolising forever. That is not a
-   * subtlety, it is the reason Selkov's own equations flatlined here. A basal
-   * rate is also what real phosphofructokinase has — the ADP activation is a
-   * multiplier on an enzyme that already turns over.
+   *     r1  A -> B            metabolicFuel   * A
+   *     r2  -> C              metabolicCat    * B * (base + C) / (1 + sigma*C)
+   *     r3  C -> D            metabolicReset  * C
+   *     r4  B + D ->          metabolicQuench * B * D
+   *
+   * plus a uniform outflow `metabolicDecay` on all four, which the doc's
+   * diagonal decay matrix supplies and which is structurally required: `D`
+   * has no other sink, so at zero decay it grows without bound.
+   *
+   * **Whether this oscillates at all is a narrow question, and the doc's own
+   * constants get it wrong.** A's row decouples — it is fed from outside and
+   * only feeds B — so the dynamics live in the 3x3 over (B, C, D), which is a
+   * negative feedback loop B -> C -> D -| B carrying a positive self-loop on
+   * C from the autocatalysis. Writing `p` for B's removal, `q` for C's *net*
+   * removal once the autocatalysis is subtracted, `r` for D's and `L` for the
+   * loop gain, the characteristic polynomial is `(x+p)(x+q)(x+r) + L`, so a
+   * complex pair crosses into the right half plane when
+   *
+   *     L > (p+q+r)(pq+pr+qr) - pqr
+   *
+   * With three equal stages that is the familiar factor of eight. Here they
+   * are nothing like equal, and the useful reading is the limit where the
+   * autocatalysis nearly cancels C's own removal: as `q -> 0` the condition
+   * collapses to `metabolicReset > (2 + 2*sqrt(2)) * metabolicDecay`, about
+   * 4.83 times. The python in `docs/scratch.py` has 0.4 against 0.483 — just
+   * the wrong side of it, which is why its reactor settles at every setting,
+   * and it never notices because it only ever prints its gates.
+   *
+   * The other half is that `q` can only be driven to zero when the saturation
+   * is weak. At the fixed point, C's self-gain has no free parameters left in
+   * it at all:
+   *
+   *     f = (k3 + d) * C* (1 - sigma*base) / ((base + C*)(1 + sigma*C*))
+   *
+   * — independent of the fuel, of B, and of `metabolicCat`. So turning the
+   * autocatalysis up does nothing: it moves C* and B* together and `f` is
+   * flat. Its maximum over C* sits at `C* = sqrt(base/sigma)`, which at the
+   * python's `base` 0.02 and `sigma` 0.5 leaves `q` stuck near a fifth of
+   * `k3 + d`. That is why both ship small.
+   */
+  metabolicFuel: number;
+  metabolicCat: number;
+  metabolicReset: number;
+  metabolicQuench: number;
+  /**
+   * The saturation that caps the autocatalysis, the doc's §3.1.4 sigma.
+   *
+   * The doc wants it above zero to stop runaway. It is above zero, and small,
+   * because it is also what holds the reactor *stable* — see the rate block
+   * above. The excursion is bounded by the loop instead: C makes D, and D
+   * quenches the B that C is made from.
+   */
+  metabolicSigma: number;
+  /**
+   * Uniform outflow on all four species, per unit of reaction time.
+   *
+   * Not the decay the standing rules forbid. That one is about the pond —
+   * lineages, learned weights, memory — where forgetting erases a difference
+   * something paid for. This is a well-stirred vat's outflow, it is what
+   * closes the loop, and `D` has no other sink at all: at zero it grows
+   * without bound and there is no fixed point to oscillate around.
+   */
+  metabolicDecay: number;
+  /**
+   * The basal term in the autocatalysis, `base + C` where the doc has `C`.
+   *
+   * Not in the doc, and required by it. The doc's own `r2` carries a factor
+   * of C, so C = 0 is absorbing — and the decay above drives C to zero, so a
+   * reactor that ever empties stays empty. That is the same flatline Selkov's
+   * equations gave this pond, arriving by the same door. Small enough not to
+   * move the fixed point, large enough that nothing is ever permanently dead.
    */
   metabolicBase: number;
   /**
-   * How fast ADP is recharged to ATP, per second. The payoff phase.
+   * Half-saturation of the stroke on the catalyst: the wave is
+   * `2C/(metabolicWave + C) - 1`.
    *
-   * Against `metabolicBase` and the pool this sets whether the pathway
-   * oscillates or settles: recharge much faster than the autocatalytic burn
-   * and the pool sits full and still, much slower and it sits empty.
-   *
-   * How much slower is not a matter of taste. Write `u` for ADP and the four
-   * reactions of `advanceGait` are:
-   *
-   *     sub' = supply·(1 − charge) − sub·(base + u²)
-   *     u'   = sub·(base + u²) + work − regen·u
-   *
-   * and `1 − charge` is `u/pool`, because a cell pulls on its fuel when it is
-   * discharged rather than when it is holding a lot. That is the departure
-   * from Selkov that matters here: his influx is a constant `v`, and this one
-   * is proportional to `u`. Add the two rows and the shared autocatalytic term
-   * cancels, leaving a balance that is *linear* in `u`:
-   *
-   *     u* · (metabolicRegen − metabolicSupply/pool) = work(u*)
-   *
-   * `u` is ADP, so `u*` has to land inside the body's own `adenylate` pool.
-   * Below `supply/pool` the left side is negative and the right side is not,
-   * so there is no steady state at all and every body runs to the discharged
-   * clamp and stays: at the values this shipped with — supply 3, regen 1, a
-   * seeded pool of 1.5 — the wave sat at exactly −1 forever and the gait never
-   * moved. Far above it, `u*` is driven to nearly zero and the pathway sits
-   * fully charged and just as still. 4 was that second mistake.
-   *
-   * The oscillation lives in the narrow band just above `supply/pool`, which
-   * is 2 at the shipped supply and seeded pool. Integrating the four
-   * reactions across it, `regen` from 2.15 to 2.50 gives a limit cycle that
-   * swings 1.85 of a possible 2.0, and the period goes exactly as
-   * `1/metabolicRate` — 7.3 s at a rate of 6, so a stroke of a couple of
-   * seconds wants a rate around 15 to 20. It ships mid-band.
-   *
-   * Two things that band depends on, and both are worth knowing before moving
-   * anything near it. `work` is what makes `u*` nonzero at all — take
-   * `gaitSwell` to zero and the balance above forces `u* = 0`, so the stroke's
-   * own cost is what drives the clock that drives the stroke. And `adenylate`
-   * is heritable, so the band is per body: a lineage that breeds a bigger pool
-   * lowers its own `supply/pool` and slides out of it. Neither has been
-   * measured in a pond, which is why `metabolicRate` is still at zero.
+   * The doc's §5.2 drives contraction by C directly and unbounded. A rest
+   * length needs a bounded, signed multiplier, and this is the same
+   * Michaelis form the doc uses elsewhere, so a body empty of catalyst reads
+   * -1, one holding `metabolicWave` reads 0, and a saturated one approaches
+   * +1 without ever asking a span constraint for more than it can give.
    */
-  metabolicRegen: number;
+  metabolicWave: number;
   /**
-   * ATP spent per unit of stroke, per second.
+   * Fuel burned per unit of stroke, per unit of reaction time.
    *
-   * What makes moving cost something. The stroke discharges the pool in
-   * proportion to how far it is actually swinging a wire, so a net that
-   * undulates hard runs its charge down, pulls harder on its tank, and has to
-   * eat — and one that cannot eat goes still. That is the loop `swimCost` was
-   * reaching for by charging on speed, arriving through the mechanism instead
-   * of beside it.
+   * What makes moving cost something: the stroke draws A down in proportion
+   * to how far it is actually swinging a wire, so a net that undulates hard
+   * runs its fuel down, pulls harder on its tank, and has to eat.
+   *
+   * It no longer has a second job. Under the two-pool pathway the stroke's
+   * own cost was also what made the steady state non-zero, so taking it to
+   * zero stopped the clock — measured, and it cost an afternoon. The
+   * four-species reactor oscillates on its own loop, so this is a price and
+   * nothing else.
    */
   metabolicWork: number;
-  /**
-   * Energy debited from the tank per unit of substrate the pathway buys.
-   * 0 = metabolism is free, which is the pond before this.
-   *
-   * A yield, and the reason the reaction's own scale and the economy's can
-   * differ by two orders without either being wrong. A pathway turns its pool
-   * over many times per unit of matter consumed — that is what a *currency*
-   * is — so `metabolicSupply` is in reaction units and this is what converts
-   * them to tank units. At the shipped values a body at half charge spends
-   * about 0.015/s, which is the rent it already pays to exist: metabolising
-   * costs about as much as being alive.
-   */
   metabolicCost: number;
   /**
-   * How fast a firing body moves charge across its principal wire, per
-   * second per unit of `send` below its gate. 0 = every body's pathway is
+   * How fast a broadcasting body pushes its signal down its principal wire,
+   * per second per unit of `send` above its gate. 0 = every body's reactor is
    * its own.
    *
-   * The fast coupling, and it is directed and signed. A body acts out of its
-   * principal port only, so it has one mouth and up to two ears; what it
-   * does is `send` off the `Gc` head — positive draws the far end's ATP into
-   * its own burst and sets the far end off, negative pushes its ATP out and
-   * holds the far end quiet — and only while its wave is below `gate`, which
-   * is while it is firing. Con seeds positive and Dup negative, so a chain
-   * is a sequence of exciters and brakes, which has a direction where a
-   * chain of identical diffusers only has a phase. This used to be symmetric
-   * diffusion of substrate, whose attractor on a chain of like oscillators
-   * is the pond-wide pulse the gait exists to replace; and before that it
-   * moved substrate out of charged bodies, which looked at on a chain kept
-   * every interior body charged and silent. See `docs/mka-plan.md`.
+   * The doc's §4 transmission rate, and it is directed and signed. A body
+   * broadcasts out of its principal port only, so it has one mouth and up to
+   * two ears; what it sends is the sign of `send` off the `Gc` head —
+   * positive is the catalyst C, negative is the inhibitor D — and it sends
+   * only while its wave is above `gate`, which is while it is holding
+   * catalyst. Con seeds positive and Dup negative, so a chain is a sequence
+   * of exciters and brakes.
+   *
+   * **The band is narrow and both edges are the reactor's.** Measured on six
+   * pinned Cons wired principal-to-auxiliary, against a period of about 100
+   * frames: below about 0.5 there is no lock and the bodies free-run at
+   * whatever phases they were seeded with; from 0.5 to 3 the interior wires
+   * hold a steady 9 to 12 frames, which is a tenth of a cycle a wire and is
+   * a travelling wave; at 5 the senders start to run down, because
+   * broadcasting spends the catalyst they need; and at 8 every reactor in the
+   * chain flatlines. It ships at 1, where the lock is clean and the swing is
+   * barely below an uncoupled body's.
+   *
+   * A body at the end of a chain whose principal is free only ever *receives*,
+   * and it is driven into the inhibited state: the catalyst it is fed runs
+   * to D, D quenches the primer, and its own loop stalls. That is the doc's
+   * stoichiometry rather than a tuning failure, and in a grown net it is a
+   * body waiting to latch rather than a resting state.
    *
    * The slow coupling is already there and costs nothing: two wired bodies
-   * both buy substrate out of tanks that `flowCharges` moves energy between,
-   * so their pathways are coupled through the economy whether this is set
-   * or not.
+   * both buy fuel out of tanks that `flowCharges` moves energy between, so
+   * their reactors are coupled through the economy whether this is set or
+   * not.
    */
   metabolicDiffuse: number;
   /**
-   * The wave level a fresh body's pathway has to be below to count as
-   * firing, on the wave's own [-1, 1]. Seeds the `gate` row of `Gc` and is
-   * heritable from there. 0 is the discharged half of the cycle.
+   * The wave level a fresh body has to be *above* before it broadcasts
+   * anything, on the wave's own [-1, 1]. Seeds the `gate` row of `Gc` and is
+   * heritable from there. 0 is the upper half of the cycle.
+   *
+   * The doc's §4 `H(x_j - G_j)`: a node broadcasts what it has, so it speaks
+   * while its catalyst is high and is silent while it is spent.
    */
   metabolicGate: number;
   /**
-   * How fast charge crosses a wire, in world units a second. 0 = instantly,
-   * which is the coupling before this.
+   * What a fresh body's fuel intake starts at, as a multiple of
+   * `metabolicSupply`. Heritable from there.
    *
-   * **This is what gives the wave a wavelength**, and it is the whole reason
-   * the coupling lives on the wire rather than in a scratch array. A wire
-   * conducts with a time constant of its own rest length over this speed, so
-   * a firing body's draw on its neighbour ramps up over `rest / speed`
-   * instead of landing whole in one frame. Each hop then costs a time the
-   * *net's own geometry* sets, and a fixed delay per hop along a chain is a
-   * travelling wave — which along a body is peristalsis.
-   *
-   * Instantaneous was measured and is not a gait. Coupled with no delay, a
-   * thirty-body chain cascades in under half a second against a period of
-   * about three, so the whole net fires as one from the next cycle on: that
-   * is entrainment, and its speed is the frame rate rather than anything a
-   * lineage owns. `gaitLag` used to set the phase difference per wire as a
-   * global constant; this is the same quantity arriving out of how long a
-   * body's wires actually are.
-   *
-   * Measured on a chain of six pinned Cons wired principal-to-auxiliary,
-   * started at scattered charges, after ten seconds of settling. The lag is
-   * the median frames between a body starting to fire and its neighbour
-   * doing the same, against a period of about 175 frames:
-   *
-   *     coupling off        106 frames    no lock at all; free runners
-   *     speed 0 (instant)     1.6         synchrony, the pond-wide pulse
-   *     speed 90             11.4         a wave: 6.5% of a cycle per wire
-   *     speed 90, rest 118   28           longer wire, slower wave
-   *     speed 30            breaks up     too slow to entrain
-   *
-   * So the usable band is roughly 60 to 260 and it ships at 90, where the lag
-   * is uniform along the chain and a six-body worm carries about half a cycle
-   * end to end — which is a wave the eye can follow.
-   *
-   * Two things fall out of the constant being `rest` rather than a number of
-   * its own. `wireShrink` reels a fresh latch in from whatever length it
-   * latched at, so a new limb conducts slowly and speeds up as it tightens.
-   * And the gait's own stroke swings `rest`, so a wire conducts faster while
-   * it is contracted — a small positive feedback between the stroke and the
-   * signal that nothing had to be added to get.
-   *
-   * What does *not* follow, and the doc said it did before it was measured: a
-   * lineage cannot breed its own wave speed this way. `wireShrink` pulls
-   * every settled wire to `wireMinRest`, which is a global, so in a settled
-   * net the delay is the same on every wire. The table's last row moves
-   * `wireMinRest` for the whole pond to show the mechanism reads the length
-   * at all. A per-lineage rest length is a separate thing and it does not
-   * exist.
+   * The doc's §8 per-agent `J`, and the one thing about the reactor a lineage
+   * owns. It decides where in the fuel window a body sits, and the window has
+   * both edges: starved, the reactor sits empty and still; fed, it runs a
+   * limit cycle whose period shortens as the fuel rises; glutted, it sits
+   * saturated and still again.
    */
-  metabolicSpeed: number;
-  /** What a fresh body's adenylate pool starts at. Heritable from there. */
-  adenylate: number;
+  intake: number;
   /**
    * How far the gait swings a wire's rest length, as a fraction of it.
    * 0 = the wire ignores the clock, which is the pond before this.
@@ -1201,15 +1200,20 @@ export function defaultParams(): Params {
     grip: 2,
     metabolicRate: 15,
     metabolicSupply: 3,
-    metabolicBase: 0.02,
-    metabolicRegen: 2.3,
-    metabolicWork: 2.25,
+    metabolicFuel: 2,
+    metabolicCat: 0.266,
+    metabolicReset: 1,
+    metabolicQuench: 0.0283,
+    metabolicSigma: 0.005,
+    metabolicDecay: 0.1,
+    metabolicBase: 0.001,
+    metabolicWave: 1.2,
+    metabolicWork: 0.05,
     metabolicCost: 0.01,
-    metabolicDiffuse: 8,
+    metabolicDiffuse: 1,
     metabolicGate: 0,
-    metabolicSpeed: 90,
-    adenylate: 1.5,
-    gaitSwell: 0.08,
+    intake: 1,
+    gaitSwell: 0.04,
     flockAlign: 5.5,
     flockSep: 48,
     maxAgents: 100000,
@@ -1285,15 +1289,20 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'angDrag', label: 'Spin damp', min: 0, max: 8, step: 0.05 },
   { key: 'grip', label: 'Grip (tank)', min: -4, max: 12, step: 0.05 },
   { key: 'metabolicRate', label: 'Metabolic rate', min: 0, max: 20, step: 0.1 },
-  { key: 'metabolicSupply', label: 'Substrate pull', min: 0, max: 6, step: 0.05 },
-  { key: 'metabolicBase', label: 'Basal enzyme', min: 0, max: 2, step: 0.01 },
-  { key: 'metabolicRegen', label: 'Recharge rate', min: 0.05, max: 6, step: 0.05 },
-  { key: 'metabolicWork', label: 'Stroke cost', min: 0, max: 4, step: 0.02 },
-  { key: 'metabolicCost', label: 'Substrate price', min: 0, max: 0.1, step: 0.002 },
-  { key: 'adenylate', label: 'Adenylate pool (seed)', min: 0.2, max: 6, step: 0.1 },
-  { key: 'metabolicDiffuse', label: 'Coupling', min: 0, max: 20, step: 0.1 },
-  { key: 'metabolicGate', label: 'Fire below (seed)', min: -1, max: 1, step: 0.02 },
-  { key: 'metabolicSpeed', label: 'Conduction (px/s)', min: 0, max: 2000, step: 10 },
+  { key: 'metabolicSupply', label: 'Fuel intake', min: 0, max: 12, step: 0.05 },
+  { key: 'metabolicFuel', label: 'A to B (k1)', min: 0.05, max: 8, step: 0.05 },
+  { key: 'metabolicCat', label: 'Autocatalysis (k2)', min: 0.01, max: 4, step: 0.002 },
+  { key: 'metabolicReset', label: 'C to D (k3)', min: 0.05, max: 4, step: 0.01 },
+  { key: 'metabolicQuench', label: 'Quench (k4)', min: 0, max: 0.4, step: 0.0005 },
+  { key: 'metabolicSigma', label: 'Saturation', min: 0, max: 1, step: 0.001 },
+  { key: 'metabolicDecay', label: 'Outflow', min: 0.005, max: 1, step: 0.005 },
+  { key: 'metabolicBase', label: 'Basal enzyme', min: 0, max: 0.2, step: 0.0005 },
+  { key: 'metabolicWave', label: 'Stroke half-point', min: 0.1, max: 12, step: 0.1 },
+  { key: 'metabolicWork', label: 'Stroke cost', min: 0, max: 1, step: 0.005 },
+  { key: 'metabolicCost', label: 'Fuel price', min: 0, max: 0.1, step: 0.002 },
+  { key: 'intake', label: 'Fuel intake (seed)', min: 0.2, max: 6, step: 0.1 },
+  { key: 'metabolicDiffuse', label: 'Broadcast', min: 0, max: 8, step: 0.05 },
+  { key: 'metabolicGate', label: 'Speak above (seed)', min: -1, max: 1, step: 0.02 },
   { key: 'gaitSwell', label: 'Gait swell', min: 0, max: 0.8, step: 0.01 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
   { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },

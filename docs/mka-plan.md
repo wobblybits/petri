@@ -235,87 +235,110 @@ once — and it needs a wave to exist before it can be asked.
 
 ## 5b. What was looked at, and what shipped
 
-All four steps are done and the gait ships on. The look was in the browser
-pane, driving frames by hand on `?soup=0&net=deep-87` with the CPU path
-forced, plus controlled chains measured headlessly. In order of what it
-taught:
+Four commits, and then the reactor itself. The look was in the browser pane
+with the CPU path forced, plus controlled chains and the equations integrated
+on their own. In the order it taught:
 
 **The planted nets were not dead because of the gait.** A blob's `scalar`
 section declares its own field names and the decoder read by fixed index, so
-both library nets — written before `adenylate` was appended — came back
-shifted by one from body one onward, with the tail reading off the end. A
-quarter of every planted net had a pool that was negative or not a number, and
-`advanceGait` skips a body whose pool is not positive. Fixed by reading the
-declared names and seeding what a blob does not carry, the way the genome's
-segment map already works. Every scalar in both nets is now inside its own
-gene range and every planted body's clock runs.
+both library nets came back shifted by one from body one onward. A quarter of
+every planted net had a pool that was negative or not a number, and a body
+without a pool has no clock. Fixed by reading the declared names and seeding
+what a blob does not carry, the way the genome's segment map already works.
 
-**Substrate coupling made a pipe, not a wave.** Moving substrate out of
-*charged* bodies kept every interior body of a thirty-Con chain charged and
-silent while the fuel drained to the end. The autocatalyst is ADP, so the
-thing that propagates is discharge: a firing body draws its neighbour's ATP
-into its own burst. Charge, not fuel, and only while the sender is firing.
+**Substrate coupling made a pipe; charge coupling entrained.** Two dead ends
+of the two-pool pathway, both in §2's history.
 
-**Instantaneous coupling entrains; it does not travel.** A cascade crossed
-thirty bodies in under half a second against a period of three, so the chain
-fired as one from the next cycle on, and the speed was the pass's one-frame
-staging delay. That is the pond-wide pulse the gait exists to replace.
+**The doc's own reactor does not oscillate, and the reason is checkable.**
+The first thing built for §3 was the four-chemical vat at the python's
+constants, integrated on its own. It settles at every setting, and a broad
+random search over eight decades of every rate found nothing — which was the
+wrong instrument. The right one is the Jacobian. A's row decouples, so the
+dynamics live in the 3x3 over (B, C, D): a three-stage negative feedback loop
+carrying a positive self-loop on C from the autocatalysis, whose
+characteristic polynomial is `(x+p)(x+q)(x+r) + L`. A complex pair crosses
+into the right half plane when
 
-**A wire that conducts gives the wave a wavelength.** Measured on six pinned
-Cons wired principal-to-auxiliary, scattered charges, after ten seconds of
-settling, against a period of about 175 frames:
+    L > (p+q+r)(pq+pr+qr) - pqr
 
-| | median lag per wire |
-|---|---:|
-| coupling off | 106 frames — no lock; free runners |
-| coupling 2 (the old default) | 59 — the first two wires lock, the rest do not |
-| coupling 8, conduction 0 | 1.6 — synchrony |
-| coupling 8, conduction 90 | 11.4 — a wave, 6.5% of a cycle per wire |
-| coupling 8, conduction 90, rest 118 | 28 — longer wire, slower wave |
-| coupling 8, conduction 30 | breaks up — too slow to entrain |
-| coupling 16 | breaks up — over-driven |
+With three equal stages that is the familiar factor of eight; here they are
+nothing like equal, and the useful limit is `q -> 0`, where it collapses to
+**`metabolicReset > (2 + 2*sqrt 2) * metabolicDecay`**, about 4.83 times. The
+python has 0.4 against 0.483, just the wrong side. And `q` can only be driven
+toward zero when the saturation is weak, because C's self-gain at the fixed
+point is
 
-Three regimes, and that they are three is the finding. It ships in the middle
-one: rate 15, coupling 8, conduction 90.
+    f = (k3 + d) * C* (1 - sigma*base) / ((base + C*)(1 + sigma*C*))
 
-**The stroke had to come down, and the pathway did not have to.** At
-`gaitSwell` 0.3 a freshly latched pair spiked to 140 rad/s against the spin
-suite's bound of 20 — the failure the pathway's own note had warned about,
-and it is sharply nonlinear: 15.2 at 0.08, 32 at 0.15, 140 at 0.3. Only the
-product `metabolicWork * gaitSwell` enters the pathway's equations, so the
-swell went to 0.08 and the work to 2.25. Measured back to back, the period,
-the wave's swing and the per-wire lag are identical to three digits, and the
-mechanical swing is a quarter of what it was. The bodies were never actually
-turning, it should be said — total rotation stayed at 1.4 turns against a
-bound of 4 — but a 2-radian jolt in one frame is something the eye sees.
+— independent of the fuel, of B, and of the autocatalytic rate. So turning
+`k2` up does nothing: it moves C* and B* together and `f` is flat, with a
+maximum at `C* = sqrt(base/sigma)` that at the python's numbers leaves `q`
+stuck near a fifth of `k3 + d`. Both of those are why `metabolicSigma` and
+`metabolicBase` ship small, and the analysis is in `metabolicFuel`.
 
-**In a live dish most bodies sit charged and quiet.** The trace of a planted
-net shows travelling activity where a chain is fed and stillness elsewhere.
-That is the oscillation window the pathway's own documentation describes: too
-little income and it is supply-limited and sits charged. The wave runs where
-a net is fed, and widening that window wants more species, not a tuning pass.
+**A is steady fuel, and that is what made the algebra close.** Treating A as
+a state that equilibrates with its own inflow ties the influx to `k1` and
+`J` together; treating it as an input held by the leaves frees it, and it is
+also what the doc means. Either way A's row decouples, so it changes no
+eigenvalue — but it is the difference between searching a constrained surface
+and a free one. Confirmed in the pond: A sits at `J/(k1+decay)` to three
+digits while B, C and D go round the loop.
 
-**Twenty-five tests moved, and nineteen of them for one reason.** The pathway
-spends, so "a still body loses nothing", "a full body has nothing to learn
-from", "nothing else should be draining it" and "full ground should read
-about 1" all became false — a second spender arrived and the body ate to
-cover it. `fixedParams` already existed for exactly this shape of problem
-with `learnRate`, and it now pins `metabolicRate` too, with the same
-argument; `gait.test.ts` is the one place the pathway runs and it sets its own
-rate. Two failures were real and are fixed: the genome parity test strode its
-output by a hardcoded 19 after the head count went to 21, and a redex's two
-asks were bounded separately and summed, which could move more than either
-bound allowed.
+**The fuel window has both edges.** Swept on the equations and then in the
+sim: still below about a fifth of a tank, a full relaxation cycle from there
+to the top, and still again if the fuel is pushed past the window. The period
+runs 2.6 s at the bottom to 1.7 s at the top, so a fuller body strokes
+faster. Nothing was added to get it.
+
+**Conduction was retired, having been measured.** The wire lag was the whole
+of the previous commit and it does not survive the new reactor: across every
+conduction speed the interior lag of a chain sat at 10 to 12 frames, and the
+wire's own lag only made it less uniform. This reactor supplies its own hop
+delay through C -> D -> quench. The dial is gone and the wire bucket stays,
+because one signed number both ends read is what makes a transfer
+antisymmetric.
+
+**The broadcast band is narrow and both edges are the reactor's.** On six
+pinned Cons against a 100-frame period: uncoupled the interior offsets are
+18, 0 and 0 and never converge; at the shipped 1 they are 10, 9 and 9, a
+tenth of a cycle a wire; at 5 the senders run down because broadcasting
+spends the catalyst their own loop needs; at 8 the whole chain flatlines. It
+ships at 1.
+
+**The stroke is a quarter of what it was.** A relaxation oscillator slews
+fast, so it yanks a near-rigid span constraint harder: at `gaitSwell` 0.06 a
+freshly latched pair spikes to 29 rad/s against the spin suite's bound of 20,
+and at 0.08 to 50. It ships at 0.04. Locomotion comes mostly through the
+anchor, which modulates drag and no span constraint fights.
+
+**What a live dish looks like.** Planted `deep-87`, CPU path, the reactor on:
+every body cycles and activity travels along a chain a body at a time, where
+the two-pool pathway's trace was a uniform saturated block with occasional
+pond-wide bursts. About half the bodies sit at the bottom of the window,
+which is the starving end — the wave runs where a net is fed. The pond grows
+throughout, 148 to 166 bodies over eight seconds.
 
 **Not this change, and not chased.** In the pane the GPU field pass errors
-with `used in submit while pending map` on this machine and leaves most
-planted bodies with NaN state before the sim falls back to the CPU; NaN state
-never heals, because `Wh` feeds it back and `Wn` spreads it to wired
-neighbours, and every head then reads its clamp floor. Confirmed on the
-untouched tree, where `field-device.test.ts` also fails two of its own tests.
-Every observation above was made on the CPU path. It is a session of its own.
+with `used in submit while pending map` and leaves most planted bodies with
+NaN state before the sim falls back to the CPU. Confirmed on the untouched
+tree, where `field-device.test.ts` also fails two of its own tests. Every
+observation above was made on the CPU path.
 
-## 6. What the python gets wrong
+### What of the doc is not built
+
+- **§6.1, an Era pushing A and B downstream.** The python has it and it is
+  the most interesting thing in the document: it would make a leaf a net's
+  feeder and give a net a *metabolic* reason to have one, which is exactly
+  what `energy-chemistry-plan.md` §0 says the simulation lacks. It needs a
+  per-species transmission vector, which is four genes where the current
+  `send` is one sign.
+- **§4's per-species gate.** One gate here, so a Dup's inhibitor rides its
+  catalyst's rhythm rather than its own. Right to within the C -> D lag.
+- **§7.1's trophic learning of the gate.** Rejected in §3 above and still
+  rejected: it is a second learning rule.
+- **§5.2's stiffness actuation.** Rejected on measurement in §1.
+
+## 6. What the python gets wrong## 6. What the python gets wrong
 
 Listed because the author said it was not quite right, and because two of
 these are the project's own findings arriving by a different door.

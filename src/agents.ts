@@ -1,4 +1,5 @@
 import { extraCapFor } from './energy.ts';
+import { REACT_A, REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
 import {
   CHEM_LEN,
   CHEM_SPECIES,
@@ -459,23 +460,15 @@ export class Agent {
     this.store.transportThrust[this.slot] = v;
   }
 
-  /** The charged part of this body's adenylate pool. See `Sim.advanceGait`. */
-  get atp(): number {
-    return this.store.atp[this.slot];
-  }
-  set atp(v: number) {
-    this.store.atp[this.slot] = v;
-  }
-
   /**
-   * How much adenylate this body carries: its working capital, and the
-   * ceiling on how much work it can have outstanding at once. Heritable.
+   * How hard this body pulls fuel into its reactor, as a multiple of
+   * `metabolicSupply`. The doc's per-agent `J`, and heritable.
    */
-  get adenylate(): number {
-    return this.store.adenylate[this.slot];
+  get intake(): number {
+    return this.store.intake[this.slot];
   }
-  set adenylate(v: number) {
-    this.store.adenylate[this.slot] = v;
+  set intake(v: number) {
+    this.store.intake[this.slot] = v;
   }
 
   /** How hard this body recoils, per unit of energy it pumps to a neighbour. */
@@ -1361,12 +1354,20 @@ export function createAgent(
   mix = Math.imul(mix, 3266489917) >>> 0;
   mix ^= mix >>> 16;
   const traits = seedTraits(kind, params);
-  const pool = traits.adenylate;
-  store.adenylate[slot] = pool;
-  // Part charged, and not all of it: a pool that starts full has no ADP for
-  // the autocatalytic step to work on and the pathway never lights.
-  store.atp[slot] = pool * (0.25 + (mix / 4294967296) * 0.5);
-  store.sub[slot] = 0.5;
+  store.intake[slot] = traits.intake;
+  /*
+   * A scattered start for the reactor, so two fresh bodies are not at the
+   * same point of the same cycle. Only C is scattered: A settles to the fuel
+   * it is given within a second whatever it starts at, and B and D follow C
+   * round the loop. Seeded off the id hash rather than `Math.random`, so
+   * where a body starts is a property of the body and not of how many were
+   * made before it.
+   */
+  const r = slot * REACT_SPECIES;
+  store.react[r + REACT_A] = 0.5;
+  store.react[r + REACT_B] = 1;
+  store.react[r + REACT_C] = 0.2 + (mix / 4294967296) * 2;
+  store.react[r + REACT_D] = 2;
   // A body made outside a rewrite is a founder: generation zero of its own
   // line. `autoSpawn` makes a great many of these, which is the point of
   // being able to count them.
@@ -1427,7 +1428,7 @@ export interface SeededTraits {
   debtCap: number;
   rescueTo: number;
   assort: number;
-  adenylate: number;
+  intake: number;
 }
 
 export function seedTraits(kind: AgentKind, params: Params): SeededTraits {
@@ -1438,7 +1439,7 @@ export function seedTraits(kind: AgentKind, params: Params): SeededTraits {
     debtCap: params.debtCap,
     rescueTo: params.rescueTo,
     assort: params.assortBias,
-    adenylate: params.adenylate,
+    intake: params.intake,
   };
 }
 

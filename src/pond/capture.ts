@@ -147,7 +147,7 @@ function captureComponent(sim: Sim, ids: number[], wires: GraphWire[]): Captured
       debtCap: a.debtCap,
       rescueTo: a.rescueTo,
       assort: a.assort,
-      adenylate: a.adenylate,
+      intake: a.intake,
       born: a.born,
       lineage: a.lineage,
       chem,

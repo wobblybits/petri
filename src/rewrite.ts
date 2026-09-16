@@ -885,7 +885,7 @@ function snapshotTargets(
  * where the force reads it, which is the same arrangement as before.
  */
 export const TRAIT_KEYS = [
-  'adenylate',
+  'intake',
   'requestDecay',
   'energyCap',
   'debtCap',
@@ -924,16 +924,17 @@ export const CHEM_SLOPE_MAX = 1;
 
 export const TRAIT_RANGE: Record<TraitKey, { min: number; max: number; mutate: number }> = {
   /*
-   * Working capital: how much adenylate a body carries, and so how much work
-   * it can have outstanding before it has to wait on its own regeneration.
+   * How hard a body pulls fuel into its reactor, as a multiple of
+   * `metabolicSupply`. The doc's §8 per-agent `J`.
    *
-   * A small pool discharges fast and recharges fast, which is a quick shallow
-   * stroke; a large one rides through a lean patch on stored charge and
-   * strokes slower and deeper. Neither dominates, which is why it is a gene
-   * and not a constant — and it is the first thing about a lineage's
-   * metabolism that selection can reach.
+   * The reactor has a fuel window with both edges: starved it sits empty and
+   * still, fed it runs a limit cycle whose period shortens as the fuel rises,
+   * and glutted it sits saturated and still again. So this decides where in
+   * that window a lineage lives, and neither end dominates — which is why it
+   * is a gene and not a constant, and it is the first thing about a
+   * lineage's metabolism that selection can reach.
    */
-  adenylate: { min: 0.2, max: 6, mutate: 0.15 },
+  intake: { min: 0.2, max: 6, mutate: 0.15 },
   requestDecay: { min: 0.5, max: 0.98, mutate: 0.03 },
   energyCap: { min: EXTRA_CAP * 0.5, max: EXTRA_CAP * 2, mutate: EXTRA_CAP * 0.1 },
   /*

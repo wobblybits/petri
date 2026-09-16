@@ -1,4 +1,5 @@
 import { GAIT_GATE_MAX, GAIT_SEND_MAX, GC_BASE, GC_OUT } from './chem-layout.ts';
+import { REACT_A, REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
 import {
   boundRadius,
   discRadius,
@@ -233,7 +234,7 @@ type RedexEscrow = {
 };
 
 /** Most either metabolite may pile up to. A pathway is not a warehouse. */
-const REACT_CAP = 12;
+const REACT_CAP = 256;
 /**
  * Largest reaction step taken at once. The pathway is stiff where its
  * activator spikes, and explicit Euler past about this rings at the step
@@ -4282,60 +4283,57 @@ export class Sim {
   private readonly gripKeep = new Float64Array(Sim.GRIP_STEPS + 1);
 
   /**
-   * One step of the body's metabolism, and what this frame's stroke comes to.
+   * One step of the body's reactor, and what this frame's stroke comes to.
    *
-   * Three reactions over two pools, and an adenylate pool that is conserved:
+   * Four chemicals in a well-stirred vat, which is `docs/scratch.txt` §3 and
+   * `docs/mka-plan.md` §2:
    *
-   *     supply   extra   -> sub        rate  metabolicSupply * (1 - charge),
-   *                                        priced at metabolicCost a unit
-   *     burn     sub, ATP -> ADP       rate  sub * (base + adp^2)
-   *     regen    ADP     -> ATP        rate  metabolicRegen * adp
-   *     work     ATP     -> ADP        rate  metabolicWork * swell * |wave|
+   *     r1   A -> B          metabolicFuel   * A
+   *     r2   -> C            metabolicCat    * B * (base + C) / (1 + sigma*C)
+   *     r3   C -> D          metabolicReset  * C
+   *     r4   B + D ->        metabolicQuench * B * D
+   *     J    extra -> A      metabolicSupply * intake * fullness, at a price
+   *     work A ->            metabolicWork * gaitSwell * |wave|
    *
-   * `atp + adp` is the body's `adenylate`, and nothing here changes it — the
-   * pool is currency and can only be cycled, never minted. What *is* spent is
-   * `extra`, bought as substrate, and `supply` is where this pathway joins
-   * the economy rather than shadowing it.
+   * with a uniform outflow on all four. A is *primary fuel* and it is steady:
+   * it is bought out of the body's own tank and it settles within a second to
+   * whatever the fuel supply supports, so the oscillation lives entirely in
+   * the loop B -> C -> D -| B. C is the saturated catalyst, and it is both
+   * what the stroke reads and what a Con passes down its wire.
    *
-   * The regulation is the real one. A cell does not pull harder on its fuel
-   * because it is holding a lot; it pulls harder because it is *discharged*.
-   * So supply runs on `1 - charge`, which means a net that is working draws
-   * its tank down, a drawn-down tank is what `spreadRequests` carries, and
-   * `flowCharges` answers it from wherever the net has surplus. Two wired
-   * bodies are coupled through that whether or not `metabolicDiffuse` is set.
+   * `metabolicSupply` is where this joins the economy rather than shadowing
+   * it. Fuel is bought in proportion to how full the tank is, so a working
+   * net draws its tank down, a drawn-down tank is what `spreadRequests`
+   * carries, and `flowCharges` answers it. What leaves the tank lands on the
+   * ground through the same `upkeepExcrete` road rent uses, so metabolising
+   * is fertilising and the pond's total does not move.
    *
-   * `burn` is the autocatalysis, and it is the same one glycolysis uses:
-   * phosphofructokinase is activated by the ADP it produces, so a discharged
-   * body burns faster, discharges further, and burns faster still — until the
-   * substrate runs out and `regen` catches up. That is the oscillation, and
-   * it is a *consequence* of the regulation rather than a clock beside it.
+   * **The fuel window has both edges, and that is the gate.** Starved, the
+   * reactor sits empty and still; fed, it runs a limit cycle whose period
+   * shortens as the fuel rises; glutted, it sits saturated and still again.
+   * Measured on the equations alone at the shipped constants, with the fuel
+   * `J` swept: still below 0.7, a full relaxation cycle from 0.8 to about
+   * 3.5, and still again past 4. The period runs 2.9 s of pond time at the
+   * bottom of the window to 1.6 s at the top. Nothing had to be added to get
+   * "a starving body does not undulate" — it is where the Hopf boundary is.
    *
-   * `base` is not decoration. Without it the burn is `sub * adp^2`, which is
-   * zero at full charge, so a body that ever tops up stops metabolising for
-   * good — zero is absorbing. That is exactly why Selkov's own equations
-   * flatlined here at every fullness. Real phosphofructokinase turns over
-   * without ADP too; the activation is a multiplier on an enzyme that is
-   * already running.
+   * Whether the reactor oscillates at all is a narrow question and the doc's
+   * own constants answer it wrongly; `metabolicFuel` carries the stability
+   * analysis and the two conditions that matter.
    *
-   * What leaves the tank lands on the ground, through the same `excreteRate`
-   * path `tickUpkeepFast` already uses for rent. So a body that metabolises
-   * hard fertilises the cell it stands in, nothing is destroyed, and the
-   * conservation the economy is checked against still holds.
-   *
-   * The wave is `(atp - adp) / adenylate`, which is the adenylate energy
-   * charge mapped to [-1, 1]: +1 fully charged, -1 fully spent, 0 half. No
-   * arbitrary normalisation, and a body whose pathway has stalled sits at
-   * whatever charge it stalled at and does not stroke.
+   * The wave is `2C/(metabolicWave + C) - 1`: bounded, signed, and no
+   * arbitrary normalisation, so a body empty of catalyst reads -1 and a
+   * saturated one approaches +1.
    */
   private advanceGait(params: Params, dt: number): void {
     const store = this.agentStore;
-    const SUB = store.sub;
-    const ATP = store.atp;
-    const POOL = store.adenylate;
+    const R = store.react;
+    const INTAKE = store.intake;
     const WAVE = store.gaitWave;
     const GA = store.gaitAnchor;
     const ANCHOR = store.anchor;
     const EXTRA = store.extra;
+    const CAP = store.energyCap;
     const rate = params.metabolicRate;
     if (!(rate > 0)) {
       for (const agent of this.agents.values()) {
@@ -4345,112 +4343,124 @@ export class Sim {
       return;
     }
 
-    const supply = params.metabolicSupply;
+    const k1 = params.metabolicFuel;
+    const k2 = params.metabolicCat;
+    const k3 = params.metabolicReset;
+    const k4 = params.metabolicQuench;
+    const sig = params.metabolicSigma;
+    const dec = params.metabolicDecay;
     const base = params.metabolicBase;
-    const regen = params.metabolicRegen;
+    const waveK = params.metabolicWave > 0 ? params.metabolicWave : 1e-6;
+    const supply = params.metabolicSupply;
     const workRate = params.metabolicWork * params.gaitSwell;
     const price = params.metabolicCost;
     /*
-     * `upkeepExcrete`, and not `excreteRate`, which is what this read for four
-     * commits and is the whole of why `energy.test.ts`'s pond conservation
-     * broke: the spend below is rent by another name, and rent's dial is
-     * `upkeepExcrete`. `excreteRate` is the reaction table's, a rate in its
-     * own units rather than a fraction — so at its default of zero the
-     * pathway's spend was destroyed, and above one it would have minted.
+     * `upkeepExcrete`, and not `excreteRate`: the spend below is rent by
+     * another name, and rent's dial is this one. `excreteRate` is the
+     * reaction table's, a rate in its own units rather than a fraction.
      */
     const back = params.upkeepExcrete;
     const grid = this.energy;
     const h = rate * dt;
-    const sub = Math.max(1, Math.ceil(h / REACT_H));
-    const hs = h / sub;
+    const steps = Math.max(1, Math.ceil(h / REACT_H));
+    const hs = h / steps;
 
     for (const agent of this.agents.values()) {
       const s = agent.slot;
-      const pool = POOL[s];
-      if (!(pool > 0)) {
-        WAVE[s] = 0;
-        ANCHOR[s] = 0;
-        continue;
-      }
-      let a = ATP[s];
-      let m = SUB[s];
+      const o = s * REACT_SPECIES;
+      let A = R[o + REACT_A];
+      let B = R[o + REACT_B];
+      let C = R[o + REACT_C];
+      let D = R[o + REACT_D];
+      const cap = CAP[s];
+      const pull = supply * INTAKE[s];
       let spent = 0;
-      for (let k = 0; k < sub; k++) {
-        const d = pool - a;
-        const charge = a / pool;
-        // Bought, not conjured: a body with an empty tank cannot buy
-        // substrate and its pathway winds down.
-        // Priced, not free, and bounded by what the tank can actually pay for
-        // — a body with nothing left buys nothing and its pathway winds down.
-        const want = supply * (1 - charge) * hs;
+      for (let k = 0; k < steps; k++) {
+        // Bought, not conjured, and bounded by what the tank can pay for: a
+        // body with nothing left buys nothing and its reactor winds down.
         const have = EXTRA[s] - spent;
+        const fullness = cap > 0 ? (have <= 0 ? 0 : have >= cap ? 1 : have / cap) : 0;
+        const want = pull * fullness * hs;
         const afford = price > 0 ? have / price : want;
         const buy = want <= 0 || afford <= 0 ? 0 : want > afford ? afford : want;
         spent += buy * price;
-        const burn = m * (base + d * d);
-        const back = regen * d;
-        const work = workRate * (a >= d ? a - d : d - a) / pool;
-        m = m + buy - burn * hs;
-        a = a + (back - burn - work) * hs;
-        if (m < 0) m = 0;
-        else if (m > REACT_CAP) m = REACT_CAP;
-        if (a < 0) a = 0;
-        else if (a > pool) a = pool;
+
+        const r1 = k1 * A;
+        const r2 = (k2 * B * (base + C)) / (1 + sig * C);
+        const r3 = k3 * C;
+        const r4 = k4 * B * D;
+        const w = (2 * C) / (waveK + C) - 1;
+        const work = workRate * (w < 0 ? -w : w);
+        A = A + buy + (-r1 - dec * A - work) * hs;
+        B = B + (r1 - r4 - dec * B) * hs;
+        C = C + (r2 - r3 - dec * C) * hs;
+        D = D + (r3 - dec * D) * hs;
+        if (A < 0) A = 0;
+        else if (A > REACT_CAP) A = REACT_CAP;
+        if (B < 0) B = 0;
+        else if (B > REACT_CAP) B = REACT_CAP;
+        if (C < 0) C = 0;
+        else if (C > REACT_CAP) C = REACT_CAP;
+        if (D < 0) D = 0;
+        else if (D > REACT_CAP) D = REACT_CAP;
       }
-      SUB[s] = m;
-      ATP[s] = a;
+      R[o + REACT_A] = A;
+      R[o + REACT_B] = B;
+      R[o + REACT_C] = C;
+      R[o + REACT_D] = D;
       if (spent > 0) {
         EXTRA[s] -= spent;
         // The same road out as rent, and the same mix: what left the tank
         // lands on the dish as whatever this body makes, so metabolising is
-        // fertilising and the pond's total is unchanged. This pass runs before
-        // `refreshExpression`, so the rows are last frame's — one frame stale,
-        // which is what the harvest plan lives with too.
+        // fertilising and the pond's total is unchanged. This pass runs
+        // before `refreshExpression`, so the rows are last frame's — one
+        // frame stale, which is what the harvest plan lives with too.
         if (back > 0) payOut(grid, store.expressAll, s, store.x[s], store.y[s], spent * back);
       }
-      const w = (2 * a - pool) / pool;
+      const w = (2 * C) / (waveK + C) - 1;
       WAVE[s] = w;
       ANCHOR[s] = GA[s] * w;
     }
 
     /*
-     * The coupling: what a body passes down its wires, and which way.
+     * The coupling: what a firing body passes down its wire, and which way.
      *
-     * Bipartite on purpose. A wire pass computes each wire's flux once and
-     * writes it on the wire; a body pass reads the three wires on its own
-     * ports and applies them. So the two ends of a wire read one number and
-     * a transfer is antisymmetric by construction, and nothing is written to
-     * a body until every wire has spoken, so the order of the wire map cannot
-     * matter. The staging value is the first step toward a wire that holds
-     * charge in transit — see `docs/mka-plan.md` §2.
-     *
-     * What crosses is *charge*, and it crosses while the sender is firing.
-     * The pathway's autocatalyst is ADP — the burn runs on `adp^2` — so the
-     * thing that sets a neighbour off is discharge, and a body passes it on
-     * by drawing the neighbour's ATP into its own burst: the neighbour loses
-     * charge, its burn accelerates, it fires, and draws on the next. That is
-     * the sketch's catalyst wave in this pathway's currency. The first form
-     * of this moved substrate out of *charged* bodies, and looked at on a
-     * chain of thirty Cons it kept every interior body charged and silent
-     * while the fuel drained to the end — a pipe, not a wave — because a
-     * charged body is exactly one that has not burned, and giving its fuel
-     * away keeps it that way.
-     *
-     * A body sends out of its principal port only, so every body has one
+     * The doc's §4.1 transmission presets, as genes rather than a rule keyed
+     * on kind: a Con broadcasts the catalyst C and drives excitation down the
+     * mesh, a Dup broadcasts the inhibitor D and resets the wave front. Which
+     * of the two a body does is the sign of `send` off the `Gc` head, seeded
+     * positive on a Con and negative on a Dup, and a lineage is free to swap
+     * it. A body broadcasts out of its principal port only, so it has one
      * mouth and up to two ears, and an Era — nothing but a principal — is a
-     * pacemaker leaf without a rule saying so. What it sends is signed:
-     * below its gate, a positive `send` draws the far end's ATP in (excite)
-     * and a negative one pushes its own ATP out (inhibit, the wave-front
-     * reset). Con seeds positive, Dup negative, and a chain of exciters and
-     * brakes has a direction where a chain of identical diffusers only has a
-     * phase. `atp + adp` stays each body's own `adenylate`: ATP moves
-     * between pools and is never minted.
+     * pacemaker leaf without a rule saying so.
      *
-     * Bounded by a quarter of what the source holds and a quarter of the room
-     * at the sink. A body's ATP can be drawn on by at most four transfers a
-     * frame — its own push, and a pull from the far end of each of its three
-     * wires — and its room filled by at most four, so nothing can overdraw
-     * and the pass conserves ATP exactly, with no clamp at the apply.
+     * Rectified rather than a Heaviside step, which is what the doc's own
+     * python does and is the better reading: a step rings under explicit
+     * Euler and gives a gate nothing to move along.
+     *
+     * Bipartite on purpose. A wire pass computes each wire's two fluxes once
+     * and writes them on the wire; a body pass reads the three wires on its
+     * own ports. So the two ends of a transfer read one number and cannot
+     * disagree about it, and nothing is written to a body until every wire
+     * has spoken, so the order of the wire map cannot matter.
+     *
+     * What crosses is what was asked, bounded once on the net by a quarter
+     * of the source's stock and a quarter of the sink's room — a body's
+     * species can be drawn on by at most four transfers a frame, so nothing
+     * overdraws and the pass moves matter without creating it.
+     *
+     * There is no conduction delay any more, and taking it out was measured.
+     * Under the two-pool pathway a wire that relaxed toward the ask over
+     * `rest / speed` was the only thing that turned a one-frame cascade into
+     * a travelling wave. This reactor supplies its own delay: a body driven
+     * with catalyst takes about a tenth of a cycle to shift its phase,
+     * because the catalyst has to run through D and quench the primer before
+     * the loop answers. Measured across the whole range of conduction speeds
+     * the interior lag sat at 10 to 12 frames either way, and the wire's own
+     * lag only made it *less* uniform — so the dial did nothing but blur the
+     * thing it was built for, and it is gone. What that costs is named under
+     * Locomotion in `docs/concepts.md`: the wavelength is now set by global
+     * rates, and nothing about a net's own shape reaches it.
      */
     const spread = params.metabolicDiffuse;
     if (spread > 0) {
@@ -4460,79 +4470,49 @@ export class Sim {
       const agents = this.agents;
       const wires = this.graph.wires;
       const k = spread * dt;
-      const speed = params.metabolicSpeed;
       for (const wire of wires.values()) {
         const A = agents.get(wire.a.id);
         const B = agents.get(wire.b.id);
         if (!A || !B || A === B) {
-          wire.flux = 0;
+          wire.fluxC = 0;
+          wire.fluxD = 0;
           continue;
         }
         const sa = A.slot;
         const sb = B.slot;
-        // Signed `a` toward `b`. A wire between two principals — which is a
-        // redex — is asked by both of its ends, and what crosses is the net
-        // of the two asks rather than each in turn.
-        let want = 0;
-        if (wire.a.slot === 'p') want += demand(SEND, GATE, WAVE, sa, k);
-        if (wire.b.slot === 'p') want -= demand(SEND, GATE, WAVE, sb, k);
-        /*
-         * The wire conducts rather than teleporting. `rest / speed` is its
-         * time constant, so what actually crosses relaxes toward what the
-         * firing end asked for — and the hop delay that gives a chain its
-         * wavelength is the net's own geometry rather than the frame rate.
-         * At `metabolicSpeed` 0 the step is 1 and the ask lands whole, which
-         * is the coupling as it was before this.
-         */
-        const rest = wire.rest;
-        const step = speed > 0 && rest > 0 ? Math.min(1, (dt * speed) / rest) : 1;
-        let f = wire.flux + (want - wire.flux) * step;
-        /*
-         * Bounded once, on the net, and after the lag. Each end used to be
-         * bounded on its own and the two summed, so a redex could move more
-         * than either bound allowed; and a lagged transfer has to be checked
-         * against what is actually there this frame rather than against what
-         * was there when the ask was made. A quarter, because a body's charge
-         * can be drawn on by its own ask and by the far end of each of its
-         * three wires — so nothing can overdraw it and the pass conserves ATP
-         * exactly, with no clamp at the apply.
-         */
-        if (f > 0) {
-          const have = ATP[sa] * 0.25;
-          const room = (POOL[sb] - ATP[sb]) * 0.25;
-          if (f > have) f = have;
-          if (f > room) f = room;
-          if (f < 0) f = 0;
-        } else if (f < 0) {
-          const have = ATP[sb] * 0.25;
-          const room = (POOL[sa] - ATP[sa]) * 0.25;
-          if (-f > have) f = -have;
-          if (-f > room) f = -room;
-          if (f > 0) f = 0;
-        }
-        wire.flux = f;
+        // Signed `a` toward `b`. A wire between two principals is a redex and
+        // is asked by both of its ends; what crosses is the net of the asks.
+        const askA = wire.a.slot === 'p' ? broadcast(SEND, GATE, WAVE, sa, k) : 0;
+        const askB = wire.b.slot === 'p' ? broadcast(SEND, GATE, WAVE, sb, k) : 0;
+        let wantC = 0;
+        let wantD = 0;
+        if (askA > 0) wantC += askA;
+        else wantD -= askA;
+        if (askB > 0) wantC -= askB;
+        else wantD += askB;
+        wire.fluxC = limit(R, sa, sb, REACT_C, wantC);
+        wire.fluxD = limit(R, sa, sb, REACT_D, wantD);
       }
       for (const agent of agents.values()) {
         const s = agent.slot;
         const id = agent.id;
+        const o = s * REACT_SPECIES;
         for (let port = 0; port < 3; port++) {
           const wid = PW[s * 3 + port];
           if (wid < 0) continue;
           const wire = wires.get(wid);
           if (!wire) continue;
-          const f = wire.flux;
-          if (f === 0) continue;
           // Signed `a` toward `b`, and this body is one of the two.
-          ATP[s] += wire.a.id === id ? -f : f;
+          const sign = wire.a.id === id ? -1 : 1;
+          if (wire.fluxC !== 0) R[o + REACT_C] += sign * wire.fluxC;
+          if (wire.fluxD !== 0) R[o + REACT_D] += sign * wire.fluxD;
         }
-        // The wave and the anchor follow the charge, so a body that was just
-        // drawn on strokes as what it now is rather than what it was.
-        const pool = POOL[s];
-        if (pool > 0) {
-          const w = (2 * ATP[s] - pool) / pool;
-          WAVE[s] = w;
-          ANCHOR[s] = GA[s] * w;
-        }
+        // The wave follows the catalyst, so a body that has just been driven
+        // strokes as what it now is rather than what it was.
+        const C = R[o + REACT_C];
+        const w = (2 * C) / (waveK + C) - 1;
+        WAVE[s] = w;
+        ANCHOR[s] = GA[s] * w;
       }
     }
   }
@@ -7365,25 +7345,52 @@ function rewriteAudio(
  * accessors are the whole cost — see the note on reading `chemAll` directly.
  */
 /**
- * What one end of a wire is asking to move across it this frame, signed from
- * the sender `s` toward whatever is at the other end: negative when `s` draws
- * the far end in, which is excitation.
+ * What one end of a wire is broadcasting this frame, signed by *which*
+ * species: positive is catalyst C, negative is inhibitor D, and the magnitude
+ * is the rate either way.
+ *
+ * Zero unless the reactor is *above* its gate, which is the doc's own
+ * `H(x_j - G_j)`: a node broadcasts what it has, so it broadcasts while its
+ * catalyst is high. One gate and not four, so a Dup's inhibitor rides the
+ * same wave its catalyst does — D is made from C, so it is right to within
+ * the C -> D lag, and the doc's per-species gate vector is what would close
+ * that gap.
  *
  * The ask only, unbounded — the wire's own conduction and the two ends' room
- * are applied to the net of both ends' asks, in `Sim.advanceGait`, which says
- * why. Nothing is asked unless the pathway is below its gate, which is while
- * it is firing.
+ * are applied to the net of both ends' asks, in `Sim.advanceGait`.
  */
-function demand(
+function broadcast(
   SEND: Float64Array,
   GATE: Float64Array,
   WAVE: Float64Array,
   s: number,
   k: number,
 ): number {
-  const drive = GATE[s] - WAVE[s];
+  const drive = WAVE[s] - GATE[s];
   if (!(drive > 0)) return 0;
-  return -SEND[s] * drive * k;
+  return SEND[s] * drive * k;
+}
+
+/**
+ * A wire's flux for one species, clipped to what is actually at either end:
+ * a quarter of the source's stock and a quarter of the sink's room. A body's
+ * species can be drawn on by its own broadcast and by the far end of each of
+ * its three wires, so a quarter is what makes an overdraw impossible.
+ */
+function limit(R: Float64Array, sa: number, sb: number, species: number, f: number): number {
+  if (f > 0) {
+    const have = R[sa * REACT_SPECIES + species] * 0.25;
+    const room = (REACT_CAP - R[sb * REACT_SPECIES + species]) * 0.25;
+    const lim = have < room ? have : room;
+    return f > lim ? (lim > 0 ? lim : 0) : f;
+  }
+  if (f < 0) {
+    const have = R[sb * REACT_SPECIES + species] * 0.25;
+    const room = (REACT_CAP - R[sa * REACT_SPECIES + species]) * 0.25;
+    const lim = have < room ? have : room;
+    return -f > lim ? (lim > 0 ? -lim : 0) : f;
+  }
+  return 0;
 }
 
 function headAt(

@@ -125,79 +125,92 @@ not also be asked to do. Nothing else belongs here; measurements go in
   it is plain synchrony, which is the pond-wide pulse this branch began by
   removing.
 
-  The clock is a metabolism, and it is in the economy rather than beside it.
-  Every body runs three reactions over two pools: it buys substrate out of its
-  own tank in proportion to how *discharged* it is, an autocatalytic step
-  burns that substrate and spends ATP into ADP, and a recharge step puts it
-  back. `atp + adp` is the body's `adenylate` and never changes — the pool is
-  currency and can only be cycled. What is spent is `extra`, and what leaves
-  the tank lands on the ground through the same `excreteRate` path rent
-  already uses, so metabolising is fertilising and nothing is destroyed.
+  The clock is a chemistry, and it is in the economy rather than beside it.
+  Every body runs the four-chemical reactor of `docs/scratch.txt` §3 — A
+  primary fuel, B active primer, C saturated catalyst, D reset inhibitor —
+  over four reactions and a uniform outflow:
 
-  The regulation is the real one: a cell pulls harder on its fuel because it
-  is discharged, not because it is holding a lot. So a net that works draws
-  its tank down, a drawn-down tank is what `spreadRequests` carries, and
-  `flowCharges` answers it — two wired bodies are coupled through the economy
-  whether or not `metabolicDiffuse` is set. The stroke discharges the pool in
-  proportion to how far it swings a wire, so moving costs something, and a
-  body that cannot buy substrate goes still within about half a minute.
+      r1  A -> B      r2  -> C (autocatalytic in C, saturating)
+      r3  C -> D      r4  B + D ->
 
-  The oscillation is a *consequence* of that regulation rather than a clock
-  beside it, and it lives in a window: too little income and the pathway is
-  supply-limited and sits charged, too much and it runs fully discharged and
-  sits there. Both ends are still. That window is narrow, which is a real
-  property of a two-pool network and not a tuning failure — saturating the
-  burn widens nothing, it removes the oscillation entirely. More species is
-  what would widen it.
+  A is bought out of the body's own tank at a price, in proportion to how
+  full the tank is, and what leaves lands on the ground through the same road
+  rent uses, so metabolising is fertilising and nothing is destroyed. That is
+  the whole of the join: a net that works draws its tank down, a drawn-down
+  tank is what `spreadRequests` carries, and `flowCharges` answers it.
 
-  The coupling between pathways is directed and signed, and it lives on the
-  wire. A body acts out of its principal port only, so it has one mouth and
-  up to two ears and an Era is a pacemaker leaf by construction; what it does
-  is `send` off the `Gc` head — positive draws the far end's ATP into its own
-  burst and sets the far end off, negative pushes its ATP out and holds the
-  far end quiet — and only while its wave is below `gate`, which is while it
-  fires. Charge and not fuel, because the pathway's autocatalyst is ADP and
-  moving substrate out of charged bodies was looked at and made a chain a
-  pipe. Con seeds positive and Dup negative, so a chain is a sequence of
-  exciters and brakes, which has a direction where a chain of identical
-  diffusers only has a phase. The wire carries the transfer as one signed
-  number both ends read (`Wire.flux`), which is what makes it antisymmetric
-  by construction.
+  **A is steady.** Its row decouples — it is fed from outside and only feeds
+  B — so it settles to `J/(k1 + decay)` whatever it started at and the
+  oscillation is the loop `B -> C -> D -| B`, a three-stage negative feedback
+  carrying a positive self-loop on C. That is what makes the stability
+  question answerable in closed form, and the answer is that the doc's own
+  constants do not oscillate: writing `q` for C's net removal after the
+  autocatalysis is subtracted, a complex pair crosses into the right half
+  plane only when `L > (p+q+r)(pq+pr+qr) - pqr`, which in the limit `q -> 0`
+  is `metabolicReset > (2 + 2*sqrt 2) * metabolicDecay`. The python has 0.4
+  against 0.483. And `q` can only be driven toward zero when the saturation
+  is weak, because C's self-gain at the fixed point depends on nothing but
+  `base` and `sigma * C*` — not on the fuel, not on the autocatalytic rate.
+  The reactor's parameter block carries the derivation.
 
-  A wire *conducts* rather than teleporting, and that is what gives the wave
-  a wavelength. `Wire.flux` relaxes toward what the firing end is asking for
-  with a time constant of the wire's own rest length over `metabolicSpeed`,
-  so each hop costs a fixed time and a fixed phase difference per wire is a
-  travelling wave. Measured on six pinned Cons against a period of 175
-  frames: uncoupled, the lag between neighbours is 106 frames, which is no
-  lock at all; coupled instantly it is 1.6, which is synchrony and the
-  pond-wide pulse this branch began by removing; at conduction 90 it is 11.4,
-  a wave carrying 6.5% of a cycle per wire; at twice the rest length, 28. The
-  three regimes are the finding, and it ships in the middle one.
+  The fuel window has both edges and that is the gate: starved, the reactor
+  sits empty and still; fed, it runs a limit cycle whose period shortens as
+  the fuel rises, so a full body strokes faster than a lean one; glutted, it
+  sits saturated and still again. Nothing had to be added to get "a starving
+  body does not undulate" — it is where the Hopf boundary is.
 
-  It ships **on**: rate 15, coupling 8, conduction 90. The stroke came down
-  from 0.3 to 0.08 to get there, because 0.3 yanked a freshly latched wire
-  hard enough to spike a body to 140 rad/s against a bound of 20 — the spin
-  the pathway's own note had warned about. Only the product
-  `metabolicWork * gaitSwell` enters the pathway's dynamics, so `metabolicWork`
-  went up to 2.25 in exchange and the clock is unchanged to the digit while
-  the mechanical swing is a quarter of what it was. `docs/mka-plan.md` §5b
-  has the whole look.
+  The coupling is the doc's §4 transmission, directed and signed, and it
+  lives on the wire. A body broadcasts out of its principal port only, so it
+  has one mouth and up to two ears and an Era is a pacemaker leaf by
+  construction; what it broadcasts is the sign of `send` off the `Gc` head —
+  positive is the catalyst C, negative is the inhibitor D — and only while
+  its wave is *above* `gate`, which is the doc's own `H(x - G)`: a node
+  broadcasts what it has. Con seeds positive and Dup negative, so a chain is
+  a sequence of exciters and brakes. The wire carries each species as one
+  signed number both ends read (`Wire.fluxC`, `Wire.fluxD`), which is what
+  makes a transfer antisymmetric by construction.
+
+  Measured on six pinned Cons wired principal to auxiliary, against a period
+  of about 100 frames: uncoupled the interior offsets are 18, 0 and 0 frames
+  and never converge, which is no lock; at the shipped rate they are 10, 9
+  and 9, which is a tenth of a cycle a wire and is a travelling wave. The
+  band is narrow and both edges are the reactor's — broadcasting spends the
+  very catalyst the sender's loop runs on, so at five times the shipped rate
+  the senders run down and at eight times every reactor in the chain
+  flatlines.
+
+  There is no conduction delay, and taking it out was measured. Under the
+  two-pool pathway a wire that relaxed toward the ask over `rest / speed` was
+  the only thing that turned a one-frame cascade into a travelling wave. This
+  reactor supplies its own delay: a body driven with catalyst takes about a
+  tenth of a cycle to answer, because the catalyst has to run through D and
+  quench the primer before the loop responds. Across the whole range of
+  conduction speeds the interior lag sat at 10 to 12 frames either way and
+  the wire's own lag only made it less uniform, so the dial is gone.
+
+  It ships **on**: rate 15, broadcast 1, stroke 0.04. The stroke is a
+  quarter of what the two-pool pathway could drive, and that is the honest
+  cost of a relaxation oscillator: its transitions are fast, so it slews a
+  rest length hard, and above 0.04 a freshly latched pair spikes past the
+  spin suite's bound. Locomotion comes mostly through the anchor, which
+  modulates drag and is not limited by a span constraint.
 
   Not yet true, and this is the list. The rates are global constants and
-  should stay so — they set the wave's time base, and a lineage that changed
-  them locally would change what a wavelength means across its net; what a
-  body owns is its pool, its sign and its gate, which are heritable. The
-  conduction delay is not one of them: `wireShrink` pulls every settled wire
-  to `wireMinRest`, which is global, so a lineage cannot breed its own wave
-  speed and the only per-wire variation left is a fresh latch reeling in and
-  the stroke's own swing. The pathway is its own private chemistry: it
-  neither eats nor excretes any of the four field species, so the only thing
-  connecting it to the dish is the price it pays and the fertiliser that
-  price becomes. In a live dish most bodies sit charged and quiet, because
-  the oscillation lives in a window and a body that is not well fed is
-  supply-limited below it — the wave runs where a net is fed, which is a
-  property of the two-pool pathway and not a tuning failure. And an Era is
+  should stay so — they are the doc's §8 laws of the world, and a lineage
+  that changed them locally would change what a wavelength means across its
+  own net. But that leaves the *wavelength* global too, and nothing about a
+  net's own shape reaches it: the conduction delay used to be the one thing
+  that did, and it was measured not to work. What a body owns is `intake`,
+  its broadcast sign and its gate. The reactor is also its own private
+  chemistry: it neither eats nor excretes any of the four field species, so
+  the only thing connecting it to the dish is the price it pays and the
+  fertiliser that price becomes — the doc's §6.1 has an Era pushing A and B
+  downstream, which would make a leaf a net's feeder and is not built. One
+  gate where the doc has four, so a Dup's inhibitor rides its catalyst's
+  rhythm rather than its own. A body at the end of a chain whose principal is
+  free only ever receives, and the catalyst it is fed runs to D, quenches its
+  primer and stalls its loop — the doc's stoichiometry, and in a grown net it
+  is a body waiting to latch. And an Era is
   both the leaf *and*, by `ERA_UPKEEP_RATIO` and its
   larger store, the fullest body on its wire — so the seeded head makes it
   the oar while the economy makes it the anchor, and those pull opposite

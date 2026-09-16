@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CHEM_LEN, CRITIC_LEN, PLASTIC_LEN, STATE_DIMS } from '../chem-layout.ts';
-import { defaultParams, type Params } from '../params.ts';
+import type { Params } from '../params.ts';
+import { fixedParams } from '../test-params.ts';
 import { loadPreset } from '../presets.ts';
 import { TRAIT_KEYS } from '../rewrite.ts';
 import { Sim } from '../sim.ts';
@@ -31,7 +32,7 @@ import {
  */
 
 function learningPond(soup: number, frames: number): { sim: Sim; params: Params } {
-  const params = defaultParams();
+  const params = fixedParams();
   params.soupCount = soup;
   // The dials that ship at zero. A pond with learning off stores an all-zero
   // plastic block, which would let a broken round trip pass.
@@ -186,7 +187,7 @@ describe('plant', () => {
   });
 
   it('plants nothing at all when the net will not fit', () => {
-    const params = defaultParams();
+    const params = fixedParams();
     params.soupCount = 40;
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', params);
@@ -248,7 +249,7 @@ describe('pond database', () => {
     const net = captureNets(sim)[0];
     const db = new PondDb(':memory:');
     try {
-      const params = defaultParams();
+      const params = fixedParams();
       const runId = db.startRun({
         seed: 1,
         seconds: 10,
@@ -299,7 +300,7 @@ describe('pond database', () => {
         preset: 'soup' as string | null,
         soupCount: 120,
         parentRun: null as number | null,
-        params: defaultParams(),
+        params: fixedParams(),
         commit: null,
         note: null,
       };
@@ -345,7 +346,7 @@ describe('sweeps', () => {
         preset: 'soup' as string | null,
         soupCount: 10,
         parentRun: null,
-        params: defaultParams(),
+        params: fixedParams(),
         commit: null,
         note: null,
       };
@@ -408,7 +409,7 @@ describe('sweeps', () => {
         preset: 'soup',
         soupCount: 1,
         parentRun: null,
-        params: defaultParams(),
+        params: fixedParams(),
         commit: null,
         note: null,
       });

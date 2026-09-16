@@ -109,9 +109,10 @@ export const SCALAR_FIELDS = [
   'assort',
   // Appended, never inserted: a stored blob's field order is its layout, and
   // moving one would make every net in the library decode as something else.
-  // `NET_FORMAT` goes up with it so an older blob is refused rather than
-  // silently read one scalar short.
-  'adenylate',
+  // A blob that is missing one of these is read at its own width and the
+  // missing field is seeded; one carrying a name this build has dropped has
+  // that field skipped. Both are notes, not refusals — see `storedScalars`.
+  'intake',
 ] as const;
 export type ScalarField = (typeof SCALAR_FIELDS)[number];
 
@@ -195,8 +196,8 @@ export interface NetBody {
   debtCap: number;
   rescueTo: number;
   assort: number;
-  /** Working capital: the adenylate pool. See `Sim.advanceGait`. */
-  adenylate: number;
+  /** How hard this body pulls fuel into its reactor. See `Sim.advanceGait`. */
+  intake: number;
   born: number;
   lineage: number;
   /** `layout.chem` floats. Copied, never a live view into a store. */
@@ -783,7 +784,7 @@ export function decodeNet(input: Uint8Array): NetData {
       debtCap: scalarOf(i, 'debtCap'),
       rescueTo: scalarOf(i, 'rescueTo'),
       assort: scalarOf(i, 'assort'),
-      adenylate: scalarOf(i, 'adenylate'),
+      intake: scalarOf(i, 'intake'),
       born: ancestry[i * 2],
       lineage: ancestry[i * 2 + 1],
       chem: chem.subarray(i * L.chem, (i + 1) * L.chem),
