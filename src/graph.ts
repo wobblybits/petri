@@ -70,6 +70,17 @@ export interface Wire {
    * latch drops shape, then the rope, and comes back if it goes slack.
    */
   ropePath: RopePath;
+  /**
+   * ATP crossing this wire this frame, signed `a` toward `b`.
+   *
+   * The wire is the bucket. `Sim.advanceGait` writes it once per wire and
+   * every body then reads the wires on its own ports, so the two ends of a
+   * transfer read one number and cannot disagree about it. A staging value
+   * for now, cleared and rewritten every frame; a wire that holds charge in
+   * transit is the next step, and it is why this is on the wire and not in
+   * a scratch array on `Sim`.
+   */
+  flux: number;
 }
 
 export type RopePath = 'full' | 'no-shape' | 'span';
@@ -473,7 +484,7 @@ export class Graph {
     if (!this.isFree(a) || !this.isFree(b)) return null;
     const id = this.nextWireId++;
     const len = Math.max(1, latchLen);
-    const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full' };
+    const wire: Wire = { id, a, b, collapse: 0, pitchFloor: len * 0.5, latchLen: len, lastLen: len, rest: len, ropeLen: len, shape: [], born: time, nodes: [], ropePath: 'full', flux: 0 };
     this.wires.set(id, wire);
     this.setWireAt(a.id, a.slot, id);
     this.setWireAt(b.id, b.slot, id);

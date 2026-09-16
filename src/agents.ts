@@ -8,6 +8,7 @@ import {
   E_OUT,
   F_BASE,
   G_BASE,
+  GC_BASE,
   HEAD_SCALE,
   KS_BASE,
   L_BASE,
@@ -1105,8 +1106,24 @@ export function flockGain(v: number): number {
 const GAIT_ANCHOR_ERA = 0.02;
 const GAIT_ANCHOR_NODE = 0.25;
 
-function seedGait(c: Float32Array, kind: AgentKind): void {
+/**
+ * What a kind does to the far end of its principal wire while it fires, at
+ * the seed. A Con excites — draws the neighbour's charge into its burst and
+ * sets it off — and a Dup inhibits — gives the neighbour charge and holds it
+ * quiet: the sketch's excitatory routing element and inhibitory brake, as a
+ * seed a lineage drifts from rather than a rule it is held to. An Era
+ * excites: it has nothing but a principal, so it is the pacemaker at the end
+ * of a limb, and a wave in this coupling starts at leaves and runs toward
+ * the root.
+ */
+const GAIT_SEND_CON = 1;
+const GAIT_SEND_DUP = -1;
+const GAIT_SEND_ERA = 1;
+
+function seedGait(c: Float32Array, kind: AgentKind, params: Params): void {
   c[G_BASE] = kind === 'era' ? GAIT_ANCHOR_ERA : GAIT_ANCHOR_NODE;
+  c[GC_BASE] = kind === 'con' ? GAIT_SEND_CON : kind === 'dup' ? GAIT_SEND_DUP : GAIT_SEND_ERA;
+  c[GC_BASE + 1] = params.metabolicGate;
 }
 
 /**
@@ -1173,7 +1190,7 @@ export function seedChem(kind: AgentKind, params: Params): Float32Array {
   c[P_BASE + 1] = params.transportRecoil / HEAD_SCALE.recoil;
   c[L_BASE] = params.stepSpeed / HEAD_SCALE.cruise;
   c[L_BASE + 1] = params.turnRate / HEAD_SCALE.turn;
-  seedGait(c, kind);
+  seedGait(c, kind, params);
   seedProduction(c, kind);
   if (kind === 'con') {
     c[EMIT] = 1;

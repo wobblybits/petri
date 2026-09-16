@@ -162,7 +162,7 @@ describe('the header', () => {
   it('refuses to encode a net at another layout', () => {
     const { sim } = learningPond(60, 120);
     const net = captureNets(sim)[0].data;
-    const old = decodeNet(asOldBuild(net, NAMES.filter((n) => n !== 'G' && n !== 'g0')).blob);
+    const old = decodeNet(asOldBuild(net, NAMES.filter((n) => n !== 'Gc' && n !== 'gc0')).blob);
     expect(() => encodeNet(old)).toThrow(/migrateNet/);
   });
 });
@@ -171,16 +171,18 @@ describe('migration', () => {
   it('seeds a head this build appended, and carries everything else bit for bit', () => {
     // The case that stranded every net in the library: `G` and `g0` went on
     // the end, the width grew, and nothing a stored body carried had changed.
+    // The tail is whatever this build appended last — `Gc` and `gc0` now —
+    // so the test follows the layout rather than naming the head of the day.
     const { sim, params } = learningPond(120, 400);
     const net = captureNets(sim)[0].data;
     const { blob, chem } = asOldBuild(
       net,
-      NAMES.filter((n) => n !== 'G' && n !== 'g0'),
+      NAMES.filter((n) => n !== 'Gc' && n !== 'gc0'),
     );
-    expect(chem).toBe(CHEM_LEN - segment('G').len - segment('g0').len);
+    expect(chem).toBe(CHEM_LEN - segment('Gc').len - segment('gc0').len);
 
     const c = compatibility(readHeader(blob));
-    expect(c).toEqual({ kind: 'migratable', notes: ['G seeded (new in this build)', 'g0 seeded (new in this build)'] });
+    expect(c).toEqual({ kind: 'migratable', notes: ['Gc seeded (new in this build)', 'gc0 seeded (new in this build)'] });
 
     const old = decodeNet(blob);
     expect(old.bodies[0].chem.length).toBe(chem);
@@ -189,7 +191,7 @@ describe('migration', () => {
     const { net: now, notes } = prepareNet(old, params);
     expect(notes).toEqual(c.kind === 'migratable' ? c.notes : []);
     expect(isCurrent(now)).toBe(true);
-    const G = segment('G');
+    const G = segment('Gc');
     for (let i = 0; i < net.bodies.length; i++) {
       const was = net.bodies[i];
       const is = now.bodies[i];
@@ -346,13 +348,13 @@ describe('migration', () => {
   it('is what plantNet does on the way in', () => {
     const { sim, params } = learningPond(120, 400);
     const net = captureNets(sim)[0].data;
-    const old = decodeNet(asOldBuild(net, NAMES.filter((n) => n !== 'G' && n !== 'g0')).blob);
+    const old = decodeNet(asOldBuild(net, NAMES.filter((n) => n !== 'Gc' && n !== 'gc0')).blob);
 
     const fresh = new Sim(1600, 1200, 128);
     loadPreset(fresh, 'soup', { ...params, soupCount: 0 });
     const ids = plantNet(fresh, params, old, fresh.w * 0.5, fresh.h * 0.5);
     expect(ids.length).toBe(net.bodies.length);
-    const G = segment('G');
+    const G = segment('Gc');
     const store = fresh.agentStore;
     for (let i = 0; i < ids.length; i++) {
       const a = fresh.agents.get(ids[i])!;
@@ -367,11 +369,11 @@ describe('migration', () => {
   it('seeds through migrateNet with whatever seeder it is handed', () => {
     const { sim } = learningPond(60, 120);
     const net = captureNets(sim)[0].data;
-    const old = decodeNet(asOldBuild(net, NAMES.filter((n) => n !== 'g0')).blob);
+    const old = decodeNet(asOldBuild(net, NAMES.filter((n) => n !== 'gc0')).blob);
     const marker = new Float32Array(CHEM_LEN).fill(-7);
     const { net: now, notes } = migrateNet(old, () => marker.slice());
-    expect(notes).toEqual(['g0 seeded (new in this build)']);
-    const g0 = segment('g0');
+    expect(notes).toEqual(['gc0 seeded (new in this build)']);
+    const g0 = segment('gc0');
     expect([...now.bodies[0].chem.subarray(g0.at)]).toEqual(new Array(g0.len).fill(-7));
     expect(() => migrateNet(old, () => new Float32Array(3))).toThrow(new RegExp(`not ${CHEM_LEN}`));
   });
@@ -406,7 +408,7 @@ describe('net files', () => {
     const dir = mkdtempSync(join(tmpdir(), 'petri-nets-'));
     try {
       const path = join(dir, 'old.petrinet');
-      const { blob } = asOldBuild(net, NAMES.filter((n) => n !== 'G' && n !== 'g0'));
+      const { blob } = asOldBuild(net, NAMES.filter((n) => n !== 'Gc' && n !== 'gc0'));
       writeFileSync(path, blob);
       expect(inspectNetFile(path).compatibility.kind).toBe('migratable');
       const loaded = loadNet(path, params);

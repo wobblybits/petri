@@ -14,6 +14,7 @@ function fakeWire(over: Partial<Wire> = {}): Wire {
     id: 1,
     a: { id: 1, slot: 'p' },
     b: { id: 2, slot: 'p' },
+    flux: 0,
     collapse: 0,
     pitchFloor: 20,
     latchLen: 40,

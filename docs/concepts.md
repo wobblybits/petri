@@ -33,7 +33,10 @@ not also be asked to do. Nothing else belongs here; measurements go in
 - Identity: what counts as one organism
 - Shape. Lives in wire physics. Tension is held by energy flowing along a
   wire, so a net that moves no energy is slack. Not yet true: stiffness is a
-  free global constant.
+  free global constant. `Wire.flux` is the charge crossing a wire this frame,
+  a staging value today; a wire that holds it in transit for a time its rest
+  length sets is the float this heading and Locomotion's coupling would
+  share, and Locomotion now needs it.
 - Locomotion. Lives in the drag law, whose rate is `drag + grip * fullness`.
   A net moves itself by moving energy through itself: a transport kick is
   equal and opposite, and under one rate for every body it cancels at the
@@ -147,17 +150,38 @@ not also be asked to do. Nothing else belongs here; measurements go in
   burn widens nothing, it removes the oscillation entirely. More species is
   what would widen it.
 
-  Not yet true, and this is the list. Only the pool size is heritable, as
-  `adenylate`; every rate is still a global constant, where a lineage should
-  own them — that is what `X`, the expression head, exists for and is read by
-  nothing. The pathway is also its own private chemistry: it neither eats nor
-  excretes any of the four field species, so the only thing connecting it to
-  the dish is the price it pays and the fertiliser that price becomes. And an
-  Era is both the leaf *and*, by `ERA_UPKEEP_RATIO` and its larger store, the
-  fullest body on its wire — so the seeded head makes it the oar while the
-  economy makes it the anchor, and those pull opposite ways. On the bench they
-  are separate rigs and both carry a pair; which of them wins in a net where
-  both act at once is a pond question and has not been asked.
+  The coupling between pathways is directed and signed, and it lives on the
+  wire. A body acts out of its principal port only, so it has one mouth and
+  up to two ears and an Era is a pacemaker leaf by construction; what it does
+  is `send` off the `Gc` head — positive draws the far end's ATP into its own
+  burst and sets the far end off, negative pushes its ATP out and holds the
+  far end quiet — and only while its wave is below `gate`, which is while it
+  fires. Charge and not fuel, because the pathway's autocatalyst is ADP and
+  moving substrate out of charged bodies was looked at and made a chain a
+  pipe. Con seeds positive and Dup negative, so a chain is a sequence of
+  exciters and brakes, which has a direction where a chain of identical
+  diffusers only has a phase. The wire carries the transfer as one signed
+  number both ends read (`Wire.flux`), which is what makes it antisymmetric
+  by construction. Looked at on a thirty-body chain, it entrains: a cascade
+  crosses the chain in half a second, one hop a frame, and the chain then
+  fires as one. That is a wave and not a gait, and a wire that holds charge
+  in transit for a time its rest length sets is what would make it one.
+  `docs/mka-plan.md` §5b has the look.
+
+  Not yet true, and this is the list. The rates are global constants and
+  should stay so — they set the wave's time base, and a lineage that changed
+  them locally would change what a wavelength means across its net; what a
+  body owns is its pool, its sign and its gate, which are heritable. The
+  pathway is its own private chemistry: it neither eats nor excretes any of
+  the four field species, so the only thing connecting it to the dish is the
+  price it pays and the fertiliser that price becomes. Whether a wired chain
+  now runs a wave or still pulses is a thing to look at and has not been
+  looked at. And an Era is both the leaf *and*, by `ERA_UPKEEP_RATIO` and its
+  larger store, the fullest body on its wire — so the seeded head makes it
+  the oar while the economy makes it the anchor, and those pull opposite
+  ways. On the bench they are separate rigs and both carry a pair; which of
+  them wins in a net where both act at once is a pond question and has not
+  been asked.
 - Communication within a net
 - Transport of energy within a net. Lives in the demand gradient: a body gives
   to whichever neighbour is strictly needier, and `transportQuantum` sets

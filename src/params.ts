@@ -416,15 +416,35 @@ export interface Params {
    */
   metabolicCost: number;
   /**
-   * How fast the upstream metabolite crosses a wire, per second. 0 = every
-   * body's pathway is its own.
+   * How fast a firing body moves charge across its principal wire, per
+   * second per unit of `send` below its gate. 0 = every body's pathway is
+   * its own.
    *
-   * The fast coupling. The slow one is already there and costs nothing: two
-   * wired bodies both buy substrate out of tanks that `flowCharges` moves
-   * energy between, so their pathways are coupled through the economy
-   * whether this is set or not.
+   * The fast coupling, and it is directed and signed. A body acts out of its
+   * principal port only, so it has one mouth and up to two ears; what it
+   * does is `send` off the `Gc` head — positive draws the far end's ATP into
+   * its own burst and sets the far end off, negative pushes its ATP out and
+   * holds the far end quiet — and only while its wave is below `gate`, which
+   * is while it is firing. Con seeds positive and Dup negative, so a chain
+   * is a sequence of exciters and brakes, which has a direction where a
+   * chain of identical diffusers only has a phase. This used to be symmetric
+   * diffusion of substrate, whose attractor on a chain of like oscillators
+   * is the pond-wide pulse the gait exists to replace; and before that it
+   * moved substrate out of charged bodies, which looked at on a chain kept
+   * every interior body charged and silent. See `docs/mka-plan.md`.
+   *
+   * The slow coupling is already there and costs nothing: two wired bodies
+   * both buy substrate out of tanks that `flowCharges` moves energy between,
+   * so their pathways are coupled through the economy whether this is set
+   * or not.
    */
   metabolicDiffuse: number;
+  /**
+   * The wave level a fresh body's pathway has to be below to count as
+   * firing, on the wave's own [-1, 1]. Seeds the `gate` row of `Gc` and is
+   * heritable from there. 0 is the discharged half of the cycle.
+   */
+  metabolicGate: number;
   /** What a fresh body's adenylate pool starts at. Heritable from there. */
   adenylate: number;
   /**
@@ -1135,6 +1155,7 @@ export function defaultParams(): Params {
     metabolicWork: 0.6,
     metabolicCost: 0.01,
     metabolicDiffuse: 2,
+    metabolicGate: 0,
     adenylate: 1.5,
     gaitSwell: 0.3,
     flockAlign: 5.5,
@@ -1218,7 +1239,8 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'metabolicWork', label: 'Stroke cost', min: 0, max: 4, step: 0.02 },
   { key: 'metabolicCost', label: 'Substrate price', min: 0, max: 0.1, step: 0.002 },
   { key: 'adenylate', label: 'Adenylate pool (seed)', min: 0.2, max: 6, step: 0.1 },
-  { key: 'metabolicDiffuse', label: 'Activator spread', min: 0, max: 20, step: 0.1 },
+  { key: 'metabolicDiffuse', label: 'Coupling', min: 0, max: 20, step: 0.1 },
+  { key: 'metabolicGate', label: 'Fire below (seed)', min: -1, max: 1, step: 0.02 },
   { key: 'gaitSwell', label: 'Gait swell', min: 0, max: 0.8, step: 0.01 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
   { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },

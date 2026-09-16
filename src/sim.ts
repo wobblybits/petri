@@ -1,3 +1,4 @@
+import { GAIT_GATE_MAX, GAIT_SEND_MAX, GC_BASE, GC_OUT } from './chem-layout.ts';
 import {
   boundRadius,
   discRadius,
@@ -455,8 +456,6 @@ export class Sim {
   private requestPrev = new Float64Array(0);
 
   /** Scratch for one diffusion step: the pull on each body, and its degree. */
-  private gaitPull = new Float64Array(0);
-  private gaitDegree = new Float64Array(0);
 
   /** Per-agent unmet need this frame, rebuilt by `pulseRequests`. */
   private readonly wireAdj = new WireAdjacency();
@@ -4414,39 +4413,84 @@ export class Sim {
       ANCHOR[s] = GA[s] * w;
     }
 
+    /*
+     * The coupling: what a body passes down its wires, and which way.
+     *
+     * Bipartite on purpose. A wire pass computes each wire's flux once and
+     * writes it on the wire; a body pass reads the three wires on its own
+     * ports and applies them. So the two ends of a wire read one number and
+     * a transfer is antisymmetric by construction, and nothing is written to
+     * a body until every wire has spoken, so the order of the wire map cannot
+     * matter. The staging value is the first step toward a wire that holds
+     * charge in transit — see `docs/mka-plan.md` §2.
+     *
+     * What crosses is *charge*, and it crosses while the sender is firing.
+     * The pathway's autocatalyst is ADP — the burn runs on `adp^2` — so the
+     * thing that sets a neighbour off is discharge, and a body passes it on
+     * by drawing the neighbour's ATP into its own burst: the neighbour loses
+     * charge, its burn accelerates, it fires, and draws on the next. That is
+     * the sketch's catalyst wave in this pathway's currency. The first form
+     * of this moved substrate out of *charged* bodies, and looked at on a
+     * chain of thirty Cons it kept every interior body charged and silent
+     * while the fuel drained to the end — a pipe, not a wave — because a
+     * charged body is exactly one that has not burned, and giving its fuel
+     * away keeps it that way.
+     *
+     * A body sends out of its principal port only, so every body has one
+     * mouth and up to two ears, and an Era — nothing but a principal — is a
+     * pacemaker leaf without a rule saying so. What it sends is signed:
+     * below its gate, a positive `send` draws the far end's ATP in (excite)
+     * and a negative one pushes its own ATP out (inhibit, the wave-front
+     * reset). Con seeds positive, Dup negative, and a chain of exciters and
+     * brakes has a direction where a chain of identical diffusers only has a
+     * phase. `atp + adp` stays each body's own `adenylate`: ATP moves
+     * between pools and is never minted.
+     *
+     * Bounded by a quarter of what the source holds and a quarter of the room
+     * at the sink. A body's ATP can be drawn on by at most four transfers a
+     * frame — its own push, and a pull from the far end of each of its three
+     * wires — and its room filled by at most four, so nothing can overdraw
+     * and the pass conserves ATP exactly, with no clamp at the apply.
+     */
     const spread = params.metabolicDiffuse;
     if (spread > 0) {
-      if (this.gaitPull.length < store.capacity) {
-        this.gaitPull = new Float64Array(store.capacity);
-        this.gaitDegree = new Float64Array(store.capacity);
+      const SEND = store.gaitSend;
+      const GATE = store.gaitGate;
+      const PW = store.portWire;
+      const agents = this.agents;
+      const wires = this.graph.wires;
+      const k = spread * dt;
+      for (const wire of wires.values()) {
+        wire.flux = 0;
+        const A = agents.get(wire.a.id);
+        const B = agents.get(wire.b.id);
+        if (!A || !B || A === B) continue;
+        let f = 0;
+        if (wire.a.slot === 'p') f += transmit(ATP, POOL, SEND, GATE, WAVE, A.slot, B.slot, k);
+        if (wire.b.slot === 'p') f -= transmit(ATP, POOL, SEND, GATE, WAVE, B.slot, A.slot, k);
+        wire.flux = f;
       }
-      const pull = this.gaitPull;
-      const count = this.gaitDegree;
-      for (const agent of this.agents.values()) {
-        pull[agent.slot] = 0;
-        count[agent.slot] = 0;
-      }
-      // Accumulated before it is applied, so every wire sees the same field
-      // and the answer does not depend on the order the wire map is in.
-      for (const wire of this.graph.wires.values()) {
-        const A = this.agents.get(wire.a.id);
-        const B = this.agents.get(wire.b.id);
-        if (!A || !B) continue;
-        const d = SUB[B.slot] - SUB[A.slot];
-        pull[A.slot] += d;
-        pull[B.slot] -= d;
-        count[A.slot] += 1;
-        count[B.slot] += 1;
-      }
-      // Per wire, so a hub is not driven as many times as it has wires, and
-      // capped at a half so an explicit step cannot overshoot and ring.
-      const step = Math.min(0.5, spread * dt);
-      for (const agent of this.agents.values()) {
+      for (const agent of agents.values()) {
         const s = agent.slot;
-        const n = count[s];
-        if (n <= 0) continue;
-        const next = SUB[s] + step * (pull[s] / n);
-        SUB[s] = next <= 0 ? 0 : next >= REACT_CAP ? REACT_CAP : next;
+        const id = agent.id;
+        for (let port = 0; port < 3; port++) {
+          const wid = PW[s * 3 + port];
+          if (wid < 0) continue;
+          const wire = wires.get(wid);
+          if (!wire) continue;
+          const f = wire.flux;
+          if (f === 0) continue;
+          // Signed `a` toward `b`, and this body is one of the two.
+          ATP[s] += wire.a.id === id ? -f : f;
+        }
+        // The wave and the anchor follow the charge, so a body that was just
+        // drawn on strokes as what it now is rather than what it was.
+        const pool = POOL[s];
+        if (pool > 0) {
+          const w = (2 * ATP[s] - pool) / pool;
+          WAVE[s] = w;
+          ANCHOR[s] = GA[s] * w;
+        }
       }
     }
   }
@@ -6092,6 +6136,8 @@ export class Sim {
     const TT = store.transportThrust;
     const TR = store.transportRecoil;
     const GA = store.gaitAnchor;
+    const SEND = store.gaitSend;
+    const GATE = store.gaitGate;
     const PLASTIC = store.plasticAll;
     const TRACE = store.traceAll;
     const CRITIC = store.criticAll;
@@ -6326,6 +6372,10 @@ export class Sim {
       // Signed both ways on purpose: a body that lets go where its neighbour
       // holds walks the other way, and that is a lineage's to choose.
       GA[slot] = clamp(headAt(CHEM, g, G_OUT, G_BASE, 0, H, ho, S) * HEAD_SCALE.anchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
+      // The coupling: whether this body excites or inhibits down its principal
+      // wire while it fires, and how discharged it has to be to fire it.
+      SEND[slot] = clamp(headAt(CHEM, g, GC_OUT, GC_BASE, 0, H, ho, S) * HEAD_SCALE.send, -GAIT_SEND_MAX, GAIT_SEND_MAX);
+      GATE[slot] = clamp(headAt(CHEM, g, GC_OUT, GC_BASE, 1, H, ho, S) * HEAD_SCALE.gate, -GAIT_GATE_MAX, GAIT_GATE_MAX);
 
       /*
        * What this body learns from the frame it has just had.
@@ -6529,6 +6579,8 @@ export class Sim {
       store.transportThrust[slot] = out[o + 16];
       store.transportRecoil[slot] = out[o + 17];
       store.gaitAnchor[slot] = out[o + 18];
+      store.gaitSend[slot] = out[o + 19];
+      store.gaitGate[slot] = out[o + 20];
     }
   }
 
@@ -7270,6 +7322,46 @@ function rewriteAudio(
  * `Agent.h`. This one exists for `updateState`'s inner loop, where those two
  * accessors are the whole cost — see the note on reading `chemAll` directly.
  */
+/**
+ * ATP one end of a wire moves across it this frame, signed from the sender
+ * `s` toward the receiver `r`: negative when `s` draws the far end in, which
+ * is excitation. The coupling block in `Sim.advanceGait` says why it fires
+ * below the gate and why it is bounded by quarters.
+ */
+function transmit(
+  ATP: Float64Array,
+  POOL: Float64Array,
+  SEND: Float64Array,
+  GATE: Float64Array,
+  WAVE: Float64Array,
+  s: number,
+  r: number,
+  k: number,
+): number {
+  const drive = GATE[s] - WAVE[s];
+  if (!(drive > 0)) return 0;
+  const send = SEND[s];
+  if (send > 0) {
+    // Excite: draw the far end's charge into this burst.
+    let want = send * drive * k;
+    const have = ATP[r] * 0.25;
+    const room = (POOL[s] - ATP[s]) * 0.25;
+    if (want > have) want = have;
+    if (want > room) want = room;
+    return want > 0 ? -want : 0;
+  }
+  if (send < 0) {
+    // Inhibit: give the far end charge, so it has nothing to fire with.
+    let want = -send * drive * k;
+    const have = ATP[s] * 0.25;
+    const room = (POOL[r] - ATP[r]) * 0.25;
+    if (want > have) want = have;
+    if (want > room) want = room;
+    return want > 0 ? want : 0;
+  }
+  return 0;
+}
+
 function headAt(
   chem: Float32Array,
   g: number,

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import shader from './genome.wgsl?raw';
 import {
-  B_STATE, CHEM_LEN, EMIT, E_OUT, F_BASE, F_OUT, GAIT_ANCHOR_MAX, G_BASE, G_OUT,
+  B_STATE, CHEM_LEN, EMIT, E_OUT, F_BASE, F_OUT, GAIT_ANCHOR_MAX, GAIT_GATE_MAX, GAIT_SEND_MAX,
+  G_BASE, G_OUT, GC_BASE, GC_OUT,
   HEAD_SCALE, IN_DIMS, L_BASE, L_OUT,
   LEARN_CRITIC, LEARN_PREV_V, LEARN_STRIDE, LEARN_TRACE,
   P_BASE, P_OUT, PLASTIC_LEN, X_OUT, SENSE_SCALE, STATE_DIMS, TASTE, T_OUT, W_IN, W_NET, W_SELF,
@@ -45,6 +46,7 @@ describe('the genome shader matches the genome layout', () => {
     const want: Record<string, number> = {
       STATE_DIMS, IN_DIMS, EMIT, TASTE, E_OUT, T_OUT, W_IN, W_SELF, W_NET,
       B_STATE, F_OUT, F_BASE, P_OUT, P_BASE, L_OUT, L_BASE, G_OUT, G_BASE,
+      GC_OUT, GC_BASE,
       // The learning row is indexed by the same hand-copied constants and
       // carries the same hazard.
       PLASTIC_LEN, LEARN_TRACE, LEARN_CRITIC, LEARN_PREV_V, LEARN_STRIDE,
@@ -54,12 +56,12 @@ describe('the genome shader matches the genome layout', () => {
     }
   });
 
-  it('writes the nineteen floats a body the host unpacks', () => {
-    // h(4) + emit(4) + taste(4) + six heads. The host reads them back by this
-    // stride, so a mismatch shifts every field by a body.
+  it('writes the twenty-one floats a body the host unpacks', () => {
+    // h(4) + emit(4) + taste(4) + nine heads. The host reads them back by
+    // this stride, so a mismatch shifts every field by a body.
     // state(4), emit(4), taste(4), then the heads: cruise, turn, align,
-    // sep, thrust, recoil, anchor.
-    expect(shaderConst('OUT_STRIDE')).toBe(4 + 4 + 4 + 7);
+    // sep, thrust, recoil, anchor, send, gate.
+    expect(shaderConst('OUT_STRIDE')).toBe(4 + 4 + 4 + 9);
   });
 
   it('has no genome offset the layout does not derive', () => {
@@ -69,7 +71,7 @@ describe('the genome shader matches the genome layout', () => {
     const known = new Set([
       'STATE_DIMS', 'IN_DIMS', 'EMIT', 'TASTE', 'E_OUT', 'T_OUT', 'W_IN', 'W_SELF',
       'W_NET', 'B_STATE', 'F_OUT', 'F_BASE', 'P_OUT', 'P_BASE', 'L_OUT', 'L_BASE',
-      'G_OUT', 'G_BASE',
+      'G_OUT', 'G_BASE', 'GC_OUT', 'GC_BASE',
       'OUT_STRIDE', 'PLASTIC_LEN', 'LEARN_TRACE', 'LEARN_CRITIC', 'LEARN_PREV_V',
       'LEARN_STRIDE',
     ]);
@@ -91,7 +93,7 @@ describe('the genome shader matches the genome layout', () => {
       'n', 'chemLen', 'senseScale', 'groundScale',
       'sCruise', 'sTurn', 'sAlign', 'sSep', 'sThrust', 'sRecoil', 'energyCh',
       'learnRate', 'learnCritic', 'learnTrace', 'learnDiscount', 'maxWeight',
-      'sAnchor', 'pad1', 'pad2', 'pad3',
+      'sAnchor', 'sSend', 'sGate', 'pad3',
     ]);
     // A uniform buffer's size has to be a whole number of sixteen-byte
     // blocks, which is what the pads are for.
@@ -111,8 +113,8 @@ describe('the genome shader matches the genome layout', () => {
 
   it('reads inside the genome it is given', () => {
     /*
-     * The shader now reaches the end of the genome. `G`, the gait head, is
-     * the last block, so `G_BASE + 2` is both the furthest read and
+     * The shader now reaches the end of the genome. `Gc`, the coupling head,
+     * is the last block, so `GC_BASE + 2` is both the furthest read and
      * `CHEM_LEN` — assert the equality, which is what notices a field added
      * after it that the shader has not been taught about.
      *
@@ -123,7 +125,8 @@ describe('the genome shader matches the genome layout', () => {
      */
     expect(L_BASE + 2).toBe(X_OUT);
     expect(X_OUT).toBeLessThan(G_OUT);
-    expect(G_BASE + 1).toBe(CHEM_LEN);
+    expect(G_BASE + 1).toBe(GC_OUT);
+    expect(GC_BASE + 2).toBe(CHEM_LEN);
   });
 });
 
@@ -213,6 +216,8 @@ function mirrorState(a: {
     out[o + 16] = cl(head(P_OUT, P_BASE, 0, HEAD_SCALE.thrust), 0, 1);
     out[o + 17] = cl(head(P_OUT, P_BASE, 1, HEAD_SCALE.recoil), 0, 200);
     out[o + 18] = cl(head(G_OUT, G_BASE, 0, HEAD_SCALE.anchor), -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
+    out[o + 19] = cl(head(GC_OUT, GC_BASE, 0, HEAD_SCALE.send), -GAIT_SEND_MAX, GAIT_SEND_MAX);
+    out[o + 20] = cl(head(GC_OUT, GC_BASE, 1, HEAD_SCALE.gate), -GAIT_GATE_MAX, GAIT_GATE_MAX);
   }
   return out;
 }

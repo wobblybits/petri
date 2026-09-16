@@ -285,7 +285,29 @@ export const ERA_GROUND_SHARE = SEED_PRODUCTION / (SEED_PRODUCTION + CHEM_SPECIE
  */
 export const G_OUT = KS_BASE + CHEM_SPECIES;
 export const G_BASE = G_OUT + STATE_DIMS;
-export const CHEM_LEN = G_BASE + 1;
+
+/**
+ * `Gc`, state -> coupling, and its bases. Two rows: `send`, then `gate`.
+ *
+ * What this body does to the far end of its principal wire while it fires.
+ * `send` is signed: positive draws the far end's ATP into this body's burst,
+ * which discharges the far end and sets it off (excite); negative pushes this
+ * body's ATP out to it, which holds it charged and quiet (inhibit). `gate` is
+ * the wave level the pathway has to be *below* to be firing, on the same
+ * [-1, 1] as `gaitWave`. Read by the coupling pass in `Sim.advanceGait`; see
+ * `docs/mka-plan.md` §2.
+ *
+ * Its own segment rather than two more rows on `G`, because `net-blob.ts`
+ * refuses a stored net whose segment changed length and seeds one it never
+ * had. The nets under `nets/` keep loading, and arrive seeded for their kind.
+ *
+ * A head, so a lineage can make what it sends depend on its state — and so
+ * the learned weights that shape `h` reach the gate without a second
+ * learning rule. Row-major, like every head: `GC_OUT + row * STATE_DIMS + d`.
+ */
+export const GC_OUT = G_BASE + 1;
+export const GC_BASE = GC_OUT + 2 * STATE_DIMS;
+export const CHEM_LEN = GC_BASE + 2;
 
 /**
  * The genome as a list of named segments, in memory order.
@@ -330,6 +352,8 @@ export const CHEM_SEGMENTS: readonly ChemSegment[] = [
   { name: 'ks', at: KS_BASE, len: CHEM_SPECIES },
   { name: 'G', at: G_OUT, len: STATE_DIMS },
   { name: 'g0', at: G_BASE, len: 1 },
+  { name: 'Gc', at: GC_OUT, len: 2 * STATE_DIMS },
+  { name: 'gc0', at: GC_BASE, len: 2 },
 ];
 
 /**
@@ -395,6 +419,13 @@ export const LEARN_STRIDE = LEARN_PREV_V + 1;
  * the layout rather than on `Sim`.
  */
 export const GAIT_ANCHOR_MAX = 8;
+/**
+ * Widest `send` the coupling head may ask for, as a multiple of
+ * `metabolicDiffuse`, and the gate's range — the wave is in [-1, 1], so a gate
+ * past either end is always open or never.
+ */
+export const GAIT_SEND_MAX = 4;
+export const GAIT_GATE_MAX = 1;
 
 export const HEAD_SCALE = {
   align: 8,
@@ -405,6 +436,9 @@ export const HEAD_SCALE = {
   turn: 2,
   /** Same natural unit as the `grip` slider: one gene is one 1/s of drag. */
   anchor: 2,
+  /** One gene is one `metabolicDiffuse` of coupling, and one gene of gate is one wave. */
+  send: 1,
+  gate: 1,
 } as const;
 
 /**

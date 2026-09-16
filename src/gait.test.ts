@@ -221,3 +221,109 @@ describe('the stroke', () => {
     expect(Math.abs(wire.rest - span * stroke)).toBeGreaterThan(span * 0.005);
   });
 });
+
+describe('the coupling', () => {
+  /*
+   * Directed, signed, and on the wire. A body acts out of its principal port
+   * only; what it does is `send` off the `Gc` head, positive drawing the far
+   * end's ATP into its own burst and negative pushing its own ATP out; and
+   * the wire carries the transfer as one signed number both ends read. See
+   * `docs/mka-plan.md` §2.
+   *
+   * Two fed, pinned bodies on one wire, and the slots chosen by hand, because
+   * which end is the principal is the whole of the claim.
+   */
+  function pair(kindA: 'con' | 'dup' | 'era', slotA: 'p' | 'l', kindB: 'con' | 'dup', slotB: 'p' | 'l', p: Params) {
+    const sim = new Sim(4000, 4000);
+    loadPreset(sim, 'soup', p);
+    const a = sim.spawn(kindA, 1960, 2000, 0, p, true)!;
+    const b = sim.spawn(kindB, 2040, 2000, 0, p, true)!;
+    a.pinned = true;
+    b.pinned = true;
+    const wire = sim.graph.connect(sim.agents, { id: a.id, slot: slotA }, { id: b.id, slot: slotB }, sim.w, sim.h, p, sim.time)!;
+    return { sim, a, b, wire };
+  }
+
+  function run(sim: Sim, a: { extra: number; energyCap: number }, b: { extra: number; energyCap: number }, wire: { flux: number }, p: Params) {
+    let toward = 0;
+    let away = 0;
+    for (let f = 0; f < 900; f++) {
+      a.extra = a.energyCap;
+      b.extra = b.energyCap;
+      sim.step(1 / 60, p);
+      if (wire.flux > 0) toward += wire.flux;
+      if (wire.flux < 0) away -= wire.flux;
+    }
+    return { toward, away };
+  }
+
+  it('acts out of the principal port, and only that way', () => {
+    const p = gaitParams();
+    // A Con's principal on the wire's `a` end draws `b`'s charge in, so the
+    // flux, signed `a` toward `b`, is negative and never positive.
+    {
+      const { sim, a, b, wire } = pair('con', 'p', 'con', 'l', p);
+      const { toward, away } = run(sim, a, b, wire, p);
+      expect(away, 'the principal end drew nothing').toBeGreaterThan(0);
+      expect(toward, 'the auxiliary end acted').toBe(0);
+    }
+    // Mirrored: the principal on `b` draws from `a`, so the flux is positive.
+    {
+      const { sim, a, b, wire } = pair('con', 'l', 'con', 'p', p);
+      const { toward, away } = run(sim, a, b, wire, p);
+      expect(toward).toBeGreaterThan(0);
+      expect(away).toBe(0);
+    }
+  });
+
+  it('is a brake on a Dup and a spark on a Con, from the same port', () => {
+    // Same geometry, same port, the other kind at the acting end: the sign
+    // flips, because a Dup seeds `send` negative and pushes its own charge
+    // out through its principal to hold the far end quiet.
+    const p = gaitParams();
+    const { sim, a, b, wire } = pair('dup', 'p', 'con', 'l', p);
+    const { toward, away } = run(sim, a, b, wire, p);
+    expect(toward, 'the Dup gave nothing').toBeGreaterThan(0);
+    expect(away, 'the Dup drew').toBe(0);
+  });
+
+  it('moves charge between the two ends of one wire, and conserves it', () => {
+    /*
+     * The wire is the bucket: one signed number, read by both ends, so what
+     * leaves one body is exactly what arrives at the other. The pathway is
+     * slowed to nothing so that the coupling is the only thing moving ATP
+     * — at 1e-9 its one tick still showed at the twelfth digit — and the
+     * sender is set fully discharged by hand so it is firing, the receiver
+     * fully charged so there is something to draw.
+     */
+    const p = gaitParams();
+    p.metabolicRate = 1e-15;
+    const { sim, a, b, wire } = pair('con', 'p', 'con', 'l', p);
+    const store = sim.agentStore;
+    const lone = sim.spawn('con', 2000, 2400, 0, p, true)!;
+    lone.pinned = true;
+    // Two frames so the heads have been read off the genome at least once.
+    sim.step(1 / 60, p);
+    sim.step(1 / 60, p);
+    const pool = store.adenylate[a.slot];
+    store.atp[a.slot] = 0;
+    store.atp[b.slot] = store.adenylate[b.slot];
+    store.atp[lone.slot] = 0;
+    sim.step(1 / 60, p);
+    const drawn = -wire.flux;
+    expect(drawn).toBeGreaterThan(0);
+    expect(store.atp[a.slot]).toBeCloseTo(drawn, 12);
+    expect(store.atp[a.slot] + store.atp[b.slot]).toBeCloseTo(store.adenylate[b.slot], 12);
+    expect(store.atp[lone.slot], 'an unwired body was touched').toBeCloseTo(0, 12);
+    // And the wave follows the charge in the same frame.
+    expect(store.gaitWave[a.slot]).toBeCloseTo((2 * drawn - pool) / pool, 12);
+
+    // And nothing at all with the coupling dial at zero — nothing but the
+    // pathway's own vanishing tick, which is what the zero is close to.
+    p.metabolicDiffuse = 0;
+    store.atp[a.slot] = 0;
+    store.atp[b.slot] = store.adenylate[b.slot];
+    sim.step(1 / 60, p);
+    expect(store.atp[a.slot]).toBeCloseTo(0, 12);
+  });
+});

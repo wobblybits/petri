@@ -109,6 +109,13 @@ export class AgentStore {
   adenylate!: Float64Array;
   gaitWave!: Float64Array;
   gaitAnchor!: Float64Array;
+  /**
+   * The coupling head, `Gc`, as it reads this frame: whether this body
+   * excites (+) or inhibits (−) the far end of its principal wire while it
+   * fires, and the wave level below which it counts as firing.
+   */
+  gaitSend!: Float64Array;
+  gaitGate!: Float64Array;
   anchor!: Float64Array;
   /** Whole units this body sends in one transfer. See `params.transportQuantum`. */
   transportQuantum!: Float64Array;
@@ -501,6 +508,8 @@ export class AgentStore {
     this.adenylate[slot] = 0;
     this.gaitWave[slot] = 0;
     this.gaitAnchor[slot] = 0;
+    this.gaitSend[slot] = 0;
+    this.gaitGate[slot] = 0;
     this.anchor[slot] = 0;
     this.transportQuantum[slot] = 0;
     this.csHeading[slot] = 0;
@@ -596,6 +605,8 @@ export class AgentStore {
     this.adenylate = growF64(this.adenylate);
     this.gaitWave = growF64(this.gaitWave);
     this.gaitAnchor = growF64(this.gaitAnchor);
+    this.gaitSend = growF64(this.gaitSend);
+    this.gaitGate = growF64(this.gaitGate);
     this.anchor = growF64(this.anchor);
     this.transportQuantum = growF64(this.transportQuantum);
     // Three a body, and -1 rather than 0 is the free marker, so a fresh tail
