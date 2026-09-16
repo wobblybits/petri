@@ -73,12 +73,21 @@ export interface Wire {
   /**
    * ATP crossing this wire this frame, signed `a` toward `b`.
    *
-   * The wire is the bucket. `Sim.advanceGait` writes it once per wire and
-   * every body then reads the wires on its own ports, so the two ends of a
-   * transfer read one number and cannot disagree about it. A staging value
-   * for now, cleared and rewritten every frame; a wire that holds charge in
-   * transit is the next step, and it is why this is on the wire and not in
-   * a scratch array on `Sim`.
+   * The wire is the bucket, and this is what is in it. `Sim.advanceGait`
+   * writes it once per wire and every body then reads the wires on its own
+   * ports, so the two ends of a transfer read one number and cannot disagree
+   * about it.
+   *
+   * It persists across frames rather than being recomputed, because the wire
+   * *conducts* rather than teleporting: this relaxes toward what the firing
+   * end is asking for with a time constant of `rest / metabolicSpeed`, so a
+   * long wire carries a front slowly and a short one quickly. That delay per
+   * hop is what makes a chain's cascade a travelling wave instead of the
+   * frame-rate entrainment it was when the transfer landed whole.
+   *
+   * Nothing is *stored* here — it is an amount moved per frame, not a
+   * reservoir — so a wire that snaps or is rewritten away owes nobody a
+   * spill, and the pond's conservation does not have to know wires exist.
    */
   flux: number;
 }

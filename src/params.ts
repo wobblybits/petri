@@ -445,6 +445,57 @@ export interface Params {
    * heritable from there. 0 is the discharged half of the cycle.
    */
   metabolicGate: number;
+  /**
+   * How fast charge crosses a wire, in world units a second. 0 = instantly,
+   * which is the coupling before this.
+   *
+   * **This is what gives the wave a wavelength**, and it is the whole reason
+   * the coupling lives on the wire rather than in a scratch array. A wire
+   * conducts with a time constant of its own rest length over this speed, so
+   * a firing body's draw on its neighbour ramps up over `rest / speed`
+   * instead of landing whole in one frame. Each hop then costs a time the
+   * *net's own geometry* sets, and a fixed delay per hop along a chain is a
+   * travelling wave — which along a body is peristalsis.
+   *
+   * Instantaneous was measured and is not a gait. Coupled with no delay, a
+   * thirty-body chain cascades in under half a second against a period of
+   * about three, so the whole net fires as one from the next cycle on: that
+   * is entrainment, and its speed is the frame rate rather than anything a
+   * lineage owns. `gaitLag` used to set the phase difference per wire as a
+   * global constant; this is the same quantity arriving out of how long a
+   * body's wires actually are.
+   *
+   * Measured on a chain of six pinned Cons wired principal-to-auxiliary,
+   * started at scattered charges, after ten seconds of settling. The lag is
+   * the median frames between a body starting to fire and its neighbour
+   * doing the same, against a period of about 175 frames:
+   *
+   *     coupling off        106 frames    no lock at all; free runners
+   *     speed 0 (instant)     1.6         synchrony, the pond-wide pulse
+   *     speed 90             11.4         a wave: 6.5% of a cycle per wire
+   *     speed 90, rest 118   28           longer wire, slower wave
+   *     speed 30            breaks up     too slow to entrain
+   *
+   * So the usable band is roughly 60 to 260 and it ships at 90, where the lag
+   * is uniform along the chain and a six-body worm carries about half a cycle
+   * end to end — which is a wave the eye can follow.
+   *
+   * Two things fall out of the constant being `rest` rather than a number of
+   * its own. `wireShrink` reels a fresh latch in from whatever length it
+   * latched at, so a new limb conducts slowly and speeds up as it tightens.
+   * And the gait's own stroke swings `rest`, so a wire conducts faster while
+   * it is contracted — a small positive feedback between the stroke and the
+   * signal that nothing had to be added to get.
+   *
+   * What does *not* follow, and the doc said it did before it was measured: a
+   * lineage cannot breed its own wave speed this way. `wireShrink` pulls
+   * every settled wire to `wireMinRest`, which is a global, so in a settled
+   * net the delay is the same on every wire. The table's last row moves
+   * `wireMinRest` for the whole pond to show the mechanism reads the length
+   * at all. A per-lineage rest length is a separate thing and it does not
+   * exist.
+   */
+  metabolicSpeed: number;
   /** What a fresh body's adenylate pool starts at. Heritable from there. */
   adenylate: number;
   /**
@@ -1156,6 +1207,7 @@ export function defaultParams(): Params {
     metabolicCost: 0.01,
     metabolicDiffuse: 2,
     metabolicGate: 0,
+    metabolicSpeed: 90,
     adenylate: 1.5,
     gaitSwell: 0.3,
     flockAlign: 5.5,
@@ -1241,6 +1293,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'adenylate', label: 'Adenylate pool (seed)', min: 0.2, max: 6, step: 0.1 },
   { key: 'metabolicDiffuse', label: 'Coupling', min: 0, max: 20, step: 0.1 },
   { key: 'metabolicGate', label: 'Fire below (seed)', min: -1, max: 1, step: 0.02 },
+  { key: 'metabolicSpeed', label: 'Conduction (px/s)', min: 0, max: 2000, step: 10 },
   { key: 'gaitSwell', label: 'Gait swell', min: 0, max: 0.8, step: 0.01 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
   { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },

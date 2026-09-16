@@ -4460,14 +4460,56 @@ export class Sim {
       const agents = this.agents;
       const wires = this.graph.wires;
       const k = spread * dt;
+      const speed = params.metabolicSpeed;
       for (const wire of wires.values()) {
-        wire.flux = 0;
         const A = agents.get(wire.a.id);
         const B = agents.get(wire.b.id);
-        if (!A || !B || A === B) continue;
-        let f = 0;
-        if (wire.a.slot === 'p') f += transmit(ATP, POOL, SEND, GATE, WAVE, A.slot, B.slot, k);
-        if (wire.b.slot === 'p') f -= transmit(ATP, POOL, SEND, GATE, WAVE, B.slot, A.slot, k);
+        if (!A || !B || A === B) {
+          wire.flux = 0;
+          continue;
+        }
+        const sa = A.slot;
+        const sb = B.slot;
+        // Signed `a` toward `b`. A wire between two principals — which is a
+        // redex — is asked by both of its ends, and what crosses is the net
+        // of the two asks rather than each in turn.
+        let want = 0;
+        if (wire.a.slot === 'p') want += demand(SEND, GATE, WAVE, sa, k);
+        if (wire.b.slot === 'p') want -= demand(SEND, GATE, WAVE, sb, k);
+        /*
+         * The wire conducts rather than teleporting. `rest / speed` is its
+         * time constant, so what actually crosses relaxes toward what the
+         * firing end asked for — and the hop delay that gives a chain its
+         * wavelength is the net's own geometry rather than the frame rate.
+         * At `metabolicSpeed` 0 the step is 1 and the ask lands whole, which
+         * is the coupling as it was before this.
+         */
+        const rest = wire.rest;
+        const step = speed > 0 && rest > 0 ? Math.min(1, (dt * speed) / rest) : 1;
+        let f = wire.flux + (want - wire.flux) * step;
+        /*
+         * Bounded once, on the net, and after the lag. Each end used to be
+         * bounded on its own and the two summed, so a redex could move more
+         * than either bound allowed; and a lagged transfer has to be checked
+         * against what is actually there this frame rather than against what
+         * was there when the ask was made. A quarter, because a body's charge
+         * can be drawn on by its own ask and by the far end of each of its
+         * three wires — so nothing can overdraw it and the pass conserves ATP
+         * exactly, with no clamp at the apply.
+         */
+        if (f > 0) {
+          const have = ATP[sa] * 0.25;
+          const room = (POOL[sb] - ATP[sb]) * 0.25;
+          if (f > have) f = have;
+          if (f > room) f = room;
+          if (f < 0) f = 0;
+        } else if (f < 0) {
+          const have = ATP[sb] * 0.25;
+          const room = (POOL[sa] - ATP[sa]) * 0.25;
+          if (-f > have) f = -have;
+          if (-f > room) f = -room;
+          if (f > 0) f = 0;
+        }
         wire.flux = f;
       }
       for (const agent of agents.values()) {
@@ -7323,43 +7365,25 @@ function rewriteAudio(
  * accessors are the whole cost — see the note on reading `chemAll` directly.
  */
 /**
- * ATP one end of a wire moves across it this frame, signed from the sender
- * `s` toward the receiver `r`: negative when `s` draws the far end in, which
- * is excitation. The coupling block in `Sim.advanceGait` says why it fires
- * below the gate and why it is bounded by quarters.
+ * What one end of a wire is asking to move across it this frame, signed from
+ * the sender `s` toward whatever is at the other end: negative when `s` draws
+ * the far end in, which is excitation.
+ *
+ * The ask only, unbounded — the wire's own conduction and the two ends' room
+ * are applied to the net of both ends' asks, in `Sim.advanceGait`, which says
+ * why. Nothing is asked unless the pathway is below its gate, which is while
+ * it is firing.
  */
-function transmit(
-  ATP: Float64Array,
-  POOL: Float64Array,
+function demand(
   SEND: Float64Array,
   GATE: Float64Array,
   WAVE: Float64Array,
   s: number,
-  r: number,
   k: number,
 ): number {
   const drive = GATE[s] - WAVE[s];
   if (!(drive > 0)) return 0;
-  const send = SEND[s];
-  if (send > 0) {
-    // Excite: draw the far end's charge into this burst.
-    let want = send * drive * k;
-    const have = ATP[r] * 0.25;
-    const room = (POOL[s] - ATP[s]) * 0.25;
-    if (want > have) want = have;
-    if (want > room) want = room;
-    return want > 0 ? -want : 0;
-  }
-  if (send < 0) {
-    // Inhibit: give the far end charge, so it has nothing to fire with.
-    let want = -send * drive * k;
-    const have = ATP[s] * 0.25;
-    const room = (POOL[r] - ATP[r]) * 0.25;
-    if (want > have) want = have;
-    if (want > room) want = room;
-    return want > 0 ? want : 0;
-  }
-  return 0;
+  return -SEND[s] * drive * k;
 }
 
 function headAt(

@@ -327,3 +327,124 @@ describe('the coupling', () => {
     expect(store.atp[a.slot]).toBeCloseTo(0, 12);
   });
 });
+
+describe('conduction', () => {
+  /*
+   * What makes a coupled chain a wave rather than a pulse.
+   *
+   * A wire conducts with a time constant of its own rest length over
+   * `metabolicSpeed`, so a firing body's draw on its neighbour ramps up
+   * instead of landing whole in one frame, and each hop costs a fixed time.
+   * A fixed phase difference per wire along a chain is a travelling wave,
+   * which along a body is peristalsis — and it is what `gaitLag` used to set
+   * as a global constant before the metabolism replaced the clock and left
+   * nothing in its place.
+   *
+   * Three regimes, and the point is that they are three: no coupling at all
+   * is no lock, instant coupling is synchrony, and a finite speed is the wave
+   * in between. The bounds are loose because this is a change detector on
+   * the mechanism and not a measure of the pond; the numbers it was written
+   * against are in `metabolicSpeed`.
+   */
+  function lockOf(speed: number, coupling: number, minRest = 48): { lag: number; period: number } {
+    const p = gaitParams();
+    // Faster than this file's own default, so a 600-frame window holds three
+    // or four cycles: the period goes as `1/metabolicRate`, and at 6 it is
+    // 7.3 s, which is one crossing and nothing to take a median over.
+    p.metabolicRate = 15;
+    p.metabolicSpeed = speed;
+    p.metabolicDiffuse = coupling;
+    p.wireMinRest = minRest;
+    const n = 6;
+    const sim = new Sim(4000, 4000);
+    loadPreset(sim, 'soup', p);
+    const bodies: ReturnType<Sim['spawn']>[] = [];
+    for (let i = 0; i < n; i++) {
+      const a = sim.spawn('con', 1200 + i * 60, 2000, 0, p, true)!;
+      a.pinned = true;
+      bodies.push(a);
+    }
+    // Principal to auxiliary all the way down, so every body's one mouth
+    // faces the next body's ear and the chain has a direction.
+    for (let i = 0; i + 1 < n; i++) {
+      sim.graph.connect(sim.agents, { id: bodies[i]!.id, slot: 'p' }, { id: bodies[i + 1]!.id, slot: 'l' }, sim.w, sim.h, p, sim.time);
+    }
+    const store = sim.agentStore;
+    // Scattered charges and stores, so a lock has to be achieved rather than
+    // assumed: identical bodies burst in unison by construction.
+    for (let i = 0; i < n; i++) {
+      store.atp[bodies[i]!.slot] = p.adenylate * (0.2 + (0.7 * ((i * 7919) % 11)) / 11);
+      store.sub[bodies[i]!.slot] = 0.3 + (0.5 * ((i * 104729) % 7)) / 7;
+    }
+    const feed = () => {
+      for (const a of sim.agents.values()) a.extra = a.energyCap;
+    };
+    for (let f = 0; f < 600; f++) {
+      feed();
+      sim.step(1 / 60, p);
+    }
+    // Downward zero crossings: the frame each body starts firing.
+    const cross: number[][] = bodies.map(() => []);
+    const was = bodies.map((b) => store.gaitWave[b!.slot]);
+    for (let f = 0; f < 600; f++) {
+      feed();
+      sim.step(1 / 60, p);
+      for (let i = 0; i < n; i++) {
+        const now = store.gaitWave[bodies[i]!.slot];
+        if (was[i] >= 0 && now < 0) cross[i].push(f);
+        was[i] = now;
+      }
+    }
+    const first = cross[0];
+    expect(first.length, 'the head of the chain never fired').toBeGreaterThan(1);
+    const period = (first[first.length - 1] - first[0]) / (first.length - 1);
+    // Per wire, the median over cycles of how long after this body its
+    // neighbour follows. Matched to the nearest earlier crossing so a lag
+    // near a whole period is not read as a negative one.
+    const lags: number[] = [];
+    for (let i = 1; i < n; i++) {
+      const d: number[] = [];
+      for (const t of cross[i]) {
+        let best: number | null = null;
+        for (const u of cross[i - 1]) {
+          const g = t - u;
+          if (g >= 0 && (best === null || g < best)) best = g;
+        }
+        if (best !== null && best < period) d.push(best);
+      }
+      d.sort((x, y) => x - y);
+      if (d.length) lags.push(d[d.length >> 1]);
+    }
+    expect(lags.length, 'no wire had a comparable pair of crossings').toBeGreaterThan(2);
+    return { lag: lags.reduce((x, y) => x + y, 0) / lags.length, period };
+  }
+
+  it('is no lock uncoupled, synchrony instant, and a wave at a finite speed', () => {
+    const free = lockOf(90, 0);
+    const instant = lockOf(0, 8);
+    const wave = lockOf(90, 8);
+
+    // Uncoupled, the bodies are free runners: the offset between neighbours
+    // is whatever their scattered starts left, which is most of a period.
+    expect(free.lag, 'uncoupled bodies locked anyway').toBeGreaterThan(free.period * 0.2);
+
+    // Instant, they lock in phase — the pond-wide pulse this branch began by
+    // removing, and what the coupling did before it had to cross a wire.
+    expect(instant.lag, 'instant coupling did not synchronise').toBeLessThan(4);
+
+    // Conducting, they lock with a lag: a fixed phase difference per wire.
+    expect(wave.lag, 'no lag, so no wave').toBeGreaterThan(instant.lag + 3);
+    expect(wave.lag, 'the chain did not lock at all').toBeLessThan(wave.period * 0.25);
+  });
+
+  it('takes longer over a longer wire', () => {
+    // The delay is the wire's own length over the speed, so the same chain
+    // held at twice the rest length carries its wave more slowly. This moves
+    // `wireMinRest` for the whole pond, which is the only way to move it —
+    // see `metabolicSpeed` on what that does and does not say about a
+    // lineage.
+    const short = lockOf(90, 8, 48);
+    const long = lockOf(90, 8, 96);
+    expect(long.lag, 'wire length did not change the lag').toBeGreaterThan(short.lag * 1.3);
+  });
+});
