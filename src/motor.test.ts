@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CH } from './fields.ts';
 import { EMIT, TASTE, seedChem } from './agents.ts';
 import { defaultParams } from './params.ts';
+import { fixedParams } from './test-params.ts';
 import { Sim } from './sim.ts';
 
 /**
@@ -29,7 +30,7 @@ function lone(params: ReturnType<typeof defaultParams>, speed: number): Sim {
 
 describe('swimming costs energy', () => {
   it('bills a moving body and leaves a still one alone', () => {
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.upkeep = 0;
     params.ambientEnergy = 0;
@@ -52,7 +53,7 @@ describe('swimming costs energy', () => {
   });
 
   it('charges nothing at all when the price is off', () => {
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.upkeep = 0;
     params.ambientEnergy = 0;
@@ -70,7 +71,7 @@ describe('swimming costs energy', () => {
     // Cargo, not an engine: a body whose principal is attached is moved by the
     // constraint rather than by its own port, and charging it for the net's
     // motion would make being carried expensive.
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.upkeep = 0;
     params.ambientEnergy = 0;
@@ -96,7 +97,7 @@ describe('swimming costs energy', () => {
 
 describe('appetite', () => {
   it('asks for energy in proportion to what it likes about where it is', () => {
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.upkeep = 0;
     params.rewriteDuration = 0;
@@ -121,7 +122,7 @@ describe('appetite', () => {
   it('stays quiet about somewhere it actively dislikes', () => {
     // Taste is signed, so a trail can be negative. That is a reason to leave,
     // not a reason to be fed.
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.upkeep = 0;
     params.rewriteDuration = 0;
@@ -136,7 +137,7 @@ describe('appetite', () => {
   });
 
   it('is off when the dial is', () => {
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.upkeep = 0;
     params.rewriteDuration = 0;
@@ -152,7 +153,7 @@ describe('appetite', () => {
 
 describe('port occupancy', () => {
   it('tracks how much of a body is attached, and updates when that changes', () => {
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.rewriteDuration = 0;
     const sim = new Sim(4000, 4000);
@@ -212,7 +213,7 @@ describe('farming', () => {
    * assertions below are written against that, which is why they look small.
    */
   it('moves stock onto the ground one for one, and no further', () => {
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.upkeep = 0;
     params.rewriteDuration = 0;
@@ -238,7 +239,7 @@ describe('farming', () => {
   });
 
   it('will not farm itself into debt', () => {
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.upkeep = 0;
     params.rewriteDuration = 0;
@@ -255,7 +256,7 @@ describe('farming', () => {
     // The whole argument for farming. Growth is proportional to what is in a
     // cell, so a cell at zero is stuck there — seeding it is the only thing
     // that restarts it, and then the ground pays back more than went in.
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.upkeep = 0;
     params.rewriteDuration = 0;
@@ -280,7 +281,7 @@ describe('farming', () => {
   it('feeds a neighbour that is not standing on the crop', () => {
     // Which is the useful case, and the one the self-harvest loop points at:
     // a farmer is worth having next to you, not worth being.
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     params.upkeep = 0;
     params.rewriteDuration = 0;
@@ -308,7 +309,7 @@ describe('farming', () => {
     // an Era's unit there because a seed says what a kind is for. The honesty
     // mechanism this test used to name lives on `X` now — production trades
     // against uptake — and is pinned in `chemistry.test.ts`.
-    const params = defaultParams();
+    const params = fixedParams();
     const era = seedChem('era', params);
     let sum = 0;
     for (let k = 0; k < 4; k++) sum += era[EMIT + k];

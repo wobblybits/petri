@@ -38,7 +38,8 @@ import {
 } from './rewrite.ts';
 import { EXTRA_CAP, extraCapFor } from './energy.ts';
 import { Sim } from './sim.ts';
-import { defaultParams, type Params } from './params.ts';
+import type { Params } from './params.ts';
+import { fixedParams } from './test-params.ts';
 import { buildTopology } from './audio/topology.ts';
 import { audio } from './audio/engine.ts';
 import type { WorkletInMessage } from './audio/types.ts';
@@ -274,7 +275,7 @@ describe('Lafont reconnect', () => {
 describe('annihilation staging', () => {
   function annihilating(): { sim: Sim; params: Params; a: number; b: number } {
     const sim = new Sim(800, 600);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     const a = sim.spawn('era', 380, 300, 0, params, true)!;
     const b = sim.spawn('era', 460, 300, Math.PI, params, true)!;
@@ -382,7 +383,7 @@ describe('annihilation contact', () => {
     audio.onPost = (m) => posted.push(m);
     try {
       const sim = new Sim(800, 600);
-      const params = defaultParams();
+      const params = fixedParams();
       params.spawnInterval = 0;
       run(sim, params);
     } finally {
@@ -419,7 +420,7 @@ describe('annihilation contact', () => {
     const prevPost = audio.onPost;
     audio.armWithoutAudio();
     const sim = new Sim(800, 600);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     let live = false;
     audio.onPost = (m) => {
@@ -444,7 +445,7 @@ describe('annihilation contact', () => {
 
   it('rewrites a principal meeting without a dressed net', () => {
     const sim = new Sim(800, 600);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     const a = sim.spawn('dup', 380, 300, 0, params, true)!;
     const b = sim.spawn('dup', 460, 300, Math.PI, params, true)!;
@@ -461,7 +462,7 @@ describe('annihilation contact', () => {
 describe('commute birth layout', () => {
   function oscillatorPair(): { sim: Sim; params: Params } {
     const sim = new Sim(480, 320);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     loadPreset(sim, 'oscillator', params);
     return { sim, params };
@@ -546,7 +547,7 @@ describe('commute birth layout', () => {
 describe('heritable traits', () => {
   function oscillatorPair(): { sim: Sim; params: Params } {
     const sim = new Sim(480, 320);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     loadPreset(sim, 'oscillator', params);
     return { sim, params };
@@ -761,7 +762,7 @@ describe('heritable traits', () => {
 
   it('clones an Era through erase, with a mutation nudge', () => {
     const sim = new Sim(320, 240);
-    const params = defaultParams();
+    const params = fixedParams();
     const era = sim.spawn('era', 100, 100, 0, params, true)!;
     const bin = sim.spawn('con', 130, 100, Math.PI, params, true)!;
     sim.wire(era.id, 'p', bin.id, 'p', params);
@@ -847,7 +848,7 @@ describe('rewrite leftover ropes', () => {
 
   it('keeps oscillator leftovers on their chords instead of whipping them', () => {
     const sim = new Sim(480, 320);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     loadPreset(sim, 'oscillator', params);
     let rewrites = 0;
@@ -879,7 +880,7 @@ describe('rewrite leftover ropes', () => {
 
   it('does not haul leftover eras into the collapsing pair', () => {
     const sim = new Sim(480, 320);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     loadPreset(sim, 'oscillator', params);
     // Measured across the rewrite, not from the start of the run. The eras
@@ -923,7 +924,7 @@ describe('rewrite leftover ropes', () => {
 
   it('hands leftover chords to the birth poses instead of jumping at commit', () => {
     const sim = new Sim(480, 320);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     loadPreset(sim, 'oscillator', params);
     const eraIds = [...sim.agents.values()].filter((a) => a.kind === 'era').map((a) => a.id);
@@ -966,7 +967,7 @@ describe('rewrite leftover ropes', () => {
 
   it('does not fire latch audio for rewrite-born wires', () => {
     const sim = new Sim(480, 320);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     loadPreset(sim, 'oscillator', params);
     const latches: number[] = [];
@@ -988,7 +989,7 @@ describe('rewrite leftover ropes', () => {
 
   it('keeps leftover wire ids across an oscillator commute', () => {
     const sim = new Sim(480, 320);
-    const params = defaultParams();
+    const params = fixedParams();
     params.spawnInterval = 0;
     loadPreset(sim, 'oscillator', params);
     const dup = [...sim.agents.values()].find((a) => a.kind === 'dup')!;

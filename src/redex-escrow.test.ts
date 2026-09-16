@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { defaultParams } from './params.ts';
+import { fixedParams } from './test-params.ts';
 import { Sim } from './sim.ts';
 
 /**
@@ -15,7 +16,7 @@ import { Sim } from './sim.ts';
  */
 
 function facing(): { sim: Sim; params: ReturnType<typeof defaultParams> } {
-  const params = defaultParams();
+  const params = fixedParams();
   params.spawnInterval = 0;
   params.ambientEnergy = 0;
   params.upkeep = 0;

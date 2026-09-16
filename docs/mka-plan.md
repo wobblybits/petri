@@ -199,6 +199,8 @@ pathway ships at `metabolicRate` 0, so everything under it is free to change
 before anything is seen; but this plan is not done until the rate is *on* at
 a value the eye can see, because that is the rule.
 
+*All steps below are done; §5b is what they found.*
+
 **Step 0. Look first, no code.** Load `nets/deep-87.petrinet`, set
 `metabolicRate` to about 15 and `metabolicDiffuse` at its 2. Watch the
 chain for a minute. If it runs a wave down its length the finding in §0 is
@@ -231,53 +233,87 @@ once — and it needs a wave to exist before it can be asked.
 
 ---
 
-## 5b. What was looked at, 2026-09-15
+## 5b. What was looked at, and what shipped
 
-Steps 1 and 2 are built: the wire pass, `Wire.flux`, the `Gc` head on both
-genome paths, the two dials, and the tests. The look was done in the browser
-pane on `?soup=0&net=deep-87`, driving frames by hand, reading each body's
-charge along the longest chain (31 bodies, Era–Dup–Dup–Con×27–Era, every
-link principal-to-left) as one digit per body per tenth of a second.
+All four steps are done and the gait ships on. The look was in the browser
+pane, driving frames by hand on `?soup=0&net=deep-87` with the CPU path
+forced, plus controlled chains measured headlessly. In order of what it
+taught:
 
-- **The pathway does not oscillate in the stored net as it is.** Most planted
-  bodies sit pinned charged or discharged and never move, because
-  `nets/*.petrinet` carry NaN and negative `adenylate` (13 NaN and 12 negative
-  of 87 in deep-87; 44 and 44 of 308 in mixed-308) and a lineage's pool sets
-  which side of the window it lives on. With every pool set to the seed value
-  and every body fed, all bodies oscillate — in unison, because regen erases
-  any charge scatter in a fifth of a second and the burst is timed by
-  substrate accumulation, which is identical for identical bodies. This
-  oscillator holds no phase.
-- **Substrate coupling made a pipe.** See §2. Replaced with charge.
-- **Charge coupling works and is visible, and what it does is entrain.** On
-  a chain with substrate staggered along it, uncoupled bodies fire on their
-  own schedules and keep the stagger every cycle. Coupled at 8, the first
-  body to fire pulls its downstream neighbour over within a frame or two,
-  the cascade runs the whole chain in about 0.4 s, and from the next cycle
-  on the chain fires as one. The propagation speed is the pass's one-frame
-  staging delay, thirty hops in under half a second against a period of
-  three seconds. That is a wave, and it is far too fast to be a gait.
-- **So the reservoir is the next step, not an option.** A wire that holds
-  charge in transit for a time set by its rest length would make the cascade
-  cross a hop in a time the net's own geometry sets, which is a travelling
-  wave with a wavelength — the thing `gaitLag` used to set by fiat. The
-  refractory tail already exists: a body that has just fired has burned its
-  substrate and cannot fire again until supply refills it, so a wave cannot
-  run backward through it.
-- **Not this change, but found by it.** In the pane the GPU field pass
-  errors (`used in submit while pending map`) on this machine and leaves
-  57 of 82 planted bodies with NaN state before the sim drops to the CPU;
-  NaN `h` never heals and pins every head at its clamp floor. Confirmed on
-  the untouched tree; `field-device.test.ts` fails two tests there the same
-  day. Headless on the CPU path the same net keeps finite state. Every
-  observation above was made on the CPU path.
+**The planted nets were not dead because of the gait.** A blob's `scalar`
+section declares its own field names and the decoder read by fixed index, so
+both library nets — written before `adenylate` was appended — came back
+shifted by one from body one onward, with the tail reading off the end. A
+quarter of every planted net had a pool that was negative or not a number, and
+`advanceGait` skips a body whose pool is not positive. Fixed by reading the
+declared names and seeding what a blob does not carry, the way the genome's
+segment map already works. Every scalar in both nets is now inside its own
+gene range and every planted body's clock runs.
 
-What ships: `metabolicRate` is still 0. The plan says it is not done until
-the rate is on at a value the eye can see, and the honest state is that with
-the rate on, a planted net today mostly does not oscillate for reasons
-upstream of this change — the pools in the files and the window — and a
-chain that does oscillate entrains rather than walks. Turning it on is the
-author's call once the reservoir exists; the sliders are there.
+**Substrate coupling made a pipe, not a wave.** Moving substrate out of
+*charged* bodies kept every interior body of a thirty-Con chain charged and
+silent while the fuel drained to the end. The autocatalyst is ADP, so the
+thing that propagates is discharge: a firing body draws its neighbour's ATP
+into its own burst. Charge, not fuel, and only while the sender is firing.
+
+**Instantaneous coupling entrains; it does not travel.** A cascade crossed
+thirty bodies in under half a second against a period of three, so the chain
+fired as one from the next cycle on, and the speed was the pass's one-frame
+staging delay. That is the pond-wide pulse the gait exists to replace.
+
+**A wire that conducts gives the wave a wavelength.** Measured on six pinned
+Cons wired principal-to-auxiliary, scattered charges, after ten seconds of
+settling, against a period of about 175 frames:
+
+| | median lag per wire |
+|---|---:|
+| coupling off | 106 frames — no lock; free runners |
+| coupling 2 (the old default) | 59 — the first two wires lock, the rest do not |
+| coupling 8, conduction 0 | 1.6 — synchrony |
+| coupling 8, conduction 90 | 11.4 — a wave, 6.5% of a cycle per wire |
+| coupling 8, conduction 90, rest 118 | 28 — longer wire, slower wave |
+| coupling 8, conduction 30 | breaks up — too slow to entrain |
+| coupling 16 | breaks up — over-driven |
+
+Three regimes, and that they are three is the finding. It ships in the middle
+one: rate 15, coupling 8, conduction 90.
+
+**The stroke had to come down, and the pathway did not have to.** At
+`gaitSwell` 0.3 a freshly latched pair spiked to 140 rad/s against the spin
+suite's bound of 20 — the failure the pathway's own note had warned about,
+and it is sharply nonlinear: 15.2 at 0.08, 32 at 0.15, 140 at 0.3. Only the
+product `metabolicWork * gaitSwell` enters the pathway's equations, so the
+swell went to 0.08 and the work to 2.25. Measured back to back, the period,
+the wave's swing and the per-wire lag are identical to three digits, and the
+mechanical swing is a quarter of what it was. The bodies were never actually
+turning, it should be said — total rotation stayed at 1.4 turns against a
+bound of 4 — but a 2-radian jolt in one frame is something the eye sees.
+
+**In a live dish most bodies sit charged and quiet.** The trace of a planted
+net shows travelling activity where a chain is fed and stillness elsewhere.
+That is the oscillation window the pathway's own documentation describes: too
+little income and it is supply-limited and sits charged. The wave runs where
+a net is fed, and widening that window wants more species, not a tuning pass.
+
+**Twenty-five tests moved, and nineteen of them for one reason.** The pathway
+spends, so "a still body loses nothing", "a full body has nothing to learn
+from", "nothing else should be draining it" and "full ground should read
+about 1" all became false — a second spender arrived and the body ate to
+cover it. `fixedParams` already existed for exactly this shape of problem
+with `learnRate`, and it now pins `metabolicRate` too, with the same
+argument; `gait.test.ts` is the one place the pathway runs and it sets its own
+rate. Two failures were real and are fixed: the genome parity test strode its
+output by a hardcoded 19 after the head count went to 21, and a redex's two
+asks were bounded separately and summed, which could move more than either
+bound allowed.
+
+**Not this change, and not chased.** In the pane the GPU field pass errors
+with `used in submit while pending map` on this machine and leaves most
+planted bodies with NaN state before the sim falls back to the CPU; NaN state
+never heals, because `Wh` feeds it back and `Wn` spreads it to wired
+neighbours, and every head then reads its clamp floor. Confirmed on the
+untouched tree, where `field-device.test.ts` also fails two of its own tests.
+Every observation above was made on the CPU path. It is a session of its own.
 
 ## 6. What the python gets wrong
 

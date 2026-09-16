@@ -162,21 +162,43 @@ not also be asked to do. Nothing else belongs here; measurements go in
   exciters and brakes, which has a direction where a chain of identical
   diffusers only has a phase. The wire carries the transfer as one signed
   number both ends read (`Wire.flux`), which is what makes it antisymmetric
-  by construction. Looked at on a thirty-body chain, it entrains: a cascade
-  crosses the chain in half a second, one hop a frame, and the chain then
-  fires as one. That is a wave and not a gait, and a wire that holds charge
-  in transit for a time its rest length sets is what would make it one.
-  `docs/mka-plan.md` §5b has the look.
+  by construction.
+
+  A wire *conducts* rather than teleporting, and that is what gives the wave
+  a wavelength. `Wire.flux` relaxes toward what the firing end is asking for
+  with a time constant of the wire's own rest length over `metabolicSpeed`,
+  so each hop costs a fixed time and a fixed phase difference per wire is a
+  travelling wave. Measured on six pinned Cons against a period of 175
+  frames: uncoupled, the lag between neighbours is 106 frames, which is no
+  lock at all; coupled instantly it is 1.6, which is synchrony and the
+  pond-wide pulse this branch began by removing; at conduction 90 it is 11.4,
+  a wave carrying 6.5% of a cycle per wire; at twice the rest length, 28. The
+  three regimes are the finding, and it ships in the middle one.
+
+  It ships **on**: rate 15, coupling 8, conduction 90. The stroke came down
+  from 0.3 to 0.08 to get there, because 0.3 yanked a freshly latched wire
+  hard enough to spike a body to 140 rad/s against a bound of 20 — the spin
+  the pathway's own note had warned about. Only the product
+  `metabolicWork * gaitSwell` enters the pathway's dynamics, so `metabolicWork`
+  went up to 2.25 in exchange and the clock is unchanged to the digit while
+  the mechanical swing is a quarter of what it was. `docs/mka-plan.md` §5b
+  has the whole look.
 
   Not yet true, and this is the list. The rates are global constants and
   should stay so — they set the wave's time base, and a lineage that changed
   them locally would change what a wavelength means across its net; what a
   body owns is its pool, its sign and its gate, which are heritable. The
-  pathway is its own private chemistry: it neither eats nor excretes any of
-  the four field species, so the only thing connecting it to the dish is the
-  price it pays and the fertiliser that price becomes. Whether a wired chain
-  now runs a wave or still pulses is a thing to look at and has not been
-  looked at. And an Era is both the leaf *and*, by `ERA_UPKEEP_RATIO` and its
+  conduction delay is not one of them: `wireShrink` pulls every settled wire
+  to `wireMinRest`, which is global, so a lineage cannot breed its own wave
+  speed and the only per-wire variation left is a fresh latch reeling in and
+  the stroke's own swing. The pathway is its own private chemistry: it
+  neither eats nor excretes any of the four field species, so the only thing
+  connecting it to the dish is the price it pays and the fertiliser that
+  price becomes. In a live dish most bodies sit charged and quiet, because
+  the oscillation lives in a window and a body that is not well fed is
+  supply-limited below it — the wave runs where a net is fed, which is a
+  property of the two-pool pathway and not a tuning failure. And an Era is
+  both the leaf *and*, by `ERA_UPKEEP_RATIO` and its
   larger store, the fullest body on its wire — so the seeded head makes it
   the oar while the economy makes it the anchor, and those pull opposite
   ways. On the bench they are separate rigs and both carry a pair; which of

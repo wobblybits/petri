@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { EXTRA_FLOOR } from './energy.ts';
-import { defaultParams, type Params } from './params.ts';
+import type { Params } from './params.ts';
+import { fixedParams } from './test-params.ts';
 import { Sim } from './sim.ts';
 
 /**
@@ -17,7 +18,7 @@ import { Sim } from './sim.ts';
  */
 
 function quiet(): Params {
-  const p = defaultParams();
+  const p = fixedParams();
   p.spawnInterval = 0;
   p.rewriteDuration = 0;
   p.snapRadius = 0;

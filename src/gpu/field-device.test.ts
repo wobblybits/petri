@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CH, CHANNELS, Fields } from '../fields.ts';
-import { defaultParams, type Params } from '../params.ts';
+import type { Params } from '../params.ts';
+import { fixedParams } from '../test-params.ts';
 import { loadPreset } from '../presets.ts';
 import { Sim } from '../sim.ts';
 import { fieldGpu } from './field-gpu.ts';
@@ -43,7 +44,7 @@ afterAll(() => {
 });
 
 function pondParams(): Params {
-  const params = defaultParams();
+  const params = fixedParams();
   params.soupCount = 0;
   params.spawnInterval = 0;
   return params;

@@ -11,7 +11,7 @@ import { refreshReadsField } from '../agents.ts';
 import type { AgentKind } from '../agents.ts';
 import { WireAdjacency } from '../energy.ts';
 import { CH } from '../fields.ts';
-import { defaultParams } from '../params.ts';
+import { fixedParams } from '../test-params.ts';
 import { Sim } from '../sim.ts';
 
 /**
@@ -38,6 +38,18 @@ function shaderConst(name: string): number {
   if (!m) throw new Error(`no const ${name} in genome.wgsl`);
   return Number(m[1]);
 }
+
+/**
+ * Floats the shader writes per body: `h`, emit, taste, then the nine heads.
+ *
+ * Written out here rather than imported because the shader's own copy is what
+ * is under test — the tripwire below asserts the two agree. It was a bare
+ * `19` in three places and a `20` in a fourth, and when the coupling head
+ * made it 21 the reference kernel and the comparison loop went on striding by
+ * 19: every field read as the next body's, and the parity test failed with a
+ * diverged state rather than saying the stride had moved.
+ */
+const OUT_STRIDE = 4 + 4 + 4 + 9;
 
 describe('the genome shader matches the genome layout', () => {
   it('carries the same offsets chem-layout.ts derives', () => {
@@ -154,7 +166,7 @@ function mirrorState(a: {
   const S = STATE_DIMS;
   const { chem, hPrev, facts, slots, samples, off, nei, n } = a;
   const learn = a.learn;
-  const out = new Float32Array(n * 20);
+  const out = new Float32Array(n * OUT_STRIDE);
   const phi = (v: number): number => v / (1 + Math.abs(v));
   const cl = (v: number, lo: number, hi: number): number => Math.min(Math.max(v, lo), hi);
   for (let i = 0; i < n; i++) {
@@ -203,7 +215,7 @@ function mirrorState(a: {
       sum += w;
     }
     if (sum > 1e-6) for (let c = 0; c < 4; c++) emit[c] /= sum;
-    const o = i * 19;
+    const o = i * OUT_STRIDE;
     for (let d = 0; d < S; d++) out[o + d] = h[d];
     for (let c = 0; c < 4; c++) out[o + 4 + c] = emit[c];
     for (let c = 0; c < 4; c++) out[o + 8 + c] = chem[g + TASTE + c] + dot(T_OUT, c);
@@ -248,7 +260,7 @@ describe('the genome shader computes what updateState computes', () => {
      * What still varies frame to frame is `h` itself, through `Wh` and `Wn`,
      * which is the part worth testing.
      */
-    const params = defaultParams();
+    const params = fixedParams();
     /*
      * Fixed weights, which is what this mirror models.
      *
@@ -348,7 +360,7 @@ describe('the genome shader computes what updateState computes', () => {
     let moved = 0;
     for (let i = 0; i < n; i++) {
       const s = list[i].slot;
-      const o = i * 19;
+      const o = i * OUT_STRIDE;
       for (let d = 0; d < STATE_DIMS; d++) {
         worstH = Math.max(worstH, Math.abs(got[o + d] - store.hAll[s * STATE_DIMS + d]));
         if (Math.abs(store.hAll[s * STATE_DIMS + d]) > 1e-3) moved++;

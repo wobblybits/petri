@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { CRITIC_LEN, PLASTIC_BASE, PLASTIC_LEN } from './chem-layout.ts';
 import { EXTRA_CAP } from './energy.ts';
-import { defaultParams, type Params } from './params.ts';
+import type { Params } from './params.ts';
+import { fixedParams } from './test-params.ts';
 import { loadPreset } from './presets.ts';
 import { CHEM_TASTE_MAX } from './rewrite.ts';
 import { Sim } from './sim.ts';
@@ -32,7 +33,7 @@ function seed(n: number): void {
 
 /** No ground, no rent, no latching: a body's tank is exactly what we set. */
 function still(): Params {
-  const p = defaultParams();
+  const p = fixedParams();
   p.spawnInterval = 0;
   p.snapRadius = 0;
   p.rewriteDuration = 0;
@@ -71,7 +72,7 @@ describe('plasticity: off', () => {
       seed(99);
       try {
         const sim = new Sim(600, 400);
-        const params = defaultParams();
+        const params = fixedParams();
         params.soupCount = 50;
         params.learnRate = 0;
         params.inheritLearned = kappa;
@@ -179,7 +180,7 @@ describe('plasticity: inheritance', () => {
     seed(7);
     try {
       const sim = new Sim(600, 400);
-      const params = defaultParams();
+      const params = fixedParams();
       params.spawnInterval = 0;
       params.learnRate = 0;
       params.inheritLearned = kappa;

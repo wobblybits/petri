@@ -3,10 +3,10 @@ import { bareBody, expressVector, seedChem, uptakeKsOf } from './agents.ts';
 import { CHEM_LEN, CHEM_SPECIES, ERA_GROUND_SHARE, KS_BASE, ROW_COUNT, ROW_EXCRETE, ROW_UPTAKE, STATE_DIMS, X_BASE, X_OUT } from './chem-layout.ts';
 import { HarvestPlan, REWRITE_SHARE, harvestSlotsFast, uptakeRate, type UptakeKinetics } from './energy.ts';
 import { CH, CHANNELS } from './fields.ts';
-import { defaultParams, type Params } from './params.ts';
+import type { Params } from './params.ts';
 import { loadPreset } from './presets.ts';
 import { Sim } from './sim.ts';
-import { channelTotal, pondMatter } from './test-params.ts';
+import { channelTotal, fixedParams, pondMatter } from './test-params.ts';
 
 /*
  * The body reaction table. `docs/energy-chemistry-plan.md` §3.
@@ -30,7 +30,7 @@ import { channelTotal, pondMatter } from './test-params.ts';
  * its job and not a body failing to conserve.
  */
 function chemistryParams(): Params {
-  const p = defaultParams();
+  const p = fixedParams();
   p.soupCount = 60;
   p.spawnInterval = 0;
   p.energyRegrow = 0;
@@ -109,7 +109,7 @@ describe('expression', () => {
   const out = new Float64Array(ROW_COUNT);
 
   it('divides one unit across the whole table', () => {
-    const chem = seedChem('con', defaultParams());
+    const chem = seedChem('con', fixedParams());
     expressVector(chem, 0, h, 0, out, 0);
     let sum = 0;
     for (let r = 0; r < ROW_COUNT; r++) {
@@ -128,7 +128,7 @@ describe('expression', () => {
      * committed to. See 'what a kind makes' below for the three answers.
      */
     for (const kind of ['era', 'dup', 'con'] as const) {
-      const chem = seedChem(kind, defaultParams());
+      const chem = seedChem(kind, fixedParams());
       expressVector(chem, 0, h, 0, out, 0);
       let made = 0;
       for (let c = 0; c < CHEM_SPECIES; c++) {
@@ -141,7 +141,7 @@ describe('expression', () => {
   });
 
   it('reads the state, so a body can express differently when hungry', () => {
-    const chem = seedChem('con', defaultParams());
+    const chem = seedChem('con', fixedParams());
     // One row wired to one state dimension: the smallest thing that makes
     // expression a phenotype rather than a constant.
     chem[X_OUT + ROW_UPTAKE * STATE_DIMS + 0] = 2;
@@ -163,7 +163,7 @@ describe('expression', () => {
   it('keeps a body that mutated its way to silence silent', () => {
     // The same rule `emitVector` follows: relu then normalise would otherwise
     // amplify a genome sitting at all-negative back out of noise.
-    const chem = seedChem('con', defaultParams());
+    const chem = seedChem('con', fixedParams());
     for (let r = 0; r < ROW_COUNT; r++) chem[X_BASE + r] = -1;
     expressVector(chem, 0, h, 0, out, 0);
     // Nothing expressed at all is the flat fallback, not an arbitrary row.
@@ -171,23 +171,23 @@ describe('expression', () => {
   });
 
   it('gives each species its own affinity, floored above zero', () => {
-    const chem = seedChem('dup', defaultParams());
+    const chem = seedChem('dup', fixedParams());
     for (let c = 0; c < CHEM_SPECIES; c++) {
       // Seeded at one natural unit, so a fresh body uses the global.
       expect(uptakeKsOf(chem, 0, c, 0.25)).toBeCloseTo(0.25, 12);
     }
-    const half = seedChem('dup', defaultParams());
+    const half = seedChem('dup', fixedParams());
     half[X_BASE + ROW_COUNT + 0] = 0.5;
     expect(uptakeKsOf(half, 0, 0, 0.25)).toBeCloseTo(0.125, 12);
     // A gene mutated to or past zero would be an infinitely good transporter,
     // and a division by zero downstream.
-    const dead = seedChem('dup', defaultParams());
+    const dead = seedChem('dup', fixedParams());
     dead[X_BASE + ROW_COUNT + 1] = -3;
     expect(uptakeKsOf(dead, 0, 1, 0.25)).toBeGreaterThan(0);
   });
 
   it('leaves the genome it reads alone', () => {
-    const chem = seedChem('con', defaultParams());
+    const chem = seedChem('con', fixedParams());
     const before = [...chem];
     expressVector(chem, 0, h, 0, out, 0);
     expect([...chem]).toEqual(before);
@@ -712,7 +712,7 @@ describe('what a kind makes', () => {
   expect(P).toBeCloseTo(ERA_GROUND_SHARE, 12);
 
   const met = (kind: 'con' | 'dup' | 'era'): number[] => {
-    const chem = seedChem(kind, defaultParams());
+    const chem = seedChem(kind, fixedParams());
     const h = new Float64Array(STATE_DIMS);
     const express = new Float64Array(ROW_COUNT);
     expressVector(chem, 0, h, 0, express, 0);
@@ -749,7 +749,7 @@ describe('what a kind makes', () => {
      */
     const h = new Float64Array(STATE_DIMS);
     const express = new Float64Array(ROW_COUNT);
-    expressVector(seedChem('era', defaultParams()), 0, h, 0, express, 0);
+    expressVector(seedChem('era', fixedParams()), 0, h, 0, express, 0);
     expect(express[ROW_EXCRETE + CH.energy]).toBeCloseTo(ERA_GROUND_SHARE, 12);
 
     const era = met('era');
@@ -771,7 +771,7 @@ describe('what a kind makes', () => {
     const h = new Float64Array(STATE_DIMS);
     const express = new Float64Array(ROW_COUNT);
     for (const kind of ['con', 'dup', 'era'] as const) {
-      expressVector(seedChem(kind, defaultParams()), 0, h, 0, express, 0);
+      expressVector(seedChem(kind, fixedParams()), 0, h, 0, express, 0);
       for (let c = 0; c < CHEM_SPECIES; c++) {
         // An eighth each, which is exactly the flat fallback's own value.
         expect(express[ROW_UPTAKE + c], `${kind} uptake ${c}`).toBeCloseTo(1 / ROW_COUNT, 12);

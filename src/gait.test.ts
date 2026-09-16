@@ -46,18 +46,30 @@ function gaitParams(): Params {
   return p;
 }
 
-describe('the gait ships off', () => {
-  it('is exactly one at the shipped default, on every wire', () => {
+describe('the gait ships on', () => {
+  it('runs at the shipped default, and is exactly one at zero', () => {
     /*
-     * The claim `metabolicRate` makes about itself, pinned. At zero
-     * `advanceGait` returns with the wave and the anchor untouched, so
-     * `strokeOf` is exactly 1 — not nearly, exactly, because it is a
-     * multiplier on a rest length and a wire that starts satisfied has to
-     * stay that way to the last bit.
+     * The pathway shipped at zero for two months while the question "what
+     * rate should it be" waited on a sweep it was never going to get. It runs
+     * now, at 15 — a period of about three seconds, which `metabolicRate`'s
+     * own arithmetic says is a stroke a couple of seconds long — with
+     * coupling 8 and conduction 90, the two values the chain was measured to
+     * lock at.
+     *
+     * The neutral behaviour is still worth pinning, because it is what every
+     * test that is not about the gait runs at: `fixedParams` turns the rate
+     * off, and at zero `advanceGait` returns with the wave and the anchor
+     * untouched, so `strokeOf` is exactly 1 — not nearly, exactly, because it
+     * is a multiplier on a rest length and a wire that starts satisfied has
+     * to stay that way to the last bit.
      */
+    const shipped = defaultParams();
+    expect(shipped.metabolicRate, 'the gait ships off again').toBeGreaterThan(0);
+    expect(shipped.metabolicDiffuse, 'the coupling ships off').toBeGreaterThan(0);
+    expect(shipped.metabolicSpeed, 'conduction ships instant, which entrains').toBeGreaterThan(0);
+
     const p = gaitParams();
-    p.metabolicRate = defaultParams().metabolicRate;
-    expect(p.metabolicRate, 'the pathway ships at its neutral value').toBe(0);
+    p.metabolicRate = 0;
     const sim = new Sim(4000, 4000);
     loadPreset(sim, 'soup', p);
     const a = sim.spawn('con', 1960, 2000, 0, p, true)!;

@@ -4,7 +4,8 @@ import { CHANNELS } from './fields.ts';
 import type { Sim } from './sim.ts';
 
 /**
- * The shipping pond with lifetime learning switched off.
+ * The shipping pond with lifetime learning and the metabolic pathway switched
+ * off.
  *
  * `npm test` is a change detector for mechanical rewrites, and nearly every
  * assertion in it is about what a *fixed* genome does: a weight that stays at
@@ -21,13 +22,28 @@ import type { Sim } from './sim.ts';
  * keep calling `defaultParams` and set their own rate, which is what makes
  * them the only place the default's value can break the suite.
  *
- * Everything else is the shipping default, deliberately: pinning one dial to
+ * `metabolicRate` is pinned for the same reason and it is the stronger case.
+ * The pathway *spends*: every body buys substrate out of its own tank in
+ * proportion to how discharged it is, and the price leaves through the same
+ * road rent does. So with it running, "a still body loses nothing", "a full
+ * body has nothing to learn from", "nothing else should be draining it" and
+ * "full ground should read about 1" are all false — not because the mechanism
+ * they test broke, but because a second spender arrived and the body then ate
+ * to cover it. It also swings every wire's rest length, which moves a chord
+ * and a bound-disc radius by a few per cent.
+ *
+ * A test about the pathway says so by turning it on: `gait.test.ts` is the
+ * one place it runs, and it sets its own rate. That is the same arrangement
+ * learning has, and for the same reason.
+ *
+ * Everything else is the shipping default, deliberately: pinning two dials to
  * keep a measurement honest is different from running the suite against a
  * pond nobody ships.
  */
 export function fixedParams(): Params {
   const params = defaultParams();
   params.learnRate = 0;
+  params.metabolicRate = 0;
   return params;
 }
 
