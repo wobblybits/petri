@@ -1,5 +1,13 @@
 # Plan: one clock that nobody sets, and a net that has to have leaves
 
+> **Superseded by `docs/metabolism-spec.md`**, which states the same design
+> formally: the state, the reaction table, the two inequalities that decide
+> which bodies oscillate and which relay, the coupling operator and its
+> spectrum, the surviving parameters, and the phases with what would show
+> each one worked. This document is kept for the analysis it carries — §0's
+> spectrum, §3's timescale argument and §5's separation of `upkeep`'s three
+> jobs — which the specification cites rather than repeats.
+
 Written 2026-09-16, after building `docs/scratch.txt`'s reactor and auditing
 what the pond ended up with. The reactor works and the pond is more
 complicated than it needs to be. This is what to take out, what to move, and

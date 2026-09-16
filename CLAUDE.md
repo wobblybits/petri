@@ -5,7 +5,15 @@ rewrite, eat, signal and learn. `src/` is the simulation and pages; `src/pond/`
 is the headless runner and the library it writes; `docs/` holds the plans and
 audits.
 
-Two documents are the ones to read before proposing anything:
+Three documents are the ones to read before proposing anything:
+
+- **`docs/metabolism-spec.md`** — the metabolism as specified: the state a
+  body holds, the reaction table over it, the two inequalities that decide
+  which bodies pace and which relay, the coupling operator and its spectrum,
+  the surviving parameters, and the phases with what would show each worked.
+  It is a specification and not a narrative; `docs/scratch.txt` is the source
+  document it implements and `docs/mka-plan.md` records which of that
+  document's clauses were taken, which refused, and on what measurement.
 
 - **`docs/concepts.md`** — the research-level concepts (memory, learning,
   locomotion, shape, breeding, inheritance, selection, and the rest) and the
