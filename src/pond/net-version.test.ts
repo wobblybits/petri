@@ -470,10 +470,20 @@ describe('the scalar list', () => {
       loadPreset(sim, 'soup', { ...params, soupCount: 0, spawnInterval: 0 });
       plantNet(sim, params, net, sim.w * 0.5, sim.h * 0.5);
       const on = { ...params, soupCount: 0, spawnInterval: 0, metabolicRate: 15 };
-      for (let f = 0; f < 60; f++) sim.step(1 / 60, on);
+      for (let f = 0; f < 59; f++) sim.step(1 / 60, on);
+      // The roster from before the last step. A body a rewrite made during
+      // that step has not been through `advanceGait` yet, so it still reads
+      // the zero the store resets it to — which is a birth and not a dead
+      // clock, and counting it made this assertion a test of whether the net
+      // happened to rewrite on the last frame.
+      const grown = [...sim.agents.values()].map((a) => a.id);
+      sim.step(1 / 60, on);
       const store = sim.agentStore;
       let still = 0;
-      for (const a of sim.agents.values()) if (store.gaitWave[a.slot] === 0) still++;
+      for (const id of grown) {
+        const a = sim.agents.get(id);
+        if (a && store.gaitWave[a.slot] === 0) still++;
+      }
       expect(still, `${name}: bodies with a dead pathway`).toBe(0);
     }
   });
