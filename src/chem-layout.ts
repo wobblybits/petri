@@ -519,6 +519,30 @@ export const LEARN_STRIDE = LEARN_PREV_FULL + 1;
  */
 export const GAIT_ANCHOR_MAX = 8;
 
+/**
+ * Widest swing each output head may ask for.
+ *
+ * The bounds are about what the forces survive, not about what a genome may
+ * say — a cruise of ten thousand is not a fast body, it is a body that has
+ * left. Here rather than at either use site because there are two of those in
+ * two languages: `updateState` clamps the CPU pass and `genome.wgsl`
+ * transcribes the same numbers for the GPU one, and a pair that disagrees
+ * gives a body different traits depending on which pass expressed it.
+ *
+ * `genome-kernel.test.ts` asserts the shader's copy against this one. It is
+ * the only thing that can: a WGSL const cannot import, and the agreement test
+ * never drove a head hard enough to saturate, so halving a bound in the
+ * shader alone passed the whole suite.
+ */
+export const HEAD_RANGE = {
+  cruise: { min: 0, max: 180 },
+  turn: { min: 0, max: 8 },
+  align: { min: -8, max: 16 },
+  sep: { min: -60, max: 120 },
+  thrust: { min: 0, max: 1 },
+  recoil: { min: 0, max: 200 },
+} as const;
+
 export const HEAD_SCALE = {
   align: 8,
   sep: 60,

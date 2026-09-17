@@ -24,6 +24,7 @@ import {
   GAIT_ANCHOR_MAX,
   G_BASE,
   G_OUT,
+  HEAD_RANGE,
   HEAD_SCALE,
   L_BASE,
   L_OUT,
@@ -6518,12 +6519,12 @@ export class Sim {
       emitVector(W, wb, CHEM, g, H, ho, XI, 0, EMITS, slot * 4);
       tasteVector(W, wb, CHEM, g, H, ho, XI, 4, TASTES, slot * 4);
 
-      CRUISE[slot] = clamp((headAt(W, wb, L_OUT, L_BASE, 0, H, ho, S) + XI[12]) * HEAD_SCALE.cruise, 0, 180);
-      TURN[slot] = clamp((headAt(W, wb, L_OUT, L_BASE, 1, H, ho, S) + XI[13]) * HEAD_SCALE.turn, 0, 8);
-      FA[slot] = clamp((headAt(W, wb, F_OUT, F_BASE, 0, H, ho, S) + XI[8]) * HEAD_SCALE.align, -8, 16);
-      FS[slot] = clamp((headAt(W, wb, F_OUT, F_BASE, 1, H, ho, S) + XI[9]) * HEAD_SCALE.sep, -60, 120);
-      TT[slot] = clamp((headAt(W, wb, P_OUT, P_BASE, 0, H, ho, S) + XI[10]) * HEAD_SCALE.thrust, 0, 1);
-      TR[slot] = clamp((headAt(W, wb, P_OUT, P_BASE, 1, H, ho, S) + XI[11]) * HEAD_SCALE.recoil, 0, 200);
+      CRUISE[slot] = clamp((headAt(W, wb, L_OUT, L_BASE, 0, H, ho, S) + XI[12]) * HEAD_SCALE.cruise, HEAD_RANGE.cruise.min, HEAD_RANGE.cruise.max);
+      TURN[slot] = clamp((headAt(W, wb, L_OUT, L_BASE, 1, H, ho, S) + XI[13]) * HEAD_SCALE.turn, HEAD_RANGE.turn.min, HEAD_RANGE.turn.max);
+      FA[slot] = clamp((headAt(W, wb, F_OUT, F_BASE, 0, H, ho, S) + XI[8]) * HEAD_SCALE.align, HEAD_RANGE.align.min, HEAD_RANGE.align.max);
+      FS[slot] = clamp((headAt(W, wb, F_OUT, F_BASE, 1, H, ho, S) + XI[9]) * HEAD_SCALE.sep, HEAD_RANGE.sep.min, HEAD_RANGE.sep.max);
+      TT[slot] = clamp((headAt(W, wb, P_OUT, P_BASE, 0, H, ho, S) + XI[10]) * HEAD_SCALE.thrust, HEAD_RANGE.thrust.min, HEAD_RANGE.thrust.max);
+      TR[slot] = clamp((headAt(W, wb, P_OUT, P_BASE, 1, H, ho, S) + XI[11]) * HEAD_SCALE.recoil, HEAD_RANGE.recoil.min, HEAD_RANGE.recoil.max);
       // Signed both ways on purpose: a body that lets go where its neighbour
       // holds walks the other way, and that is a lineage's to choose.
       GA[slot] = clamp(

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import shader from './genome.wgsl?raw';
 import {
-  B_STATE, CHEM_LEN, EMIT, E_OUT, F_BASE, F_OUT, GAIT_ANCHOR_MAX,
+  B_STATE, CHEM_LEN, EMIT, E_OUT, F_BASE, F_OUT, GAIT_ANCHOR_MAX, HEAD_RANGE,
   G_BASE, G_OUT, HEAD_ROWS, KS_BASE, TX_BASE,
   HEAD_SCALE, IN_DIMS, L_BASE, L_OUT,
   LEARN_CRITIC, LEARN_PREV_V, LEARN_STRIDE, LEARN_TRACE,
@@ -36,6 +36,13 @@ import { Sim } from '../sim.ts';
 function shaderConst(name: string): number {
   const m = new RegExp(`const\\s+${name}\\s*:\\s*u32\\s*=\\s*(\\d+)u\\s*;`).exec(shader);
   if (!m) throw new Error(`no const ${name} in genome.wgsl`);
+  return Number(m[1]);
+}
+
+/** The same, for the shader's f32 constants — the clamps and the anchor. */
+function shaderF32(name: string): number {
+  const m = new RegExp(`const\\s+${name}\\s*:\\s*f32\\s*=\\s*(-?[\\d.]+)\\s*;`).exec(shader);
+  if (!m) throw new Error(`no f32 const ${name} in genome.wgsl`);
   return Number(m[1]);
 }
 
@@ -80,16 +87,38 @@ describe('the genome shader matches the genome layout', () => {
     expect(shaderConst('OUT_STRIDE')).toBe(4 + 4 + 4 + 7);
   });
 
+  it('clamps every head where HEAD_RANGE says, and so does the CPU pass', () => {
+    /*
+     * The bounds reached the shader as bare literals and `sim.ts` had its own
+     * copy of the same six pairs, so the two could differ and a body would
+     * get different traits depending on which pass expressed it. Nothing
+     * caught it: halving the cruise bound in the shader alone passed this
+     * whole file, because the agreement test below never drives a head hard
+     * enough to saturate. Names on both sides, checked here.
+     */
+    for (const [head, range] of Object.entries(HEAD_RANGE)) {
+      const NAME = head.toUpperCase();
+      expect(shaderF32(`${NAME}_MIN`), `genome.wgsl's ${NAME}_MIN`).toBe(range.min);
+      expect(shaderF32(`${NAME}_MAX`), `genome.wgsl's ${NAME}_MAX`).toBe(range.max);
+    }
+    // The anchor is the one head that was already named on both sides — and
+    // was never actually compared, because `shaderConst` only read u32.
+    expect(shaderF32('GAIT_ANCHOR_MAX')).toBe(GAIT_ANCHOR_MAX);
+  });
+
   it('has no genome offset the layout does not derive', () => {
     // The other direction: a constant added to the shader alone would pass
     // every check above by never being looked at.
-    const declared = [...shader.matchAll(/const\s+([A-Z_][A-Z0-9_]*)\s*:\s*u32/g)].map((m) => m[1]);
+    const declared = [...shader.matchAll(/const\s+([A-Z_][A-Z0-9_]*)\s*:\s*(?:u32|f32)/g)].map((m) => m[1]);
     const known = new Set([
       'STATE_DIMS', 'IN_DIMS', 'EMIT', 'TASTE', 'E_OUT', 'T_OUT', 'W_IN', 'W_SELF',
       'W_NET', 'B_STATE', 'F_OUT', 'F_BASE', 'P_OUT', 'P_BASE', 'L_OUT', 'L_BASE',
       'G_OUT', 'G_BASE',
       'OUT_STRIDE', 'PLASTIC_LEN', 'LEARN_TRACE', 'LEARN_CRITIC', 'LEARN_PREV_V', 'LEARN_PREV_FULL',
       'LEARN_STRIDE', 'HEAD_ROWS',
+      // f32: the anchor and the six clamp pairs, all checked above.
+      'GAIT_ANCHOR_MAX',
+      ...Object.keys(HEAD_RANGE).flatMap((h) => [`${h.toUpperCase()}_MIN`, `${h.toUpperCase()}_MAX`]),
     ]);
     expect(declared.filter((d) => !known.has(d)), 'undocumented shader constant').toEqual([]);
   });
@@ -226,12 +255,12 @@ function mirrorState(a: {
     for (let c = 0; c < 4; c++) out[o + 8 + c] = chem[g + TASTE + c] + dot(T_OUT, c);
     const head = (mat: number, base: number, row: number, scale: number): number =>
       (chem[g + base + row] + dot(mat, row)) * scale;
-    out[o + 12] = cl(head(L_OUT, L_BASE, 0, HEAD_SCALE.cruise), 0, 180);
-    out[o + 13] = cl(head(L_OUT, L_BASE, 1, HEAD_SCALE.turn), 0, 8);
-    out[o + 14] = cl(head(F_OUT, F_BASE, 0, HEAD_SCALE.align), -8, 16);
-    out[o + 15] = cl(head(F_OUT, F_BASE, 1, HEAD_SCALE.sep), -60, 120);
-    out[o + 16] = cl(head(P_OUT, P_BASE, 0, HEAD_SCALE.thrust), 0, 1);
-    out[o + 17] = cl(head(P_OUT, P_BASE, 1, HEAD_SCALE.recoil), 0, 200);
+    out[o + 12] = cl(head(L_OUT, L_BASE, 0, HEAD_SCALE.cruise), HEAD_RANGE.cruise.min, HEAD_RANGE.cruise.max);
+    out[o + 13] = cl(head(L_OUT, L_BASE, 1, HEAD_SCALE.turn), HEAD_RANGE.turn.min, HEAD_RANGE.turn.max);
+    out[o + 14] = cl(head(F_OUT, F_BASE, 0, HEAD_SCALE.align), HEAD_RANGE.align.min, HEAD_RANGE.align.max);
+    out[o + 15] = cl(head(F_OUT, F_BASE, 1, HEAD_SCALE.sep), HEAD_RANGE.sep.min, HEAD_RANGE.sep.max);
+    out[o + 16] = cl(head(P_OUT, P_BASE, 0, HEAD_SCALE.thrust), HEAD_RANGE.thrust.min, HEAD_RANGE.thrust.max);
+    out[o + 17] = cl(head(P_OUT, P_BASE, 1, HEAD_SCALE.recoil), HEAD_RANGE.recoil.min, HEAD_RANGE.recoil.max);
     out[o + 18] = cl(head(G_OUT, G_BASE, 0, HEAD_SCALE.anchor), -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
   }
   return out;

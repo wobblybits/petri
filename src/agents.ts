@@ -822,6 +822,7 @@ export {
   E_OUT,
   F_BASE,
   F_OUT,
+  HEAD_RANGE,
   HEAD_SCALE,
   L_BASE,
   L_OUT,

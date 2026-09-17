@@ -44,6 +44,22 @@ const G_BASE: u32 = 138u;
 // the shader neither computes nor carries them; `Sim.advanceGait` reads them
 // straight off `chem` the way `uptakeKsOf` reads the uptake affinities.
 const GAIT_ANCHOR_MAX: f32 = 8.0;
+// `chem-layout.ts`'s HEAD_RANGE, the same way: what the forces survive, not
+// what a genome may say. `genome-kernel.test.ts` asserts every one of these
+// against the table there, because nothing else can — the CPU pass clamps to
+// the same numbers in `sim.ts` and the agreement test never saturates a head.
+const CRUISE_MIN: f32 = 0.0;
+const CRUISE_MAX: f32 = 180.0;
+const TURN_MIN: f32 = 0.0;
+const TURN_MAX: f32 = 8.0;
+const ALIGN_MIN: f32 = -8.0;
+const ALIGN_MAX: f32 = 16.0;
+const SEP_MIN: f32 = -60.0;
+const SEP_MAX: f32 = 120.0;
+const THRUST_MIN: f32 = 0.0;
+const THRUST_MAX: f32 = 1.0;
+const RECOIL_MIN: f32 = 0.0;
+const RECOIL_MAX: f32 = 200.0;
 
 // The learning row, from `chem-layout.ts`: learned deltas on the state
 // matrices **and every head**, then their eligibility traces, then the critic,
@@ -348,12 +364,12 @@ fn state(@builtin(global_invocation_id) gid: vec3u) {
   outv[o + 11u] = taste.w;
   // Clamped to the ranges the heritable versions were bred inside: those
   // bounds are about what the forces survive, not about what a genome may say.
-  outv[o + 12u] = clampf(headAt(g, lb, L_OUT, L_BASE, 0u, h, XI[12]) * G.sCruise, 0.0, 180.0);
-  outv[o + 13u] = clampf(headAt(g, lb, L_OUT, L_BASE, 1u, h, XI[13]) * G.sTurn, 0.0, 8.0);
-  outv[o + 14u] = clampf(headAt(g, lb, F_OUT, F_BASE, 0u, h, XI[8]) * G.sAlign, -8.0, 16.0);
-  outv[o + 15u] = clampf(headAt(g, lb, F_OUT, F_BASE, 1u, h, XI[9]) * G.sSep, -60.0, 120.0);
-  outv[o + 16u] = clampf(headAt(g, lb, P_OUT, P_BASE, 0u, h, XI[10]) * G.sThrust, 0.0, 1.0);
-  outv[o + 17u] = clampf(headAt(g, lb, P_OUT, P_BASE, 1u, h, XI[11]) * G.sRecoil, 0.0, 200.0);
+  outv[o + 12u] = clampf(headAt(g, lb, L_OUT, L_BASE, 0u, h, XI[12]) * G.sCruise, CRUISE_MIN, CRUISE_MAX);
+  outv[o + 13u] = clampf(headAt(g, lb, L_OUT, L_BASE, 1u, h, XI[13]) * G.sTurn, TURN_MIN, TURN_MAX);
+  outv[o + 14u] = clampf(headAt(g, lb, F_OUT, F_BASE, 0u, h, XI[8]) * G.sAlign, ALIGN_MIN, ALIGN_MAX);
+  outv[o + 15u] = clampf(headAt(g, lb, F_OUT, F_BASE, 1u, h, XI[9]) * G.sSep, SEP_MIN, SEP_MAX);
+  outv[o + 16u] = clampf(headAt(g, lb, P_OUT, P_BASE, 0u, h, XI[10]) * G.sThrust, THRUST_MIN, THRUST_MAX);
+  outv[o + 17u] = clampf(headAt(g, lb, P_OUT, P_BASE, 1u, h, XI[11]) * G.sRecoil, RECOIL_MIN, RECOIL_MAX);
   // The gait's grip. Signed both ways: a body that lets go where its
   // neighbour holds walks the other way.
   outv[o + 18u] = clampf(headAt(g, lb, G_OUT, G_BASE, 0u, h, XI[14]) * G.sAnchor, -GAIT_ANCHOR_MAX, GAIT_ANCHOR_MAX);
