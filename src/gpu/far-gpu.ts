@@ -11,6 +11,34 @@ import {
 } from './far-kernel.ts';
 
 const UNIFORM_BYTES = 256;
+
+/**
+ * Where each field of `far.wgsl`'s `SimParams` begins, in four-byte slots.
+ *
+ * Named on both sides and asserted in `uniform-layout.test.ts`; see
+ * `GENOME_U` for why the bare indices this replaces were a standing hazard.
+ * `pad0` and `pad1` are written nowhere and are here so the map can be
+ * compared against the struct without either side having to know which gaps
+ * are deliberate.
+ */
+export const FAR_U = {
+  n: 0,
+  nWires: 1,
+  cols: 2,
+  rows: 3,
+  h: 4,
+  slop: 5,
+  contactComp: 6,
+  spanComp: 7,
+  gridMinX: 8,
+  gridMinY: 9,
+  invCell: 10,
+  pad0: 11,
+  worldX: 12,
+  worldY: 13,
+  boundR: 14,
+  pad1: 15,
+} as const;
 const PARTICLE_BYTES = FAR_STRIDE * 4;
 /** Must match `CELL_CAP` and `NEI_CAP` in far.wgsl. */
 const CELL_CAP = 64;
@@ -175,20 +203,21 @@ export class FarGpu {
       const u32 = new Uint32Array(uniform);
       const f32 = new Float32Array(uniform);
       const grid = this.computeGrid(data, n);
-      u32[0] = n;
-      u32[1] = nWires;
-      u32[2] = grid.cols;
-      u32[3] = grid.rows;
-      f32[4] = h;
-      f32[5] = FAR_SLOP;
-      f32[6] = FAR_CONTACT_COMP;
-      f32[7] = FAR_SPAN_COMP;
-      f32[8] = grid.minX;
-      f32[9] = grid.minY;
-      f32[10] = grid.invCell;
-      f32[12] = cx;
-      f32[13] = cy;
-      f32[14] = boundR;
+      const U = FAR_U;
+      u32[U.n] = n;
+      u32[U.nWires] = nWires;
+      u32[U.cols] = grid.cols;
+      u32[U.rows] = grid.rows;
+      f32[U.h] = h;
+      f32[U.slop] = FAR_SLOP;
+      f32[U.contactComp] = FAR_CONTACT_COMP;
+      f32[U.spanComp] = FAR_SPAN_COMP;
+      f32[U.gridMinX] = grid.minX;
+      f32[U.gridMinY] = grid.minY;
+      f32[U.invCell] = grid.invCell;
+      f32[U.worldX] = cx;
+      f32[U.worldY] = cy;
+      f32[U.boundR] = boundR;
       device.queue.writeBuffer(this.uniform!, 0, uniform);
       device.queue.writeBuffer(this.particles!, 0, data.buffer, data.byteOffset, n * PARTICLE_BYTES);
       if (nWires > 0) {

@@ -24,6 +24,49 @@ import { CHEM_LEN, HEAD_SCALE, LEARN_STRIDE } from '../chem-layout.ts';
 const OUT_STRIDE = 19;
 /** 80 bytes: twenty f32/u32, and nothing here is a vec so nothing has to align. */
 const UNIFORM_BYTES = 96;
+
+/**
+ * Where each field of `genome.wgsl`'s `GenomeParams` begins, in four-byte
+ * slots.
+ *
+ * The uniform is declared by name in one language and was written by bare
+ * index in the other, so the only thing holding the two orders together was
+ * counting. `sAnchor` is the evidence: it sits at 16 rather than beside the
+ * other six scales, because it was appended after the learning block, and
+ * nothing would have complained had the host left it at 11.
+ *
+ * `uniform-layout.test.ts` parses the struct out of the shader, walks it under
+ * WGSL's alignment rules, and asserts this map against the result — every
+ * name, every slot, and nothing on either side the other does not have. It is
+ * the check `HEAD_RANGE` gives the clamps, given to the thing that carries
+ * them.
+ */
+export const GENOME_U = {
+  n: 0,
+  chemLen: 1,
+  senseScale: 2,
+  groundScale: 3,
+  sCruise: 4,
+  sTurn: 5,
+  sAlign: 6,
+  sSep: 7,
+  sThrust: 8,
+  sRecoil: 9,
+  energyCh: 10,
+  learnRate: 11,
+  learnCritic: 12,
+  learnTrace: 13,
+  learnDiscount: 14,
+  maxWeight: 15,
+  sAnchor: 16,
+  learnReward: 17,
+  dtInv: 18,
+  learnExplore: 19,
+  frame: 20,
+  pad0: 21,
+  pad1: 22,
+  pad2: 23,
+} as const;
 /** Most learning rows read back in one frame. A frame that begins more
  *  rewrites than this leaves the rest marked for the next one. */
 const LEARN_READ_CAP = 64;
@@ -357,29 +400,30 @@ export class GenomeGpu {
       const u = new ArrayBuffer(UNIFORM_BYTES);
       const u32 = new Uint32Array(u);
       const f32 = new Float32Array(u);
-      u32[0] = n;
-      u32[1] = CHEM_LEN;
-      f32[2] = 1 / senseScale;
-      f32[3] = groundScale;
-      f32[4] = HEAD_SCALE.cruise;
-      f32[5] = HEAD_SCALE.turn;
-      f32[6] = HEAD_SCALE.align;
-      f32[7] = HEAD_SCALE.sep;
-      f32[8] = HEAD_SCALE.thrust;
-      f32[9] = HEAD_SCALE.recoil;
-      f32[10] = energyCh;
-      f32[11] = learn.rate;
-      f32[12] = learn.critic;
-      f32[13] = learn.trace;
-      f32[14] = learn.discount;
-      f32[15] = learn.maxWeight;
-      f32[16] = HEAD_SCALE.anchor;
-      f32[17] = learn.reward;
-      f32[18] = learn.dtInv;
-      f32[19] = learn.explore;
+      const U = GENOME_U;
+      u32[U.n] = n;
+      u32[U.chemLen] = CHEM_LEN;
+      f32[U.senseScale] = 1 / senseScale;
+      f32[U.groundScale] = groundScale;
+      f32[U.sCruise] = HEAD_SCALE.cruise;
+      f32[U.sTurn] = HEAD_SCALE.turn;
+      f32[U.sAlign] = HEAD_SCALE.align;
+      f32[U.sSep] = HEAD_SCALE.sep;
+      f32[U.sThrust] = HEAD_SCALE.thrust;
+      f32[U.sRecoil] = HEAD_SCALE.recoil;
+      f32[U.energyCh] = energyCh;
+      f32[U.learnRate] = learn.rate;
+      f32[U.learnCritic] = learn.critic;
+      f32[U.learnTrace] = learn.trace;
+      f32[U.learnDiscount] = learn.discount;
+      f32[U.maxWeight] = learn.maxWeight;
+      f32[U.sAnchor] = HEAD_SCALE.anchor;
+      f32[U.learnReward] = learn.reward;
+      f32[U.dtInv] = learn.dtInv;
+      f32[U.learnExplore] = learn.explore;
       // The exploration key. Wrapped by `Sim` at `FRAME_WRAP` so it is exact
       // in this `f32`, which is what lets the shader's hash match the host's.
-      f32[20] = learn.frame;
+      f32[U.frame] = learn.frame;
       device.queue.writeBuffer(this.uniform!, 0, u);
       device.queue.writeBuffer(this.hPrev!, 0, this.hData.buffer, this.hData.byteOffset, n * 4 * 4);
       device.queue.writeBuffer(
