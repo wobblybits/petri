@@ -19,7 +19,7 @@ export function getSampleRate(): number {
 
 /** Rest-tension wave speed along a rope, in world pixels per second.
  *  A 40 px rest (the default min length) then sounds at 400 Hz. */
-export const WAVE_SPEED = 32000;
+const WAVE_SPEED = 32000;
 
 let speedScale = 1;
 
@@ -78,7 +78,7 @@ export function portImpedance(kind: AgentKind, slot: PortSlot): number {
  * point, but it means the fundamental is attenuated too and the loss design
  * has to divide that back out or every note comes up short.
  */
-export function dampGainAt(damp: number, hz: number): number {
+function dampGainAt(damp: number, hz: number): number {
   const w = (2 * Math.PI * hz) / sampleRate;
   const a = 1 - damp;
   const re = 1 - a * Math.cos(w);
@@ -133,7 +133,7 @@ export function lossForT60(lengthSamples: number, t60: number, damp = 1): number
  * 0.05 → a 32-agent clump rings about 0.4× as long. That is the bed, not the
  * knock: an impulse still hits, it just does not occupy the mix afterwards.
  */
-export const COMP_T60_LOAD = 0.05;
+const COMP_T60_LOAD = 0.05;
 
 export function componentLoadScale(n: number): number {
   const extra = Math.max(0, (Number.isFinite(n) ? n : 1) - 2);
@@ -232,7 +232,7 @@ export function bowSpeed(vT: number): number {
  * Air is faster than the rope so a gap is a short slap, not a second string.
  * 80k px/s: 40 px is ~0.5 ms, a 400 px view is ~5 ms.
  */
-export const AIR_SPEED = 80000;
+const AIR_SPEED = 80000;
 export const AIR_CUTOFF_PX = 240;
 export const AIR_MIN_PX = 16;
 export const MAX_AIR_PATHS = 48;

@@ -1410,7 +1410,7 @@ export function defaultParams(): Params {
   };
 }
 
-export interface SliderSpec {
+interface SliderSpec {
   key: keyof Params;
   label: string;
   min: number;

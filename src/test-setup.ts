@@ -33,7 +33,7 @@ function seeded(n: number): () => number {
   };
 }
 
-export const TEST_SEED = 20260902;
+const TEST_SEED = 20260902;
 
 beforeEach(() => {
   Math.random = seeded(TEST_SEED);

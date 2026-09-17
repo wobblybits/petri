@@ -2,10 +2,10 @@ import { momentOfInertia, portLocal, poseHeld, stemRoot, type Agent, type PortSl
 import { bezierPoint, type Cubic } from './curve.ts';
 import { clamp, rotate, wrap, wrapAngle, wrapDeltaVec, type Vec2 } from './wrap.ts';
 
-export const TARGET_LINK = 6;
-export const MIN_LINKS = 4;
-export const MAX_LINKS = 24;
-export const MIN_SEG = 3.5;
+const TARGET_LINK = 6;
+const MIN_LINKS = 4;
+const MAX_LINKS = 24;
+const MIN_SEG = 3.5;
 export const CHAIN_MASS = 0.08;
 
 export interface ChainNode {
@@ -37,7 +37,7 @@ export interface ChainNode {
  * Port-axis alignment is deliberately not here — it is an actuator, not a
  * material property. See Sim.portTorques.
  */
-export const COMPLIANCE: Record<"span" | "link" | "bend" | "contact" | "shape", number> = {
+const COMPLIANCE: Record<"span" | "link" | "bend" | "contact" | "shape", number> = {
   span: 3.0e-6,
   link: 2.0e-6,
   bend: 1.5e-4,
@@ -131,7 +131,7 @@ const invInertia = (agent: Agent): number =>
   poseHeld(agent) ? 0 : 1 / Math.max(1e-4, momentOfInertia(agent));
 
 /** Offset from body centre to a port's stem root, at the body's current heading. */
-export function attachOffset(agent: Agent, slot: PortSlot): Vec2 {
+function attachOffset(agent: Agent, slot: PortSlot): Vec2 {
   const loc = stemRoot(agent.kind, slot);
   return rotate(loc.x * agent.scale, loc.y * agent.scale, agent.heading);
 }
@@ -142,7 +142,7 @@ export function stemPoint(agent: Agent, slot: PortSlot): Vec2 {
 }
 
 /** Unit vector the port points along, in world space. */
-export function portAxisWorld(agent: Agent, slot: PortSlot): Vec2 {
+function portAxisWorld(agent: Agent, slot: PortSlot): Vec2 {
   const tip = portLocal(agent.kind, slot);
   const root = stemRoot(agent.kind, slot);
   const r = rotate(
@@ -350,7 +350,7 @@ export function solveWireSpan(
  * triangle correctly transfers less linear momentum and more spin than a
  * square one.
  */
-export interface ContactMechanics {
+interface ContactMechanics {
   effMass: number;
   /** Closing speed along the normal. Positive means approaching. */
   vN: number;

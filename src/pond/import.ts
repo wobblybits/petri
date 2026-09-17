@@ -25,7 +25,7 @@ import { PondDb, SCHEMA_VERSION } from './db.ts';
  *   without keeping track of what has already been folded in.
  */
 
-export interface ImportResult {
+interface ImportResult {
   file: string;
   runs: number;
   skipped: number;

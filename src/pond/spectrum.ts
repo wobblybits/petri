@@ -41,7 +41,7 @@ export function epsilon(p: Params): number {
 }
 
 /** The reactor's fixed point, parameterised by its catalyst level. */
-export interface FixedPoint {
+interface FixedPoint {
   /** Active primer. */
   B: number;
   /** Saturated catalyst. */
@@ -57,7 +57,7 @@ export interface FixedPoint {
  * influx that sustains them follow without a solve. `dC/dt = 0` gives B,
  * `dD/dt = 0` gives D, and `dB/dt = 0` gives the influx.
  */
-export function fixedPoint(p: Params, C: number): FixedPoint {
+function fixedPoint(p: Params, C: number): FixedPoint {
   const d = p.metabolicDecay;
   const B = ((p.metabolicReset + d) * C * (1 + p.metabolicSigma * C)) / (p.metabolicCat * (p.metabolicBase + C));
   const D = (p.metabolicReset * C) / d;
@@ -89,7 +89,7 @@ export function loop(par: Params, fp: FixedPoint): { p: number; q: number; r: nu
  * Routh-Hurwitz: a complex pair crosses into the right half plane when
  * `L > (p+q+r)(pq+pr+qr) - pqr`. Positive means oscillating.
  */
-export function hopfMargin(par: Params, C: number): number {
+function hopfMargin(par: Params, C: number): number {
   const { p, q, r, L } = loop(par, fixedPoint(par, C));
   return L - ((p + q + r) * (p * q + p * r + q * r) - p * q * r);
 }
@@ -106,7 +106,7 @@ function bisect(f: (x: number) => number, lo: number, hi: number, steps = 200): 
   return 0.5 * (a + b);
 }
 
-export interface Bands {
+interface Bands {
   /** Influx below which the reactor rests quiet, and above which it cycles. */
   hopfLow: number;
   /** Influx above which it saturates and goes still again. */
@@ -203,7 +203,7 @@ export interface Node {
   out: number;
 }
 
-export interface NetSpectrum {
+interface NetSpectrum {
   bodies: number;
   /** Bodies whose principal is wired, so the out-degree of the signalling graph. */
   speaking: number;

@@ -58,7 +58,7 @@ export interface CapturedNet {
   text: string;
 }
 
-export interface CaptureOptions {
+interface CaptureOptions {
   /** Components smaller than this are skipped. One body is not a net. */
   minBodies?: number;
   /** Keep only the largest `limit` components, by body count. */

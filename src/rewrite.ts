@@ -29,7 +29,7 @@ export interface NetWire {
   sources?: number[];
 }
 
-export interface NetAgent {
+interface NetAgent {
   id: number;
   kind: AgentKind;
 }
@@ -39,13 +39,13 @@ export interface NetSnapshot {
   wires: NetWire[];
 }
 
-export interface Spawned {
+interface Spawned {
   id: number;
   kind: AgentKind;
   role: 'era-l' | 'era-r' | 'con-u' | 'con-v' | 'dup-x' | 'dup-y';
 }
 
-export interface ApplyResult {
+interface ApplyResult {
   net: NetSnapshot;
   nextId: number;
   spawned: Spawned[];
@@ -101,7 +101,7 @@ function wireOf(wires: NetWire[], port: PortRef): NetWire | undefined {
   );
 }
 
-export function otherEndOf(wire: NetWire, port: PortRef): PortRef {
+function otherEndOf(wire: NetWire, port: PortRef): PortRef {
   if (wire.a.id === port.id && wire.a.slot === port.slot) return wire.b;
   return wire.a;
 }
@@ -145,14 +145,14 @@ function stripAgents(net: NetSnapshot, dying: Set<number>): NetSnapshot {
 }
 
 /** Ghosts start spreading from the mid at this rewrite time. */
-export const GHOST_APPEAR_START = 0.35;
+const GHOST_APPEAR_START = 0.35;
 
-export function rewriteAppear(t: number): number {
+function rewriteAppear(t: number): number {
   return easeInOut(clamp((t - GHOST_APPEAR_START) / (1 - GHOST_APPEAR_START), 0, 1));
 }
 
-export const COMMUTE_ROLES = ['con-u', 'con-v', 'dup-x', 'dup-y'] as const;
-export type CommuteRole = (typeof COMMUTE_ROLES)[number];
+const COMMUTE_ROLES = ['con-u', 'con-v', 'dup-x', 'dup-y'] as const;
+type CommuteRole = (typeof COMMUTE_ROLES)[number];
 
 /** Lafont square among commute children. Drawn as ghost wires during appear. */
 export const COMMUTE_K22: { a: CommuteRole; aSlot: PortSlot; b: CommuteRole; bSlot: PortSlot }[] = [
@@ -182,7 +182,7 @@ export const COLLAPSE_START = 0.65;
  * made a pancake and the K₂,₂ chords stacked. Half-width is two-plus
  * body sizes so the rectangle has two sides, two diagonals, one crossing.
  */
-export const COMMUTE_ALONG_MIN = 48;
+const COMMUTE_ALONG_MIN = 48;
 export const COMMUTE_ACROSS_MIN = 40;
 
 /**
@@ -393,7 +393,7 @@ export function snapshotOf(
  * rather than a scan. `snapshotOf` stays for `lambda.ts` and the tests, which
  * build small nets and do read the whole thing back.
  */
-export function localSnapshotOf(
+function localSnapshotOf(
   agents: Map<number, Agent>,
   graph: Graph,
   a: number,
@@ -892,7 +892,7 @@ export const TRAIT_KEYS = [
   'rescueTo',
   'assort',
 ] as const;
-export type TraitKey = (typeof TRAIT_KEYS)[number];
+type TraitKey = (typeof TRAIT_KEYS)[number];
 
 /**
  * Bounds a bred trait is clamped to, and how far one generation's mutation

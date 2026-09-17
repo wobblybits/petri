@@ -60,7 +60,7 @@ export const SUMMARIES: readonly Summary[] = ['last', 'peak', 'trough', 'mean', 
  */
 export const DEFAULT_WARMUP = 60;
 
-export interface MetricSpec {
+interface MetricSpec {
   /** Column heading. */
   label: string;
   /** Where the number lives in a `sample` row. */
@@ -254,7 +254,7 @@ export interface TrialRow {
   sweep?: string | null;
 }
 
-export interface TrialOptions {
+interface TrialOptions {
   /** Metric keys, each optionally `@summary`. Default: every metric at its default fold. */
   metrics?: string[];
   warmup?: number;
@@ -536,7 +536,7 @@ export function readEffect(e: Effect): string {
   return need === null ? 'unresolved' : `unresolved; ~${need > 999 ? '999+' : need}/level`;
 }
 
-export interface TableOptions {
+interface TableOptions {
   /** Print an axis's level as a name — arms, say — instead of its number. */
   levelName?: (axis: string, level: number) => string;
 }

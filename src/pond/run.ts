@@ -33,7 +33,7 @@ import type { PondDb } from './db.ts';
  * harness's own shape — which its JSON output and its two sweeps already
  * depend on — does not move. `db.addSample` reads `diversity` if it is there.
  */
-export type PondSample = Sample & { diversity: Diversity };
+type PondSample = Sample & { diversity: Diversity };
 
 export interface SeedNet {
   /** The library row this came from, or null for a net planted from a file. */
@@ -85,7 +85,7 @@ export interface PondRunSpec {
   gpu: 'auto' | 'on' | 'off';
 }
 
-export interface PondRunResult {
+interface PondRunResult {
   runId: number;
   frames: number;
   wallMs: number;
@@ -96,7 +96,7 @@ export interface PondRunResult {
   paths: { wasm: boolean; fieldGpu: boolean; genomeGpu: boolean; adapter: string | null };
 }
 
-export interface RunHooks {
+interface RunHooks {
   onSample?: (s: PondSample) => void;
   onHarvest?: (t: number, nets: CapturedNet[]) => void;
 }

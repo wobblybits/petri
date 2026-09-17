@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CH, CHANNELS, FIELD_CELL, Fields } from './fields.ts';
+import { CH, CHANNELS, FIELD_CELL, Fields, VOICE } from './fields.ts';
 
 /**
  * Per-channel diffuse and decay rates.
@@ -169,5 +169,35 @@ describe('per-channel field rates', () => {
         }
       }
     }
+  });
+});
+
+describe('what counts as a voice', () => {
+  it('hears every channel VOICE names, and does not hear the ground', () => {
+    /*
+     * `peak()` walks the signal channels unrolled rather than `for (const c of
+     * VOICE)`, because the for-of allocated an iterator per cell and cost five
+     * milliseconds a frame on a 1024^2 field. Its note says the unroll is
+     * "the same three written out" — which was true and unchecked, so a fourth
+     * signal channel added to `VOICE` and not to the loop would be a channel
+     * nothing in the pond could hear, and the overlay would go on looking
+     * right because the other three still scale it.
+     *
+     * Driven through the public method rather than by reading the loop: what
+     * matters is that every channel `VOICE` calls a signal is one `peak` can
+     * see, and that the ground is not.
+     */
+    for (const ch of VOICE) {
+      const f = new Fields(8);
+      f.data[ch] = 0.75;
+      expect(f.peak(), `peak() cannot see CH index ${ch}, which VOICE calls a voice`).toBe(0.75);
+    }
+    const ground = new Fields(8);
+    ground.data[CH.energy] = 5;
+    expect(ground.peak(), 'peak() counted the ground as a voice').toBe(0);
+    // And VOICE really is every channel but the ground, or the two assertions
+    // above are checking a set that has quietly become a subset.
+    expect(VOICE.length).toBe(CHANNELS - 1);
+    expect(VOICE).not.toContain(CH.energy);
   });
 });

@@ -13,7 +13,7 @@ export const GALLERY_TABS: { id: GalleryTabId; label: string }[] = [
   { id: 'lambda', label: 'Lambda' },
 ];
 
-export interface CatalogPiece {
+interface CatalogPiece {
   name: string;
   text: string;
 }

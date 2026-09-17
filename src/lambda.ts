@@ -96,7 +96,7 @@ function port(id: number, slot: PortSlot): PortRef {
   return { id, slot };
 }
 
-export interface Compiled {
+interface Compiled {
   net: NetSnapshot;
   /**
    * Aux port of an inert marker node wired to the term's value. The value port
@@ -207,7 +207,7 @@ export function findRedex(net: NetSnapshot): { a: number; b: number } | null {
   return null;
 }
 
-export interface Normalized {
+interface Normalized {
   net: NetSnapshot;
   steps: number;
   /** False when the step budget ran out — the term may not have a normal form. */
@@ -296,7 +296,7 @@ export function evalChurch(term: Term, maxSteps = 20000): { value: number | null
 
 // ------------------------------------------------------------------ layout
 
-export interface NetPose {
+interface NetPose {
   id: number;
   x: number;
   y: number;

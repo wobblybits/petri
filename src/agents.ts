@@ -656,7 +656,7 @@ export function slotsFor(kind: AgentKind): PortSlot[] {
   return kind === 'era' ? ['p'] : ['p', 'l', 'r'];
 }
 
-export function massFor(kind: AgentKind, params: Params): number {
+function massFor(kind: AgentKind, params: Params): number {
   return kind === 'era' ? params.eraMass : params.nodeMass;
 }
 
@@ -773,7 +773,7 @@ export function momentOfInertiaAt(kindCode: number, mass: number, scale: number)
   return (m * TRI_VERTEX_R2 * s * s) / 6;
 }
 
-export const PORT_EXTRUDE = 8;
+const PORT_EXTRUDE = 8;
 const HANDLE_SCALE = 3;
 
 /** Where a port stem meets the body. */
@@ -782,7 +782,7 @@ export function stemRoot(kind: AgentKind, slot: PortSlot): Vec2 {
 }
 
 /** `stemRoot` without the allocation. The single source of the geometry. */
-export function stemRootInto(kind: AgentKind, slot: PortSlot, out: Vec2): Vec2 {
+function stemRootInto(kind: AgentKind, slot: PortSlot, out: Vec2): Vec2 {
   if (kind === 'era') {
     out.x = slot === 'p' ? 8 : 0;
     out.y = 0;
@@ -832,6 +832,7 @@ export {
   IN_FULL,
   IN_SENSE,
   LEARN_CRITIC,
+  LEARN_PLASTIC,
   LEARN_PREV_V,
   LEARN_STRIDE,
   LEARN_TRACE,
@@ -1496,7 +1497,7 @@ export function createAgent(
  * is given the tank the blob recorded, and a body whose blob did not record
  * one starts empty rather than fed.
  */
-export interface SeededTraits {
+interface SeededTraits {
   extra: number;
   requestDecay: number;
   energyCap: number;
@@ -1531,7 +1532,7 @@ export function portAxis(agent: Agent, slot: PortSlot): Vec2 {
 }
 
 /** Body heading that aims `slot` along the world angle `target`. */
-export function headingFacingPort(agent: Agent, slot: PortSlot, target: number): number {
+function headingFacingPort(agent: Agent, slot: PortSlot, target: number): number {
   const axis = portAxis(agent, slot);
   const portAng = Math.atan2(axis.y, axis.x);
   return wrapAngle(agent.heading + angleDelta(portAng, target));
@@ -1823,7 +1824,7 @@ export function stemOffsetInto(agent: Agent, slot: PortSlot, out: Vec2): Vec2 {
 
 
 /** Stem root offset from body center at a given heading. */
-export function stemOffsetAt(heading: number, agent: Agent, slot: PortSlot): Vec2 {
+function stemOffsetAt(heading: number, agent: Agent, slot: PortSlot): Vec2 {
   const loc = stemRoot(agent.kind, slot);
   return rotate(loc.x * agent.scale, loc.y * agent.scale, heading);
 }
@@ -1879,7 +1880,7 @@ export function stemWorldInto(
  * cross, and the cubic then doubles back on itself — which reads as a shorter
  * wire than the straight line between the ports.
  */
-export function handleWorld(
+function handleWorld(
   agent: Agent,
   slot: PortSlot,
   w: number,

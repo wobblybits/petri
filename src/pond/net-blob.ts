@@ -87,8 +87,8 @@ export const NET_FORMAT = 2;
 const MAGIC = 'petri-net';
 
 /** Wires address ports by index here, because `PortSlot` is a string. */
-export const SLOT_CODE: Record<PortSlot, number> = { p: 0, l: 1, r: 2 };
-export const CODE_SLOT: PortSlot[] = ['p', 'l', 'r'];
+const SLOT_CODE: Record<PortSlot, number> = { p: 0, l: 1, r: 2 };
+const CODE_SLOT: PortSlot[] = ['p', 'l', 'r'];
 
 /**
  * The heritable scalars, in the order the `scalar` section stores them.
@@ -116,13 +116,13 @@ export const SCALAR_FIELDS = [
 ] as const;
 export type ScalarField = (typeof SCALAR_FIELDS)[number];
 
-export const POSE_FIELDS = ['x', 'y', 'heading'] as const;
-export const ANCESTRY_FIELDS = ['born', 'lineage'] as const;
-export const WIRE_FIELDS = ['a', 'aSlot', 'b', 'bSlot'] as const;
+const POSE_FIELDS = ['x', 'y', 'heading'] as const;
+const ANCESTRY_FIELDS = ['born', 'lineage'] as const;
+const WIRE_FIELDS = ['a', 'aSlot', 'b', 'bSlot'] as const;
 
-export type SectionType = 'u8' | 'i32' | 'f32' | 'f64';
+type SectionType = 'u8' | 'i32' | 'f32' | 'f64';
 
-export interface Section {
+interface Section {
   name: string;
   type: SectionType;
   /** Bytes from the start of the payload. */
@@ -138,7 +138,7 @@ export interface Section {
 }
 
 /** The genome dimensions a blob was written against. */
-export interface NetLayout {
+interface NetLayout {
   chem: number;
   plastic: number;
   critic: number;
@@ -146,7 +146,7 @@ export interface NetLayout {
 }
 
 /** Where a blob came from, when the writer knew. */
-export interface NetSource {
+interface NetSource {
   run?: number;
   net?: number;
   /** Simulated seconds into that run. */
@@ -308,7 +308,7 @@ export type Compatibility =
   | { kind: 'refused'; reason: string };
 
 /** The shape `compatibility` reads; a header is one, and so is a decoded net. */
-export interface LayoutLike {
+interface LayoutLike {
   format?: number;
   layout: NetLayout;
   segments?: readonly ChemSegment[];

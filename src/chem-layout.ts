@@ -311,7 +311,7 @@ export const GX_BASE = TX_BASE + CHEM_SPECIES;
  * `gaitSwell` and `gripSwing` stay the global magnitudes: the weights choose a
  * direction in (B, C, D) and those choose how hard it is pulled.
  */
-export const SPECIES_W = 3;
+const SPECIES_W = 3;
 export const SW_BASE = GX_BASE + CHEM_SPECIES;
 export const GW_BASE = SW_BASE + SPECIES_W;
 /** Slots in `Sw` and `Gw`, in the reactor's own order. */

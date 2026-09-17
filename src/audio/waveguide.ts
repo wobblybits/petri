@@ -13,20 +13,20 @@ type AgentTopoLike = AgentTopo;
 export const MAX_WIRES = 64;
 export const MAX_DELAY = 4096;
 export const MAX_AGENTS = 256;
-export const MAX_PORTS = 4;
-export const MAX_CONTACTS = 48;
+const MAX_PORTS = 4;
+const MAX_CONTACTS = 48;
 export const MAX_AIR = 48;
 export const MAX_AIR_DELAY = 512;
 export const MAX_STUBS = 96;
 export const MAX_STUB_DELAY = 64;
-export const IMPULSE_TAPS = 12;
-export const MAX_TISSUES = 8;
-export const TISSUE_MODES = 4;
+const IMPULSE_TAPS = 12;
+const MAX_TISSUES = 8;
+const TISSUE_MODES = 4;
 
 /** Spatial bins in a traveling-wave snapshot. t=0 is end A, t=1 is end B. */
 export const WAVE_BINS = 32;
 /** Packed record: id, env, fwd[WAVE_BINS], back[WAVE_BINS]. */
-export const WAVE_STRIDE = 2 + WAVE_BINS * 2;
+const WAVE_STRIDE = 2 + WAVE_BINS * 2;
 
 /** Delay length glides toward its target instead of stepping (~5 ms). */
 const LENGTH_GLIDE = 0.004;
@@ -209,7 +209,7 @@ const MU_KINETIC = 0.34;
 const V_STRIBECK = 0.01;
 const V_STICK = 0.0012;
 
-export interface WireState {
+interface WireState {
   active: boolean;
   /** Zeroed and skipped once the pickup envelope falls under QUIET_FLOOR. */
   quiet: boolean;
@@ -281,7 +281,7 @@ export interface WireState {
 
 export const BODY_MODES = 3;
 
-export interface AgentState {
+interface AgentState {
   active: boolean;
   /** Detail tier from apparent size. 0 full body, 1 reduced, 2 ensemble. */
   lod: number;
@@ -353,7 +353,7 @@ export interface AgentState {
   tissueY: number;
 }
 
-export type WorkletMessage =
+type WorkletMessage =
   | { type: 'topology'; topo: NetTopology }
   | { type: 'impulse'; wireId: number; end: 0 | 1; gain: number }
   | { type: 'pluck'; wireId: number; gain: number; at?: number; width?: number }

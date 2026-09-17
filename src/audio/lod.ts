@@ -28,9 +28,9 @@ export const LOD_NEAR = 0;
 export const LOD_MID = 1;
 export const LOD_FAR = 2;
 
-export type LodTier = typeof LOD_NEAR | typeof LOD_MID | typeof LOD_FAR;
+type LodTier = typeof LOD_NEAR | typeof LOD_MID | typeof LOD_FAR;
 
-export interface LodBand {
+interface LodBand {
   /** Apparent size, in screen px, at or above which an object is NEAR. */
   near: number;
   /** Apparent size, in screen px, at or above which an object is MID. */
@@ -209,7 +209,7 @@ export const COST_US = {
 };
 
 /** One render quantum at 48 kHz. */
-export const QUANTUM_US = (128 / 48000) * 1e6;
+const QUANTUM_US = (128 / 48000) * 1e6;
 
 /**
  * Share of the quantum the tiered voices may spend.

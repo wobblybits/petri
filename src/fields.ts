@@ -35,20 +35,6 @@ export const CHANNELS = 4;
  */
 export const VOICE = [CH.conP, CH.dupP, CH.aux] as const;
 
-/**
- * The order a body digests what it swallowed: the three signalling species,
- * then the ground.
- *
- * Not the harvest's order, and on purpose. The harvest visits species in
- * index order, which is arbitrary and only has to match the shader; digestion
- * spends the ground as the co-substrate the other three are converted *with*
- * (`Sim.runDigestion`), so the ground has to be paired off last or a body
- * digests it out from under its own catabolism in the same frame — and which
- * reaction got the last unit would then be an artifact of where `CH.energy`
- * happens to sit in the channel list rather than of anything a body is.
- */
-export const DIGEST_ORDER = [CH.conP, CH.dupP, CH.aux, CH.energy] as const;
-
 
 
 /*
@@ -89,7 +75,7 @@ export const FIELD_HALF = FIELD_EXTENT / 2;
  * rectangle. Body radius is subtracted again at the wall, so glyphs do not
  * clip through the rim into a cell the field does not own.
  */
-export const WORLD_BOUND_INSET = FIELD_CELL;
+const WORLD_BOUND_INSET = FIELD_CELL;
 
 /**
  * Radius of the largest disk centred on `(cx, cy)` that sits inside the field
@@ -1090,7 +1076,9 @@ export class Fields {
      * could see it, because they all time `sim.step` and none of them render.
      *
      * `VOICE` stays the statement of which channels are signals; this is the
-     * same three written out.
+     * same three written out, and `field-rates.test.ts` holds the two
+     * together — a fourth signal channel added to `VOICE` and not to this
+     * loop would be a channel nothing could hear.
      */
     for (let i = 0; i < d.length; i += CHANNELS) {
       if (d[i + CH.conP] > m) m = d[i + CH.conP];

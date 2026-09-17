@@ -37,7 +37,7 @@ export type DesignTool =
   | 'rotate'
   | 'touch';
 
-export interface DesignPose {
+interface DesignPose {
   id: number;
   kind: AgentKind;
   x: number;
@@ -54,7 +54,7 @@ export interface DesignSnapshot {
 }
 
 /** Clipboard fragment in centroid-relative coordinates. */
-export interface DesignFragment {
+interface DesignFragment {
   agents: { kind: AgentKind; x: number; y: number; heading: number; extra: number }[];
   wires: { a: number; aSlot: PortSlot; b: number; bSlot: PortSlot }[];
 }
@@ -70,14 +70,14 @@ type Gesture =
   | { kind: 'wire'; from: PortRef; x: number; y: number; over: PortRef | null }
   | { kind: 'sound'; stroke: SoundStroke };
 
-export function toolKind(tool: DesignTool): AgentKind | null {
+function toolKind(tool: DesignTool): AgentKind | null {
   if (tool === 'paint-era') return 'era';
   if (tool === 'paint-dup') return 'dup';
   if (tool === 'paint-con') return 'con';
   return null;
 }
 
-export function paintSpacing(params: Params): number {
+function paintSpacing(params: Params): number {
   return Math.max(8, params.wireMinRest);
 }
 
@@ -150,7 +150,7 @@ export function still(agent: Agent): void {
   agent.prevHeading = agent.heading;
 }
 
-export function restitchIncident(sim: Sim, ids: Iterable<number>, params: Params): void {
+function restitchIncident(sim: Sim, ids: Iterable<number>, params: Params): void {
   const set = ids instanceof Set ? ids : new Set(ids);
   for (const w of sim.graph.wires.values()) {
     if (set.has(w.a.id) || set.has(w.b.id)) {
@@ -185,7 +185,7 @@ export function rotateAgents(sim: Sim, ids: Iterable<number>, da: number, cx: nu
   restitchIncident(sim, set, params);
 }
 
-export function agentTooClose(sim: Sim, x: number, y: number, spacing: number, ignore?: number): boolean {
+function agentTooClose(sim: Sim, x: number, y: number, spacing: number, ignore?: number): boolean {
   const min = spacing * 0.9;
   const min2 = min * min;
   for (const a of sim.agents.values()) {
@@ -249,7 +249,7 @@ export function copyFragment(sim: Sim, ids: Iterable<number>): DesignFragment | 
   };
 }
 
-export function snapshotToFragment(snap: DesignSnapshot): DesignFragment | null {
+function snapshotToFragment(snap: DesignSnapshot): DesignFragment | null {
   if (snap.agents.length === 0) return null;
   let cx = 0;
   let cy = 0;

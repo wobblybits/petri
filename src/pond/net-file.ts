@@ -36,9 +36,9 @@ import {
 export const NET_FILE_EXT = '.petrinet';
 
 /** `<repo>/nets/`, wherever this module is loaded from. */
-export const NETS_DIR = fileURLToPath(new URL('../../nets/', import.meta.url));
+const NETS_DIR = fileURLToPath(new URL('../../nets/', import.meta.url));
 
-export interface LoadedNet {
+interface LoadedNet {
   /** At this build's layout. */
   net: NetData;
   header: NetHeader;

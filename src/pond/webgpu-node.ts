@@ -30,7 +30,7 @@
  * import is dynamic so nothing on the browser's module graph can reach it.
  */
 
-export interface GpuOpen {
+interface GpuOpen {
   ok: boolean;
   /** Why not, when `ok` is false. */
   error?: string;

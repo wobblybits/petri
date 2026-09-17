@@ -390,7 +390,7 @@ export function kindFillRgb(
   return hslToRgb(h, s * t, l);
 }
 
-export function kindFillCss(
+function kindFillCss(
   kind: AgentKind,
   extra: number,
   floor = EXTRA_FLOOR,

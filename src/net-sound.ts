@@ -12,7 +12,7 @@ export const SOUND_PULL = 10;
 const BOW_PERIOD = 80;
 const TAP_SPEED = 80;
 
-export type SoundHit =
+type SoundHit =
   | { kind: 'port'; id: number; slot: PortSlot; x: number; y: number }
   | { kind: 'body'; id: number }
   | { kind: 'wire'; id: number; at: number; x: number; y: number };
@@ -32,7 +32,7 @@ export interface SoundStroke {
 }
 
 /** Mouse reports 0 or 0.5; treat a missing reading as a medium press. */
-export function pointerPressure(n: number): number {
+function pointerPressure(n: number): number {
   if (!(n > 0)) return 0.5;
   return n > 1 ? 1 : n;
 }
@@ -110,7 +110,7 @@ export function strokePull(s: SoundStroke): number {
   return Math.hypot(s.x - s.x0, s.y - s.y0);
 }
 
-export function strokeSpeed(s: SoundStroke): number {
+function strokeSpeed(s: SoundStroke): number {
   return Math.hypot(s.vx, s.vy);
 }
 

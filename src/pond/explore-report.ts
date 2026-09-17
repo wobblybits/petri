@@ -35,7 +35,7 @@ export interface Loading {
   value: number;
 }
 
-export interface ExploreReport {
+interface ExploreReport {
   runs: number;
   paramNames: string[];
   outcomeNames: string[];
@@ -53,7 +53,7 @@ export interface ExploreReport {
   notes: string[];
 }
 
-export interface ExploreOptions {
+interface ExploreOptions {
   sweep?: string | string[] | null;
   clusters?: number;
   components?: number;
@@ -71,7 +71,7 @@ export interface ExploreOptions {
  * is true and useless: `nets` and `nets_effective`, `lines` and
  * `lines_effective`, would take a whole component to say so.
  */
-export const EXPLORE_METRICS: readonly string[] = [
+const EXPLORE_METRICS: readonly string[] = [
   'bodies',
   'wires',
   'lines_effective',

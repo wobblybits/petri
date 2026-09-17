@@ -25,7 +25,7 @@ import { SLIDERS, type Params } from '../params.ts';
  * when the question is whether the assumption holds.
  */
 
-export interface SampleAxis {
+interface SampleAxis {
   key: keyof Params;
   min: number;
   max: number;

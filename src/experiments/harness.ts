@@ -37,7 +37,7 @@ export function seededRandom(seed: number): () => number {
   };
 }
 
-export interface TrialSpec {
+interface TrialSpec {
   /** Simulated seconds to run. */
   seconds: number;
   /** Frame step; 1/60 is what the app runs at. */
@@ -118,7 +118,7 @@ export interface Sample {
   trait: Record<string, { mean: number; sd: number }>;
 }
 
-export interface Trial {
+interface Trial {
   spec: TrialSpec;
   samples: Sample[];
   /** Wall time the trial took, ms. */
@@ -207,7 +207,7 @@ export function sampleSim(sim: Sim, t: number): Sample {
 }
 
 /** Run one seeded pond and sample it on a schedule. */
-export function runTrial(spec: TrialSpec): Trial {
+function runTrial(spec: TrialSpec): Trial {
   const realRandom = Math.random;
   Math.random = seededRandom(spec.seed);
   const t0 = performance.now();
@@ -245,7 +245,7 @@ export interface SweepSpec {
   base: Omit<TrialSpec, 'seed' | 'params'> & { params?: Partial<Params> };
 }
 
-export interface SweepRow {
+interface SweepRow {
   point: Partial<Record<keyof Params, number>>;
   seed: number;
   trial: Trial;

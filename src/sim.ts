@@ -37,6 +37,7 @@ import {
   exploreAt,
   CRITIC_LEN,
   LEARN_CRITIC,
+  LEARN_PLASTIC,
   LEARN_PREV_V,
   LEARN_TRACE,
   IN_BOUND,
@@ -3505,7 +3506,7 @@ export class Sim {
         const o = row * stride;
         const ps = slot * PLASTIC_LEN;
         for (let k = 0; k < PLASTIC_LEN; k++) {
-          up[o + k] = P[ps + k];
+          up[o + LEARN_PLASTIC + k] = P[ps + k];
           up[o + LEARN_TRACE + k] = T[ps + k];
         }
         const cs = slot * CRITIC_LEN;
@@ -3583,7 +3584,7 @@ export class Sim {
       const ps = s * PLASTIC_LEN;
       let on = 0;
       for (let k = 0; k < PLASTIC_LEN; k++) {
-        const w = rows[o + k];
+        const w = rows[o + LEARN_PLASTIC + k];
         P[ps + k] = w;
         T[ps + k] = rows[o + LEARN_TRACE + k];
         if (w !== 0) on = 1;
@@ -3619,7 +3620,7 @@ export class Sim {
       const ps = s * PLASTIC_LEN;
       let on = 0;
       for (let k = 0; k < PLASTIC_LEN; k++) {
-        const w = src[o + k];
+        const w = src[o + LEARN_PLASTIC + k];
         P[ps + k] = w;
         T[ps + k] = src[o + LEARN_TRACE + k];
         if (w !== 0) on = 1;

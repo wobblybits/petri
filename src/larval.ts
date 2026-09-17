@@ -29,7 +29,7 @@ const MIN_S = 0.01;
 const DECADES = 5;
 const BINS = PER_DECADE * DECADES;
 
-export interface LarvalReading {
+interface LarvalReading {
   /** Bodies that latched at least once, and the seconds they took. */
   latched: number;
   p50: number | null;

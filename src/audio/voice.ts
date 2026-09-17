@@ -45,7 +45,7 @@ export function albedo(kind: AgentKind): number {
 }
 
 /** Interior angle at the polygon vertex a port sits on, in radians. */
-export function featureAngle(kind: AgentKind, slot: PortSlot): number {
+function featureAngle(kind: AgentKind, slot: PortSlot): number {
   if (kind === 'era') return Math.PI;
   const tri = triangleLocal(1);
   // Ports sit at apex (index 0) and the two base corners.
@@ -70,7 +70,7 @@ export function featureAngle(kind: AgentKind, slot: PortSlot): number {
  * a wide-open corner on a big body is comparatively blunt. Hertzian contact
  * width goes as the square root of this, which is what `width` uses.
  */
-export function featureRadius(agent: Agent, slot: PortSlot): number {
+function featureRadius(agent: Agent, slot: PortSlot): number {
   if (agent.kind === 'era') return ERA_RADIUS * agent.scale;
   // A polygon corner is a singularity; blunt it by the half-angle so the apex
   // reads sharper than the base corners rather than both being infinite.

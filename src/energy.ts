@@ -111,7 +111,7 @@ export function deathYield(a: { extra: number }, value = BODY_VALUE): number {
 }
 
 /** Energy locked up in one body's existence. Every kind costs the same. */
-export const AGENT_VALUE: Record<AgentKind, number> = {
+const AGENT_VALUE: Record<AgentKind, number> = {
   era: BODY_VALUE,
   con: BODY_VALUE,
   dup: BODY_VALUE,
@@ -148,7 +148,7 @@ export const REQUEST_DECAY = 0.9;
  * redex is often a fraction of a percent short — one frame of upkeep — and
  * refusing to move that much is refusing to let it ever fire.
  */
-export const REQUEST_FLOOR = 0.01;
+const REQUEST_FLOOR = 0.01;
 
 /** Smallest transfer worth doing. Guards against denormal churn, nothing more. */
 const FLOW_EPS = 1e-9;
@@ -184,7 +184,7 @@ export const ERA_UPKEEP_RATIO = -0.2;
  * else, which is what §5 of the chemistry plan wants once an Era's income
  * comes from a high uptake yield instead of from a mint keyed on its glyph.
  */
-export function upkeepRateFor(kind: AgentKind, rate: number, eraRatio = ERA_UPKEEP_RATIO): number {
+function upkeepRateFor(kind: AgentKind, rate: number, eraRatio = ERA_UPKEEP_RATIO): number {
   return kind === 'era' ? rate * eraRatio : rate;
 }
 
@@ -1571,7 +1571,7 @@ export function runHarvestPlan(
  * a rate change mid-run, and that is a body that cannot eat, not a body with
  * negative room.
  */
-export function gutRoomOf(store: AgentStore, slot: number, gutSize: number): number {
+function gutRoomOf(store: AgentStore, slot: number, gutSize: number): number {
   const gutCap = store.energyCap[slot] * gutSize;
   const room = gutCap - store.gutTotal(slot);
   return room > 0 ? room : 0;
@@ -1599,7 +1599,7 @@ export function harvestSlotsFast(
   runHarvestPlan(plan, store, grid, uptake);
 }
 
-export interface UpkeepOptions {
+interface UpkeepOptions {
   /**
    * Fraction of ordinary upkeep put back into the field rather than
    * destroyed, `params.upkeepExcrete`.
@@ -2108,7 +2108,7 @@ export function relaxRequests(list: SlotBody[], adj: WireAdjacency, decay?: numb
  * remainder has to land somewhere or the pond quietly mints a hole in its own
  * conservation. Same destination a rewrite's leftovers take.
  */
-export interface FlowOptions {
+interface FlowOptions {
   /**
    * Override every body's own quantum with this one. Omit — which is what the
    * simulation does — and each sender uses its own `transportQuantum`, seeded

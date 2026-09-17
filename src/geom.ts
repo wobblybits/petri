@@ -2,7 +2,7 @@ export const WIRE_RADIUS = 2.5;
 /** World px of string displacement at waveguide |sample| = 1 after AGC. */
 export const WAVE_DISP_PX = 16;
 
-export function orient(
+function orient(
   ax: number,
   ay: number,
   bx: number,

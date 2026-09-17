@@ -55,7 +55,7 @@ export interface SweepSpec {
   note: string | null;
 }
 
-export interface SweepPoint {
+interface SweepPoint {
   point: Record<string, number>;
   seed: number;
   runId: number;
@@ -74,7 +74,7 @@ export function gridPoints(grid: Record<string, number[]>): Record<string, numbe
   return out;
 }
 
-export interface SweepHooks {
+interface SweepHooks {
   onTrial?: (row: SweepPoint, done: number, total: number) => void;
 }
 

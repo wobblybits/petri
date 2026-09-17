@@ -207,7 +207,7 @@ function scenes(): Scene[] {
   return out;
 }
 
-export interface FieldDiff {
+interface FieldDiff {
   field: string;
   maxAbs: number;
   atIndex: number;
@@ -215,7 +215,7 @@ export interface FieldDiff {
   gpu: number;
 }
 
-export interface SceneResult {
+interface SceneResult {
   name: string;
   n: number;
   nWires: number;
@@ -255,7 +255,7 @@ function compare(name: string, sc: Scene, cpu: Float32Array, gpu: Float32Array, 
   return { name, n: sc.n, nWires: sc.nWires, gpuActuallyRan: ran, worst, perField, cpuNonFinite, gpuNonFinite };
 }
 
-export interface DriftSample {
+interface DriftSample {
   frame: number;
   maxPosDiff: number;
   cpuMaxSpeed: number;

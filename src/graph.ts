@@ -40,7 +40,7 @@ const stemScratchB = { x: 0, y: 0 };
  * of `params.wireMinRest`. Only the callers that reach `attach` without params
  * — tests, mostly — fall back to it.
  */
-export const DEFAULT_REST_BASE = 48;
+const DEFAULT_REST_BASE = 48;
 
 export interface Wire {
   id: number;

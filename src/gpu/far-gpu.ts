@@ -77,7 +77,7 @@ type GpuEntry =
  * WebGPU host for the FAR kernel. One submit per frame, one readback.
  * Falls back to the CPU twin when the adapter is missing or a pass fails.
  */
-export class FarGpu {
+class FarGpu {
   ready = false;
   private device: GPUDevice | null = null;
   private module: GPUShaderModule | null = null;

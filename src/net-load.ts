@@ -19,7 +19,7 @@ import { compatibility, decodeNet, readHeader, type NetHeader } from './pond/net
  * decoder and planter it uses do not either.
  */
 
-export interface PlantedNet {
+interface PlantedNet {
   /** The new agent ids, in blob order. Empty means it did not fit. */
   ids: number[];
   header: NetHeader;

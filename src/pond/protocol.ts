@@ -68,7 +68,7 @@ export interface Outcome {
   along?: string;
 }
 
-export interface Precondition {
+interface Precondition {
   metric: string;
   summary?: Summary;
   min?: number;
@@ -80,7 +80,7 @@ export interface Precondition {
   why: string;
 }
 
-export interface Accepted {
+interface Accepted {
   axis: string;
   constant: string;
   because: string;
@@ -397,13 +397,13 @@ export function armSweepName(protocol: string, arm: string, smoke = false): stri
   return `${protocol}${smoke ? '~smoke' : ''}/${arm}`;
 }
 
-export interface PlanOptions {
+interface PlanOptions {
   seeds?: number;
   seconds?: number;
   smoke?: boolean;
 }
 
-export interface ArmPlan {
+interface ArmPlan {
   arm: Arm;
   sweep: string;
   base: Record<string, number>;
@@ -416,7 +416,7 @@ export interface ArmPlan {
   note: string;
 }
 
-export interface Plan {
+interface Plan {
   arms: ArmPlan[];
   points: number;
   trials: number;
@@ -453,7 +453,7 @@ export function planProtocol(p: Protocol, opts: PlanOptions = {}): Plan {
   return { arms, points, trials: arms.length * points * seeds.length, smoke };
 }
 
-export interface Preflight {
+interface Preflight {
   /** Anything here and the protocol must not run. */
   errors: string[];
   /** Worth reading before running. */
@@ -463,7 +463,7 @@ export interface Preflight {
 }
 
 /** Parameter keys set differently between arms: the arm axis, as parameters. */
-export function variedAcrossArms(p: Protocol): Set<string> {
+function variedAcrossArms(p: Protocol): Set<string> {
   const out = new Set<string>();
   const keys = new Set<string>();
   for (const a of p.arms) for (const k of Object.keys(a.set)) keys.add(k);
@@ -563,7 +563,7 @@ export function preflight(p: Protocol, opts: PlanOptions = {}): Preflight {
 }
 
 /** The metric keys a protocol reads: outcomes, then preconditions, deduplicated. */
-export function protocolKeys(p: Protocol): string[] {
+function protocolKeys(p: Protocol): string[] {
   const keys: string[] = [];
   const add = (metric: string, summary?: Summary) => {
     const k = metricKey(metric, summary);
@@ -575,7 +575,7 @@ export function protocolKeys(p: Protocol): string[] {
 }
 
 /** Every arm's trials, with the arm filed as an axis. */
-export function protocolTrials(db: PondDb, p: Protocol, opts: { smoke?: boolean; warmup?: number } = {}): TrialRow[] {
+function protocolTrials(db: PondDb, p: Protocol, opts: { smoke?: boolean; warmup?: number } = {}): TrialRow[] {
   const keys = protocolKeys(p);
   const out: TrialRow[] = [];
   p.arms.forEach((arm, i) => {
@@ -586,7 +586,7 @@ export function protocolTrials(db: PondDb, p: Protocol, opts: { smoke?: boolean;
   return out;
 }
 
-export interface PreconditionResult {
+interface PreconditionResult {
   pre: Precondition;
   key: string;
   scope: string;

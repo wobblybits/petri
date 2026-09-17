@@ -81,7 +81,7 @@ export function channelTotal(sim: Sim, ch: number): number {
 }
 
 /** Every species, every cell. */
-export function fieldTotal(sim: Sim): number {
+function fieldTotal(sim: Sim): number {
   const d = sim.fields.data;
   let s = 0;
   // The ground alone. A signal is not matter: nothing eats it, nothing

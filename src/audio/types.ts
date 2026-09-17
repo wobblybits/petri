@@ -1,6 +1,6 @@
 import type { AgentKind, PortSlot } from '../agents.ts';
 
-export type KindCode = 0 | 1 | 2;
+type KindCode = 0 | 1 | 2;
 
 export function kindCode(kind: AgentKind): KindCode {
   if (kind === 'era') return 0;
@@ -167,7 +167,7 @@ export interface RewriteEvent {
   leftovers: number[];
 }
 
-export interface SpawnEvent {
+interface SpawnEvent {
   type: 'spawn';
   agent: number;
   kind: AgentKind;
@@ -197,7 +197,7 @@ export interface LiveContact {
 
 
 /** Direct air path between two bodies. Delay is travel time, gain dies with distance. */
-export interface AirItem {
+interface AirItem {
   agentA: number;
   agentB: number;
   length: number;

@@ -1,6 +1,6 @@
-export const GALLERY_KEY = 'swimmers.design.gallery.v1';
+const GALLERY_KEY = 'swimmers.design.gallery.v1';
 
-export interface GalleryPiece {
+interface GalleryPiece {
   id: string;
   name: string;
   text: string;
@@ -51,7 +51,7 @@ export function parseGallery(raw: string | null): GalleryPiece[] {
   }
 }
 
-export function serializeGallery(pieces: GalleryPiece[]): string {
+function serializeGallery(pieces: GalleryPiece[]): string {
   return JSON.stringify(pieces);
 }
 

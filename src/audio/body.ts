@@ -21,7 +21,7 @@ const DISC_RATIOS = [1, 2.09, 3.44];
 /** Triangular plate: wider spacing, more clatter. */
 const PLATE_RATIOS = [1, 1.71, 2.62];
 
-export interface BodyTone {
+interface BodyTone {
   /** Mode frequencies in Hz, low to high. */
   freq: number[];
   /** Per-mode T60 in seconds. Higher modes always die first. */

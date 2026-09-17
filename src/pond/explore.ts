@@ -165,7 +165,7 @@ export function pca(m: Matrix, want: number): Component[] {
   return out;
 }
 
-export interface CrossComponent {
+interface CrossComponent {
   /** Loading on the parameter block, in `x.names` order. */
   xLoading: number[];
   /** Loading on the outcome block, in `y.names` order. */
@@ -265,7 +265,7 @@ export function pls(x: Matrix, y: Matrix, want: number): CrossComponent[] {
   return out;
 }
 
-export interface Clustering {
+interface Clustering {
   /** Cluster index per row. */
   label: number[];
   /** Cluster centres, in the input's column space. */
