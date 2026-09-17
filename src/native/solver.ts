@@ -148,6 +148,50 @@ type Exp = {
  * C FAR solver, NEAR XPBD, and scent field, compiled to WASM. Same SoA as
  * the TS/GPU kernel for bodies. After `init`, steps are synchronous.
  */
+/**
+ * The steer parameter block, by name. `solver.c`'s `SP_*`.
+ *
+ * One `Float32Array` crosses the wasm wall each frame and the host wrote it by
+ * bare index against a C file that reads it by `#define`. `solver.c` says what
+ * that costs, in the note over `SP_UNUSED_12`: the two dead slots are still
+ * reserved "because every index above them is a hardcoded number on both sides
+ * of this wall and renumbering to recover two floats is how that kind of thing
+ * goes wrong". It says it again over `SP_SENSE_SPAN` — "a constant that has to
+ * agree across the wasm wall and is written down twice eventually disagrees,
+ * which is how the deposit normalisation came to be 20 on one side and 10 on
+ * the other".
+ *
+ * So: names on both sides, and `shared-constants.test.ts` reads the `#define`s
+ * out of `solver.c` and asserts this against them. Renumbering is now a thing
+ * the suite can check rather than a thing nobody dares do.
+ */
+export const STEER_PARAM = {
+  faceRadius: 0,
+  snapRadius: 1,
+  snapArc: 2,
+  faceAttract: 3,
+  snapWell: 4,
+  sensorAngle: 5,
+  sensorDist: 6,
+  sense: 7,
+  turnRate: 8,
+  stepSpeed: 9,
+  swimTau: 10,
+  swimNoise: 11,
+  /** 12 and 13 carried `attractStrong`/`attractMedium`, which are seeds the
+   *  solver never read. Reserved rather than reclaimed; see solver.c. */
+  unused12: 12,
+  unused13: 13,
+  senseSpan: 14,
+} as const;
+
+/** Per-body steer flags, a bitfield. `solver.c`'s `SF_*`. */
+export const STEER_FLAG = {
+  pFree: 1,
+  starving: 2,
+  stunned: 4,
+} as const;
+
 export class NativeSolver {
   ready = false;
   lastError = '';

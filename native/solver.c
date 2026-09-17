@@ -1497,6 +1497,14 @@ static float port_exit_angle(int i, int slot, float tx, float ty) {
  * reserved rather than being reclaimed, because every index above them is a
  * hardcoded number on both sides of this wall and renumbering to recover two
  * floats is how that kind of thing goes wrong.
+ *
+ * That last sentence is now less true than it was. `STEER_PARAM` in
+ * `src/native/solver.ts` names every slot below, and
+ * `shared-constants.test.ts` reads these `#define`s out of this file and
+ * asserts the two agree — so a renumbering that misses one side fails the
+ * suite instead of steering a pond on its own sensor distance. Reclaiming
+ * these two is still not worth a wasm rebuild for eight bytes a frame, but it
+ * is no longer the thing that cannot be attempted.
  */
 #define SP_UNUSED_12 12
 #define SP_UNUSED_13 13

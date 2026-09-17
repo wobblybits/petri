@@ -120,6 +120,8 @@ import {
   NODE_STRIDE,
   HIT,
   HIT_STRIDE,
+  STEER_FLAG,
+  STEER_PARAM,
   WF_FULL,
   WF_HOLD,
   WF_SHAPE,
@@ -1804,7 +1806,7 @@ export class Sim {
       // Bit 0 is "principal port free". Bit 2 is stun, which is per-frame and
       // written by the steer pass on top of this.
       const pFree = g.isFreeAtSlot(a.slot, 0);
-      flags[i] = pFree ? 1 : 0;
+      flags[i] = pFree ? STEER_FLAG.pFree : 0;
       sat[i] = g.portsFilledAt(a) ? 1 : 0;
       // Bitmask of free ports, for the scent deposit in endFrame. Built here
       // rather than there so it is walked once per topology instead of once
@@ -4700,7 +4702,7 @@ export class Sim {
     if (this.scratchFresh) {
       for (let i = 0; i < n; i++) {
         const sl = list[i].slot;
-        flags[i] = (flags[i] & 1) | (STUN_OF[sl] > 0 ? 4 : 0);
+        flags[i] = (flags[i] & STEER_FLAG.pFree) | (STUN_OF[sl] > 0 ? STEER_FLAG.stunned : 0);
         // Under a force block packPose has already written these; without one
         // nothing else does, and scale moves every frame as bodies grow.
         if (packed) {
@@ -4725,7 +4727,7 @@ export class Sim {
         const a = list[i];
         const sl = a.slot;
         const pFree = this.graph.isFreeAtSlot(sl, 0);
-        flags[i] = (pFree ? 1 : 0) | (STUN_OF[sl] > 0 ? 4 : 0);
+        flags[i] = (pFree ? STEER_FLAG.pFree : 0) | (STUN_OF[sl] > 0 ? STEER_FLAG.stunned : 0);
         if (packed) {
           kinds[i] = KIND_OF[sl];
           sc[i] = SCALE_OF[sl];
@@ -4752,22 +4754,23 @@ export class Sim {
         noise[i * 3 + 2] = Math.random();
       }
     }
-    sp[0] = params.faceRadius;
-    sp[1] = params.snapRadius;
-    sp[2] = params.snapArc;
-    sp[3] = params.faceAttract;
-    sp[4] = params.snapWell;
-    sp[5] = params.sensorAngle;
-    sp[6] = params.sensorDist;
-    sp[7] = params.sense;
-    sp[8] = params.turnRate;
-    sp[9] = params.stepSpeed;
-    sp[10] = params.swimTau;
-    sp[11] = params.swimNoise;
-    // 12 and 13 are dead: they carried `attractStrong`/`attractMedium`, which
-    // are seeds read once by `seedChem` and by nothing in the solver. The slots
-    // stay reserved; see the note in solver.c.
-    sp[14] = SENSE_SPAN;
+    const SP = STEER_PARAM;
+    sp[SP.faceRadius] = params.faceRadius;
+    sp[SP.snapRadius] = params.snapRadius;
+    sp[SP.snapArc] = params.snapArc;
+    sp[SP.faceAttract] = params.faceAttract;
+    sp[SP.snapWell] = params.snapWell;
+    sp[SP.sensorAngle] = params.sensorAngle;
+    sp[SP.sensorDist] = params.sensorDist;
+    sp[SP.sense] = params.sense;
+    sp[SP.turnRate] = params.turnRate;
+    sp[SP.stepSpeed] = params.stepSpeed;
+    sp[SP.swimTau] = params.swimTau;
+    sp[SP.swimNoise] = params.swimNoise;
+    // `unused12` and `unused13` are dead: they carried `attractStrong` and
+    // `attractMedium`, which are seeds read once by `seedChem` and by nothing
+    // in the solver. Reserved rather than reclaimed; see the note in solver.c.
+    sp[SP.senseSpan] = SENSE_SPAN;
     nativeSolver.steer(n, dt);
     // Back the same way: two setter calls a body wrote these two arrays.
     for (let i = 0; i < n; i++) {

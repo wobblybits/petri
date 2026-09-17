@@ -4,6 +4,19 @@ import farShader from '../gpu/far.wgsl?raw';
 import { ERA_RADIUS, TRI_DISC_RATIO } from '../agents.ts';
 import { SKIN, SLOP } from '../collide.ts';
 import {
+  HIT_STRIDE,
+  ND,
+  NODE_STRIDE,
+  STEER_FLAG,
+  STEER_PARAM,
+  WF_FULL,
+  WF_HOLD,
+  WF_SHAPE,
+  WF_SKIP,
+  WIRE_NEAR_STRIDE,
+  WN,
+} from './solver.ts';
+import {
   FAR,
   FAR_CONTACT_COMP,
   FAR_SKIN,
@@ -109,5 +122,110 @@ describe('the contact constants agree across the four tiers', () => {
     // Every slot accounted for, so a thirteenth field added to one side is a
     // failure rather than a silent extra.
     expect(Object.keys(C_NAMES).length, 'FAR does not tile its own stride').toBe(FAR_STRIDE);
+  });
+});
+
+describe('the wasm wall agrees about every index that crosses it', () => {
+  /*
+   * `solver.c` says twice what this is for, and both notes are the reason it
+   * exists rather than a renumbering.
+   *
+   * Over `SP_UNUSED_12`: two slots that carry nothing are still reserved,
+   * "because every index above them is a hardcoded number on both sides of
+   * this wall and renumbering to recover two floats is how that kind of thing
+   * goes wrong."
+   *
+   * Over `SP_SENSE_SPAN`: "a constant that has to agree across the wasm wall
+   * and is written down twice eventually disagrees, which is how the deposit
+   * normalisation came to be 20 on one side and 10 on the other."
+   *
+   * Both are true and neither was checkable. Every map below already had names
+   * on the TypeScript side; what was missing was anything comparing them to
+   * the `#define`s they were transcribed from. A field inserted into one of
+   * these blocks shifts every read above it in that language only, and what
+   * comes out is a pond that steers on its own sensor distance or reads a
+   * wire's rest length as its rope length.
+   */
+  it('packs the steer parameters where the solver reads them', () => {
+    const C: Record<keyof typeof STEER_PARAM, string> = {
+      faceRadius: 'SP_FACE_RADIUS',
+      snapRadius: 'SP_SNAP_RADIUS',
+      snapArc: 'SP_SNAP_ARC',
+      faceAttract: 'SP_FACE_ATTRACT',
+      snapWell: 'SP_SNAP_WELL',
+      sensorAngle: 'SP_SENSOR_ANGLE',
+      sensorDist: 'SP_SENSOR_DIST',
+      sense: 'SP_SENSE',
+      turnRate: 'SP_TURN_RATE',
+      stepSpeed: 'SP_STEP_SPEED',
+      swimTau: 'SP_SWIM_TAU',
+      swimNoise: 'SP_SWIM_NOISE',
+      unused12: 'SP_UNUSED_12',
+      unused13: 'SP_UNUSED_13',
+      senseSpan: 'SP_SENSE_SPAN',
+    };
+    for (const [field, define] of Object.entries(C)) {
+      expect(cDefine(define), `solver.c's ${define} against STEER_PARAM.${field}`).toBe(
+        STEER_PARAM[field as keyof typeof STEER_PARAM],
+      );
+    }
+  });
+
+  it('agrees about the steer flags', () => {
+    expect(cDefine('SF_P_FREE')).toBe(STEER_FLAG.pFree);
+    expect(cDefine('SF_STARVING')).toBe(STEER_FLAG.starving);
+    expect(cDefine('SF_STUNNED')).toBe(STEER_FLAG.stunned);
+    // A bitfield, so they must also be distinct powers of two on both sides.
+    const bits = Object.values(STEER_FLAG);
+    expect(new Set(bits).size, 'two flags share a bit').toBe(bits.length);
+    for (const b of bits) expect(b & (b - 1), `${b} is not a single bit`).toBe(0);
+  });
+
+  it('indexes a near wire and its rope nodes the same way', () => {
+    expect(cDefine('WIRE_NEAR'), "solver.c's near wire stride").toBe(WIRE_NEAR_STRIDE);
+    expect(cDefine('NODE_STRIDE'), "solver.c's rope node stride").toBe(NODE_STRIDE);
+    expect(cDefine('HIT_STRIDE'), "solver.c's hit stride").toBe(HIT_STRIDE);
+
+    const WIRE: Record<keyof typeof WN, string> = {
+      a: 'WN_A',
+      b: 'WN_B',
+      rest: 'WN_REST',
+      rope: 'WN_ROPE',
+      scale: 'WN_SCALE',
+      slack: 'WN_SLACK',
+      aSlot: 'WN_ASLOT',
+      bSlot: 'WN_BSLOT',
+      node0: 'WN_NODE0',
+      nNodes: 'WN_NNODES',
+      flags: 'WN_FLAGS',
+    };
+    for (const [field, define] of Object.entries(WIRE)) {
+      expect(cDefine(define), `solver.c's ${define} against WN.${field}`).toBe(
+        WN[field as keyof typeof WN],
+      );
+    }
+
+    const NODE: Record<keyof typeof ND, string> = {
+      x: 'ND_X',
+      y: 'ND_Y',
+      vx: 'ND_VX',
+      vy: 'ND_VY',
+      prevX: 'ND_PREVX',
+      prevY: 'ND_PREVY',
+      shapeX: 'ND_SX',
+      shapeY: 'ND_SY',
+    };
+    for (const [field, define] of Object.entries(NODE)) {
+      expect(cDefine(define), `solver.c's ${define} against ND.${field}`).toBe(
+        ND[field as keyof typeof ND],
+      );
+    }
+  });
+
+  it('agrees about the wire flags', () => {
+    expect(cDefine('WF_FULL')).toBe(WF_FULL);
+    expect(cDefine('WF_SKIP')).toBe(WF_SKIP);
+    expect(cDefine('WF_SHAPE')).toBe(WF_SHAPE);
+    expect(cDefine('WF_HOLD')).toBe(WF_HOLD);
   });
 });
