@@ -155,6 +155,40 @@ export class GenomeGpu {
    * like the genome. Growing that one loses every body's learning, so it is
    * grown generously and the caller re-pushes what it has.
    */
+  /**
+   * Zero the resident learning row, for a pond that is taking this device over
+   * from another one.
+   *
+   * The learning row is the one thing in this class that is *supposed* to
+   * outlive a frame, and that is exactly what made it outlive a pond. It is
+   * indexed by slot and lives on the device; `syncLearn` pushes a row up only
+   * when the host marks that slot dirty, and a brand-new `Sim` has no dirty
+   * slots — its own `plasticAll` is a fresh zeroed array, so it has nothing it
+   * thinks needs saying. The device kept the last pond's rows and handed them
+   * to whoever took slot 0 next.
+   *
+   * `FieldGpu.clear` exists for the same reason one buffer over, and the note
+   * on `Sim.openFieldGpu` has the story: a second pond "starts life standing in
+   * somebody else's dish". This is the same pond starting life with somebody
+   * else's learning — measured at `maxWeight` on every head, because thirty
+   * seconds of a previous trial had saturated them.
+   *
+   * The comment on `init` used to carry the reason this could not happen:
+   * `FieldGpu.init` had "no ready guard — every call requests a fresh adapter
+   * and device", so a second `Sim` got a new device and this whole class
+   * rebuilt. That guard exists now — `if (this.ready && this.device &&
+   * this.cells === cells * cells) return true` — so two ponds of the same grid
+   * size share a device, and the invariant that was doing the work quietly
+   * stopped being true.
+   */
+  clearLearning(): void {
+    const device = this.device;
+    if (!this.ready || !device || !this.learn) return;
+    const enc = device.createCommandEncoder();
+    enc.clearBuffer(this.learn);
+    device.queue.submit([enc.finish()]);
+  }
+
   reserve(n: number, nei: number, chemFloats: number, learnSlots = 0): boolean {
     const device = this.device;
     if (!device) return false;

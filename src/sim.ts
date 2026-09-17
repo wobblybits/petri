@@ -3286,7 +3286,22 @@ export class Sim {
      * that direction.
      */
     const dev = fieldGpu.gpuDevice;
-    if (dev && (await genomeGpu.init(dev))) this.genomeOnGpu = true;
+    if (dev && (await genomeGpu.init(dev))) {
+      this.genomeOnGpu = true;
+      /*
+       * And its learning, for the reason `fieldGpu.clear()` above is called:
+       * the resident learning row is indexed by slot and outlives whichever
+       * `Sim` last used it, so this pond's body in slot 0 would start with
+       * what the last pond's body in slot 0 had learned. `syncLearn` cannot
+       * catch it — it pushes a row only when the host marks that slot dirty,
+       * and a fresh `Sim` has nothing dirty to say.
+       *
+       * Only here, because `openFieldGpu` returns early for a pond that
+       * already holds the device: a Sim clears the row when it takes the
+       * device and never again, so nothing live is wiped.
+       */
+      genomeGpu.clearLearning();
+    }
     return true;
   }
 
