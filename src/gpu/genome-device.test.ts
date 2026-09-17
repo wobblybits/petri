@@ -58,6 +58,12 @@ function learnParams(): Params {
    * the learning rule rather than the harvest.
    */
   params.ambientEnergy = 20;
+  /*
+   * And no rent, for the same reason: it draws the pinned tanks down over the
+   * run, and `x4` is an input to the very rule under test — so the two copies
+   * would be learning from a number that is itself drifting apart.
+   */
+  params.upkeep = 0;
   // The reactor swings every wire's rest length, which moves bodies and is not
   // what this is asking about.
   params.metabolicRate = 0;

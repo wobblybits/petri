@@ -18,6 +18,13 @@ function liveLatchParams() {
    * latch failing, and it is not what this file is about.
    */
   params.learnExplore = 0;
+  /*
+   * And no rent. The drag law is `drag + grip * fullness`, so a rent that
+   * draws every tank down draws the damping down with it — measured, peak
+   * spin on the con-con snap goes from under 20 to 27.7. That is the coupling
+   * working and not the latch failing, and this file is about the geometry.
+   */
+  params.upkeep = 0;
   return params;
 }
 

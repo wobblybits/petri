@@ -44,6 +44,14 @@ function gaitParams(): Params {
    */
   p.groundPatches = 0;
   /*
+   * And no rent, or "a bare dish" stops being reachable. With `upkeepExcrete`
+   * at 1 the rent lands on the ground under the body that paid it, so a body
+   * standing on nothing quietly lays its own tank out in front of itself and
+   * eats it back — slowly, and at a loss to the reactor, but enough that the
+   * gut is never empty and the arm that asks for no clock at all has a clock.
+   */
+  p.upkeep = 0;
+  /*
    * The ground regrows and diffuses, because the reactor is fed by eating.
    * A body grazes the cell it is standing in, so without diffusion its own
    * patch never refills and it drops below the fuel window inside a minute —

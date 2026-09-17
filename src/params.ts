@@ -797,8 +797,8 @@ export interface Params {
    */
   fertilise: number;
   /**
-   * A standing rent on the tank, per second. **Ships at 0**, and what it was
-   * doing has three homes now.
+   * A standing rent on the tank, per second. **Back on at 0.01**, for the one
+   * job of its four that nothing else took over.
    *
    * It was one dial doing three jobs. *The standing cost* is the reactor's own
    * outflow: a body must keep eating to hold its pools against `metabolicDecay`
@@ -810,12 +810,39 @@ export interface Params {
    * the rent goes (28.9% to 30.8%). *Rationing rewrites* belongs to the
    * rewrite's own price, and that is `bodyValue`.
    *
-   * What the rent was also doing, unbilled, was **holding nets shallow**: it
-   * charges every body in a net whether or not that body is doing anything, so
-   * depth costs and a lineage that grows one bleeds. Turning it off with
-   * `bodyValue` at `REWRITE_SHARE`, measured over three seeds at 90 s: depth
-   * 0.49 -> 1.11, drift 0.172 -> 0.257, lines 364 -> 309. Fewer lineages,
-   * deeper, and further apart.
+   * What the rent was also doing, unbilled, was **holding nets shallow**, and
+   * that is the job it is back for. It charges every body in a net whether or
+   * not that body is doing anything, so depth costs and a lineage that grows
+   * one bleeds. With it off, dense fast-growing nets arose and then would not
+   * die: nothing charges a body for merely existing, so a net that stops
+   * growing is free, and `upkeepExcrete` at 1 returns its reactor's food to
+   * the cell it is standing in, so it restocks its own pasture and no body in
+   * it is ever hungry enough to start the §7.2 clock. Measured, a 40-body knot
+   * plateaued at 84 and sat there for four minutes with the clock reading zero
+   * the whole time.
+   *
+   * Rent is what makes that cost something, and it is density-dependent for
+   * free: at `upkeepExcrete` 1 the rent lands back on the ground under the
+   * body, so a lone body re-eats its own rent while a crowded one recovers
+   * only its share of it — the harvest is rate-limited and shared. Three
+   * seeds, 120 s, 400 founders, `biggestNet` being the largest connected
+   * component:
+   *
+   *     upkeep   bodies  lines  wires/body  biggestNet  tank  forage
+   *     0           424    171        0.98         146  0.46    1.65
+   *     0.005       312    167        0.91          88  0.59    1.44
+   *     0.01        277    189        0.89          82  0.65    1.40
+   *     0.02        218    158        0.84          31  0.74    1.27
+   *
+   * `biggestNet` is monotone in it and nothing else here is, which is what
+   * says this dial is the one that governs runaway size. 0.01 nearly halves it
+   * and has the *most* founder lines of the four — capping the runaway net is
+   * what leaves room for the others. 0.02 crushes it to 31 and costs lines.
+   *
+   * At 0.01 a full body has 200 s of arrears before `debtCap` kills it, which
+   * sits deliberately outside the 25 s starvation window: rent is the slow
+   * pressure and going hungry is the fast one, and a body can be killed by
+   * either.
    *
    * Hitting `debtCap` still kills; nothing else charges rent to do it.
    */
@@ -1275,10 +1302,20 @@ export interface Params {
    * are in their own units and outside the books, so that food leaves them.
    * At 1 it lands back on the ground the body is standing on.
    *
-   * **1, so a body is conservative: no reaction it runs creates or destroys
-   * matter.** That is the invariant that makes selection honest, and
-   * `docs/metabolism-spec.md` §3.2 has always said so while the dial said
-   * otherwise. It shipped at 0 — the reactor a sink, the pond quietly bleeding
+   * **1, so a body's *metabolism* neither creates nor destroys matter**: what
+   * `intake` routes to the reactor lands back on the ground rather than
+   * leaving the books. That is the invariant `docs/metabolism-spec.md` §3.2
+   * asks for and the dial used to deny.
+   *
+   * It is not the same as a conserved *pond*, and an earlier draft of this
+   * note overstated it. Measured with every inflow off — no regrowth, no
+   * immigration — and counting each living body's own `bodyValue` as well as
+   * its tank, a pond loses 8% of its matter in two minutes at `upkeep` 0 and
+   * 12% at 0.01. `deathYield` is `max(0, bodyValue + extra)`, so a body dying
+   * in debt destroys what it owed; that is the largest sink and it is
+   * deliberate — a corpse that starved leaves less than one that did not.
+   * A negative `eraUpkeepRatio` is a small source pointing the other way: it
+   * adds to a producer's tank without taking from the ground. It shipped at 0 — the reactor a sink, the pond quietly bleeding
    * matter — because turning it on used to lay the food down as the body's own
    * *excretion mix*, which for a Con is signal rather than food. Nothing
    * excretes now and it returns as ground.
@@ -1496,7 +1533,7 @@ export function defaultParams(): Params {
     energyDiffuse: 0.006,
     energyRegrow: 0.02,
     fertilise: 0,
-    upkeep: 0,
+    upkeep: 0.01,
     swimCost: 0,
     forageAsk: 0,
     rescueTo: 0.9,
