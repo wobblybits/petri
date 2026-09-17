@@ -1378,8 +1378,8 @@ describe('transport recoil', () => {
     const adj = new WireAdjacency();
     adj.build(list.length, index, () => wires);
     const west = chain[0];
-    // Mirrors the frame order in `Sim.pulseRequests` at the shipped
-    // `requestReach` 0: this frame's claims, relaxed to the fixpoint.
+    // Mirrors the frame order in `Sim.pulseRequests`: this frame's claims,
+    // relaxed to the fixpoint.
     for (let frame = 0; frame < 12; frame++) {
       west.extra = -0.9;
       resetRequests(list);

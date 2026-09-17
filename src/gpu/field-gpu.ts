@@ -25,7 +25,51 @@ import { CHANNELS, type Fields } from '../fields.ts';
  * written at the wrong offset reads as a plausible number rather than an
  * error, which is the whole hazard of hand-packing a uniform.
  */
-const UNIFORM_BYTES = 176;
+const UNIFORM_BYTES = 144;
+
+/**
+ * Where each field of `field.wgsl`'s `FieldParams` begins, in four-byte slots.
+ *
+ * The longest of the three and the one where counting was least safe: three
+ * `vec4f` sit in the middle, and a `vec4f` in a uniform aligns to sixteen
+ * bytes, so inserting a scalar anywhere above `mix` moves twelve slots by four
+ * rather than by one. The trailing `padN` round the struct up to a whole
+ * number of those blocks, and `field.wgsl` used to say of `pad5` that "the
+ * slot stays because the uniform is a whole number of sixteen-byte blocks and
+ * is packed by index" — which was true, and is what this map is for.
+ *
+ * Named on both sides and asserted in `uniform-layout.test.ts`, which applies
+ * those alignment rules rather than trusting either side's arithmetic.
+ */
+export const FIELD_U = {
+  cols: 0,
+  rows: 1,
+  nDeposit: 2,
+  nProbe: 3,
+  originX: 4,
+  originY: 5,
+  extent: 6,
+  fixedScale: 7,
+  worldX: 8,
+  worldY: 9,
+  boundR: 10,
+  growCh: 11,
+  mix: 12,
+  mix2: 16,
+  keep: 20,
+  growR: 24,
+  growCap: 25,
+  nBlocks: 26,
+  harvestCh: 27,
+  fillCh: 28,
+  fillValue: 29,
+  uptakeCap: 30,
+  uptakeKs: 31,
+  hillN: 32,
+  pad5: 33,
+  pad6: 34,
+  pad7: 35,
+} as const;
 /** Floats per Deposit and per Probe in the shader's layout. */
 const DEPOSIT_FLOATS = 8;
 const PROBE_FLOATS = 12;
@@ -52,7 +96,6 @@ type Entry =
   | 'applyAcc'
   | 'diffuse'
   | 'diffuse2'
-  | 'react'
   | 'decay'
   | 'grow'
   | 'harvest'
@@ -190,7 +233,6 @@ export class FieldGpu {
         'applyAcc',
         'diffuse',
         'diffuse2',
-        'react',
         'decay',
         'grow',
         'harvest',
@@ -354,12 +396,11 @@ export class FieldGpu {
     mix: number,
     mix2: number,
     decayRate: number,
-    grow: { ch: number; r: number; cap: number; catCh: number; gamma: number },
-    react: { u: number; v: number; feed: number; kill: number; dt: number },
+    grow: { ch: number; r: number; cap: number },
     harvest: { ch: number; blocks: number; entries: number; uptakeCap: number; uptakeKs: number; hillN: number },
     fill: { ch: number; value: number } | null,
   ): Promise<boolean> {
-    if (!this.submit(fields, nDeposit, nProbe, mix, mix2, decayRate, grow, react, harvest, fill)) {
+    if (!this.submit(fields, nDeposit, nProbe, mix, mix2, decayRate, grow, harvest, fill)) {
       return false;
     }
     return this.collect();
@@ -373,8 +414,7 @@ export class FieldGpu {
     mix: number,
     mix2: number,
     decayRate: number,
-    grow: { ch: number; r: number; cap: number; catCh: number; gamma: number },
-    react: { u: number; v: number; feed: number; kill: number; dt: number },
+    grow: { ch: number; r: number; cap: number },
     harvest: { ch: number; blocks: number; entries: number; uptakeCap: number; uptakeKs: number; hillN: number },
     fill: { ch: number; value: number } | null,
   ): boolean {
@@ -386,18 +426,19 @@ export class FieldGpu {
       const u = new ArrayBuffer(UNIFORM_BYTES);
       const u32 = new Uint32Array(u);
       const f32 = new Float32Array(u);
-      u32[0] = fields.cols;
-      u32[1] = fields.rows;
-      u32[2] = nDeposit;
-      u32[3] = nProbe;
-      f32[4] = fields.originX;
-      f32[5] = fields.originY;
-      f32[6] = fields.worldW;
-      f32[7] = FIXED_SCALE;
-      f32[8] = fields.boundX;
-      f32[9] = fields.boundY;
-      f32[10] = fields.boundR;
-      f32[11] = grow.ch;
+      const U = FIELD_U;
+      u32[U.cols] = fields.cols;
+      u32[U.rows] = fields.rows;
+      u32[U.nDeposit] = nDeposit;
+      u32[U.nProbe] = nProbe;
+      f32[U.originX] = fields.originX;
+      f32[U.originY] = fields.originY;
+      f32[U.extent] = fields.worldW;
+      f32[U.fixedScale] = FIXED_SCALE;
+      f32[U.worldX] = fields.boundX;
+      f32[U.worldY] = fields.boundY;
+      f32[U.boundR] = fields.boundR;
+      f32[U.growCh] = grow.ch;
       /*
        * Per-channel rates, resolved the same way `Fields` does: the slider is
        * one number for the world and each channel scales it. Clamped at one,
@@ -410,30 +451,23 @@ export class FieldGpu {
         const m1 = mix * dr;
         const m2 = mix2 * dr;
         const k = decayRate * kr;
-        f32[12 + c] = m1 > 1 ? 1 : m1;
-        f32[16 + c] = m2 > 1 ? 1 : m2;
-        f32[20 + c] = k >= 1 ? 0 : 1 - k;
+        f32[U.mix + c] = m1 > 1 ? 1 : m1;
+        f32[U.mix2 + c] = m2 > 1 ? 1 : m2;
+        f32[U.keep + c] = k >= 1 ? 0 : 1 - k;
       }
-      f32[24] = grow.r;
-      f32[25] = grow.cap;
-      f32[26] = grow.gamma;
-      f32[27] = grow.catCh;
-      f32[28] = react.feed * react.dt;
-      f32[29] = (react.feed + react.kill) * react.dt;
-      f32[30] = react.dt;
-      f32[32] = react.u;
-      f32[33] = react.v;
-      u32[34] = harvest.blocks;
-      f32[35] = harvest.ch;
-      f32[36] = fill ? fill.ch : 0;
-      f32[37] = fill ? fill.value : 0;
+      f32[U.growR] = grow.r;
+      f32[U.growCap] = grow.cap;
+      u32[U.nBlocks] = harvest.blocks;
+      f32[U.harvestCh] = harvest.ch;
+      f32[U.fillCh] = fill ? fill.ch : 0;
+      f32[U.fillValue] = fill ? fill.value : 0;
       // The two slots the struct used to pad with. See `harvest` in field.wgsl.
-      f32[38] = harvest.uptakeCap;
-      f32[39] = harvest.uptakeKs;
-      f32[40] = harvest.hillN;
-      // Slot 41 is `pad5`: catabolism left this pass for the host. Zeroed
-      // rather than skipped so a reused buffer cannot carry a stale value.
-      f32[41] = 0;
+      f32[U.uptakeCap] = harvest.uptakeCap;
+      f32[U.uptakeKs] = harvest.uptakeKs;
+      f32[U.hillN] = harvest.hillN;
+      // `pad5`: catabolism left this pass for the host. Zeroed rather than
+      // skipped so a reused buffer cannot carry a stale value.
+      f32[U.pad5] = 0;
       device.queue.writeBuffer(this.uniform!, 0, u);
       if (nDeposit > 0) {
         device.queue.writeBuffer(
@@ -510,9 +544,8 @@ export class FieldGpu {
       [live, other] = [other, live];
       run('diffuse2', this.cells, live, other);
       [live, other] = [other, live];
-      // Same order as the CPU: spread, react, decay, grow. `react` and `grow`
-      // both work in place on the live buffer, so neither swaps.
-      run('react', this.cells, live, other);
+      // Same order as the CPU: spread, decay, grow. `decay` and `grow` both
+      // work in place on the live buffer, so neither swaps.
       run('decay', this.cells, live, other);
       run('grow', this.cells, live, other);
       /*

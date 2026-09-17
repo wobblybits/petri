@@ -68,36 +68,12 @@ export interface Params {
    */
   declutter: number;
   /**
-   * Activity LOD budget. Settled taut islands run the cheap disc+span path
-   * even when they are on screen and close up; 0 turns the whole thing off.
-   * Live ropes, loners, grabs, rewrites and fresh latches stay NEAR whatever
-   * this says — the budget only caps how far a contact can propagate a wake.
-   *
-   * Off by default, because measured on this branch it costs more than it
-   * saves. It does exactly what it claims — a settled 1518-body mesh filling
-   * the viewport goes from 95% detailed to 2% — but the frame goes 22.8ms to
-   * 25.5ms, and the profiler puts the whole difference in `solve`. The reason
-   * is that the two mechanisms overlap almost perfectly: `ropeIsLive` already
-   * returns false for any wire whose `ropePath` is 'span', whatever the detail
-   * flag says, and a wire turns 'span' under the same aged-and-taut condition
-   * that makes its net sleepable. So the expensive half of NEAR is already off
-   * before sleep gets a vote, and all sleep can still remove is SAT on settled
-   * bodies — which is cheaper than the FAR path it moves them onto.
-   *
-   * Kept because the mechanism is sound and cheap when off, and because the
-   * branch it came from carried per-body audio work that NEAR paid for and
-   * this one no longer has. If NEAR ever grows an expensive per-body pass
-   * again, this is already here and already tested.
-   */
-  nearBudget: number;
-  /**
    * How hard a wire crossing a principal connection reels its own ends
    * together. Off by default: measured over three minutes of soup it made
    * crossings, clumping and rewrite throughput all slightly worse once
    * `declutter` was in, which already removes the crossings a local force
    * can plausibly undo. Kept as a knob because the detection is the cheap part.
    */
-  uncross: number;
   /**
    * How hard a rope pushes off other ropes and off bodies it is not attached
    * to. Segment-based and one-way — a rope never moves an agent — so this
@@ -187,22 +163,6 @@ export interface Params {
    * number to trust.
    */
   wireTug: number;
-  /**
-   * Energy per second of penetration depth, charged to both bodies in a
-   * contact. 0 = collisions are free.
-   *
-   * Damage rather than death. One rule kills — `extra` reaching the floor —
-   * and everything lethal works through the economy, so a bad knock is
-   * survivable and a body can recover from it. A separate physics death path
-   * would also turn any numerical fault into an extinction: the pond flew
-   * apart once already this week from a constant that disagreed across the
-   * wasm wall, and that should stay a thing you can watch and diagnose.
-   *
-   * It is also what gives `flockSep` something to select on. Keeping your
-   * distance is now heritable and nothing rewarded it; a cost for crowding
-   * lets a lineage work out whether to space out or tolerate the scrum.
-   */
-  contactCost: number;
   wireMinRest: number;
   wireShrink: number;
   eraMass: number;
@@ -722,34 +682,6 @@ export interface Params {
    * standing on them. The middle row is where the contrast doubles and the
    * bodies are most clearly *on* it.
    */
-  /**
-   * Gray-Scott feed and kill, between the two signal channels. Both 0 = off.
-   *
-   * `u + 2v -> 3v` run on `CH.conP` (substrate) and `CH.dupP` (activator).
-   * Without it every channel is a decaying hill around whoever is emitting, so
-   * what a body smells is always *who is there* — the field carries information
-   * but holds none of its own. A reaction puts maxima where nobody is standing,
-   * fronts that travel, and regions just used up and briefly unusable, so
-   * "over there" can start to mean something no emitter is saying.
-   *
-   * The ground is deliberately not one of the two. `CH.energy` is a conserved
-   * quantity the economy balances, and a reaction that converts it would create
-   * and destroy food as a side effect of signalling.
-   *
-   * Two things have to be arranged before this does anything but wash flat, and
-   * both are yours. The species must diffuse at different rates — Gray-Scott
-   * wants the substrate at roughly twice the activator, and `diffuseRate` is
-   * where that lives; equal rates have no instability to find. And the pair
-   * sits in a thin sliver of its own plane, roughly F in [0.01, 0.09] against
-   * k in [0.045, 0.07], with anything worth looking at inside a fraction of
-   * that. A default picked without a screen in front of it would be a uniform
-   * wash that looked like the code not working, which is why both ship at zero.
-   *
-   * Note `decay` still acts on both channels, so the effective kill is
-   * `decay + reactKill` rather than `reactKill` alone.
-   */
-  reactFeed: number;
-  reactKill: number;
   energyDiffuse: number;
   /**
    * Logistic regrowth rate, per second, toward `ambientEnergy` per cell.
@@ -767,35 +699,6 @@ export interface Params {
    * the spread alone leaves every cell reached and then filled.
    */
   energyRegrow: number;
-  /**
-   * How much the fertiliser channel accelerates regrowth, per unit of it.
-   *
-   * Growth becomes `r * (1 + fertilise * C) * E * (1 - E/K)`, where `C` is
-   * `FERTILISE_CH`. What this buys that the ground's excretion row does not
-   * is a *reason for
-   * two lineages to need each other*.
-   *
-   * Farming moves stock from a tank onto the dish: one body's investment, and
-   * the returner is the same body. This is catalysis — a lineage that emits on
-   * the fertiliser channel creates no energy at all, it makes the ground
-   * recover faster wherever it happens to be. It cannot feed itself that way
-   * any more than it already could, because the growth it accelerates is
-   * bounded by the same carrying capacity. What it can do is make the patch it
-   * stands in worth more to *somebody else*, and a grazer that stays near a
-   * fertiliser does better than one that does not. That is mutualism out of
-   * two genes and no new machinery.
-   *
-   * Negative is an inhibitor, which a lineage should be able to become — a
-   * body that poisons the ground around it denies a competitor more than it
-   * costs itself. The effective rate is clamped at zero, so an inhibitor can
-   * stall regrowth but never run it backwards; ground destroyed by being
-   * smelled at would be a hole in the conservation the economy depends on.
-   *
-   * Off by default, like every dial that changes what energy does. This one
-   * needs `energyRegrow` non-zero to mean anything at all — it scales a rate,
-   * and scaling zero is zero.
-   */
-  fertilise: number;
   /**
    * A standing rent on the tank, per second. **Back on at 0.01**, for the one
    * job of its four that nothing else took over.
@@ -870,26 +773,6 @@ export interface Params {
    */
   swimCost: number;
   /**
-   * How loudly a body asks for energy on account of liking where it is.
-   *
-   * The other half of the motor. A price on swimming alone gives a net a fuel
-   * bill; this is what makes the bill *directional*. A body with a free
-   * principal reads its own `trail` — everything it can smell, through its own
-   * taste weights — and asks in proportion, so the bodies standing where the
-   * net most wants to be are the ones that get fed and thrust hardest.
-   *
-   * Off by default, like the other two dials that change what energy is spent
-   * on. Not caution for its own sake: the field takes the largest claim it can
-   * see, so an appetite competes directly with `rescueNeed` and `redexNeed` —
-   * somebody about to die, and somebody about to reproduce. At 0.05 against
-   * the scent a pond makes of itself it already outbid a rescue, topping a
-   * dying body past its own `rescueTo` to a full tank while its donors went
-   * without. Wanting to go somewhere nice should lose to both of those, and
-   * where the crossover sits depends on how loud the pond is, which is four
-   * other sliders. Worth tuning by eye rather than guessing a default.
-   */
-  forageAsk: number;
-  /**
    * Fraction of this body's own tank a rescue fills, from `debtCap` at 0 to
    * `energyCap` at 1. The absolute extra it asks up to is
    * `debtCap + rescueTo * (energyCap - debtCap)`, so it cannot land outside
@@ -947,43 +830,6 @@ export interface Params {
    * population starts and what a mutation is centred near.
    */
   requestDecay: number;
-  /**
-   * Hops the need field carries in one frame. 0 = as far as it goes, which is
-   * the pond as it was.
-   *
-   * The field is a potential: every body holds the largest need it can see,
-   * attenuated per hop by whoever relays it. At 0 that potential is solved to
-   * a fixpoint every frame, so a shortage anywhere is *known* everywhere on
-   * the frame it arises — demand has no front, nothing propagates, and the
-   * whole net answers at once. That is most of why a net pulses rather than
-   * walks, and it is why nothing in here can carry a wave.
-   *
-   * Above 0 the field advances that many hops a frame off the previous
-   * frame's values, so a need takes a frame per wire to travel and drains
-   * behind itself when it stops. The fixpoint is unchanged — `request_i =
-   * max(claim_i, max_j request_j * keep_j)` is the same equation either way —
-   * so a settled field settles where it always did. What changes is that
-   * getting there takes time, and that time is what a travelling wave is made
-   * of.
-   *
-   * It also changes what the economy *is*, which is why it ships off. A
-   * global relaxation is global triage: every donor compares its neighbour
-   * against the worst case anywhere on the net, so the dying body outranks
-   * the merely empty one however far away it is. One hop a frame is local
-   * equalisation: a body can only weigh what it can see, and a corridor of
-   * empty bodies absorbs a reservoir on its way past rather than relaying it.
-   * Measured on `energy.test.ts`'s corridor — twelve bodies, a reservoir at
-   * one end and a body in debt at the other — at 1 the reservoir is empty
-   * inside twenty frames and the patient ends on exactly zero, having been
-   * filled and then drained back into the corridor. At 0 it is fed to its
-   * rescue target and stays there.
-   *
-   * So this is not a free improvement, it is a trade, and the thing that
-   * would pay for it is a need field that tells dying from empty by more than
-   * the difference between `rescueNeed`'s two branches. That is the next
-   * question and it is not settled here.
-   */
-  requestReach: number;
   /**
    * Momentum a body recoils with per unit of energy it pumps to a neighbour.
    * 0 = off.
@@ -1236,8 +1082,7 @@ export interface Params {
 
   /*
    * Chemistry. Every one of these ships
-   * at the value that reduces to the behaviour before it existed, which is
-   * the same discipline `fertilise` and `reactFeed` follow.
+   * at the value that reduces to the behaviour before it existed.
    */
 
   /**
@@ -1481,8 +1326,6 @@ export function defaultParams(): Params {
     springDamp: 45,
     auxSpread: 1.7,
     declutter: 1.4,
-    nearBudget: 0,
-    uncross: 0,
     wireClear: 1,
     portStiff: 2,
     wireBreathe: 0.04,
@@ -1490,7 +1333,6 @@ export function defaultParams(): Params {
     wireSpanAge: 10,
     wireTaut: 1.08,
     wireSnap: 3,
-    contactCost: 0,
     wireTug: 0.3,
     wireMinRest: 48,
     wireShrink: 0.2,
@@ -1528,19 +1370,14 @@ export function defaultParams(): Params {
     spawnInterval: 0.5,
     energyCell: 40,
     ambientEnergy: 0.5,
-    reactFeed: 0,
-    reactKill: 0,
     energyDiffuse: 0.006,
     energyRegrow: 0.02,
-    fertilise: 0,
     upkeep: 0.01,
     swimCost: 0,
-    forageAsk: 0,
     rescueTo: 0.9,
     assortBias: 0.5,
     debtCap: -1,
     requestDecay: 0.95,
-    requestReach: 0,
     transportRecoil: 100,
     transportQuantum: 0.5,
     transportThrust: 0,
@@ -1623,15 +1460,12 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'portStiff', label: 'Port stiffness', min: 0.1, max: 4, step: 0.05 },
   { key: 'auxSpread', label: 'Aux spread', min: 0, max: 3, step: 0.05 },
   { key: 'declutter', label: 'Personal space', min: 0, max: 4, step: 0.05 },
-  { key: 'nearBudget', label: 'NEAR budget', min: 0, max: 2000, step: 25 },
-  { key: 'uncross', label: 'Uncross', min: 0, max: 4, step: 0.05 },
   { key: 'wireClear', label: 'Wire clearance', min: 0, max: 4, step: 0.05 },
   { key: 'wireBreathe', label: 'Wire breathe', min: 0, max: 0.15, step: 0.005 },
   { key: 'wireShapeAge', label: 'Shape drop (s)', min: 0, max: 30, step: 0.1 },
   { key: 'wireSpanAge', label: 'Span-only (s)', min: 0, max: 60, step: 0.5 },
   { key: 'wireTaut', label: 'Taut ratio', min: 1, max: 1.5, step: 0.01 },
   { key: 'wireSnap', label: 'Wire snap ratio', min: 0, max: 6, step: 0.1 },
-  { key: 'contactCost', label: 'Impact cost', min: 0, max: 0.2, step: 0.005 },
   { key: 'eraMass', label: 'Era mass', min: 0.15, max: 2, step: 0.05 },
   { key: 'nodeMass', label: 'Con/Dup mass', min: 0.3, max: 4, step: 0.05 },
   { key: 'maxAgents', label: 'Max agents', min: 8, max: 8000, step: 1 },
@@ -1640,19 +1474,14 @@ export const SLIDERS: SliderSpec[] = [
   // scent field's cell for the two grids to line up (see EnergyGrid).
   { key: 'energyCell', label: 'Energy cell', min: FIELD_CELL, max: 160, step: FIELD_CELL },
   { key: 'ambientEnergy', label: 'Ambient energy', min: 0, max: 2, step: 0.05 },
-  { key: 'reactFeed', label: 'React feed', min: 0, max: 0.1, step: 0.001 },
-  { key: 'reactKill', label: 'React kill', min: 0, max: 0.08, step: 0.001 },
   { key: 'energyDiffuse', label: 'Ground spread', min: 0, max: 0.5, step: 0.005 },
   { key: 'energyRegrow', label: 'Ground regrow', min: 0, max: 0.4, step: 0.005 },
-  { key: 'fertilise', label: 'Fertilise', min: -2, max: 8, step: 0.1 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
   { key: 'swimCost', label: 'Swim cost', min: 0, max: 0.002, step: 0.00005 },
-  { key: 'forageAsk', label: 'Forage ask', min: 0, max: 0.5, step: 0.01 },
   { key: 'rescueTo', label: 'Rescue fill', min: 0, max: 1, step: 0.05 },
   { key: 'assortBias', label: 'Assortment (seed)', min: 0, max: 1, step: 0.05 },
   { key: 'debtCap', label: 'Debt cap', min: -2.5, max: -0.05, step: 0.05 },
   { key: 'requestDecay', label: 'Demand decay', min: 0.5, max: 0.98, step: 0.01 },
-  { key: 'requestReach', label: 'Demand hops/frame', min: 0, max: 12, step: 1 },
   { key: 'transportRecoil', label: 'Pump recoil (seed)', min: 0, max: 200, step: 5 },
   { key: 'transportThrust', label: 'Pump thrust (seed)', min: 0, max: 1, step: 0.05 },
   { key: 'transportQuantum', label: 'Transport quantum', min: 0, max: 1, step: 0.05 },

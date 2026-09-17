@@ -1,6 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { CH } from './fields.ts';
-import { TASTE } from './agents.ts';
 import { defaultParams } from './params.ts';
 import { fixedParams } from './test-params.ts';
 import { Sim } from './sim.ts';
@@ -14,10 +12,11 @@ import { Sim } from './sim.ts';
  * alive, and a net could not have a motor because there was nothing a motor
  * would cost.
  *
- * `swimCost` is the price, and `forageAsk` is what makes the bill directional
- * — a body asks in proportion to how much it likes what it can smell, so the
- * energy goes to whichever of a net's swimmers is standing somewhere worth
- * standing.
+ * `swimCost` is the price. It had a companion — `forageAsk`, which made the
+ * bill directional by letting a body ask in proportion to how much it liked
+ * what it could smell — and that is gone: it shipped at 0, so no pond ever
+ * asked. What is left is the price itself, and the three claims on the need
+ * field are again the two shortfalls, `rescueNeed` and `redexNeed`.
  */
 
 function lone(params: ReturnType<typeof defaultParams>, speed: number): Sim {
@@ -94,63 +93,6 @@ describe('swimming costs energy', () => {
     }
   });
 });
-
-describe('appetite', () => {
-  it('asks for energy in proportion to what it likes about where it is', () => {
-    const params = fixedParams();
-    params.spawnInterval = 0;
-    params.upkeep = 0;
-    params.rewriteDuration = 0;
-    params.forageAsk = 0.5;
-
-    // Two bodies alike but for their taste: one is drawn to the ground it is
-    // standing on, one is indifferent to everything.
-    const sim = new Sim(10000, 10000);
-    const keen = sim.spawn('con', 5000, 5000, 0, params, true)!;
-    const dull = sim.spawn('con', 5400, 5000, 0, params, true)!;
-    for (let k = 0; k < 4; k++) {
-      keen.chem[TASTE + k] = 0;
-      dull.chem[TASTE + k] = 0;
-    }
-    keen.chem[TASTE + CH.energy] = 4;
-    for (let f = 0; f < 20; f++) sim.step(1 / 60, params);
-
-    expect(keen.request, 'a body that likes where it is should be asking').toBeGreaterThan(0);
-    expect(dull.request, 'a body that wants nothing should be quiet').toBe(0);
-  });
-
-  it('stays quiet about somewhere it actively dislikes', () => {
-    // Taste is signed, so a trail can be negative. That is a reason to leave,
-    // not a reason to be fed.
-    const params = fixedParams();
-    params.spawnInterval = 0;
-    params.upkeep = 0;
-    params.rewriteDuration = 0;
-    params.forageAsk = 0.5;
-    const sim = new Sim(10000, 10000);
-    const a = sim.spawn('con', 5000, 5000, 0, params, true)!;
-    for (let k = 0; k < 4; k++) a.chem[TASTE + k] = 0;
-    a.chem[TASTE + CH.energy] = -4;
-    for (let f = 0; f < 20; f++) sim.step(1 / 60, params);
-    expect(a.trail, 'the setup should have given it something to dislike').toBeLessThan(0);
-    expect(a.request).toBe(0);
-  });
-
-  it('is off when the dial is', () => {
-    const params = fixedParams();
-    params.spawnInterval = 0;
-    params.upkeep = 0;
-    params.rewriteDuration = 0;
-    params.forageAsk = 0;
-    const sim = new Sim(10000, 10000);
-    const a = sim.spawn('con', 5000, 5000, 0, params, true)!;
-    for (let k = 0; k < 4; k++) a.chem[TASTE + k] = 0;
-    a.chem[TASTE + CH.energy] = 4;
-    for (let f = 0; f < 20; f++) sim.step(1 / 60, params);
-    expect(a.request).toBe(0);
-  });
-});
-
 describe('port occupancy', () => {
   it('tracks how much of a body is attached, and updates when that changes', () => {
     const params = fixedParams();

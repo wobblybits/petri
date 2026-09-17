@@ -61,10 +61,10 @@ import {
 } from './agents.ts';
 import { AgentStore, CODE_KIND } from './agent-store.ts';
 import { queryHit, queryDiscHit, SLOP, type Hit } from './collide.ts';
-import { closestTOnSegment, segmentsIntersect, WIRE_RADIUS, wireBowBudget, bounceOffDisk } from './geom.ts';
+import { closestTOnSegment, WIRE_RADIUS, wireBowBudget, bounceOffDisk } from './geom.ts';
 import { PairGrid } from './grid.ts';
 import { CHAIN_MASS, contactMechanics, portExitAngle, solveContact } from './chain.ts';
-import { CH, FERTILISE_CH, FIELD_CELL, FIELD_CELLS, Fields, worldBoundRadius } from './fields.ts';
+import { CH, FIELD_CELL, FIELD_CELLS, Fields, worldBoundRadius } from './fields.ts';
 import { Graph, ropeIsLive, wrapPos, type Wire } from './graph.ts';
 import { LarvalWindow } from './larval.ts';
 import type { Params } from './params.ts';
@@ -101,7 +101,6 @@ import {
   settlePool,
   stakeMet,
   relaxRequestsFast,
-  spreadRequestsFast,
   tickUpkeepFast,
   WireAdjacency,
 } from './energy.ts';
@@ -476,7 +475,6 @@ export class Sim {
    * — reading it live would let one body's need race several hops in a pass,
    * in whatever order the roster happens to be in.
    */
-  private requestPrev = new Float64Array(0);
 
   /** Scratch for one diffusion step: the pull on each body, and its degree. */
 
@@ -648,27 +646,6 @@ export class Sim {
     return this.physLod.peek(agentKey(agentId)) === LOD_FAR;
   }
 
-  /*
-   * Activity LOD — dual-rate islands.
-   *
-   * The view LOD demotes a body for being far away. This demotes it for being
-   * still: a taut, aged, calm net runs the same cheap disc+span path even on
-   * screen and close up, so only the parts of the pond actually doing
-   * something pay NEAR prices. The two compose in `agentDetailed` and either
-   * can veto.
-   *
-   * It is the one change here that reduces how many bodies do expensive work
-   * rather than making the work per body cheaper — and the one that changes
-   * behaviour, because a sleeping body is off the SAT path and settled tissue
-   * can therefore rest a little closer together than it otherwise would.
-   */
-  private sleepActive = false;
-  private readonly awakeAgents = new Set<number>();
-  /** id -> time until which it stays awake, so the boundary cannot flicker. */
-  private readonly holdAwake = new Map<number, number>();
-  /** Contact pairs from the collision pass, flattened, drained each frame. */
-  private readonly hitWake: number[] = [];
-
   /** Eased centre of mass. Rewrites delete agents, which jumps the true COM. */
   private home: { x: number; y: number } | null = null;
 
@@ -783,10 +760,6 @@ export class Sim {
     this.contacts.clear();
     this.physLod.clear();
     this.detailedAgents.clear();
-    this.sleepActive = false;
-    this.awakeAgents.clear();
-    this.holdAwake.clear();
-    this.hitWake.length = 0;
     this.ropesDrawable = true;
     this.lodActive = false;
     /*
@@ -924,8 +897,6 @@ export class Sim {
     Sim.phase('collectRewriteFrozen');
     this.assignPhysicsLod(view);
     Sim.phase('assignPhysicsLod');
-    this.assignActivityLod(params);
-    Sim.phase('assignActivityLod');
     this.graph.syncRest(this.time, params, this.agents, this.agentStore.gaitWave, this.wireDetailed);
     Sim.phase('syncRest');
     this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
@@ -1043,7 +1014,7 @@ export class Sim {
     // of moving them over: measured at 9600 agents, a pass that dropped from
     // 13 ms to 1.6 ms of compute still cost 7 ms because it packed 6 ms of
     // bodies to get there.
-    const block = this.openForceBlock(params);
+    const block = this.openForceBlock();
     this.refreshForceScratch(this.forceList());
     this.refreshBound();
     Sim.phase('openForceBlock');
@@ -1053,8 +1024,6 @@ export class Sim {
     Sim.phase('portTorques');
     this.declutter(params, t);
     Sim.phase('declutter');
-    this.uncrossPrincipals(params, t);
-    Sim.phase('uncrossPrincipals');
     this.flock(params, t);
     Sim.phase('flock');
     // The hard rim lives inside the integrator (JS solve / native step /
@@ -1168,7 +1137,6 @@ export class Sim {
      */
     this.runDigestion(params, t);
     Sim.phase('digest');
-    for (const id of this.contactDamage(params, t)) this.kill(id);
     for (const id of tickUpkeepFast(this.agents.values(), this.agentStore, t, params.upkeep, this.energy, {
       rentBack: params.upkeepExcrete,
       eraRatio: params.eraUpkeepRatio,
@@ -1222,22 +1190,11 @@ export class Sim {
       Sim.phase('field:diffuse1');
       this.fields.diffuse(params.diffuse * 0.65);
       Sim.phase('field:diffuse2');
-      // After the spreading and before the decay: Gray-Scott's own kill term
-      // is `feed + kill`, and `decay` then acts on both channels on top of it,
-      // so the effective kill is larger than `reactKill` alone.
-      this.fields.react(CH.conP, CH.dupP, params.reactFeed, params.reactKill, t);
-      Sim.phase('field:react');
       this.fields.decay(params.decay);
       Sim.phase('field:decay');
       // After the passes that move it, so a cell grows from what it kept
       // rather than from what it was about to lose.
-      this.fields.grow(
-        CH.energy,
-        params.energyRegrow * t,
-        this.energy.cellCap,
-        FERTILISE_CH,
-        params.fertilise,
-      );
+      this.fields.grow(CH.energy, params.energyRegrow * t, this.energy.cellCap);
       Sim.phase('field:grow');
     }
     this.autoSpawn(params, t);
@@ -1390,15 +1347,16 @@ export class Sim {
   /**
    * Open a shared copy for the run of WASM force passes.
    *
-   * Only when every pass in that run is native: `uncrossPrincipals` is still
-   * JS, so a scene that uses it would have that pass read stale velocities and
-   * then have its own writes overwritten on unpack. It is off by default, and
-   * when it is on each pass falls back to copying for itself.
+   * Only when every pass in that run is native, which is now the only kind
+   * there is. It used to refuse whenever `params.uncross` was non-zero,
+   * because `uncrossPrincipals` was a JS pass in the middle of the run and
+   * would have read stale velocities and then had its own writes overwritten
+   * on unpack. That pass is gone — it shipped at 0 and never ran — and with it
+   * the one case where this had to decline and let every pass copy for itself.
    */
-  private openForceBlock(params: Params): boolean {
+  private openForceBlock(): boolean {
     this.forceBlock = false;
     if (!Sim.nativeForces || !nativeSolver.ready) return false;
-    if (params.uncross > 0) return false;
     const list = this.forceList();
     if (list.length === 0) return false;
     if (!this.packPose(list)) return false;
@@ -1599,7 +1557,7 @@ export class Sim {
    * The same two endpoints as positions in `forceList()`, or -1.
    *
    * Every pass that walks wires wants this and every one of them used to
-   * ask a `Map` for it, twice a wire: the flocking adjacency, the wake
+   * ask a `Map` for it, twice a wire: the flocking adjacency, the body
    * graph, the need field, and all four packs. At thirty thousand wires
    * that is a few hundred thousand lookups a frame for a table that changes
    * only when the graph or the roster does, which is the same key this list
@@ -1777,18 +1735,18 @@ export class Sim {
       return this.wireAdj;
     }
     /*
-     * The wake graph's CSR again, aliased rather than copied.
+     * The body adjacency CSR again, aliased rather than copied.
      *
      * Four passes wanted the wire graph as neighbour lists — the two LOD
      * passes, flocking, and this one for the need field and the genome — and
      * each built its own from the same wires in the same order on the same
-     * key. `refreshWakeGraph` is the one that builds it; this hands the same
+     * key. `refreshBodyAdjacency` is the one that builds it; this hands the same
      * two arrays to the energy passes, which only read them. The queue
      * scratch stays this object's own, since the relaxation does write that.
      */
-    this.refreshWakeGraph();
-    this.wireAdj.off = this.wakeOff;
-    this.wireAdj.nei = this.wakeNei;
+    this.refreshBodyAdjacency();
+    this.wireAdj.off = this.adjOff;
+    this.wireAdj.nei = this.adjNei;
     this.adjGraphVersion = this.graph.version;
     this.adjRosterVersion = this.rosterVersion;
     return this.wireAdj;
@@ -1914,22 +1872,15 @@ export class Sim {
   }
 
   private agentDetailed(id: number): boolean {
-    if (this.lodActive && !this.detailedAgents.has(id)) return false;
-    if (this.sleepActive && !this.awakeAgents.has(id)) return false;
-    return true;
+    return !this.lodActive || this.detailedAgents.has(id);
   }
 
-  private static readonly WAKE_HOPS = 2;
-  private static readonly WAKE_HOLD = 0.4;
-  private static readonly LATCH_WAKE = 0.5;
-
-  private wakeGraphVersion = -1;
-  private wakeGraphRoster = -1;
-  private readonly wakeList: Agent[] = [];
-  private wakeOff = new Int32Array(1);
-  private wakeNei = new Int32Array(0);
-  private wakeDist = new Int32Array(0);
-  private wakeQ = new Int32Array(0);
+  private adjVersion = -1;
+  private adjRoster = -1;
+  private readonly adjList: Agent[] = [];
+  private adjOff = new Int32Array(1);
+  private adjNei = new Int32Array(0);
+  private adjCursor = new Int32Array(0);
 
   /**
    * Bodies and their wire adjacency in CSR, rebuilt only when topology moves.
@@ -1937,27 +1888,30 @@ export class Sim {
    * The version this was ported from rebuilt an array-of-arrays every frame —
    * the same per-frame rebuild of topology-derived scratch that flocking and
    * the force passes were each doing, and which cost more than the work it fed.
+   *
+   * It was `refreshWakeGraph` until the activity LOD went, because a wake
+   * front spreading two hops along the wires was the first thing that wanted
+   * it. That reader is gone and four remain — `wireAdjacency`,
+   * `assignPhysicsLod`, `flock` and `flockNative` — so it is named for what it
+   * is rather than for whoever asked first.
    */
-  private refreshWakeGraph(): number {
-    const list = this.wakeList;
+  private refreshBodyAdjacency(): number {
+    const list = this.adjList;
     if (
-      this.wakeGraphVersion === this.graph.version &&
-      this.wakeGraphRoster === this.rosterVersion
+      this.adjVersion === this.graph.version &&
+      this.adjRoster === this.rosterVersion
     ) {
       return list.length;
     }
-    // The shared list, so the wake graph is cut against exactly the order
+    // The shared list, so the adjacency is cut against exactly the order
     // every other pass indexes by.
     const src = this.forceList();
     list.length = 0;
     for (let i = 0; i < src.length; i++) list.push(src[i]);
     const n = list.length;
-    if (this.wakeOff.length < n + 2) this.wakeOff = new Int32Array(n * 2 + 4);
-    if (this.wakeDist.length < n) {
-      this.wakeDist = new Int32Array(n * 2);
-      this.wakeQ = new Int32Array(n * 2);
-    }
-    const off = this.wakeOff;
+    if (this.adjOff.length < n + 2) this.adjOff = new Int32Array(n * 2 + 4);
+    if (this.adjCursor.length < n) this.adjCursor = new Int32Array(n * 2);
+    const off = this.adjOff;
     off.fill(0, 0, n + 2);
     // Counting sort into CSR: one pass to count degrees, one to place.
     const wires = this.wireListResolved();
@@ -1973,9 +1927,9 @@ export class Sim {
       edges += 2;
     }
     for (let i = 0; i < n; i++) off[i + 1] += off[i];
-    if (this.wakeNei.length < edges) this.wakeNei = new Int32Array(edges * 2);
-    const nei = this.wakeNei;
-    const cursor = this.wakeQ;
+    if (this.adjNei.length < edges) this.adjNei = new Int32Array(edges * 2);
+    const nei = this.adjNei;
+    const cursor = this.adjCursor;
     for (let i = 0; i < n; i++) cursor[i] = off[i];
     for (let k = 0; k < wires.length; k++) {
       const ia = wai[k];
@@ -1984,136 +1938,10 @@ export class Sim {
       nei[cursor[ia]++] = ib;
       nei[cursor[ib]++] = ia;
     }
-    this.wakeGraphVersion = this.graph.version;
-    this.wakeGraphRoster = this.rosterVersion;
+    this.adjVersion = this.graph.version;
+    this.adjRoster = this.rosterVersion;
     return n;
   }
-
-  /**
-   * Dual-rate islands. A taut, aged, calm net does not need SAT or a live rope
-   * — the same cheap path the view LOD already uses when zoomed out — even
-   * when it is on screen. Live ropes, loners, grabs, rewrites and fresh
-   * latches stay NEAR. A contact against an already-awake body expands the
-   * set; nothing here ever demotes a live rope.
-   */
-  private assignActivityLod(params: Params): void {
-    this.awakeAgents.clear();
-    this.sleepActive = params.nearBudget > 0;
-    if (!this.sleepActive) {
-      this.holdAwake.clear();
-      this.hitWake.length = 0;
-      return;
-    }
-    const n = this.refreshWakeGraph();
-    if (n === 0) {
-      this.hitWake.length = 0;
-      return;
-    }
-    const at = this.slotIndex;
-    const list = this.wakeList;
-    const hop = this.wakeDist;
-    const q = this.wakeQ;
-    hop.fill(-1, 0, n);
-    let qt = 0;
-    const now = this.time;
-    const sticky: number[] = [];
-
-    /**
-     * Seed by index. `hold` keeps it awake past the reason that woke it.
-     *
-     * Returns whether this call actually woke something new — which the
-     * contact loop below needs, because it runs to a fixed point. A seed that
-     * changes nothing must not count as progress: `hitWake` is filled during
-     * the collision pass and drained here, so it can name a body that has
-     * since been rewritten away and is no longer in the index at all. Reported
-     * as progress, that pair alone spins the loop forever.
-     */
-    const seed = (id: number, hold: boolean): boolean => {
-      const a = this.agents.get(id);
-      if (!a) return false;
-      const i = at[a.slot];
-      if (i < 0) return false;
-      if (hop[i] >= 0) {
-        if (hold && !this.holdAwake.has(id)) sticky.push(id);
-        return false;
-      }
-      if (hold) sticky.push(id);
-      hop[i] = 0;
-      q[qt++] = i;
-      this.awakeAgents.add(id);
-      return true;
-    };
-
-    if (this.grabbed) seed(this.grabbed.id, true);
-    for (const id of this.rewriteFrozen) seed(id, true);
-    for (const [id, until] of this.holdAwake) {
-      if (until < now) this.holdAwake.delete(id);
-      else seed(id, false);
-    }
-    // A body with nothing attached is a swimmer: it needs real collision, and
-    // there is no island for it to be the still interior of.
-    for (let i = 0; i < n; i++) {
-      const a = list[i];
-      if (!a.locked && !this.graph.isWired(a)) seed(a.id, true);
-    }
-    // A rope that is still being simulated, or a latch too young to have
-    // settled, means the geometry there is not done moving.
-    for (const w of this.graph.wires.values()) {
-      if (w.ropePath !== 'span' || now - w.born < Sim.LATCH_WAKE) {
-        seed(w.a.id, true);
-        seed(w.b.id, true);
-      }
-    }
-
-    /*
-     * Contact propagation, to a fixed point. If exactly one side of a contact
-     * is awake, wake the other — repeatedly, so a wake travels the whole chain
-     * of touching bodies inside one frame rather than one link per frame. The
-     * budget is the only thing that stops it, which is what makes `nearBudget`
-     * a budget rather than a threshold.
-     */
-    const hits = this.hitWake;
-    const budget = params.nearBudget;
-    let grew = true;
-    while (grew && this.awakeAgents.size < budget) {
-      grew = false;
-      for (let k = 0; k < hits.length; k += 2) {
-        if (this.awakeAgents.size >= budget) break;
-        const a = hits[k];
-        const b = hits[k + 1];
-        const aOn = this.awakeAgents.has(a);
-        const bOn = this.awakeAgents.has(b);
-        if (aOn === bOn) continue;
-        if (seed(aOn ? b : a, true)) grew = true;
-      }
-    }
-    hits.length = 0;
-
-    /*
-     * Spread out to WAKE_HOPS along the wires. Without the halo a body pops to
-     * NEAR while its immediate neighbours stay coarse, and the constraint
-     * between them is then being solved by two different solvers.
-     */
-    let qh = 0;
-    while (qh < qt) {
-      const u = q[qh++];
-      const du = hop[u];
-      if (du >= Sim.WAKE_HOPS) continue;
-      const a0 = this.wakeOff[u];
-      const a1 = this.wakeOff[u + 1];
-      for (let k = a0; k < a1; k++) {
-        const v = this.wakeNei[k];
-        if (hop[v] >= 0) continue;
-        hop[v] = du + 1;
-        q[qt++] = v;
-        this.awakeAgents.add(list[v].id);
-      }
-    }
-
-    const holdUntil = now + Sim.WAKE_HOLD;
-    for (const id of sticky) this.holdAwake.set(id, holdUntil);
-  }
-
   /** True when this body is on the SAT / XPBD rope path. */
   isPhysicsDetailed(id: number): boolean {
     return this.agentDetailed(id);
@@ -2196,20 +2024,20 @@ export class Sim {
     }
 
     /*
-     * The wake graph's CSR rather than an adjacency of its own.
+     * The body adjacency CSR rather than an adjacency of its own.
      *
      * This used to build an array-of-arrays every frame — a push per wire
      * end into one of ten thousand arrays — over the same wires, in the same
-     * order, that `refreshWakeGraph` already keeps as a flat CSR keyed on the
+     * order, that `refreshBodyAdjacency` already keeps as a flat CSR keyed on the
      * graph and the roster. Worse, it built it into `flockAdj`, which
      * `flock` caches on exactly that key and would happily have gone on
      * using: the two agreed only because they were building the same thing.
      */
-    const n = this.refreshWakeGraph();
-    const list = this.wakeList;
+    const n = this.refreshBodyAdjacency();
+    const list = this.adjList;
     const at = this.slotIndex;
-    const off = this.wakeOff;
-    const nei = this.wakeNei;
+    const off = this.adjOff;
+    const nei = this.adjNei;
     if (this.flockDist.length < n) {
       const cap = Math.max(n * 2, 16);
       this.flockDist = new Int32Array(cap);
@@ -2444,7 +2272,6 @@ export class Sim {
     const h = dt / Sim.SUBSTEPS;
     this.collectRewriteFrozen();
     this.assignPhysicsLod(view);
-    this.assignActivityLod(params);
     this.graph.syncRest(this.time, params, this.agents, this.agentStore.gaitWave, this.wireDetailed);
     this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
@@ -2565,97 +2392,6 @@ export class Sim {
       }
     });
   }
-
-  /**
-   * Finds wires whose chords cross a principal connection and eases the pair
-   * apart. A principal wire is the one that matters: it is the redex, and a
-   * wire lying across it keeps the two agents from ever meeting cleanly.
-   *
-   * The response is lateral — each crossed wire's endpoints slide away from the
-   * other wire's line. Pulling the agents along their own wire instead (the
-   * obvious "move forward") mostly just shortens the chord and leaves the
-   * crossing where it was.
-   */
-  private uncrossPrincipals(params: Params, dt: number): void {
-    const gain = params.uncross;
-    if (gain <= 0 || dt <= 0) return;
-    type Chord = {
-      wireA: Agent;
-      wireB: Agent;
-      ax: number;
-      ay: number;
-      bx: number;
-      by: number;
-      principal: boolean;
-    };
-    const chords: Chord[] = [];
-    for (const wire of this.graph.wires.values()) {
-      const A = this.agents.get(wire.a.id);
-      const B = this.agents.get(wire.b.id);
-      if (!A || !B) continue;
-      const sa = stemWorld(A, wire.a.slot, this.w, this.h);
-      const sb = stemWorld(B, wire.b.slot, this.w, this.h);
-      chords.push({
-        wireA: A,
-        wireB: B,
-        ax: sa.x,
-        ay: sa.y,
-        bx: sb.x,
-        by: sb.y,
-        principal: wire.a.slot === 'p' || wire.b.slot === 'p',
-      });
-    }
-    for (let i = 0; i < chords.length; i++) {
-      for (let j = i + 1; j < chords.length; j++) {
-        const S = chords[i];
-        const T = chords[j];
-        if (!S.principal && !T.principal) continue;
-        if (
-          S.wireA === T.wireA ||
-          S.wireA === T.wireB ||
-          S.wireB === T.wireA ||
-          S.wireB === T.wireB
-        ) {
-          continue;
-        }
-        if (
-          Math.max(S.ax, S.bx) < Math.min(T.ax, T.bx) ||
-          Math.max(T.ax, T.bx) < Math.min(S.ax, S.bx) ||
-          Math.max(S.ay, S.by) < Math.min(T.ay, T.by) ||
-          Math.max(T.ay, T.by) < Math.min(S.ay, S.by)
-        ) {
-          continue;
-        }
-        if (!segmentsIntersect(S.ax, S.ay, S.bx, S.by, T.ax, T.ay, T.bx, T.by)) continue;
-        // Draw the crossed principal's ends toward each other. A shorter chord
-        // spans less, so it tends to slip out from under the wire lying over it.
-        if (S.principal) this.reelIn(S, gain * dt);
-        if (T.principal) this.reelIn(T, gain * dt);
-      }
-    }
-  }
-
-  /** Draw a wire's two agents toward each other along its own chord. */
-  private reelIn(
-    chord: { wireA: Agent; wireB: Agent; ax: number; ay: number; bx: number; by: number },
-    k: number,
-  ): void {
-    const dx = chord.bx - chord.ax;
-    const dy = chord.by - chord.ay;
-    const len = Math.hypot(dx, dy);
-    if (len < 1e-6) return;
-    const ux = (dx / len) * k * 26;
-    const uy = (dy / len) * k * 26;
-    if (!poseHeld(chord.wireA)) {
-      chord.wireA.vx += ux;
-      chord.wireA.vy += uy;
-    }
-    if (!poseHeld(chord.wireB)) {
-      chord.wireB.vx -= ux;
-      chord.wireB.vy -= uy;
-    }
-  }
-
   /**
    * Constrained integration. Wires, port axes and contacts are all compliant
    * constraints solved inside this one loop; nothing outside it writes a pose,
@@ -3530,15 +3266,6 @@ export class Sim {
         ch: CH.energy,
         r: params.energyRegrow * dt,
         cap: this.energy.cellCap,
-        catCh: FERTILISE_CH,
-        gamma: params.fertilise,
-      },
-      {
-        u: CH.conP,
-        v: CH.dupP,
-        feed: params.reactFeed,
-        kill: params.reactKill,
-        dt,
       },
       {
         ch: CH.energy,
@@ -4204,9 +3931,6 @@ export class Sim {
     hit: Hit,
     mechanics?: { effMass: number; vN: number; vT: number },
   ): void {
-    // A contact is the one wake signal that cannot be derived from topology:
-    // it is how a moving body tells sleeping tissue that it is coming.
-    if (this.sleepActive) this.hitWake.push(A.id, B.id);
     const key = contactKey(A.id, B.id);
     const m = mechanics ?? contactMechanics(A, B, hit);
     this.noteContact(A, B, hit.overlap, m.vT);
@@ -4693,39 +4417,6 @@ export class Sim {
     }
     for (let i = 0; i < doomed.length; i++) this.graph.detach(doomed[i]);
     this.tally.snaps += doomed.length;
-  }
-
-  /**
-   * Being hit costs energy, proportional to how deeply the pair interpenetrate.
-   *
-   * Damage, not death: it returns whoever it pushed past the floor so the
-   * caller kills them the same way starvation does, and every lethal thing in
-   * the sim keeps going through the one tank. Overlap is the severity proxy —
-   * a harder collision penetrates further before the solver can resolve it —
-   * and it is what `LiveContact` already carries for the audio.
-   */
-  private readonly bruised: number[] = [];
-
-  private contactDamage(params: Params, dt: number): number[] {
-    const k = params.contactCost;
-    const dead = this.bruised;
-    dead.length = 0;
-    if (k <= 0 || dt <= 0) return dead;
-    const hurt = k * dt;
-    for (const c of this.contacts.values()) {
-      const A = this.agents.get(c.agentA);
-      const B = this.agents.get(c.agentB);
-      const bite = hurt * c.overlap;
-      if (A && !A.locked && A.extra > A.debtCap) {
-        A.extra -= bite;
-        if (A.extra <= A.debtCap) dead.push(A.id);
-      }
-      if (B && !B.locked && B.extra > B.debtCap) {
-        B.extra -= bite;
-        if (B.extra <= B.debtCap) dead.push(B.id);
-      }
-    }
-    return dead;
   }
 
   /** Drop a free forager near the flock every spawnInterval seconds. */
@@ -5299,8 +4990,8 @@ export class Sim {
     // pair list it already built from it — so neither the fit check nor the
     // copy has anything to do.
     if (!reuse) {
-      const off = this.wakeOff;
-      const nei = this.wakeNei;
+      const off = this.adjOff;
+      const nei = this.adjNei;
       const nAdj = off[n];
       if (!nativeSolver.canFlock(n, nAdj)) return false;
       // Straight across: both sides are the same CSR, in the same order.
@@ -5386,15 +5077,15 @@ export class Sim {
       maxHops,
     );
     /*
-     * The wake graph's CSR, which is the same wires in the same order on the
+     * The body adjacency CSR, which is the same wires in the same order on the
      * same key. This pass used to build an array-of-arrays and then flatten
      * it into exactly this shape to hand to wasm — a push per wire end and
      * then a copy of the lot — for a structure two other passes were already
      * keeping.
      */
-    this.refreshWakeGraph();
-    const off = this.wakeOff;
-    const nei = this.wakeNei;
+    this.refreshBodyAdjacency();
+    const off = this.adjOff;
+    const nei = this.adjNei;
 
     if (this.flockDist.length < n) {
       const cap = Math.max(n * 2, 16);
@@ -6029,13 +5720,6 @@ export class Sim {
     const list = this.forceList();
     const REQUEST = this.agentStore.request;
     const LOCKED = this.agentStore.locked;
-    // Before the claims overwrite it: this frame's relay is off last frame's
-    // field, which is what makes demand travel a hop at a time.
-    if (this.requestPrev.length < list.length) {
-      this.requestPrev = new Float64Array(Math.max(64, list.length * 2));
-    }
-    const prev = this.requestPrev;
-    for (let i = 0; i < list.length; i++) prev[i] = REQUEST[list[i].slot];
     for (let i = 0; i < list.length; i++) {
       const a = list[i];
       const slot = a.slot;
@@ -6067,64 +5751,21 @@ export class Sim {
         seedRequest(B, redexNeed(B, paidB));
       }
     }
-
-    /*
-     * And what a body wants, not only what it is short of.
-     *
-     * `rescueNeed` and `redexNeed` are both shortfalls — about to die, about
-     * to reproduce. Neither says anything about where the net should be, so a
-     * net had no way to spend energy on going somewhere. This is the third
-     * claim: a body that can swim asks in proportion to how much it likes
-     * what it can smell, which is its `trail` read through its own taste
-     * weights, so the ask is already in the currency of that body's genome.
-     *
-     * `trail` is last frame's reading, written by `steer`. A frame of latency
-     * in an appetite is not a thing anything can perceive, and it saves
-     * sampling the field a second time for every body in the pond.
-     *
-     * Clamped at zero because taste is signed: a body that is repelled by
-     * everything around it has a negative trail, and that is a reason to
-     * leave rather than a reason to be fed.
-     */
-    if (params.forageAsk > 0) {
-      for (let i = 0; i < list.length; i++) {
-        const a = list[i];
-        if (LOCKED[a.slot] || !this.graph.isFreeAt(a.id, 'p')) continue;
-        const trail = a.trail;
-        seedRequest(a, params.forageAsk * (trail > 0 ? trail : 0));
-      }
-    }
     const adj = this.wireAdjacency();
     Sim.phase('pulse:seed');
     /*
-     * How far demand gets this frame. `requestReach` 0 means as far as it
-     * goes: iterating the one-hop step past the longest possible path is the
-     * fixpoint the old in-frame relaxation solved, so the field settles
-     * exactly where it used to. Above 0 it advances that many hops and stops,
-     * and the rest of the journey happens on later frames — which is what
-     * gives demand a front to travel on. The parameter has the trade.
+     * The need field, to its fixpoint, every frame.
      *
-     * Re-snapshotting between hops is what keeps each one a *step*: without
-     * it a value would race down the list in whatever order the roster
-     * happens to be in, and the reach would depend on the sort.
+     * Queue-driven: one visit per body whose value actually improved, which is
+     * `O(n + wires)`. `params.requestReach` used to offer the alternative —
+     * advance a fixed number of one-hop steps and stop, so that demand took
+     * time to cross a net and had a front to travel on — and that is the only
+     * thing this cannot do: the field it leaves has no history, so nothing
+     * propagates. The dial shipped at 0, so no pond ever took that trade, and
+     * iterating the one-hop step to the same answer was quadratic in the
+     * roster — the frame itself at a few hundred founders.
      */
-    const reach = params.requestReach;
-    if (reach <= 0) {
-      // The default, and a different algorithm rather than this one run to
-      // convergence: queue-driven, one visit per body that actually improved.
-      // Iterating the one-hop step until it is certainly settled costs a
-      // sweep per hop and is quadratic in the roster — measured as the frame
-      // at a few hundred founders, which is how it was found.
-      relaxRequestsFast(list, this.agentStore, adj);
-    } else {
-      for (let h = 0; h < reach; h++) {
-        // Re-snapshot between hops so each is a *step*: reading the live
-        // array would let one body's need race down the list in whatever
-        // order the roster happens to be in.
-        if (h > 0) for (let i = 0; i < list.length; i++) prev[i] = REQUEST[list[i].slot];
-        spreadRequestsFast(list, this.agentStore, adj, prev);
-      }
-    }
+    relaxRequestsFast(list, this.agentStore, adj);
     Sim.phase('pulse:spread');
     // No `quantum` here: each sender uses its own, seeded from the parameter
     // at birth exactly as `transportRecoil` is, so a net's rhythm can be a

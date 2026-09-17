@@ -717,7 +717,7 @@ export class Graph {
   /** Cheap degree test: a few port lookups rather than a scan of every wire. */
   isWired(agent: Agent): boolean {
     // The shared slot lists rather than `slotsFor`, which allocates: this is
-    // asked once a body a frame by the activity LOD.
+    // on the per-frame path and a degree test should not cost a new array.
     const slots = agent.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
     for (let i = 0; i < slots.length; i++) {
       if (!this.isFreeAt(agent.id, slots[i])) return true;
@@ -1059,7 +1059,8 @@ export class Graph {
    * for 1,400 frames left the crossing rate flat, 0.94 to 1.03 per thousand
    * wire pairs against 0.96 with it on. Crossings there come from bodies
    * drifting after they latch rather than from the latch, and nothing catches
-   * those: `uncrossPrincipals` returns immediately, `params.uncross` being 0.
+   * those at all: `uncrossPrincipals` used to be the pass that might have, and
+   * it shipped at 0 for long enough to be removed.
    *
    * It is still not removable. Where it is cheap is exactly where it matters:
    * a preset or a hand-built term has few enough wires that the loop is

@@ -75,8 +75,9 @@ function net(agents: Map<number, SlotBody>, wires: { a: { id: number }; b: { id:
 }
 
 /**
- * The need field at its fixpoint — what `Sim` does at the shipped
- * `requestReach` 0, and what these tests are about.
+ * The need field at its fixpoint — what `Sim` does every frame, and what
+ * these tests are about. There used to be another setting, `requestReach`,
+ * which advanced a fixed number of hops instead; it shipped at 0 and is gone.
  */
 function settle(list: Parameters<typeof relaxRequests>[0], adj: Parameters<typeof relaxRequests>[1], decay?: number): void {
   relaxRequests(list, adj, decay);
@@ -664,46 +665,6 @@ describe('sim energy', () => {
     for (let f = 0; f < 240; f++) sim.step(1 / 60, params);
     expect(sim.agents.size).toBe(2);
     expect(sim.rewrites.length).toBe(0);
-  });
-
-  it('carries demand a hop a frame when the reach is set, and everywhere when it is not', () => {
-    /*
-     * What `requestReach` actually changes. The field is the same potential
-     * either way and settles in the same place; the difference is whether
-     * getting there takes time. At 0 a shortage is known across the whole net
-     * on the frame it appears, which is why nothing in the pond can carry a
-     * wave — there is never anything left to travel.
-     *
-     * Every body but the last is full, so nobody else is making a claim and
-     * the only thing in the field is the one at the far end.
-     */
-    const build = (reach: number) => {
-      const sim = new Sim(1200, 600);
-      const params = fixedParams();
-      params.requestReach = reach;
-      params.spawnInterval = 0;
-      params.ambientEnergy = 0;
-      params.upkeep = 0;
-      params.rewriteDuration = 0;
-      params.snapRadius = 0;
-      params.transportRecoil = 0;
-      sim.energy.configure(params.energyCell, 0);
-      const n = 8;
-      const ids: number[] = [];
-      for (let i = 0; i < n; i++) ids.push(sim.spawn('con', 100 + i * 45, 300, 0, params, true)!.id);
-      for (let i = 0; i + 1 < n; i++) sim.wire(ids[i], 'r', ids[i + 1], 'l', params);
-      for (const id of ids) sim.agents.get(id)!.extra = EXTRA_CAP;
-      sim.agents.get(ids[n - 1])!.extra = -0.5;
-      return { sim, params, ids };
-    };
-    const heardAt = (o: ReturnType<typeof build>, frames: number): number => {
-      for (let f = 0; f < frames; f++) o.sim.step(1 / 60, o.params);
-      return o.sim.agents.get(o.ids[0])!.request;
-    };
-    expect(heardAt(build(0), 1), 'no reach: seven wires away on the first frame').toBeGreaterThan(0);
-    expect(heardAt(build(1), 1), 'reach 1: still silent after one').toBe(0);
-    expect(heardAt(build(1), 3), 'and after three').toBe(0);
-    expect(heardAt(build(1), 12), 'audible once it has had the frames to travel').toBeGreaterThan(0);
   });
 
   it('drains a reservoir across an empty corridor to a dying end', () => {

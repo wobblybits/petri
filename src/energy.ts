@@ -1878,7 +1878,7 @@ export class WireAdjacency {
   /**
    * Builds the CSR from an id-keyed index. **Only the tests call this.**
    *
-   * The frame does not: `Sim.refreshWakeGraph` lays one CSR from the shared
+   * The frame does not: `Sim.refreshBodyAdjacency` lays one CSR from the shared
    * roster and the wire list's cached endpoint indices, and every pass that
    * wants neighbours — the two LOD tiers, flocking, and the need field —
    * reads that same pair of arrays. This stays because the energy tests need
@@ -2007,7 +2007,9 @@ export function spreadRequests(
  *
  * The answer is identical to what `spreadRequests` converges to. What this
  * cannot do is take *time*: the field it leaves has no history, so nothing
- * can propagate. That is what `params.requestReach` buys and what it costs.
+ * can propagate. `params.requestReach` used to buy that, at the cost of a
+ * sweep per hop; it shipped at 0 and was removed, so this is now the only
+ * path and demand crosses a net in the frame it appears.
  */
 export function relaxRequestsFast(
   list: Agent[],
@@ -2066,40 +2068,6 @@ export function relaxRequests(list: SlotBody[], adj: WireAdjacency, decay?: numb
       if (tail >= q.length) return;
       q[tail++] = ni;
     }
-  }
-}
-
-/** Last frame's field, for `spreadRequests` to step off. */
-export function snapshotRequests(list: SlotBody[], into: number[]): number[] {
-  into.length = list.length;
-  for (let i = 0; i < list.length; i++) into[i] = list[i].request;
-  return into;
-}
-
-/** Store-based twin of `spreadRequests` — see `harvestSlotsFast`'s note. */
-export function spreadRequestsFast(
-  list: Agent[],
-  store: AgentStore,
-  adj: WireAdjacency,
-  prev: Float64Array,
-  decay?: number,
-): void {
-  const { off, nei } = adj;
-  const REQUEST = store.request;
-  const REQUEST_DECAY = store.requestDecay;
-  for (let i = 0; i < list.length; i++) {
-    let best = 0;
-    for (let k = off[i]; k < off[i + 1]; k++) {
-      const ni = nei[k];
-      const other = list[ni];
-      if (!other) continue;
-      const keep = Math.min(0.99, Math.max(0, decay ?? REQUEST_DECAY[other.slot]));
-      const v = prev[ni] * keep;
-      if (v > best) best = v;
-    }
-    if (best <= REQUEST_FLOOR) continue;
-    const s = list[i].slot;
-    if (best > REQUEST[s]) REQUEST[s] = best;
   }
 }
 

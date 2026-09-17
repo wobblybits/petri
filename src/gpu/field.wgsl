@@ -25,21 +25,12 @@ struct FieldParams {
   worldY: f32,
   boundR: f32,
   growCh: f32,
-  // Per channel, not scalar: energy is conserved where a signal fades, and a
-  // reaction only patterns when its two species move at different speeds.
+  // Per channel, not scalar: energy is conserved where a signal fades.
   mix: vec4f,
   mix2: vec4f,
   keep: vec4f,
   growR: f32,
   growCap: f32,
-  growGamma: f32,
-  growCat: f32,
-  reactF: f32,
-  reactKV: f32,
-  reactDt: f32,
-  pad0: f32,  // reserved; keeps reactU on its own sixteen-byte boundary
-  reactU: f32,
-  reactV: f32,
   nBlocks: u32,
   harvestCh: f32,
   fillCh: f32,
@@ -342,40 +333,9 @@ fn grow(@builtin(global_invocation_id) gid: vec3u) {
   var v = src[i];
   let e = v[ch];
   if (e <= 0.0 || e >= P.growCap) { return; }
-  var r = P.growR;
-  let cat = i32(P.growCat);
-  if (cat >= 0 && u32(cat) != ch && P.growGamma != 0.0) {
-    r = r * (1.0 + P.growGamma * v[u32(cat)]);
-  }
-  if (r <= 0.0) { return; }
-  let next = e + r * e * (1.0 - e / P.growCap);
+  let next = e + P.growR * e * (1.0 - e / P.growCap);
   v[ch] = min(next, P.growCap);
   src[i] = v;
-}
-
-// Gray-Scott between two channels: u + 2v -> 3v, fed and killed. `reactF` and
-// `reactKV` arrive already multiplied by dt, matching the host.
-@compute @workgroup_size(64)
-fn react(@builtin(global_invocation_id) gid: vec3u) {
-  let i = gid.x;
-  if (i >= P.cols * P.rows) { return; }
-  if (P.reactDt <= 0.0) { return; }
-  if (P.reactF <= 0.0 && P.reactKV <= 0.0) { return; }
-  let uc = u32(P.reactU);
-  let vc = u32(P.reactV);
-  if (uc == vc) { return; }
-  let ci = i32(i % P.cols);
-  let cj = i32(i / P.cols);
-  if (cellOut(ci, cj)) { return; }
-  var cell = src[i];
-  let u = cell[uc];
-  let v = cell[vc];
-  let uvv = u * v * v * P.reactDt;
-  let nu = u - uvv + P.reactF * (1.0 - u);
-  let nv = v + uvv - P.reactKV * v;
-  cell[uc] = max(nu, 0.0);
-  cell[vc] = max(nv, 0.0);
-  src[i] = cell;
 }
 
 fn sampleAt(p: vec2f) -> vec4f {

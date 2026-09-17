@@ -318,24 +318,28 @@ not also be asked to do. Nothing else belongs here; measurements go in
   things and that is known. It ships at 0.5, the packet; at 0, the trickle,
   the momentum it carries is three orders below the pond's own noise.
 
-  How far demand travels in a frame is `requestReach`, and it is the reason
-  nothing here can carry a wave. At its shipped 0 the need field is solved to
-  a fixpoint every frame, so a shortage anywhere is known everywhere at once
-  and there is never anything left to propagate. Above 0 it advances that
-  many hops a frame and a need has a front. The fixpoint is the same either
-  way; only the time to reach it changes.
+  Demand crosses a net in the frame it appears, and that is the reason
+  nothing here can carry a wave: the need field is solved to a fixpoint every
+  frame, so a shortage anywhere is known everywhere at once and there is
+  never anything left to propagate.
 
-  That is a trade and not an improvement, which is why it ships off. A global
-  relaxation is global triage — every donor weighs its neighbour against the
-  worst case anywhere on the net, so a dying body outranks a merely empty one
-  however far away. One hop a frame is local equalisation, and a corridor of
-  empty bodies absorbs a reservoir on its way past instead of relaying it:
-  measured on twelve bodies with a reservoir at one end and a body in debt at
-  the other, the reservoir is empty inside twenty frames and the patient ends
-  on exactly zero, filled and then drained back into the corridor. Not yet
-  true: the field cannot tell dying from empty by enough to survive being
-  local, and until it can, locality costs the economy more than it buys
-  locomotion.
+  There was a dial for the other behaviour — `requestReach`, which advanced
+  the field a fixed number of hops a frame so that a need had a front. It
+  shipped at 0 for its whole life and has been removed, but what it measured
+  is why, and that stands. A global relaxation is global triage: every donor
+  weighs its neighbour against the worst case anywhere on the net, so a dying
+  body outranks a merely empty one however far away. One hop a frame is local
+  equalisation, and a corridor of empty bodies absorbs a reservoir on its way
+  past instead of relaying it — measured on twelve bodies with a reservoir at
+  one end and a body in debt at the other, the reservoir was empty inside
+  twenty frames and the patient ended on exactly zero, filled and then
+  drained back into the corridor.
+
+  So locality is not an improvement waiting to be switched on. What would pay
+  for it is a need field that tells dying from empty by more than the
+  difference between `rescueNeed`'s two branches, and until that exists,
+  locality costs the economy more than it buys locomotion. That is the
+  question, and a dial nobody moved was not an answer to it.
 - Growth
 - Breeding: nets connecting at free terminals
 - Freeing terminals: death and detachment within a net

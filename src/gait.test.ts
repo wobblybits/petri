@@ -226,7 +226,6 @@ describe('the reactor', () => {
      * five seconds of grazing does not exhaust a cell that started at ambient.
      */
     p.energyRegrow = 0;
-    p.fertilise = 0;
     const sim = new Sim(1600, 1200, 128);
     loadPreset(sim, 'soup', p);
     const a = sim.spawn('con', sim.w * 0.5, sim.h * 0.5, 0, p, true)!;

@@ -32,17 +32,13 @@ import { Sim } from '../sim.ts';
 
 const FIXED_SCALE = 1e4;
 
-/**
- * `grow`, line for line. Logistic on one channel, optionally catalysed.
- */
+/** `grow`, line for line. Logistic on one channel. */
 function mirrorGrow(
   src: Float32Array,
   n: number,
   ch: number,
   r: number,
   cap: number,
-  catCh: number,
-  gamma: number,
 ): Float32Array {
   const out = Float32Array.from(src);
   if (r <= 0 || cap <= 0) return out;
@@ -50,40 +46,8 @@ function mirrorGrow(
     const k = i * CHANNELS + ch;
     const e = out[k];
     if (e <= 0 || e >= cap) continue;
-    let rr = r;
-    if (catCh >= 0 && catCh !== ch && gamma !== 0) {
-      rr = r * (1 + gamma * out[i * CHANNELS + catCh]);
-    }
-    if (rr <= 0) continue;
-    const next = e + rr * e * (1 - e / cap);
+    const next = e + r * e * (1 - e / cap);
     out[k] = next > cap ? cap : next;
-  }
-  return out;
-}
-
-/** `react`, line for line. Gray-Scott between two channels. */
-function mirrorReact(
-  src: Float32Array,
-  n: number,
-  uc: number,
-  vc: number,
-  feed: number,
-  kill: number,
-  dt: number,
-): Float32Array {
-  const out = Float32Array.from(src);
-  if (dt <= 0 || uc === vc) return out;
-  if (feed <= 0 && kill <= 0) return out;
-  const f = feed * dt;
-  const kv = (feed + kill) * dt;
-  for (let i = 0; i < n; i++) {
-    const u = out[i * CHANNELS + uc];
-    const v = out[i * CHANNELS + vc];
-    const uvv = u * v * v * dt;
-    const nu = u - uvv + f * (1 - u);
-    const nv = v + uvv - kv * v;
-    out[i * CHANNELS + uc] = nu > 0 ? nu : 0;
-    out[i * CHANNELS + vc] = nv > 0 ? nv : 0;
   }
   return out;
 }
@@ -429,14 +393,14 @@ describe('field shader arithmetic', () => {
     expect(worst).toBeLessThan(1e-6);
   });
 
-  it('grows the way Fields does, catalyst included', () => {
+  it('grows the way Fields does', () => {
     const f = openBox(seeded());
     const cap = 0.4;
-    // Something below capacity everywhere, and a catalyst that varies.
+    // Something below capacity everywhere to grow from.
     for (let i = CH.energy; i < f.data.length; i += CHANNELS) f.data[i] = cap * 0.3;
     const before = Float32Array.from(f.data);
-    const mine = mirrorGrow(before, f.cols * f.rows, CH.energy, 0.05, cap, CH.conP, 3);
-    f.grow(CH.energy, 0.05, cap, CH.conP, 3);
+    const mine = mirrorGrow(before, f.cols * f.rows, CH.energy, 0.05, cap);
+    f.grow(CH.energy, 0.05, cap);
     let worst = 0;
     for (let i = 0; i < f.data.length; i++) worst = Math.max(worst, Math.abs(f.data[i] - mine[i]));
     expect(worst, 'grow diverged from its mirror').toBeLessThan(1e-6);
@@ -446,16 +410,6 @@ describe('field shader arithmetic', () => {
       if (Math.abs(f.data[i] - before[i]) > 1e-9) moved++;
     }
     expect(moved).toBeGreaterThan(100);
-  });
-
-  it('reacts the way Fields does', () => {
-    const f = openBox(seeded());
-    const before = Float32Array.from(f.data);
-    const mine = mirrorReact(before, f.cols * f.rows, CH.conP, CH.dupP, 0.037, 0.06, 0.5);
-    f.react(CH.conP, CH.dupP, 0.037, 0.06, 0.5);
-    let worst = 0;
-    for (let i = 0; i < f.data.length; i++) worst = Math.max(worst, Math.abs(f.data[i] - mine[i]));
-    expect(worst, 'react diverged from its mirror').toBeLessThan(1e-6);
   });
 
   it('scatters where Fields deposits, within fixed-point', () => {
@@ -698,29 +652,17 @@ describe('field shader arithmetic', () => {
     expect(worst, 'the block was left in a different state').toBeLessThan(1e-7);
   });
 
-  it('takes the uptake dials out of the slots the uniform used to pad', () => {
-    /*
-     * The host hand-packs `FieldParams` by index, so a field added on one side
-     * and not the other reads as a plausible number rather than an error —
-     * the same hazard `genome-kernel.test.ts` pins for its own uniform. These
-     * two went into `pad3` and `pad4`, and the struct's size must not have
-     * moved: a uniform buffer is a whole number of sixteen-byte blocks.
-     */
-    const body = /struct\s+FieldParams\s*\{([\s\S]*?)\n\}/.exec(shader);
-    expect(body, 'no FieldParams in field.wgsl').not.toBeNull();
-    const fields = [...body![1].matchAll(/^\s*([A-Za-z_]\w*)\s*:/gm)].map((m) => m[1]);
-    expect(fields).not.toContain('pad3');
-    expect(fields).not.toContain('pad4');
-    // `uptakeCap` and `uptakeKs` took the two slots that used to pad; `hillN`
-    // the third, and the fourth carried `coSubstrate` until catabolism moved
-    // to the host, so it is a pad again.
-    // needed a fourth block, which is why there are three pads after it again.
-    expect(fields.slice(-6)).toEqual(['uptakeCap', 'uptakeKs', 'hillN', 'pad5', 'pad6', 'pad7']);
-    // Three vec4f (mix, mix2, keep) count as four slots each; everything else
-    // is a scalar, so index and slot are the same thing. `UNIFORM_BYTES` is
-    // 176, which is eleven sixteen-byte blocks.
-    expect(fields.length).toBe(176 / 4 - 3 * 3);
-  });
+  /*
+   * `FieldParams`' own layout is checked in `uniform-layout.test.ts`, which
+   * replaced the version of it that lived here.
+   *
+   * That one counted the struct's fields and named its last six. It could not
+   * have caught a slot being wrong — only a field appearing or vanishing — and
+   * it hard-coded `UNIFORM_BYTES` as a literal in the arithmetic, so the two
+   * numbers it compared were both its own. The replacement walks all three of
+   * this program's uniforms under WGSL's alignment rules and asserts every
+   * field's slot against the map its host writes with.
+   */
 
   it('pins the harvest row layout to the shader\'s literals', () => {
     // The shader cannot import, so its `HARVEST_*` are literals, and a stride

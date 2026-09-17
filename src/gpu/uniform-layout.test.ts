@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import fieldShader from './field.wgsl?raw';
 import farShader from './far.wgsl?raw';
 import genomeShader from './genome.wgsl?raw';
+import { FIELD_U } from './field-gpu.ts';
 import { FAR_U } from './far-gpu.ts';
 import { GENOME_U } from './genome-gpu.ts';
 
@@ -87,6 +89,7 @@ function parseStruct(src: string, name: string): { fields: Field[]; bytes: numbe
 const CASES = [
   { name: 'GenomeParams', src: genomeShader, map: GENOME_U, host: 'genome-gpu.ts', bytes: 96 },
   { name: 'SimParams', src: farShader, map: FAR_U, host: 'far-gpu.ts', bytes: 256 },
+  { name: 'FieldParams', src: fieldShader, map: FIELD_U, host: 'field-gpu.ts', bytes: 176 },
 ] as const;
 
 describe('the uniform maps match the structs they are written into', () => {
@@ -113,11 +116,12 @@ describe('the uniform maps match the structs they are written into', () => {
 
   it('walks vec4 alignment rather than assuming four scalars', () => {
     /*
-     * The parser is the thing being trusted above, so it is checked on the
-     * case neither struct here exercises: a `vec4f`, which aligns to sixteen
-     * bytes. Neither `GenomeParams` nor `SimParams` has one — `FieldParams`
-     * has three — so without this the alignment arithmetic would be dead code
-     * until the day it was wrong.
+     * The parser is the thing being trusted above, so it is checked on the one
+     * case that matters. `FieldParams` has eight scalars, then four u32, then
+     * `mix` — so `mix` lands at 48 bytes with no padding — and the assertion
+     * that earns its keep is the next one: a scalar inserted before a `vec4f`
+     * pads to the next sixteen, which is how a one-field edit moves twelve
+     * slots.
      */
     const flat = parseStruct('struct S {\n  a: f32,\n  v: vec4f,\n}\n', 'S');
     expect(flat.fields.map((f) => f.slot)).toEqual([0, 4]);

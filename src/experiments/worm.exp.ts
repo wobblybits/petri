@@ -78,11 +78,8 @@ export function rigParams(over: Partial<Params> = {}): Params {
   p.energyRegrow = 0;
   p.energyDiffuse = 0;
   p.upkeep = 0;
-  p.forageAsk = 0;
-  p.fertilise = 0;
   p.uptakeVmax = 0;
   p.swimCost = 0;
-  p.contactCost = 0;
   /*
    * **And the reactor, which is what killed this rig.**
    *

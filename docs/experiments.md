@@ -239,7 +239,6 @@ truth (`src/pond/couplings.ts`); this is the reading of it.
 | `groundPatches` | `learnDiscount`, `learnTrace` | the critic's horizon has to cover the trip to the reward, and patch spacing sets the trip (5–12 s against a default 0.33 s horizon) |
 | `ambientEnergy` | `uptakeKs` | a half-saturation constant only means something relative to the density it is measured against |
 | `soupCount` | `declutter`, `flockAlign` | the spacing forces gate the opening scramble, whose severity is density; the 18× was measured at 250 bodies |
-| `energyRegrow` | `fertilise` | scales a rate; scaling zero is zero |
 | `eraUpkeepRatio` | `excreteRate` | a seeded Era earns ~0.003/s from the producer discount; making ground faster than that starves it |
 
 Retired, and worth knowing why: `excreteRate` x `uptakeVmax`. The species

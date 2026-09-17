@@ -31,10 +31,9 @@ export interface Coupling {
   /** What to do instead. */
   fix: string;
   /**
-   * A held setting at which the coupling is moot. `fertilise` at 0 cannot
-   * be confounded by `energyRegrow` because it does nothing; a learning
-   * horizon is irrelevant with `learnRate` at 0. Usually the constant's own
-   * neutral value, sometimes another dial's.
+   * A held setting at which the coupling is moot: a learning horizon is
+   * irrelevant with `learnRate` at 0. Usually the constant's own neutral
+   * value, sometimes another dial's.
    */
   unless?: { key: keyof Params; is: number };
 }
@@ -110,13 +109,6 @@ export const COUPLINGS: readonly Coupling[] = [
     constant: 'flockAlign',
     why: 'as declutter: alignment turns a head-on approach into a shoal, and how often that happens is density',
     fix: 'as declutter',
-  },
-  {
-    axis: 'energyRegrow',
-    constant: 'fertilise',
-    why: 'fertilise scales the regrowth rate, and scaling zero is zero',
-    fix: 'fertilise is only readable where energyRegrow is non-zero',
-    unless: { key: 'fertilise', is: 0 },
   },
   {
     axis: 'grip',

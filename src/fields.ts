@@ -49,21 +49,7 @@ export const VOICE = [CH.conP, CH.dupP, CH.aux] as const;
  */
 export const DIGEST_ORDER = [CH.conP, CH.dupP, CH.aux, CH.energy] as const;
 
-/**
- * The channel whose presence accelerates the ground's regrowth — the fertiliser
- * signal. See `params.fertilise`.
- *
- * A voice channel rather than `CH.aux`, because it has to be a *choice*. Every
- * free port lays a flat marker into aux whatever its genome says, so
- * fertility keyed on aux would be a property of having sockets rather than
- * something a lineage decides to spend its voice on — and the whole point is
- * that being heard is a unit budget a body divides, so fertilising is
- * something it gives up something else for.
- *
- * A constant rather than a slider: an integer channel index in the parameter
- * list invites configurations that mean nothing. Change it here.
- */
-export const FERTILISE_CH: number = CH.conP;
+
 
 /*
  * The world grid, shared by the scent field and the energy grid.
@@ -159,11 +145,10 @@ export class Fields {
    * They exist because the four channels stopped being four of the same
    * thing. A signal wants to spread and fade — that is what makes a trail a
    * trail. A conserved quantity wants to spread and stay, because energy
-   * that evaporates is energy the economy has to mint back. And a
-   * reaction-diffusion pair only patterns at all when the two species move
-   * at different speeds: Gray-Scott wants the substrate about twice the
-   * activator, and at one rate for everything there is no instability to
-   * find.
+   * that evaporates is energy the economy has to mint back. A third reason
+   * went with the Gray-Scott pass: a reaction-diffusion pair only patterns
+   * when its two species move at different speeds, and that pass shipped at
+   * zero and was removed. The first two stand on their own.
    *
    * All ones is exactly the old behaviour, which is also the only shape the
    * SIMD kernel in the solver can take — it splats one rate across the whole
@@ -956,110 +941,31 @@ export class Fields {
    *
    * The result is clamped at `cap` because a single explicit step can overshoot
    * it. `E + r*E*(1 - E/K)` only stays under `K` while `r` is small, and at the
-   * shipped regrowth rate times a frame it is very small — but the fertiliser
-   * term multiplies `r` by `1 + gamma*C`, which makes an instability that was
-   * latent reachable. A cell at 0.9 of capacity with a strong catalyst
-   * overshoots to 1.05 in one step, and a carrying capacity that a body can
-   * push past by smelling at it is not a carrying capacity.
+   * shipped regrowth rate times a frame it is very small. It used to be
+   * reachable: `params.fertilise` multiplied `r` by `1 + gamma*C`, and a cell
+   * at 0.9 of capacity with a strong catalyst overshot to 1.05 in one step.
+   * That dial shipped at 0 and is gone; the clamp stays, because a carrying
+   * capacity a caller can push past is not a carrying capacity.
    *
    * `r` is per frame, already multiplied by dt by the caller — this pass has
    * no idea what a second is.
    */
-  grow(ch: number, r: number, cap: number, catCh = -1, gamma = 0): void {
+  grow(ch: number, r: number, cap: number): void {
     if (!(r > 0) || !(cap > 0)) return;
     if (this.hiI < this.loI) return;
     const d = this.data;
     const { cols } = this;
     const { lo: sLo, hi: sHi } = this.spans();
     const invCap = 1 / cap;
-    const catalysed = catCh >= 0 && catCh !== ch && gamma !== 0;
     for (let j = this.loJ; j <= this.hiJ; j++) {
       const rowBase = j * cols * CHANNELS;
       const a0 = sLo[j] > this.loI ? sLo[j] : this.loI;
       const b0 = sHi[j] < this.hiI ? sHi[j] : this.hiI;
-      // Two loops rather than a flag inside one; see the note on `decayCells`
-      // for what a loop-invariant branch per cell costs.
-      if (catalysed) {
-        const off = catCh - ch;
-        for (let i = a0, k = rowBase + a0 * CHANNELS + ch; i <= b0; i++, k += CHANNELS) {
-          const e = d[k];
-          if (e <= 0 || e >= cap) continue;
-          /*
-           * The catalyst scales the *rate*, never the outcome. Clamped at zero
-           * so that a negative gamma — an inhibitor, which is a thing a lineage
-           * should be able to become — can stall regrowth but never run it
-           * backwards. Growth that could go negative would be a body destroying
-           * ground by smelling at it, and the ground is conserved.
-           */
-          const rr = r * (1 + gamma * d[k + off]);
-          if (rr <= 0) continue;
-          const next = e + rr * e * (1 - e * invCap);
-          d[k] = next > cap ? cap : next;
-        }
-      } else {
-        for (let i = a0, k = rowBase + a0 * CHANNELS + ch; i <= b0; i++, k += CHANNELS) {
-          const e = d[k];
-          if (e <= 0 || e >= cap) continue;
-          const next = e + r * e * (1 - e * invCap);
-          d[k] = next > cap ? cap : next;
-        }
-      }
-    }
-  }
-
-  /**
-   * Gray-Scott between two channels: `u + 2v -> 3v`, fed and killed.
-   *
-   *     uvv = u * v * v
-   *     u  +=  -uvv + feed * (1 - u)
-   *     v  +=   uvv - (feed + kill) * v
-   *
-   * What it buys is the one thing four independent decaying blobs cannot do.
-   * As it stands every channel is a hill around whoever is emitting, so what a
-   * body smells is always *who is there* — the field carries information but
-   * does not hold any of its own. A reaction puts local maxima where nobody is
-   * standing, travelling fronts, and regions that have just been used up and
-   * are briefly unusable. Signal comes apart from source, and "over there" can
-   * mean something no emitter is saying.
-   *
-   * Two things it needs to work at all, both of which are the caller's job.
-   * The species must diffuse at different rates — `diffuseRate` exists partly
-   * for this, and Gray-Scott wants the substrate at roughly twice the
-   * activator; equal rates have no instability to find and simply blur. And
-   * `feed`/`kill` live in a thin sliver of their own plane, roughly F in
-   * [0.01, 0.09] and k in [0.045, 0.07], with the interesting behaviour in a
-   * fraction of that. Outside it the pattern is a uniform wash either way,
-   * which is why this is off unless someone deliberately turns it on rather
-   * than something with a plausible-looking default.
-   *
-   * `u` is normalised toward 1 by the feed term, so this expects a channel
-   * whose natural scale is about 1 — `CH.energy` read against `cellCap`, or a
-   * signal channel that is not also carrying deposits at peaks of ten. Handed
-   * a raw signal channel it will not explode, because `soft`-free arithmetic
-   * on bounded inputs stays bounded, but the pattern will sit outside its
-   * regime and do nothing interesting.
-   */
-  react(uCh: number, vCh: number, feed: number, kill: number, dt: number): void {
-    if (!(dt > 0) || uCh === vCh) return;
-    if (!(feed > 0) && !(kill > 0)) return;
-    if (this.hiI < this.loI) return;
-    const d = this.data;
-    const { cols } = this;
-    const { lo: sLo, hi: sHi } = this.spans();
-    const f = feed * dt;
-    const kv = (feed + kill) * dt;
-    for (let j = this.loJ; j <= this.hiJ; j++) {
-      const rowBase = j * cols * CHANNELS;
-      const a0 = sLo[j] > this.loI ? sLo[j] : this.loI;
-      const b0 = sHi[j] < this.hiI ? sHi[j] : this.hiI;
-      for (let i = a0, k = rowBase + a0 * CHANNELS; i <= b0; i++, k += CHANNELS) {
-        const u = d[k + uCh];
-        const v = d[k + vCh];
-        const uvv = u * v * v * dt;
-        const nu = u - uvv + f * (1 - u);
-        const nv = v + uvv - kv * v;
-        d[k + uCh] = nu > 0 ? nu : 0;
-        d[k + vCh] = nv > 0 ? nv : 0;
+      for (let i = a0, k = rowBase + a0 * CHANNELS + ch; i <= b0; i++, k += CHANNELS) {
+        const e = d[k];
+        if (e <= 0 || e >= cap) continue;
+        const next = e + r * e * (1 - e * invCap);
+        d[k] = next > cap ? cap : next;
       }
     }
   }
