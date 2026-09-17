@@ -17,6 +17,12 @@ export const FAR_SLOP = 0.35;
  * Contact skin, the `SKIN` of `src/collide.ts` and `native/solver.c`. SAT pads
  * its projections by it, so the disc tiers add it too and a pair rests in the
  * same place whichever tier it lands in.
+ *
+ * Copied rather than imported, and that is not an oversight to tidy up:
+ * importing `collide.ts` here closes a cycle through `agents.ts` and
+ * `native/solver.ts`, and a `const` initialised inside an ES module cycle
+ * reads `undefined` instead of failing. `shared-constants.test.ts` binds this
+ * copy to that one, along with the two the shader and the C file carry.
  */
 export const FAR_SKIN = 0.85;
 export const FAR_CONTACT_COMP = 4.0e-6;
