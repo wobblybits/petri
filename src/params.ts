@@ -1142,10 +1142,11 @@ export interface Params {
    * How much of what crosses out of the pond's books is put back onto the
    * ground rather than destroyed, 0 to 1.
    *
-   * With `upkeep` at 0 there is no rent left for it to govern, so what it
-   * decides is the food `intake` routes to the reactor — the reactor's pools
-   * are in their own units and outside the books, so that food leaves them.
-   * At 1 it lands back on the ground the body is standing on.
+   * Two things cross out: the rent `upkeep` charges, and the food `intake`
+   * routes to the reactor — the reactor's pools are in their own units and
+   * outside the books, so that food leaves them. At 1 both land back on the
+   * ground the body is standing on, which is also what makes the rent
+   * density-dependent: see `upkeep`.
    *
    * **1, so a body's *metabolism* neither creates nor destroys matter**: what
    * `intake` routes to the reactor lands back on the ground rather than
@@ -1160,8 +1161,10 @@ export interface Params {
    * in debt destroys what it owed; that is the largest sink and it is
    * deliberate — a corpse that starved leaves less than one that did not.
    * A negative `eraUpkeepRatio` is a small source pointing the other way: it
-   * adds to a producer's tank without taking from the ground. It shipped at 0 — the reactor a sink, the pond quietly bleeding
-   * matter — because turning it on used to lay the food down as the body's own
+   * adds to a producer's tank without taking from the ground.
+   *
+   * This shipped at 0 — the reactor a sink, the pond quietly bleeding matter —
+   * because turning it on used to lay the food down as the body's own
    * *excretion mix*, which for a Con is signal rather than food. Nothing
    * excretes now and it returns as ground.
    *
@@ -1186,9 +1189,11 @@ export interface Params {
    * `2 * (EXTRA_CAP - REWRITE_SHARE)` = 0.5 out of nothing every cycle, which
    * was the metabolism rather than a slip: a standing rent drained
    * continuously, so a net that kept rewriting fed itself and a net that sat
-   * still starved. With the rent gone (`upkeep`) that mint has nothing to
-   * balance and rewriting would be free energy. Conserved is the other half
-   * of the same change and the two move together.
+   * still starved. The rent it balanced was taken to 0, which left the mint
+   * making free energy against nothing; `upkeep` is back at 0.01 but for a
+   * different job — pricing size — and a mint that pays for rewriting is
+   * still not what should offset it. Conserved, so the cycle is neutral and
+   * the price of rewriting is stated below rather than fallen into.
    *
    * Below 1 the cycle *costs* `2 * (1 - bodyValue)`, which is where a brake on
    * rewriting belongs — on the rewrite's own price, rather than on a standing

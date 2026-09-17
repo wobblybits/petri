@@ -109,7 +109,7 @@ export interface Wire {
   ropePath: RopePath;
   /**
    * Each of the four species crossing this wire this frame, signed `a`
-   * toward `b`.
+   * toward `b`, one number each.
    *
    * The wire is the bucket, and these are what is in it. `Sim.advanceGait`
    * writes them once per wire and every body then reads the wires on its own
@@ -117,8 +117,9 @@ export interface Wire {
    * about it. A vector, because what a body broadcasts is a vector over the
    * doc's four species and the two ends of one wire need not be the same kind
    * of thing: an Era pushes the fuel and primer it ate, a Con the catalyst, a
-   * Dup the inhibitor. `fluxGut` is the doc's A, which is four wide because
-   * the gut is — a leaf feeding its net passes on whatever it swallowed.
+   * Dup the inhibitor. `fluxGut` is the doc's A. It was four wide, because the
+   * gut was; both are one number now — a body eats the ground and nothing
+   * else, so there is one thing a leaf can pass on to its net.
    *
    * They persist across frames rather than being recomputed, because the wire
    * *conducts* rather than teleporting: each relaxes toward what the firing

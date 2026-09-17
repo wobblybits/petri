@@ -56,8 +56,8 @@ Signal is a third thing and is not matter at all.
 all four channels, so a scent was a meal as well as a message: `deposit` minted
 food by shouting, a body could eat its own signal back, and the conservation
 books had to carry four columns. Matter is the ground and signal is the other
-three, and nothing crosses. The array is still four wide; three of its entries
-are always zero and are the next thing to go (§8).
+three, and nothing crosses. The gut is one number wide: it was four, with
+three entries always zero, and they went with the dead genome rows (§8).
 
 ### 2.2 Per wire
 
@@ -489,17 +489,25 @@ wavelength means across its own net.
 
 ### 6.4 To delete
 
-Gone already: `upkeep` (§7), `excreteRate` and `catCoSubstrate` (nothing
-excretes, and there is no scent to pair ground with), and `bodyValue` moved to
-`REWRITE_SHARE`. With them went `runExcretion`, `payOut`, `scentMints`, the
-minted-versus-conserved fork and the three couplings and one protocol built on
-it.
+Gone already: `excreteRate` and `catCoSubstrate` (nothing excretes, and there
+is no scent to pair ground with), and `bodyValue` moved to `REWRITE_SHARE`.
+With them went `runExcretion`, `payOut`, `scentMints`, the minted-versus-
+conserved fork and the three couplings and one protocol built on it. `X`, `x0`
+and three of `ks` went too — §8 has the measurement and the new genome length.
+
+**`upkeep` came back, at 0.01.** It was deleted here on the argument in §7 and
+returned one commit later for the job that argument left unbilled: with no rent
+a net that stops growing is free, and at `upkeepExcrete` 1 it restocks its own
+pasture, so nothing was hungry enough to start the §7.2 clock and dense nets
+plateaued and would not die. The measurement is in `params.ts` under `upkeep` —
+`biggestNet` is monotone in it and nothing else is. §7 below is the argument
+for removing it and is kept because every word of it is still true; what it
+missed is stated at the end of it.
 
 Still to go:
 
 | out | why |
 |---|---|
-| `X`, `x0`, and three of `ks` | 48 floats a body that nothing reads. A genome-layout change, so it needs the segment migration and the GPU genome pass. |
 | `metabolicRate` | the external clock. It multiplies every rate and exists only to set the period, so it is a reparameterisation — but not a free one, and §8 has the three things that go with it. |
 | `metabolicWave` | derivable from the pool it half-saturates rather than dialled. |
 
@@ -507,8 +515,10 @@ Still to go:
 
 ## 7. Death, cost, and rationing
 
-`upkeep` was one mechanic doing three jobs. **Done:** it ships at 0 and
-`bodyValue` at `REWRITE_SHARE`. Where each job went:
+`upkeep` was one mechanic doing three jobs. It was taken to 0 on the argument
+below and is now back at 0.01 for a fourth job this section did not bill — see
+the end of it, and §6.4. `bodyValue` ships at `REWRITE_SHARE`. Where each of
+the three went:
 
 **The standing cost is `δ`**, the source document's own diagonal decay matrix. A
 body must keep eating to hold its pools against it, and a body that stops dies
@@ -546,6 +556,26 @@ and `bodyValue` conserved:
 
 Fewer lineages, twice as deep, and further apart. The depth ranges do not
 overlap across the three seeds.
+
+**And that is where the argument was wrong, which is why the rent is back.**
+Depth costing something was read here as a defect and is the job. With no rent
+nothing charges a body for merely existing, so a net that stops growing is
+free; at `upkeepExcrete` 1 its own exhaust lands on the ground beneath it, so
+it restocks its own pasture and no body in it is ever hungry enough to start
+the §7.2 clock. Measured, a 40-body knot plateaued at 84 and sat there for four
+minutes with the clock reading zero throughout.
+
+Rent is what makes size cost something, and it is density-dependent for free:
+the rent lands back under the body, so a lone body re-eats its own while a
+crowded one recovers only its share. At 0.01 `biggestNet` nearly halves and the
+founder-line count is the *highest* of the four settings tried — capping the
+runaway net is what leaves room for the others. The table is in `params.ts`
+under `upkeep`.
+
+Everything above this paragraph still holds: the rent is not the standing cost
+(`δ` is), it is not the death (the window is), and it is not the Era's income
+(uptake is). It is the price of being big, and that is the one thing it was
+doing that nothing else does.
 
 ---
 
