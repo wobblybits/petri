@@ -243,6 +243,20 @@ const REACT_CAP = 256;
  */
 const STARVE_EPS = 0.05;
 /**
+ * How fast the §7.2 clock unwinds while a body is fed, per second, against
+ * one per second while it is empty.
+ *
+ * 1 is symmetric and is the whole statement of the rule: a second spent with
+ * nothing costs a second spent fed. Below 1 a body has to be fed most of the
+ * time to hold steady; above it, only a sustained famine is lethal.
+ *
+ * A constant rather than a slider because `starveTime` is already the dial
+ * this mechanic ships behind — that says how much arrears a body may run up,
+ * and this says the exchange rate. Two numbers for one idea is how a
+ * parameter surface sprawls.
+ */
+const STARVE_RECOVER = 1;
+/**
  * Largest reaction step taken at once. The pathway is stiff where its
  * activator spikes, and explicit Euler past about this rings at the step
  * frequency instead of oscillating — so `advanceGait` splits a frame into as
@@ -4407,10 +4421,32 @@ export class Sim {
       R[o + REACT_B] = B;
       R[o + REACT_C] = C;
       R[o + REACT_D] = D;
-      // The doc's §7.2 clock: how long this body has been at absolute
-      // depletion. Reset by any primer at all, so it measures a continuous
-      // window and a body that eats once is spared.
-      STARVE[s] = B > STARVE_EPS ? 0 : STARVE[s] + dt;
+      /*
+       * The doc's §7.2 clock: how long this body has been at absolute
+       * depletion, **less how long it has since been fed.**
+       *
+       * It used to reset outright on any primer at all, which made it a
+       * *continuous* window: a body that hit empty, caught one crumb and hit
+       * empty again started again from zero, so chronic scarcity never
+       * accumulated and only an unbroken famine could kill. Measured on a
+       * crowded net, bodies reached 24.9 s of a 25 s window and reset. The
+       * pond had a rule for starving and no rule for going short.
+       *
+       * Now the pressure unwinds instead of vanishing, at `STARVE_RECOVER`
+       * per second of being fed against one per second of being empty. At 1
+       * that reads as: **a second empty costs a second fed**, so a body that
+       * spends more than half its time with nothing dies of it however the
+       * gaps are arranged, and one that is fed more than half the time is
+       * safe however ragged its supply. Nothing decays here — the clock winds
+       * back only against the thing that caused it, which is the difference
+       * between a credit window and a forgetting.
+       */
+      if (B > STARVE_EPS) {
+        const t = STARVE[s] - dt * STARVE_RECOVER;
+        STARVE[s] = t > 0 ? t : 0;
+      } else {
+        STARVE[s] += dt;
+      }
       speciesWaves(B, C, D, k2, k3, dec, waveK, WV);
       const g = s * CHEM_LEN;
       const w = actuatorOf(CHEM, g + SW_BASE, WV);
