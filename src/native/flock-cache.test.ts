@@ -53,6 +53,14 @@ function brick(sim: Sim, params: Params, cols: number, rows: number): Agent[] {
 
 function settled(): Params {
   const p = defaultParams();
+  // The dials this file is about. Both ship at 0 now — a shoal is a pond-wide
+  // behaviour and the pond is being taken apart to look at locomotion — so a
+  // test about the flock neighbourhood cache has to ask for a flock.
+  p.flockAlign = 5.5;
+  p.flockSep = 48;
+  // And no food drops: this file runs the same pond twice and compares the
+  // two bit for bit, and a drop lands wherever `Math.random` puts it.
+  p.groundDropEvery = 0;
   p.maxAgents = 5000;
   p.spawnInterval = 0;
   p.rewriteDuration = 0;

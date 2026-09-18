@@ -219,6 +219,29 @@ export class AgentStore {
    */
   bound!: Float64Array;
   /**
+   * How many of this body's ports are actually attached — the count `bound`
+   * divides away.
+   *
+   * The fraction cannot answer "is this a leaf". A wired Era reads 1.0 and so
+   * does a saturated Con, because an Era has one port and a Con three; that is
+   * *saturation*, which is what `IN_BOUND` is for and is a different question
+   * from degree. Written by the same loop, out of the same walk, so it costs a
+   * store and nothing else.
+   */
+  wires!: Float64Array;
+  /**
+   * Something outside physics is writing this body's pose, so no pass may
+   * integrate it: a designer pin, or a rewrite that is driving its pair.
+   *
+   * Split off `locked`, which used to serve as both. `locked` says a body is
+   * mid-rewrite — no latching, no transport, no deposit, no harvest — and that
+   * is true however the pair is being closed. Whether *physics* must keep its
+   * hands off is a different question, and since `rewritePull` it has a
+   * different answer: at 0 the pair keeps its mass and the collapsing wire
+   * hauls it like anything else.
+   */
+  poseLock!: Uint8Array;
+  /**
    * The recurrent internal state, `STATE_W` floats a body.
    *
    * State, not genome: it is not inherited and not mutated, it is what the
@@ -542,6 +565,8 @@ export class AgentStore {
     this.lineage[slot] = 0;
     this.arrivedAt[slot] = 0;
     this.bound[slot] = 0;
+    this.wires[slot] = 0;
+    this.poseLock[slot] = 0;
     this.hAll.fill(0, slot * STATE_W, slot * STATE_W + STATE_W);
     this.senseAll.fill(0, slot * SENSE_W, slot * SENSE_W + SENSE_W);
     this.steerAll.fill(0, slot * 3, slot * 3 + 3);
@@ -647,6 +672,8 @@ export class AgentStore {
     this.lineage = growI32(this.lineage);
     this.arrivedAt = growF64(this.arrivedAt);
     this.bound = growF64(this.bound);
+    this.wires = growF64(this.wires);
+    this.poseLock = growU8(this.poseLock);
     const newH = new Float64Array(newCapacity * STATE_W);
     if (this.hAll) newH.set(this.hAll.subarray(0, live * STATE_W));
     this.hAll = newH;

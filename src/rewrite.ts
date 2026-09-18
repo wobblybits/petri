@@ -452,6 +452,8 @@ export function beginRewrite(
   h: number,
   duration: number,
   wireId = -1,
+  /** Whether the animation will drive the pair's pose; see `rewritePull`. */
+  holdsPose = false,
 ): Rewrite {
   const rule = detectRule(agentA.kind, agentB.kind);
   const dying = new Set([agentA.id, agentB.id]);
@@ -461,8 +463,13 @@ export function beginRewrite(
   const conId = agentA.kind === 'con' ? agentA.id : agentB.kind === 'con' ? agentB.id : -1;
   const dupId = agentA.kind === 'dup' ? agentA.id : agentB.kind === 'dup' ? agentB.id : -1;
   const mid = wrapMid(agentA.x, agentA.y, agentB.x, agentB.y, w, h);
+  // `locked` is "mid-rewrite" and is always true. Whether physics must keep
+  // its hands off is a separate question with a separate flag, because at
+  // `rewritePull` 0 the pair keeps its mass and the wire does the hauling.
   agentA.locked = true;
   agentB.locked = true;
+  agentA.store.poseLock[agentA.slot] = holdsPose ? 1 : 0;
+  agentB.store.poseLock[agentB.slot] = holdsPose ? 1 : 0;
   const rw: Rewrite = {
     rule,
     t: 0,
@@ -546,12 +553,38 @@ function spreadGhosts(
   }
 }
 
+/**
+ * Close the pair to the separation this beat asks for, and no faster.
+ *
+ * What replaced assigning their positions. A rewrite used to lock both bodies
+ * — which makes them infinite-mass anchors to every force pass — and then
+ * drive them along an ease curve from where they stood when it began. Both
+ * halves of that are the problem: everything wired to them spent the rewrite's
+ * whole duration being dragged through the span solver by two bodies that
+ * physics was not touching, so a two-body rewrite rearranged a forty-body net
+ * exactly as hard as it rearranged a pair. Shape was whatever the last rewrite
+ * left behind.
+ *
+ * This asks for the same schedule and lets the pond answer. `closed` is how
+ * much of the original gap the beat wants shut, so the target separation is
+ * `sep0 * (1 - closed)` — identical to the old curve when nothing resists, and
+ * softer exactly when something does. Split by inverse mass, so the pair's
+ * centre of mass does not move and a light Era does the travelling; one-sided,
+ * so it only ever pulls together and never fights the wire that is already
+ * hauling on the same pair through `Wire.collapse`.
+ *
+ * At `kin` 0 the wire does all of it and a rewrite is as strong as its rest
+ * length. At 1 the pair closes on schedule whatever the net wants, which is
+ * roughly the old pond — roughly, because even then the correction is shared
+ * by mass rather than imposed, so a net can still push back a little.
+ */
 export function advanceRewrite(
   rw: Rewrite,
   agents: Map<number, Agent>,
   w: number,
   h: number,
   dt: number,
+  kin = 0,
 ): boolean {
   rw.t += dt / Math.max(0.05, rw.duration);
   const t = clamp(rw.t, 0, 1);
@@ -561,7 +594,33 @@ export function advanceRewrite(
   if (!A || !B) return t >= 1;
 
   const toB = wrapDeltaVecInto(rw.ax, rw.ay, rw.bx, rw.by, w, h, advToB);
-  const toA = wrapDeltaVecInto(rw.bx, rw.by, rw.ax, rw.ay, w, h, advToA);
+  const sep0 = Math.hypot(toB.x, toB.y);
+
+  /**
+   * Shut the live gap to `sep0 * (1 - closed)`, split by inverse mass.
+   *
+   * One-sided and live: it reads where the pair actually is, not where it
+   * stood when the rewrite began, so it composes with whatever else moved
+   * them instead of overriding it.
+   */
+  const close = (closed: number): void => {
+    if (!(kin > 0)) return;
+    const d = wrapDeltaVecInto(A.x, A.y, B.x, B.y, w, h, advToA);
+    const dist = Math.hypot(d.x, d.y);
+    const want = sep0 * (1 - closed);
+    if (!(dist > want) || dist < 1e-6) return;
+    const wA = A.pinned ? 0 : 1 / Math.max(0.08, A.mass);
+    const wB = B.pinned ? 0 : 1 / Math.max(0.08, B.mass);
+    const tot = wA + wB;
+    if (tot <= 0) return;
+    const shut = (dist - want) * clamp(kin, 0, 1);
+    const ux = d.x / dist;
+    const uy = d.y / dist;
+    A.x = wrap(A.x + ux * shut * (wA / tot), w);
+    A.y = wrap(A.y + uy * shut * (wA / tot), h);
+    B.x = wrap(B.x - ux * shut * (wB / tot), w);
+    B.y = wrap(B.y - uy * shut * (wB / tot), h);
+  };
 
   if (rw.rule === 'era-era' || rw.rule === 'annihilate-con' || rw.rule === 'annihilate-dup') {
     // Three beats, not one blur. The wire hauls them together, they touch,
@@ -570,40 +629,33 @@ export function advanceRewrite(
     // happened, and nothing read as causing anything else.
     const pull = easeIn(clamp(t / PULL_END, 0, 1));
     const collapse = easeInOut(clamp((t - COLLAPSE_START) / (1 - COLLAPSE_START), 0, 1));
-    // The drift the pair shared is still theirs; only the closing half of the
-    // motion belongs to the rewrite.
-    const dx = rw.vx * rw.t * rw.duration;
-    const dy = rw.vy * rw.t * rw.duration;
-    A.x = wrap(rw.ax + dx + toB.x * pull * 0.5, w);
-    A.y = wrap(rw.ay + dy + toB.y * pull * 0.5, h);
-    B.x = wrap(rw.bx + dx + toA.x * pull * 0.5, w);
-    B.y = wrap(rw.by + dy + toA.y * pull * 0.5, h);
+    close(pull);
     A.scale = B.scale = lerp(1, 0.1, collapse);
     A.alpha = B.alpha = 1 - collapse;
-    A.heading = rw.ah + angleDelta(rw.ah, Math.atan2(toB.y, toB.x)) * pull;
-    B.heading = rw.bh + angleDelta(rw.bh, Math.atan2(toA.y, toA.x)) * pull;
+    // Only while something is driving the pose. Left alone, `portTorques` aims
+    // each principal at its partner's stem, which is the same answer arrived
+    // at by the mechanism that already owns heading.
+    if (kin > 0) {
+      const toA = wrapDeltaVecInto(rw.bx, rw.by, rw.ax, rw.ay, w, h, advToA);
+      A.heading = rw.ah + angleDelta(rw.ah, Math.atan2(toB.y, toB.x)) * pull * kin;
+      B.heading = rw.bh + angleDelta(rw.bh, Math.atan2(toA.y, toA.x)) * pull * kin;
+    }
     // Callers read the length to mean "no ghosts"; a fresh array says the
     // same thing and allocates to say it.
     rw.ghosts.length = 0;
   } else if (rw.rule === 'erase') {
     const era = A.kind === 'era' ? A : B;
     const bin = era === A ? B : A;
-    const esx = era === A ? rw.ax : rw.bx;
-    const esy = era === A ? rw.ay : rw.by;
-    const bsx = era === A ? rw.bx : rw.ax;
-    const bsy = era === A ? rw.by : rw.ay;
-    era.x = wrap(esx + (bsx - esx) * e, w);
-    era.y = wrap(esy + (bsy - esy) * e, h);
+    // An Era is the lighter body, so the inverse-mass split already sends it
+    // most of the way across — which is what the old assignment did by hand.
+    close(e);
     era.scale = lerp(1, 0.4, e);
     era.alpha = 1 - e;
     bin.scale = lerp(1, 0.2, e);
     bin.alpha = 1 - e * 0.85;
     spreadGhosts(rw, w, h, rewriteAppear(t), 0.3);
   } else {
-    A.x = wrap(rw.ax + toB.x * e, w);
-    A.y = wrap(rw.ay + toB.y * e, h);
-    B.x = wrap(rw.bx + toA.x * e, w);
-    B.y = wrap(rw.by + toA.y * e, h);
+    close(e);
     A.alpha = B.alpha = 1 - e;
     A.scale = B.scale = lerp(1, 0.35, e);
     spreadGhosts(rw, w, h, rewriteAppear(t), 0.25);

@@ -52,6 +52,20 @@ function gaitParams(): Params {
    */
   p.upkeep = 0;
   /*
+   * And the reactor's own food goes back under the body, which the shipping
+   * pond no longer does.
+   *
+   * At 0 a body's fuel leaves the dish for good when it routes it, so a pinned
+   * body grazes its own cell below the fuel window and its clock stops — which
+   * is the mechanic working exactly as `has no clock at all when there is
+   * nothing to eat` asserts, and is the reason the shipped default moved. It
+   * makes a hopeless bench for a clock, though: this file pins a chain at
+   * coordinates it chose and then measures periods and lags over hundreds of
+   * cycles, and a rig whose subject starves halfway through is measuring
+   * starvation. A bench feeds its subject.
+   */
+  p.upkeepExcrete = 1;
+  /*
    * The ground regrows and diffuses, because the reactor is fed by eating.
    * A body grazes the cell it is standing in, so without diffusion its own
    * patch never refills and it drops below the fuel window inside a minute —

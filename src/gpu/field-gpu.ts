@@ -66,7 +66,7 @@ export const FIELD_U = {
   uptakeCap: 30,
   uptakeKs: 31,
   hillN: 32,
-  pad5: 33,
+  growSmell: 33,
   pad6: 34,
   pad7: 35,
 } as const;
@@ -396,7 +396,7 @@ export class FieldGpu {
     mix: number,
     mix2: number,
     decayRate: number,
-    grow: { ch: number; r: number; cap: number },
+    grow: { ch: number; r: number; cap: number; smell: number },
     harvest: { ch: number; blocks: number; entries: number; uptakeCap: number; uptakeKs: number; hillN: number },
     fill: { ch: number; value: number } | null,
   ): Promise<boolean> {
@@ -414,7 +414,7 @@ export class FieldGpu {
     mix: number,
     mix2: number,
     decayRate: number,
-    grow: { ch: number; r: number; cap: number },
+    grow: { ch: number; r: number; cap: number; smell: number },
     harvest: { ch: number; blocks: number; entries: number; uptakeCap: number; uptakeKs: number; hillN: number },
     fill: { ch: number; value: number } | null,
   ): boolean {
@@ -465,9 +465,10 @@ export class FieldGpu {
       f32[U.uptakeCap] = harvest.uptakeCap;
       f32[U.uptakeKs] = harvest.uptakeKs;
       f32[U.hillN] = harvest.hillN;
-      // `pad5`: catabolism left this pass for the host. Zeroed rather than
-      // skipped so a reused buffer cannot carry a stale value.
-      f32[U.pad5] = 0;
+      // The ground's voice, in the slot catabolism left when it moved to the
+      // host. Always written, never skipped, so a reused buffer cannot carry a
+      // stale rate into a pond that turned the smell off.
+      f32[U.growSmell] = grow.smell;
       device.queue.writeBuffer(this.uniform!, 0, u);
       if (nDeposit > 0) {
         device.queue.writeBuffer(

@@ -226,4 +226,37 @@ describe('ground through the sim', () => {
     expect(g.take(key, 0.4)).toBeCloseTo(0.4, 9);
     expect(g.getCell(0, 0)).toBeCloseTo(0.6, 9);
   });
+
+  it('takes the ground off the queue when the device goes away', () => {
+    /*
+     * `openFieldGpu` puts the grid into deferring mode, where an `addAt` is
+     * queued for the shader's `scatter` rather than written. Falling back left
+     * that on, so every add after it — a corpse, rent, a refund, a food drop —
+     * went into a queue only `gpuFieldStep` empties and `gpuFieldStep` was no
+     * longer running. The dish drained to zero and stayed there with nothing
+     * reported anywhere. Seen on the page by resetting a ten-thousand-body
+     * pond down to two hundred, which is enough for the field to fall back.
+     */
+    const params = defaultParams();
+    const sim = new Sim(1600, 900);
+    // A body, so the field has covered this patch of world and an add lands.
+    sim.spawn('con', 800, 450, 0, params, true);
+    sim.step(1 / 60, params);
+
+    // What a direct add is worth here, measured rather than assumed.
+    const start = total(sim.fields);
+    sim.energy.addAt(800, 450, 1);
+    const unit = total(sim.fields) - start;
+    expect(unit).toBeGreaterThan(0);
+
+    sim.energy.deferAdds(true);
+    sim.energy.addAt(800, 450, 1);
+    expect(sim.energy.pendingAdds, 'deferred, as the device path wants').toBe(1);
+    expect(total(sim.fields)).toBeCloseTo(start + unit, 6);
+
+    (sim as unknown as { dropFieldGpu(): void }).dropFieldGpu();
+    sim.energy.addAt(800, 450, 1);
+    expect(sim.energy.pendingAdds, 'nothing queued once the device is gone').toBe(0);
+    expect(total(sim.fields)).toBeCloseTo(start + unit * 2, 6);
+  });
 });

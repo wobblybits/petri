@@ -552,10 +552,9 @@ export class EnergyGrid {
 
     const n = this.patches;
     const R = this.boundHalf;
-    const cell = f.worldW / f.cols;
+    const rp = this.patchRadius;
     // Every patch fits inside the dish, so nothing is lost off the rim: the
     // centres spiral out to `R - rp` rather than to `R`.
-    const rp = R * Math.sqrt(PATCH_SHARE / n);
     const spread = Math.max(0, R - rp);
     const cxs = new Float64Array(n);
     const cys = new Float64Array(n);
@@ -565,21 +564,111 @@ export class EnergyGrid {
       cxs[i] = this.boundX + Math.cos(ang) * rad;
       cys[i] = this.boundY + Math.sin(ang) * rad;
     }
+    this.layBlobs(cxs, cys, rp, this.uniformMass);
+  }
 
-    /*
-     * Which cells the blobs cover, collected before anything is written, so
-     * the mass can be divided by the count that actually receives it. Two
-     * patches that overlap share their cells rather than doubling them, and a
-     * cell clipped by the rim is simply not in the list — which is what makes
-     * the total land on `uniformMass` exactly instead of near it.
-     */
+  /**
+   * One patch's radius at the current count: `PATCH_SHARE` of the disk shared
+   * between `patches` blobs. Floored at one blob, so a dish with no patch
+   * layout still has a well-defined grain for `dropPatch` to lay.
+   */
+  get patchRadius(): number {
+    return this.boundHalf * Math.sqrt(PATCH_SHARE / Math.max(1, this.patches));
+  }
+
+  /**
+   * One patch's share of the seeded dish. What `dropPatch`'s mass is quoted
+   * against, so "a drop is one patch's worth" is a number and not a feeling.
+   */
+  get patchMass(): number {
+    return this.uniformMass / Math.max(1, this.patches);
+  }
+
+  /**
+   * Lay one blob of ground, at the grain the seeded layout uses.
+   *
+   * The whole of periodic food: the world does not only heal what it has, it
+   * puts new ground down somewhere it was not. `Fields.grow` heals in place
+   * and skips a cell at zero, so a region grazed out stays dead forever — a
+   * dish with only regrowth loses structure monotonically, which is the
+   * measured reason `forage_ratio` peaks in the first minute and returns to
+   * parity. A drop is the other half: structure arriving, not structure
+   * recovering.
+   *
+   * Through the same `layBlobs` the seed uses, so a drop and a seed cannot
+   * disagree about what a patch is, and through `addAt`, so it is deferred and
+   * packed on the GPU path exactly as a seed is.
+   */
+  dropPatch(cx: number, cy: number, mass: number): void {
+    if (!this.fields || mass <= 0) return;
+    this.layBlobs(Float64Array.of(cx), Float64Array.of(cy), this.patchRadius, mass);
+  }
+
+  /**
+   * `patches` patch-masses of ground, somewhere uniformly random in the dish.
+   *
+   * Here rather than at the caller because the disk is this class's — the
+   * centre, the radius and what counts as in-bounds are all private, and a
+   * caller that guessed at them would be the second place in the pond that
+   * decides where ground may be. Uniform *in area*, so the rim is as likely
+   * per unit of dish as the middle, and inset by one patch radius so the whole
+   * blob lands and the rim is not quietly poorer than the centre.
+   *
+   * `Math.random` because that is what the pond's reproducibility is built on:
+   * the runner swaps in a seeded stream for the duration of a trial, the same
+   * way immigration's `autoSpawn` already relies on.
+   */
+  dropSomewhere(patches: number): void {
+    if (!this.fields || patches <= 0) return;
+    const rp = this.patchRadius;
+    const spread = Math.max(0, this.boundHalf - rp);
+    if (!isFinite(spread) || spread <= 0) return;
+    const rad = spread * Math.sqrt(Math.random());
+    const ang = Math.random() * Math.PI * 2;
+    this.dropPatch(
+      this.boundX + Math.cos(ang) * rad,
+      this.boundY + Math.sin(ang) * rad,
+      patches * this.patchMass,
+    );
+  }
+
+  /**
+   * `mass` spread evenly over whichever in-bounds field cells the blobs cover.
+   *
+   * Which cells they cover is collected before anything is written, so the
+   * mass can be divided by the count that actually receives it. Two blobs that
+   * overlap share their cells rather than doubling them, and a cell clipped by
+   * the rim is simply not in the list — which is what makes a seeded total
+   * land on `uniformMass` exactly instead of near it.
+   *
+   * The scan box is the blobs' own, not the dish's. For the seed the two are
+   * the same rectangle, since the centres spiral out to `R - rp`; for a single
+   * drop it is the difference between a few hundred cells and the million in
+   * the grid.
+   */
+  private layBlobs(cxs: Float64Array, cys: Float64Array, rp: number, mass: number): void {
+    const f = this.fields;
+    if (!f) return;
+    const n = cxs.length;
+    if (n === 0 || rp <= 0) return;
+    const cell = f.worldW / f.cols;
     const rp2 = rp * rp;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (let k = 0; k < n; k++) {
+      if (cxs[k] < minX) minX = cxs[k];
+      if (cxs[k] > maxX) maxX = cxs[k];
+      if (cys[k] < minY) minY = cys[k];
+      if (cys[k] > maxY) maxY = cys[k];
+    }
     const xs: number[] = [];
     const ys: number[] = [];
-    const lo = Math.floor((this.boundX - R - f.originX) / cell);
-    const hi = Math.ceil((this.boundX + R - f.originX) / cell);
-    const loY = Math.floor((this.boundY - R - f.originY) / cell);
-    const hiY = Math.ceil((this.boundY + R - f.originY) / cell);
+    const lo = Math.floor((minX - rp - f.originX) / cell);
+    const hi = Math.ceil((maxX + rp - f.originX) / cell);
+    const loY = Math.floor((minY - rp - f.originY) / cell);
+    const hiY = Math.ceil((maxY + rp - f.originY) / cell);
     for (let j = loY; j <= hiY; j++) {
       const y = f.originY + (j + 0.5) * cell;
       for (let i = lo; i <= hi; i++) {
@@ -599,7 +688,7 @@ export class EnergyGrid {
     if (xs.length === 0) return;
     // Through `addAt`, so it is deferred and packed on the GPU path and lands
     // as a conserved quantity rather than a density on either.
-    const each = this.uniformMass / xs.length;
+    const each = mass / xs.length;
     for (let i = 0; i < xs.length; i++) this.addAt(xs[i], ys[i], each);
   }
 

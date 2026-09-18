@@ -342,6 +342,47 @@ export function solveWireSpan(
 }
 
 /**
+ * The same constraint, hauling on the bodies' centres instead of their stems.
+ *
+ * For the one wire a rewrite is consuming, and the reason is the lever arm. A
+ * span correction arrives at the stem, which sits off the centre, so every
+ * pixel of closing carries an angular impulse with it. That is right for a
+ * joint — a port holds a direction as well as a distance — and wrong for a
+ * wire that is being eaten: the pair is not being articulated, it is being
+ * reeled together, and the ports it is reeling by are about to stop existing.
+ *
+ * Measured on the latch-spin bench, closing a pair through the stems put 57
+ * rad/s of spin on two Eras against a bound of 20; compliance alone plateaued
+ * around 33. Through the centres there is no torque term at all.
+ */
+export function solveTether(
+  A: Agent,
+  B: Agent,
+  rest: number,
+  stiff: WireStiffness,
+  h: number,
+): void {
+  if (!Number.isFinite(rest) || rest < 0) return;
+  const dx = B.x - A.x;
+  const dy = B.y - A.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 1e-9 || !Number.isFinite(dist)) return;
+  const wA = invMass(A);
+  const wB = invMass(B);
+  const invH2 = 1 / Math.max(1e-12, h * h);
+  const alphaTilde = COMPLIANCE.span * stiff.scale * stiff.slack * invH2;
+  const denom = wA + wB + alphaTilde;
+  if (denom < 1e-12) return;
+  const lambda = -(dist - rest) / denom;
+  const nx = dx / dist;
+  const ny = dy / dist;
+  A.x -= nx * lambda * wA;
+  A.y -= ny * lambda * wA;
+  B.x += nx * lambda * wB;
+  B.y += ny * lambda * wB;
+}
+
+/**
  * The mechanics the audio needs from a contact, taken from the same quantities
  * the solver uses rather than re-guessed from positions.
  *

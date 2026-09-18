@@ -1,0 +1,1388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!--
+  Inchworm Bench — standalone build.
+  A 2D spring-graph body that learns to crawl toward a food source by continuous
+  extremum seeking on per-node phase offsets. No episodes, no resets.
+  See inchworm-implementation.md for the full spec and the calibration data.
+
+  Open this file directly in a browser. No build step, no dependencies
+  (the one external request is Google Fonts; it degrades gracefully offline).
+
+  HEADLESS MEASUREMENT
+  --------------------
+  The simulation is driven by requestAnimationFrame but can be stepped directly.
+  From the browser console, or from Playwright page.evaluate():
+
+      running = false;                  // detach from the render loop
+      P.topo = "limbed"; P.cycles = 3;  // set any parameter in P
+      rebuild(); buildParamList(S);     // rebuild after changing topology/mode
+      for (let i = 0; i < 100000; i++) step(S);
+      console.log(S.t, S.captures, S.headCount, S.dist);
+
+  S holds all simulation state; P holds all parameters. Progress toward the food
+  is measured as the summed per-step decrease in S.dist, skipping any step where
+  S.captures changed (the food relocation is a discontinuity, not progress).
+-->
+<style>
+  :root{
+    color-scheme: light;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html, body { height: 100%; }
+  body{ margin:0; background:#fdfdfc; font:14px system-ui, -apple-system, "Segoe UI", sans-serif; }
+  img{ max-width:100%; }
+  [hidden]{ display:none !important; }
+</style>
+</head>
+<body>
+<title>Inchworm Bench</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --ground:#e9ecee;
+  --panel:#ffffff;
+  --field:#f7f9fa;
+  --ink:#151a1e;
+  --ink-2:#4d5a63;
+  --ink-3:#7c8a94;
+  --line:#d3dade;
+  --line-2:#e4e9ec;
+  --accent:#0c7a72;
+  --accent-soft:#d5ebe8;
+  --on-accent:#ffffff;
+  --food:#c47f1c;
+  --grid:#dce2e6;
+  --grid-2:#c9d2d8;
+  --edge:#93a3ad;
+  --trail:#9fb0ba;
+  --shadow:0 1px 2px rgba(20,30,38,.06), 0 6px 18px rgba(20,30,38,.05);
+  --r:7px;
+  --phase-l:56%;
+  --phase-s:62%;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0f1319;
+    --panel:#161c23;
+    --field:#0a0e12;
+    --ink:#e3eaef;
+    --ink-2:#9dabb6;
+    --ink-3:#6c7b86;
+    --line:#28313a;
+    --line-2:#1e262d;
+    --accent:#56bfb6;
+    --accent-soft:#12302f;
+    --on-accent:#07100f;
+    --food:#e2a548;
+    --grid:#191f26;
+    --grid-2:#232c34;
+    --edge:#4e5f6b;
+    --trail:#3c4c57;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.28);
+    --phase-l:62%;
+    --phase-s:58%;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0f1319;
+  --panel:#161c23;
+  --field:#0a0e12;
+  --ink:#e3eaef;
+  --ink-2:#9dabb6;
+  --ink-3:#6c7b86;
+  --line:#28313a;
+  --line-2:#1e262d;
+  --accent:#56bfb6;
+  --accent-soft:#12302f;
+  --on-accent:#07100f;
+  --food:#e2a548;
+  --grid:#191f26;
+  --grid-2:#232c34;
+  --edge:#4e5f6b;
+  --trail:#3c4c57;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.28);
+  --phase-l:62%;
+  --phase-s:58%;
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--ground);color:var(--ink);
+  font-family:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased;
+}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
+
+.app{height:100%;display:grid;grid-template-rows:auto 1fr;padding:0 16px 16px;gap:12px;max-width:1500px;margin:0 auto}
+
+/* ---- header ---- */
+.bar{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;padding-block:14px 2px}
+.bar h1{margin:0;font-size:16px;font-weight:600;letter-spacing:-.01em}
+.bar .sub{color:var(--ink-3);font-size:12.5px;max-width:62ch}
+.bar .spacer{flex:1 1 40px}
+
+/* ---- layout ---- */
+.grid{display:grid;grid-template-columns:minmax(0,1fr) 288px;gap:12px;min-height:0}
+@media (max-width:860px){
+  .app{height:auto}
+  .grid{grid-template-columns:minmax(0,1fr)}
+  .stage{height:66vh}
+}
+
+.stage{position:relative;background:var(--field);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;min-height:0;box-shadow:var(--shadow)}
+#view{display:block;width:100%;height:100%}
+
+/* readout strip floats over the field */
+.tiles{
+  position:absolute;left:10px;top:10px;right:10px;
+  display:flex;gap:6px;flex-wrap:wrap;pointer-events:none;
+}
+.tile{
+  background:color-mix(in srgb, var(--panel) 88%, transparent);
+  border:1px solid var(--line);border-radius:5px;padding:5px 9px 6px;min-width:76px;
+  backdrop-filter:blur(6px);
+}
+.tile .k{font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);font-weight:500}
+.tile .v{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:14px;font-variant-numeric:tabular-nums;color:var(--ink);line-height:1.3}
+.tile .v.pos{color:var(--accent)}
+
+.chartwrap{position:absolute;left:10px;right:10px;bottom:10px;height:96px;
+  background:color-mix(in srgb, var(--panel) 88%, transparent);
+  border:1px solid var(--line);border-radius:5px;backdrop-filter:blur(6px);padding:6px 8px 4px}
+.chartwrap .ct{display:flex;justify-content:space-between;align-items:baseline;font-size:9.5px;
+  letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);font-weight:500}
+.chartwrap .ct em{font-style:normal;font-family:"IBM Plex Mono",monospace;text-transform:none;letter-spacing:0;font-size:10.5px}
+#chart{display:block;width:100%;height:68px}
+
+/* ---- control rail ---- */
+.rail{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow-y:auto;padding:12px;box-shadow:var(--shadow);min-height:0}
+.sec{border-top:1px solid var(--line-2);padding-top:11px;margin-top:11px}
+.sec:first-child{border-top:0;padding-top:0;margin-top:0}
+.sec > h2{margin:0 0 9px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+
+.row{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
+button{
+  font:inherit;font-size:12.5px;font-weight:500;color:var(--ink);background:var(--panel);
+  border:1px solid var(--line);border-radius:5px;padding:5px 10px;cursor:pointer;transition:background .12s,border-color .12s;
+}
+button:hover{background:var(--accent-soft);border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+button.primary:hover{filter:brightness(1.08);background:var(--accent);border-color:var(--accent)}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+label.f{display:grid;grid-template-columns:1fr auto;gap:2px 8px;align-items:baseline;margin-bottom:9px}
+label.f .n{font-size:12px;color:var(--ink-2)}
+label.f .val{font-family:"IBM Plex Mono",monospace;font-size:11.5px;font-variant-numeric:tabular-nums;color:var(--ink);text-align:right}
+label.f input[type=range]{grid-column:1/-1;width:100%;margin:2px 0 0;accent-color:var(--accent);height:16px}
+label.f.locked{opacity:.45}
+
+select{font:inherit;font-size:12.5px;width:100%;padding:5px 7px;border:1px solid var(--line);
+  border-radius:5px;background:var(--panel);color:var(--ink);margin-bottom:9px}
+
+label.chk{display:flex;gap:7px;align-items:flex-start;font-size:12px;color:var(--ink-2);margin-bottom:8px;cursor:pointer}
+label.chk input{margin:2px 0 0;accent-color:var(--accent);flex:none}
+
+.note{font-size:11px;line-height:1.5;color:var(--ink-3);margin:6px 0 0}
+.note code{font-family:"IBM Plex Mono",monospace;font-size:10.5px;background:var(--line-2);padding:1px 3px;border-radius:3px}
+
+.legend{display:flex;align-items:center;gap:8px;margin-top:8px}
+.wheel{width:30px;height:30px;border-radius:50%;flex:none;
+  background:conic-gradient(from -90deg,
+    hsl(0 62% 56%),hsl(60 62% 56%),hsl(120 62% 56%),hsl(180 62% 56%),
+    hsl(240 62% 56%),hsl(300 62% 56%),hsl(360 62% 56%));
+  border:1px solid var(--line)}
+.legend p{margin:0;font-size:10.5px;color:var(--ink-3);line-height:1.4}
+</style>
+
+<div class="app">
+  <div class="bar">
+    <h1>Inchworm Bench</h1>
+    <span class="sub">Overdamped spring graph. Each node modulates its own ground drag; each edge modulates its rest length. Phase offsets are learned continuously by extremum seeking — no episodes, no resets.</span>
+    <span class="spacer"></span>
+  </div>
+
+  <div class="grid">
+    <div class="stage">
+      <canvas id="view"></canvas>
+      <div class="tiles">
+        <div class="tile"><div class="k">sim time</div><div class="v" id="t-time">0</div></div>
+        <div class="tile"><div class="k">distance</div><div class="v" id="t-dist">—</div></div>
+        <div class="tile"><div class="k">approach v̄</div><div class="v" id="t-speed">—</div></div>
+        <div class="tile"><div class="k">phase lock</div><div class="v" id="t-lock">—</div></div>
+        <div class="tile"><div class="k">mean grip</div><div class="v" id="t-grip">—</div></div>
+        <div class="tile"><div class="k">heads</div><div class="v" id="t-nheads">—</div></div>
+        <div class="tile"><div class="k">centre owner</div><div class="v" id="t-cent">—</div></div>
+        <div class="tile"><div class="k">head · switch/t</div><div class="v" id="t-head">—</div></div>
+        <div class="tile"><div class="k">ρ span</div><div class="v" id="t-rho">—</div></div>
+        <div class="tile"><div class="k">captures</div><div class="v" id="t-cap">0</div></div>
+      </div>
+      <div class="chartwrap">
+        <div class="ct"><span>Approach speed &nbsp;·&nbsp; low-passed, world units / time</span><em id="c-now">—</em></div>
+        <canvas id="chart"></canvas>
+      </div>
+    </div>
+
+    <div class="rail">
+
+      <div class="sec">
+        <h2>Run</h2>
+        <div class="row">
+          <button id="b-run" class="primary">Pause</button>
+          <button id="b-reset">Rebuild body</button>
+        </div>
+        <label class="f"><span class="n">Steps per frame</span><span class="val" id="v-speed">25</span>
+          <input type="range" id="s-speed" min="1" max="100" step="1" value="25"></label>
+      </div>
+
+      <div class="sec">
+        <h2>Body</h2>
+        <select id="s-topo" aria-label="Body topology">
+          <option value="chain">Chain — the inchworm baseline</option>
+          <option value="ladder">Ladder — degree 3, has an axis</option>
+          <option value="geometric" selected>Geometric strip — degree ≤ 3</option>
+          <option value="unet">U-shaped net — two tips, one long arc</option>
+          <option value="limbed">Limbed — degrees 1 and 3 only</option>
+          <option value="cubic">Random cubic — degree 3, expander</option>
+        </select>
+        <label class="f"><span class="n">Nodes</span><span class="val" id="v-n">24</span>
+          <input type="range" id="s-n" min="8" max="48" step="2" value="24"></label>
+        <label class="f" id="l-cycles"><span class="n">Cycles c <span id="v-split"></span></span><span class="val" id="v-cycles">3</span>
+          <input type="range" id="s-cycles" min="0" max="12" step="1" value="3"></label>
+        <label class="f"><span class="n">Bending stiffness k<sub>b</sub></span><span class="val" id="v-kbend">0.50</span>
+          <input type="range" id="s-kbend" min="0" max="3" step="0.05" value="0.5"></label>
+        <label class="chk"><input type="checkbox" id="c-blind" checked><span>Degree-3 nodes are <strong>blind</strong> — they relay, never sense</span></label>
+        <p class="note">On the limbed body, <code>n₁ = n₃ + 2 − 2c</code> holds exactly, so each cycle you add buys stiffness by deleting two sensors. Blind interior nodes can never claim themselves, so <strong>every head is a leaf</strong> and basins are whole subtrees — the watershed can only sit at a junction, which makes it hysteretic for free.</p>
+        <p class="note">A spring net has no resistance to bending, so a U with k<sub>b</sub> = 0 unfolds into a line within a few gait cycles. And at degree ≤ 3 no body is ever generically rigid past n = 6 (3n/2 edges against the 2n−3 needed), so the angular springs are the entire shape-holding mechanism at every size.</p>
+        <p class="note">Random cubic graphs are expanders — no bottleneck, no head or tail. Expect them to be much worse bodies than the chain. That contrast is the experiment.</p>
+      </div>
+
+      <div class="sec">
+        <h2>Head field</h2>
+        <select id="s-tmode" aria-label="Phase offset parameterization">
+          <option value="free" selected>θ free — one offset per node</option>
+          <option value="profile">θ = Θ(ρ) — 3 coefficients, food-aligned</option>
+        </select>
+        <label class="f"><span class="n">Transmission cost γ</span><span class="val" id="v-gamma">0.35</span>
+          <input type="range" id="s-gamma" min="0" max="1.2" step="0.01" value="0.35"></label>
+        <label class="f"><span class="n">Cost convexity p</span><span class="val" id="v-convexP">1.00</span>
+          <input type="range" id="s-convexP" min="0.5" max="3" step="0.05" value="1"></label>
+        <label class="f"><span class="n">Cost scale d₀</span><span class="val" id="v-d0">4.0</span>
+          <input type="range" id="s-d0" min="1" max="15" step="0.5" value="4"></label>
+        <label class="f"><span class="n">Hysteresis μ</span><span class="val" id="v-mu">0.10</span>
+          <input type="range" id="s-mu" min="0" max="1" step="0.01" value="0.1"></label>
+        <label class="chk"><input type="checkbox" id="c-head" checked><span>Ring every head</span></label>
+        <label class="chk"><input type="checkbox" id="c-basin"><span>Colour nodes by basin instead of θ</span></label>
+        <p class="note">Each node relays a <em>claim</em> — the source's live reading, the graph distance to it, and which node it is — and keeps the cheapest, where <code>cost(d) = γd₀(d/d₀)<sup>p</sup></code>. A <strong>head is a node that claims itself</strong>, so the head count is exact, not a threshold.</p>
+        <p class="note">At p = 1 the criterion is purely local: a node is a head <strong>unless one of its edges points within arccos(γ) of the food</strong> — a 70° cone at γ = 0.35. So any segment lying sideways to the food becomes a head, and most heads are body curvature rather than real lobes. Every body here averages 2–5 of them.</p>
+        <p class="note"><strong>p ≈ 2 is what separates a lobe from a wiggle.</strong> One hop then costs γd₀(ℓ/d₀)<sup>p</sup>, far less than γℓ, so the local threshold tightens to ~85° and spurious heads vanish — while long relays cost more, so genuine extremities keep their own basin. On the U this turns a scatter of 1–4 heads into a stable 2 at almost every food bearing. Note the γ ≥ 1 identity holds at p = 1 only.</p>
+        <p class="note">Relaying the source rather than a combined value means the field cannot latch — every source re-asserts its live reading each step, so the leak this needed in the scalar version is gone. μ gives the incumbent claim a margin, which is what steadies the watershed.</p>
+      </div>
+
+      <div class="sec">
+        <h2>Gait</h2>
+        <label class="f"><span class="n">Frequency ω</span><span class="val" id="v-omega">1.50</span>
+          <input type="range" id="s-omega" min="0.3" max="3" step="0.05" value="1.5"></label>
+        <label class="f"><span class="n">Coupling w</span><span class="val" id="v-w">1.50</span>
+          <input type="range" id="s-w" min="0" max="5" step="0.05" value="1.5"></label>
+        <label class="f" id="l-rg"><span class="n">Grip amplitude r<sub>g</sub></span><span class="val" id="v-rg">0.45</span>
+          <input type="range" id="s-rg" min="0" max="0.5" step="0.01" value="0.45"></label>
+        <label class="f" id="l-xg"><span class="n">Grip offset x<sub>g</sub></span><span class="val" id="v-xg">0.50</span>
+          <input type="range" id="s-xg" min="0.1" max="0.9" step="0.01" value="0.5"></label>
+        <label class="f" id="l-a"><span class="n">Rest-length swing a</span><span class="val" id="v-a">0.22</span>
+          <input type="range" id="s-a" min="0" max="0.30" step="0.005" value="0.22"></label>
+        <div class="row">
+          <button id="b-wave">Set wave θ</button>
+          <button id="b-rand">Randomize θ</button>
+          <button id="b-zero">Zero θ</button>
+        </div>
+        <p class="note" id="n-coef" hidden>Θ = <span id="v-coef">—</span> &nbsp;·&nbsp; u = (s−m)/(M−m) ∈ [0,1], normalised from the head and tail fields alone — no node needs the body's size. No constant term: a uniform shift of θ is pure gauge.</p>
+        <p class="note">“Set wave θ” imposes a hand-built traveling wave — from graph distance in free mode, from ρ in profile mode. Run it with learning off first — if that doesn't locomote, the physics is wrong, not the learner.</p>
+      </div>
+
+      <div class="sec">
+        <h2>Sensing</h2>
+        <label class="f" id="l-kappa"><span class="n">Steering gain κ</span><span class="val" id="v-kappa">1.00</span>
+          <input type="range" id="s-kappa" min="-2" max="2" step="0.02" value="1"></label>
+        <label class="f"><span class="n">Temporal gain κ<sub>t</sub></span><span class="val" id="v-kappat">0.0</span>
+          <input type="range" id="s-kappat" min="0" max="40" step="0.5" value="0"></label>
+        <p class="note">Each node reads only its own scalar distance to the food and its neighbours'. Steering is <code>φ̇ += κ(s − ŝ) + κ<sub>t</sub>(s − s̄)</code> — a phase nudge, never a direction. Both terms advance the phase of a node that is worse off: farther than its neighbours, or receding.</p>
+        <p class="note"><strong>Flip κ negative and the body reliably marches away from the food.</strong> The correct sign depends on the gait's chirality, so κ is not independent of θ — it's the cheapest demonstration in here that these have to be learned jointly.</p>
+      </div>
+
+      <div class="sec">
+        <h2>Learning</h2>
+        <label class="chk"><input type="checkbox" id="c-learn" checked><span>Extremum seeking on <strong id="lbl-learn">θ</strong> — <span id="lbl-np">28</span> parameters</span></label>
+        <label class="chk"><input type="checkbox" id="c-learngait"><span>Also learn r<sub>g</sub>, x<sub>g</sub>, a, κ</span></label>
+        <label class="f"><span class="n">Learning rate η</span><span class="val" id="v-eta">0.010</span>
+          <input type="range" id="s-eta" min="0" max="0.06" step="0.002" value="0.01"></label>
+        <label class="f"><span class="n">Dither amplitude</span><span class="val" id="v-amp">0.35</span>
+          <input type="range" id="s-amp" min="0.02" max="1.2" step="0.01" value="0.35"></label>
+        <label class="f"><span class="n">Dither hold (gait periods)</span><span class="val" id="v-hold">8</span>
+          <input type="range" id="s-hold" min="2" max="40" step="1" value="8"></label>
+        <label class="f"><span class="n">Grip cost λ<sub>g</sub></span><span class="val" id="v-lg">0.004</span>
+          <input type="range" id="s-lg" min="0" max="0.05" step="0.001" value="0.004"></label>
+        <label class="f"><span class="n">Actuation cost λ<sub>ℓ</sub></span><span class="val" id="v-ll">0.004</span>
+          <input type="range" id="s-ll" min="0" max="0.05" step="0.001" value="0.004"></label>
+        <p class="note">All parameters are dithered simultaneously with independent ±1 signs. Each node demodulates the shared reward against its own sign, so credit assignment costs one broadcast scalar. Timescales must stay separated: learning ≪ dither ≪ gait.</p>
+      </div>
+
+      <div class="sec">
+        <h2>Ablation</h2>
+        <select id="s-couple" aria-label="Phase coupling topology">
+          <option value="body" selected>Couple over the body graph</option>
+          <option value="star">Couple over a star</option>
+          <option value="line">Couple over a line</option>
+          <option value="none">No coupling</option>
+        </select>
+        <p class="note">Kurin et al. found a star carrying no morphological information matched the true morphology. Physics always uses the real body; this changes only who talks to whom.</p>
+      </div>
+
+      <div class="sec">
+        <h2>Display</h2>
+        <label class="f"><span class="n">Zoom</span><span class="val" id="v-zoom">1.00</span>
+          <input type="range" id="s-zoom" min="0.35" max="3" step="0.05" value="1"></label>
+        <label class="chk"><input type="checkbox" id="c-trail" checked><span>Centroid trail</span></label>
+        <label class="chk"><input type="checkbox" id="c-strain"><span>Colour edges by strain</span></label>
+        <div class="legend">
+          <div class="wheel" aria-hidden="true"></div>
+          <p>Node hue is its learned phase offset θ — a cyclic quantity, so a hue circle. Node size and brightness are its live grip.</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ============================================================
+   Inchworm Bench
+   Overdamped spring graph + per-node CPG + continuous
+   extremum-seeking (Rademacher-dither SPSA) on phase offsets.
+   ============================================================ */
+
+const TAU = Math.PI * 2;
+const $ = id => document.getElementById(id);
+
+/* ---------- parameters bound to the UI ---------- */
+const P = {
+  n: 24, topo: "geometric",
+  omega: 1.5, w: 1.5, rg: 0.45, xg: 0.5, a: 0.22, kappa: 1.0, kappaT: 0,
+  learn: true, learnGait: false,
+  eta: 0.01, amp: 0.35, holdPeriods: 8,
+  lamG: 0.004, lamL: 0.004,
+  couple: "body",
+  // head field: discounted min-plus relay of the scalar sensor
+  thetaMode: "free",              // "free" = one offset per node | "profile" = Theta(rho)
+  gamma: 0.35, convexP: 1.0, d0: 4.0, mu: 0.10,
+  kbend: 0.5, cycles: 3, blind: true,
+  c1: 2.2, c2: 0, c3: 0,          // profile coefficients, learned in profile mode
+  stepsPerFrame: 25, zoom: 1, trail: true, strainColor: false,
+  showHead: true, basinColor: false
+};
+
+/* ---------- fixed physics constants ---------- */
+const DT      = 0.01;   // physics/control step
+const K_SPR   = 1.0;    // spring stiffness
+const K_REP   = 2.0;    // soft repulsion between non-adjacent nodes
+const R_REP   = 1.0;    // repulsion range
+const C0      = 1.0;    // baseline drag
+const GAMMA   = 2.0;    // grip -> drag exponent
+const STRAIN  = 0.28;   // strain limit, fraction of current rest length
+const CAPTURE = 1.4;    // capture radius
+const FOOD_D  = 12;     // respawn distance
+const REF_RHO = 3.0;    // reference body depth, so the profile coefficients are well conditioned
+
+/* filter corners (rad per unit sim time) */
+const W_REWARD = 0.15;  // low-pass on raw reward: kills gait-frequency ripple
+const W_HIGH   = 0.004; // high-pass -> the baseline
+const W_DEMOD  = 0.004; // demodulator low-pass
+const W_RMS    = 0.004; // reward-scale tracker
+
+let S = null;           // the whole simulation state
+let running = true;
+
+/* ============================================================
+   Graph construction
+   ============================================================ */
+function shuffle(a){ for(let i=a.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;[a[i],a[j]]=[a[j],a[i]];} return a; }
+
+function buildEdges(n, topo){
+  const key = (i,j) => i<j ? i+","+j : j+","+i;
+  const set = new Set(), E = [];
+  const add = (i,j) => { if(i===j) return false; const k=key(i,j); if(set.has(k)) return false; set.add(k); E.push([Math.min(i,j),Math.max(i,j)]); return true; };
+
+  if(topo === "chain"){
+    for(let i=0;i<n-1;i++) add(i,i+1);
+
+  } else if(topo === "ladder" || topo === "unet"){
+    const m = Math.floor(n/2);                 // two rails of m, rungs between
+    for(let i=0;i<m-1;i++){ add(i,i+1); add(m+i,m+i+1); }
+    for(let i=0;i<m;i++) add(i,m+i);           // every node ends at degree <= 3
+
+  } else if(topo === "limbed"){
+    /* Degrees 1 and 3 only. Counting edge-ends with c independent cycles forces
+       n1 = n3 + 2 - 2c exactly, so the cycle count and the sensor count are not
+       independent choices: every cycle costs two sensory nodes. */
+    const cyc = Math.max(0, Math.min(P.cycles|0, Math.floor((n-4)/2)));
+    const n3  = (n - 2 + 2*cyc) / 2;
+    for(let i=0;i<n3-1;i++) add(i, i+1);           // backbone of interior nodes
+    const spare = new Array(n3).fill(1);
+    spare[0] = 2; spare[n3-1] = 2;                 // the two ends carry an extra stub
+    let placed = 0;
+    for(let gap=3; gap<=8 && placed<cyc; gap++){
+      for(let i=0; i+gap<n3 && placed<cyc; i++){
+        if(spare[i]>0 && spare[i+gap]>0 && add(i,i+gap)){ spare[i]--; spare[i+gap]--; placed++; }
+      }
+    }
+    let leaf = n3;                                 // every remaining stub becomes a sensor
+    for(let i=0;i<n3 && leaf<n;i++){
+      while(spare[i]>0 && leaf<n){ add(i, leaf); spare[i]--; leaf++; }
+    }
+
+  } else if(topo === "geometric"){
+    // Points in a 4:1 strip. Lay a spanning path along the strip FIRST so the
+    // body is connected by construction, then spend the remaining degree
+    // budget on the shortest available pairs.
+    const pts = [];
+    for(let i=0;i<n;i++) pts.push([Math.random()*4*Math.sqrt(n), Math.random()*Math.sqrt(n)]);
+    pts.sort((p,q)=>p[0]-q[0]);
+    const deg = new Array(n).fill(0);
+    for(let i=0;i<n-1;i++){ add(i,i+1); deg[i]++; deg[i+1]++; }
+    const cand = [];
+    for(let i=0;i<n;i++) for(let j=i+2;j<n;j++){
+      const dx=pts[i][0]-pts[j][0], dy=pts[i][1]-pts[j][1];
+      cand.push([dx*dx+dy*dy,i,j]);
+    }
+    cand.sort((p,q)=>p[0]-q[0]);
+    for(const [,i,j] of cand){ if(deg[i]<3 && deg[j]<3 && add(i,j)){ deg[i]++; deg[j]++; } }
+
+  } else { // random cubic via the pairing model, rejecting non-simple draws
+    const N = (n % 2 === 0) ? n : n-1;
+    for(let attempt=0; attempt<600; attempt++){
+      set.clear(); E.length = 0;
+      const stubs = [];
+      for(let i=0;i<N;i++) for(let c=0;c<3;c++) stubs.push(i);
+      shuffle(stubs);
+      let ok = true;
+      for(let i=0;i<stubs.length;i+=2){ if(!add(stubs[i],stubs[i+1])){ ok=false; break; } }
+      if(ok && components(N,E).count === 1) break;
+    }
+    if(n !== N) add(n-1, 0); // odd n: hang the last node off node 0
+  }
+  return E;
+}
+
+function components(n, E){
+  const id = new Array(n).fill(-1), adj = adjacency(n,E);
+  let count = 0;
+  for(let s=0;s<n;s++){
+    if(id[s] !== -1) continue;
+    const q=[s]; id[s]=count;
+    while(q.length){ const v=q.pop(); for(const u of adj[v]) if(id[u]===-1){ id[u]=count; q.push(u); } }
+    count++;
+  }
+  return {id, count};
+}
+function adjacency(n, E){ const A = Array.from({length:n},()=>[]); for(const [i,j] of E){ A[i].push(j); A[j].push(i); } return A; }
+
+function bfsDist(n, adj, src){
+  const d = new Array(n).fill(Infinity); d[src]=0; const q=[src];
+  for(let h=0;h<q.length;h++){ const v=q[h]; for(const u of adj[v]) if(d[u]===Infinity){ d[u]=d[v]+1; q.push(u); } }
+  for(let i=0;i<n;i++) if(!isFinite(d[i])) d[i]=0;
+  return d;
+}
+
+/* ============================================================
+   State
+   ============================================================ */
+function build(){
+  const n = P.n;
+  const E = buildEdges(n, P.topo);
+  const adj = adjacency(n, E);
+  const m = E.length;
+
+  const s = {
+    n, m, E, adj,
+    px:new Float64Array(n), py:new Float64Array(n),
+    fx:new Float64Array(n), fy:new Float64Array(n),
+    phi:new Float64Array(n),          // detrended phase
+    theta:new Float64Array(n),        // learned phase offset (free mode)
+    thEff:new Float64Array(n),        // offset actually applied this step
+    grip:new Float64Array(n),
+    drag:new Float64Array(n),
+    sens:new Float64Array(n),         // raw scalar sensor
+    sensLP:new Float64Array(n),
+    // relayed claims: each node holds (source's reading, graph distance to it,
+    // source index). Relaying the SOURCE rather than an already-combined value
+    // is what makes this self-correcting and gives every node a basin label.
+    hVal:new Float64Array(n), hDst:new Float64Array(n), hSrc:new Int32Array(n),
+    hVo :new Float64Array(n), hDo :new Float64Array(n), hSo :new Int32Array(n),
+    tVal:new Float64Array(n), tDst:new Float64Array(n), tSrc:new Int32Array(n),
+    tVo :new Float64Array(n), tDo :new Float64Array(n), tSo :new Int32Array(n),
+    mfield:new Float64Array(n),       // head field   m = min_k( s_k + c(d) )
+    Mfield:new Float64Array(n),       // tail field   M = max_k( s_k - c(d) )
+    rho:new Float64Array(n),          // s - m : depth behind the front
+    rhoHat:new Float64Array(n),       // (s-m)/(M-m) : the same, normalised LOCALLY
+    phiOut:new Float64Array(n),       // double-buffered outbox
+    sensOut:new Float64Array(n),
+    blind:new Uint8Array(n), nSense:0, anySense:true,
+    bI:null, bJ:null, bK:null, bA:null, nBend:0,
+    centroid:0, centOwner:-1, centFlip:0,
+    headIdx:-1, headRate:0, headCount:1, rhoMax:0, gBase:n,
+    ell0:new Float64Array(m),
+    ell:new Float64Array(m),
+    nonAdj:[],                        // non-adjacent pairs, for repulsion
+    // learner
+    params:[], dith:null, G:null, holdLeft:0,
+    Rlp:0, chi:0, rms:0.02, Rtilde:0,
+    prevDist:null, skipReward:true,
+    // world
+    t:0, foodX:0, foodY:0, captures:0,
+    trail:[], series:[], nextSample:0,
+    lock:0, meanGrip:0, dist:0
+  };
+
+  const adjSet = new Set(E.map(([i,j])=>i+","+j));
+  for(let i=0;i<n;i++) for(let j=i+1;j<n;j++) if(!adjSet.has(i+","+j)) s.nonAdj.push(i,j);
+  for(let k=0;k<m;k++) s.ell0[k] = 1;
+
+  if(topoIsU(P.topo)){
+    placeU(s);                       // an explicit U: relaxation would just straighten it
+  } else {
+    for(let i=0;i<n;i++){ s.px[i] = (Math.random()-0.5)*Math.sqrt(n)*1.6; s.py[i] = (Math.random()-0.5)*Math.sqrt(n)*1.2; }
+    for(let it=0; it<900; it++) relaxStep(s, 0.04);
+  }
+  for(let k=0;k<m;k++){ const [i,j]=E[k]; s.ell0[k] = Math.hypot(s.px[j]-s.px[i], s.py[j]-s.py[i]); s.ell[k]=s.ell0[k]; }
+  buildRestAngles(s);
+  recenter(s);
+
+  // degree 1 = a sensory ending; anything else relays only what it is told
+  for(let i=0;i<n;i++) s.blind[i] = (adj[i].length > 1) ? 1 : 0;
+  s.nSense = 0; for(let i=0;i<n;i++) if(!s.blind[i]) s.nSense++;
+  s.anySense = s.nSense > 0;          // a body with no leaves cannot go blind
+
+  // Jordan centre: the node whose farthest leaf is nearest. All basins
+  // eventually collide here, so it is the body's structural decision point.
+  let bestEcc = Infinity;
+  for(let v=0; v<n; v++){
+    const d = bfsDist(n, adj, v);
+    let ecc = 0; for(let i=0;i<n;i++) if(d[i] > ecc) ecc = d[i];
+    if(ecc < bestEcc){ bestEcc = ecc; s.centroid = v; }
+  }
+
+  for(let i=0;i<n;i++) s.phi[i] = Math.random()*TAU;
+  setWaveTheta(s);
+  placeFood(s, true);
+  for(let i=0;i<n;i++){
+    const d = Math.hypot(s.px[i]-s.foodX, s.py[i]-s.foodY);
+    s.sens[i]=d; s.sensLP[i]=d;
+    s.mfield[i]=d; s.hVal[i]=d;  s.hDst[i]=0; s.hSrc[i]=i;
+    s.Mfield[i]=d; s.tVal[i]=-d; s.tDst[i]=0; s.tSrc[i]=i;
+  }
+  buildParamList(s);
+  return s;
+}
+
+function topoIsU(t){ return t === "unet"; }
+
+/* Two rails bent around a semicircle. The tips end up spatially close but
+   maximally far apart around the graph — the configuration that makes two
+   heads possible at all. */
+function placeU(s){
+  const m = s.n >> 1;
+  const R = 2.0, W = 0.95;
+  const arc = Math.PI * R;
+  const leg = Math.max(0.6, ((m-1) - arc) / 2);
+  const total = 2*leg + arc;
+  for(let t=0;t<m;t++){
+    const q = (m===1) ? 0 : (t/(m-1)) * total;
+    let x,y,tx,ty;
+    if(q < leg){                       // first leg, running down at x = -R
+      x = -R; y = leg - q;  tx = 0; ty = -1;
+    } else if(q < leg + arc){          // the bend
+      const a = (q - leg)/R;
+      x = -R*Math.cos(a); y = -R*Math.sin(a);
+      tx = Math.sin(a);   ty = -Math.cos(a);
+    } else {                           // second leg, running up at x = +R
+      x = R; y = q - leg - arc; tx = 0; ty = 1;
+    }
+    const nx = -ty, ny = tx;
+    s.px[t]   = x + 0.5*W*nx;  s.py[t]   = y + 0.5*W*ny;
+    s.px[m+t] = x - 0.5*W*nx;  s.py[m+t] = y - 0.5*W*ny;
+  }
+}
+
+/* Rest angles between every pair of edges at a node. Without these a spring
+   net has no bending stiffness at all and a U simply unfolds into a line. */
+function buildRestAngles(s){
+  const I=[], J=[], K=[], A=[];
+  for(let i=0;i<s.n;i++){
+    const nb = s.adj[i];
+    for(let x=0;x<nb.length;x++) for(let y=x+1;y<nb.length;y++){
+      const j=nb[x], k=nb[y];
+      const ux=s.px[j]-s.px[i], uy=s.py[j]-s.py[i];
+      const vx=s.px[k]-s.px[i], vy=s.py[k]-s.py[i];
+      I.push(i); J.push(j); K.push(k);
+      A.push(Math.atan2(ux*vy-uy*vx, ux*vx+uy*vy));
+    }
+  }
+  s.bI=Int32Array.from(I); s.bJ=Int32Array.from(J); s.bK=Int32Array.from(K);
+  s.bA=Float64Array.from(A); s.nBend=I.length;
+}
+
+function relaxStep(s, h){
+  const {n,E,m,px,py,fx,fy} = s;
+  fx.fill(0); fy.fill(0);
+  for(let k=0;k<m;k++){
+    const i=E[k][0], j=E[k][1];
+    let dx=px[j]-px[i], dy=py[j]-py[i];
+    const L=Math.hypot(dx,dy)||1e-9; dx/=L; dy/=L;
+    const f=(L-1);
+    fx[i]+=f*dx; fy[i]+=f*dy; fx[j]-=f*dx; fy[j]-=f*dy;
+  }
+  const NA=s.nonAdj;
+  for(let p=0;p<NA.length;p+=2){
+    const i=NA[p], j=NA[p+1];
+    let dx=px[j]-px[i], dy=py[j]-py[i];
+    const L=Math.hypot(dx,dy)||1e-9;
+    if(L<1.25){ dx/=L; dy/=L; const f=-2.0*(1.25-L); fx[i]+=f*dx; fy[i]+=f*dy; fx[j]-=f*dx; fy[j]-=f*dy; }
+  }
+  for(let i=0;i<n;i++){ px[i]+=h*fx[i]; py[i]+=h*fy[i]; }
+}
+
+function recenter(s){
+  let cx=0, cy=0; for(let i=0;i<s.n;i++){ cx+=s.px[i]; cy+=s.py[i]; }
+  cx/=s.n; cy/=s.n;
+  for(let i=0;i<s.n;i++){ s.px[i]-=cx; s.py[i]-=cy; }
+}
+function centroid(s){ let cx=0,cy=0; for(let i=0;i<s.n;i++){cx+=s.px[i];cy+=s.py[i];} return [cx/s.n, cy/s.n]; }
+
+function placeFood(s, first){
+  const [cx,cy] = centroid(s);
+  const ang = Math.random()*TAU;
+  s.foodX = cx + Math.cos(ang)*FOOD_D;
+  s.foodY = cy + Math.sin(ang)*FOOD_D;
+  s.prevDist = null; s.skipReward = true;
+  if(!first) s.captures++;
+}
+
+/* ---- theta presets ---- */
+function setWaveTheta(s){
+  // linear ramp in graph distance from the node that is topologically farthest out
+  const d0 = bfsDist(s.n, s.adj, 0);
+  let src = 0; for(let i=0;i<s.n;i++) if(d0[i] > d0[src]) src = i;
+  const d = bfsDist(s.n, s.adj, src);
+  const maxd = Math.max(1, ...d);
+  for(let i=0;i<s.n;i++) s.theta[i] = (d[i]/maxd) * TAU * 0.9;
+  gauge(s);
+}
+function randomTheta(s){ for(let i=0;i<s.n;i++) s.theta[i] = Math.random()*TAU; gauge(s); }
+function zeroTheta(s){ s.theta.fill(0); }
+function gauge(s){
+  let m=0; for(let i=0;i<s.n;i++) m+=s.theta[i]; m/=s.n;
+  for(let i=0;i<s.n;i++){ let v=s.theta[i]-m; v=((v+Math.PI)%TAU+TAU)%TAU-Math.PI; s.theta[i]=v; }
+}
+
+/* ============================================================
+   Learner: the dithered parameter vector
+   Each entry exposes get/set so theta and the gait scalars
+   can live in one flat list.
+   ============================================================ */
+function buildParamList(s){
+  const list = [];
+  const clamp=(v,lo,hi)=>v<lo?lo:v>hi?hi:v;
+
+  if(P.thetaMode === "profile"){
+    // Theta(rho) = c1 u + c2 u^2 + c3 u^3,  u = rho / REF_RHO.
+    // No constant term: a uniform shift of theta is pure gauge.
+    list.push({ scale:1.0, gait:false, get:()=>P.c1, set:v=>{P.c1=clamp(v,-8,8);} });
+    list.push({ scale:1.0, gait:false, get:()=>P.c2, set:v=>{P.c2=clamp(v,-8,8);} });
+    list.push({ scale:1.0, gait:false, get:()=>P.c3, set:v=>{P.c3=clamp(v,-8,8);} });
+  } else {
+    for(let i=0;i<s.n;i++){
+      const idx=i;
+      list.push({ scale:1.0, gait:false,
+        get:()=>s.theta[idx], set:v=>{ s.theta[idx]=v; } });
+    }
+  }
+  s.gBase = list.length;
+  list.push({ scale:0.15, gait:true, get:()=>P.rg,    set:v=>{P.rg=clamp(v,0,0.5);} });
+  list.push({ scale:0.15, gait:true, get:()=>P.xg,    set:v=>{P.xg=clamp(v,0.1,0.9);} });
+  list.push({ scale:0.10, gait:true, get:()=>P.a,     set:v=>{P.a=clamp(v,0,0.30);} });
+  list.push({ scale:0.30, gait:true, get:()=>P.kappa, set:v=>{P.kappa=clamp(v,-2,2);} });
+  s.params = list;
+  s.dith = new Float64Array(list.length);
+  s.G    = new Float64Array(list.length);
+  s.holdLeft = 0;
+}
+
+/* Transmission cost as a function of TOTAL graph distance to the source.
+   p = 1 is the plain discount. p > 1 makes short relays cheaper and long
+   relays dearer than linear, which is what isolates distant extremities
+   into their own basins without flattening the local gradient. */
+function cost(d){
+  if(P.convexP === 1) return P.gamma * d;
+  return P.gamma * P.d0 * Math.pow(d / P.d0, P.convexP);
+}
+
+/* One relay pass. Each node picks the cheapest claim among its own reading
+   (distance 0, source itself) and its neighbours' claims carried one more
+   hop. sgn = -1 runs the same machinery on negated readings, which yields
+   the max-plus tail field.
+
+   Because the claim carries the SOURCE's live reading rather than an
+   already-combined value, the field cannot latch: every source re-asserts
+   itself each step and a claim is only ever as stale as its hop count.
+   Stale cycles die on their own, since distance accumulates around a loop
+   until the cost exceeds the node's own reading. The leak I said was
+   mandatory turns out to be unnecessary in this form. */
+const BLIND_BIG = 1e9;
+function relayPass(s, sgn, val, dst, src, vO, dO, sO, out){
+  const n = s.n, adj = s.adj;
+  const useBlind = P.blind && s.anySense;
+  vO.set(val); dO.set(dst); sO.set(src);
+  for(let i=0;i<n;i++){
+    // A blind node has no reading of its own to enter into the competition,
+    // so it can never claim itself — which makes every head a leaf, by
+    // construction rather than by tuning the cost curve.
+    const own = (useBlind && s.blind[i]) ? BLIND_BIG : sgn * s.sens[i];
+    const holding = sO[i];
+    let bV = own, bD = 0, bS = i;
+    let best = own - (holding === i ? P.mu : 0);   // incumbent keeps a margin
+    for(const j of adj[i]){
+      const L = Math.hypot(s.px[j]-s.px[i], s.py[j]-s.py[i]);
+      const D = dO[j] + L;
+      let sc = vO[j] + cost(D);
+      if(sO[j] === holding) sc -= P.mu;
+      if(sc < best){ best = sc; bV = vO[j]; bD = D; bS = sO[j]; }
+    }
+    val[i] = bV; dst[i] = bD; src[i] = bS;
+    let f = bV + cost(bD);
+    if(f > own){ f = own; val[i] = own; dst[i] = 0; src[i] = i; }
+    out[i] = sgn * (f >= BLIND_BIG ? sgn*s.sens[i] : f);   // before any claim arrives
+  }
+}
+function activeParam(s, k){ return s.params[k].gait ? P.learnGait : true; }
+
+/* ============================================================
+   One control + physics step
+   ============================================================ */
+function step(s){
+  const n=s.n, m=s.m, E=s.E, adj=s.adj;
+
+  /* ---- 0. dithers: resample on a slow clock ---- */
+  const hold = P.holdPeriods * (TAU / Math.max(0.05, P.omega));
+  if(P.learn){
+    s.holdLeft -= DT;
+    if(s.holdLeft <= 0){
+      s.holdLeft = hold;
+      for(let k=0;k<s.dith.length;k++) s.dith[k] = activeParam(s,k) ? (Math.random()<0.5 ? -1 : 1) : 0;
+    }
+  } else {
+    s.dith.fill(0);
+  }
+  const dAmp = P.amp;
+
+  /* ---- 1. sense ---- */
+  const alpha = 1 - Math.exp(-DT * 0.6);
+  for(let i=0;i<n;i++){
+    const d = Math.hypot(s.px[i]-s.foodX, s.py[i]-s.foodY);
+    s.sens[i] = d;
+    s.sensLP[i] += alpha * (d - s.sensLP[i]);
+  }
+
+  /* ---- 1b. head field -------------------------------------------------
+     m_i <- softmin( s_i , { m_j + gamma * l_ij } ) , then leak upward.
+
+     With gamma = 1 and true edge lengths this relaxation is EXACTLY the
+     identity, because s is 1-Lipschitz w.r.t. the graph metric: the
+     triangle inequality gives s_i <= s_j + l_ij on every edge, so the
+     node's own term always wins. Discounting (gamma < 1) is what breaks
+     that and lets a front-runner's value propagate inward.
+
+     The leak is not optional. Min propagation is monotone decreasing, so
+     without it a stale low value never expires and the field latches the
+     moment the true minimum rises (every turn, every food relocation).
+     --------------------------------------------------------------------*/
+  relayPass(s, +1, s.hVal, s.hDst, s.hSrc, s.hVo, s.hDo, s.hSo, s.mfield);
+  relayPass(s, -1, s.tVal, s.tDst, s.tSrc, s.tVo, s.tDo, s.tSo, s.Mfield);
+
+  const useBlind = P.blind && s.anySense;
+  let rhoMax = 0, head = -1, nHeads = 0;
+  for(let i=0;i<n;i++){
+    let r, rh;
+    if(useBlind){
+      // A blind node has no s of its own, so depth is the transmission cost
+      // back to its head. Normalising against the distance to its tail keeps
+      // it in [0,1] without anyone knowing the body's size.
+      r  = cost(s.hDst[i]);
+      rh = r / Math.max(1e-6, r + cost(s.tDst[i]));
+    } else {
+      r  = s.sens[i] - s.mfield[i];
+      rh = r / Math.max(1e-6, s.Mfield[i] - s.mfield[i]);
+    }
+    s.rho[i] = r; s.rhoHat[i] = rh;
+    if(r > rhoMax) rhoMax = r;
+    if(s.hSrc[i] === i && !(useBlind && s.blind[i])) nHeads++;
+    if(head < 0 || s.sens[i] < s.sens[head]) head = i;
+  }
+  s.rhoMax = rhoMax; s.headCount = nHeads;
+  const switched = (head !== s.headIdx && s.headIdx >= 0) ? 1/DT : 0;
+  s.headIdx = head;
+  s.headRate += DT * 0.3 * (switched - s.headRate);
+
+  // which head currently owns the structural centre
+  const owner = s.hSrc[s.centroid];
+  if(s.centOwner >= 0 && owner !== s.centOwner) s.centFlip += DT*0.3*(1/DT - s.centFlip);
+  else s.centFlip += DT*0.3*(0 - s.centFlip);
+  s.centOwner = owner;
+
+  /* ---- 2. exchange (double buffered) ---- */
+  s.phiOut.set(s.phi);
+  s.sensOut.set(s.sens);
+
+  /* ---- 3. advance phase ---- */
+  const gB = s.gBase;
+  const kap = P.kappa + dAmp * 0.30 * s.dith[gB+3];
+  for(let i=0;i<n;i++){
+    const nb = couplingNeighbors(s, i);
+    let acc = 0;
+    for(const j of nb) acc += Math.sin(s.phiOut[j] - s.phiOut[i]);
+    // normalised by neighbour count, so star / line / body remain comparable
+    if(nb.length) acc = P.w * acc / nb.length; else acc = 0;
+
+    const bn = adj[i];
+    let sHat = 0;
+    if(bn.length){ for(const j of bn) sHat += s.sensOut[j]; sHat /= bn.length; }
+    else sHat = s.sensOut[i];
+
+    // both terms advance the phase of a node that is worse off, which is the
+    // sign that actually steers toward the food — the opposite marches away
+    const spatial  = s.sensOut[i] - sHat;              // > 0: farther than my neighbours
+    const temporal = s.sensOut[i] - s.sensLP[i];       // > 0: I am receding
+
+    s.phi[i] += DT * (P.omega + acc + kap*spatial + P.kappaT*temporal);
+    if(s.phi[i] > 1e6) s.phi[i] %= TAU;
+  }
+
+  /* ---- 4. emit actuation (dithered parameter values) ---- */
+  const rg = P.rg + dAmp*0.15*s.dith[gB+0];
+  const xg = P.xg + dAmp*0.15*s.dith[gB+1];
+  const aa = P.a  + dAmp*0.10*s.dith[gB+2];
+
+  // the phase offset actually applied: n free values, or one profile of rho
+  if(P.thetaMode === "profile"){
+    const C1 = P.c1 + dAmp*s.dith[0];
+    const C2 = P.c2 + dAmp*s.dith[1];
+    const C3 = P.c3 + dAmp*s.dith[2];
+    for(let i=0;i<n;i++){
+      const u = s.rhoHat[i];               // in [0,1] by construction
+      s.thEff[i] = C1*u + C2*u*u + C3*u*u*u;
+    }
+  } else {
+    for(let i=0;i<n;i++) s.thEff[i] = s.theta[i] + dAmp*s.dith[i];
+  }
+
+  let gripSum = 0;
+  for(let i=0;i<n;i++){
+    const c = Math.cos(s.phi[i] + s.thEff[i]);
+    let g = xg + rg*c;
+    g = g<0?0:g>1?1:g;
+    s.grip[i] = g; gripSum += g;
+    s.drag[i] = C0 * Math.exp(GAMMA * (2*g - 1));
+  }
+  s.meanGrip = gripSum/n;
+
+  let dEll = 0;
+  for(let k=0;k<m;k++){
+    const i=E[k][0], j=E[k][1];
+    const target = s.ell0[k] * (1 + 0.5*aa*(Math.cos(s.phi[i]+s.thEff[i]) + Math.cos(s.phi[j]+s.thEff[j])));
+    dEll += Math.abs(target - s.ell[k]);
+    s.ell[k] = target;
+  }
+
+  /* ---- 5. physics ---- */
+  physics(s);
+
+  /* ---- 6. reward and learning ---- */
+  const [cx,cy] = centroid(s);
+  const dist = Math.hypot(cx - s.foodX, cy - s.foodY);
+  s.dist = dist;
+
+  let Rraw = 0;
+  if(s.skipReward || s.prevDist === null){ s.skipReward = false; }
+  else { Rraw = (s.prevDist - dist)/DT - P.lamG*s.meanGrip - P.lamL*(dEll/DT)/Math.max(1,m); }
+  s.prevDist = dist;
+
+  s.Rlp  += DT * W_REWARD * (Rraw - s.Rlp);
+  s.chi  += DT * W_HIGH   * (s.Rlp - s.chi);
+  s.Rtilde = s.Rlp - s.chi;
+  s.rms  += DT * W_RMS * (s.Rtilde*s.Rtilde - s.rms);
+  const scale = Math.sqrt(Math.max(s.rms, 1e-12)) + 1e-9;
+  const Rn = s.Rtilde / scale;
+
+  if(P.learn){
+    for(let k=0;k<s.params.length;k++){
+      if(!activeParam(s,k)){ s.G[k] = 0; continue; }
+      s.G[k] += DT * W_DEMOD * (Rn * s.dith[k] - s.G[k]);
+      const p = s.params[k];
+      p.set(p.get() + DT * P.eta * p.scale * s.G[k]);
+    }
+    if(P.thetaMode !== "profile") gauge(s);
+  }
+
+  /* ---- 7. capture ---- */
+  for(let i=0;i<n;i++){
+    if(Math.hypot(s.px[i]-s.foodX, s.py[i]-s.foodY) < CAPTURE){ placeFood(s,false); break; }
+  }
+
+  /* ---- 8. diagnostics ---- */
+  let sx=0, sy=0;
+  for(let i=0;i<n;i++){ sx += Math.cos(s.phi[i]); sy += Math.sin(s.phi[i]); }
+  s.lock = Math.hypot(sx,sy)/n;
+
+  s.t += DT;
+  if(s.t >= s.nextSample){
+    s.nextSample = s.t + 0.25;
+    s.series.push([s.t, s.Rlp]);
+    if(s.series.length > 520) s.series.shift();
+    if(P.trail){
+      s.trail.push([cx,cy]);
+      if(s.trail.length > 900) s.trail.shift();
+    }
+  }
+}
+
+/* phase-coupling topology — the ablation */
+function couplingNeighbors(s, i){
+  switch(P.couple){
+    case "star": return i===0 ? s._starAll : [0];
+    case "line": {
+      const out=[]; if(i>0) out.push(i-1); if(i<s.n-1) out.push(i+1); return out;
+    }
+    case "none": return EMPTY;
+    default: return s.adj[i];
+  }
+}
+const EMPTY = [];
+
+function physics(s){
+  const {n,m,E,px,py,fx,fy,ell,drag} = s;
+  fx.fill(0); fy.fill(0);
+
+  for(let k=0;k<m;k++){
+    const i=E[k][0], j=E[k][1];
+    let dx=px[j]-px[i], dy=py[j]-py[i];
+    const L=Math.hypot(dx,dy)||1e-9; dx/=L; dy/=L;
+    const f=K_SPR*(L-ell[k]);
+    fx[i]+=f*dx; fy[i]+=f*dy; fx[j]-=f*dx; fy[j]-=f*dy;
+  }
+  const NA=s.nonAdj;
+  for(let p=0;p<NA.length;p+=2){
+    const i=NA[p], j=NA[p+1];
+    let dx=px[j]-px[i], dy=py[j]-py[i];
+    const L=Math.hypot(dx,dy);
+    if(L<R_REP && L>1e-9){ dx/=L; dy/=L; const f=-K_REP*(R_REP-L); fx[i]+=f*dx; fy[i]+=f*dy; fx[j]-=f*dx; fy[j]-=f*dy; }
+  }
+  // angular springs: the only thing keeping a U from unfolding into a line
+  if(P.kbend > 0){
+    for(let q=0;q<s.nBend;q++){
+      const i=s.bI[q], j=s.bJ[q], k=s.bK[q];
+      let ux=px[j]-px[i], uy=py[j]-py[i]; const la=Math.hypot(ux,uy)||1e-9; ux/=la; uy/=la;
+      let vx=px[k]-px[i], vy=py[k]-py[i]; const lb=Math.hypot(vx,vy)||1e-9; vx/=lb; vy/=lb;
+      const th=Math.atan2(ux*vy-uy*vx, ux*vx+uy*vy);
+      let d=th - s.bA[q]; d=((d+Math.PI)%TAU+TAU)%TAU-Math.PI;
+      const f=P.kbend*d;
+      const fjx = (f/la)*(-uy), fjy = (f/la)*(ux);
+      const fkx = -(f/lb)*(-vy), fky = -(f/lb)*(vx);
+      fx[j]+=fjx; fy[j]+=fjy; fx[k]+=fkx; fy[k]+=fky;
+      fx[i]-=fjx+fkx; fy[i]-=fjy+fky;
+    }
+  }
+
+  for(let i=0;i<n;i++){ px[i]+=DT*fx[i]/drag[i]; py[i]+=DT*fy[i]/drag[i]; }
+
+  // strain limiting, weighted by mobility so an anchored node barely moves
+  for(let k=0;k<m;k++){
+    const i=E[k][0], j=E[k][1];
+    let dx=px[j]-px[i], dy=py[j]-py[i];
+    const L=Math.hypot(dx,dy)||1e-9;
+    const lo=ell[k]*(1-STRAIN), hi=ell[k]*(1+STRAIN);
+    if(L>hi || L<lo){
+      const target = L>hi ? hi : lo;
+      const corr = L - target;
+      dx/=L; dy/=L;
+      const mi=1/drag[i], mj=1/drag[j], tot=mi+mj;
+      const wi=mi/tot, wj=mj/tot;
+      px[i]+=wi*corr*dx; py[i]+=wi*corr*dy;
+      px[j]-=wj*corr*dx; py[j]-=wj*corr*dy;
+    }
+  }
+
+  if(!isFinite(px[0])) rebuild();
+}
+
+/* ============================================================
+   Rendering
+   ============================================================ */
+const view = $("view"), vctx = view.getContext("2d");
+const chart = $("chart"), cctx = chart.getContext("2d");
+let VW=0, VH=0, CW=0, CH=0, DPR=1;
+
+/* theme tokens, resolved at most once per token per frame */
+let _tc = new Map(), _tcStamp = -1, _frameStamp = 0;
+function css(name){
+  if(_tcStamp !== _frameStamp){ _tc.clear(); _tcStamp = _frameStamp; }
+  let v = _tc.get(name);
+  if(v === undefined){
+    v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    _tc.set(name, v);
+  }
+  return v;
+}
+
+function fitCanvas(cv, ctx){
+  DPR = Math.min(window.devicePixelRatio||1, 2);
+  const r = cv.getBoundingClientRect();
+  const w = Math.max(1, Math.round(r.width)), h = Math.max(1, Math.round(r.height));
+  cv.width = Math.round(w*DPR); cv.height = Math.round(h*DPR);
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  return [w,h];
+}
+function resize(){ [VW,VH] = fitCanvas(view, vctx); [CW,CH] = fitCanvas(chart, cctx); }
+window.addEventListener("resize", resize);
+
+function phaseColor(th, light){
+  const h = (((th/TAU)%1)+1)%1 * 360;
+  return `hsl(${h.toFixed(1)} ${css("--phase-s")} ${light ?? css("--phase-l")})`;
+}
+
+function draw(){
+  const s = S;
+  const [cx,cy] = centroid(s);
+  const scale = (Math.min(VW,VH)/18) * P.zoom;
+  const toX = x => (x-cx)*scale + VW/2;
+  const toY = y => (y-cy)*scale + VH/2;
+
+  vctx.fillStyle = css("--field");
+  vctx.fillRect(0,0,VW,VH);
+
+  /* moving grid — this is how locomotion is actually visible */
+  const g1 = css("--grid"), g2 = css("--grid-2");
+  vctx.lineWidth = 1;
+  const x0 = Math.floor(cx - VW/(2*scale)) - 1, x1 = Math.ceil(cx + VW/(2*scale)) + 1;
+  const y0 = Math.floor(cy - VH/(2*scale)) - 1, y1 = Math.ceil(cy + VH/(2*scale)) + 1;
+  if(scale > 5){
+    for(let gx=x0; gx<=x1; gx++){
+      vctx.strokeStyle = (gx%5===0)? g2 : g1;
+      vctx.beginPath(); vctx.moveTo(Math.round(toX(gx))+0.5, 0); vctx.lineTo(Math.round(toX(gx))+0.5, VH); vctx.stroke();
+    }
+    for(let gy=y0; gy<=y1; gy++){
+      vctx.strokeStyle = (gy%5===0)? g2 : g1;
+      vctx.beginPath(); vctx.moveTo(0, Math.round(toY(gy))+0.5); vctx.lineTo(VW, Math.round(toY(gy))+0.5); vctx.stroke();
+    }
+  }
+
+  /* centroid trail */
+  if(P.trail && s.trail.length>1){
+    vctx.strokeStyle = css("--trail"); vctx.lineWidth=1.5; vctx.lineJoin="round";
+    vctx.beginPath();
+    vctx.moveTo(toX(s.trail[0][0]), toY(s.trail[0][1]));
+    for(let i=1;i<s.trail.length;i++) vctx.lineTo(toX(s.trail[i][0]), toY(s.trail[i][1]));
+    vctx.stroke();
+  }
+
+  /* bearing to the food — for the viewer only; no node has this information */
+  const fx = toX(s.foodX), fy = toY(s.foodY);
+  const food = css("--food");
+  vctx.save();
+  vctx.strokeStyle = food; vctx.globalAlpha = 0.35; vctx.lineWidth = 1; vctx.setLineDash([3,5]);
+  vctx.beginPath(); vctx.moveTo(toX(cx), toY(cy)); vctx.lineTo(fx, fy); vctx.stroke();
+  vctx.restore();
+
+  if(fx>-40 && fx<VW+40 && fy>-40 && fy<VH+40){
+    vctx.strokeStyle = food; vctx.lineWidth = 1.25;
+    vctx.beginPath(); vctx.arc(fx,fy, CAPTURE*scale, 0, TAU); vctx.stroke();
+    vctx.fillStyle = food;
+    vctx.beginPath(); vctx.arc(fx,fy, 4.5, 0, TAU); vctx.fill();
+  } else {
+    const ang = Math.atan2(fy - VH/2, fx - VW/2);
+    const r = Math.min(VW,VH)/2 - 22;
+    const ex = VW/2 + Math.cos(ang)*r, ey = VH/2 + Math.sin(ang)*r;
+    vctx.save(); vctx.translate(ex,ey); vctx.rotate(ang);
+    vctx.fillStyle = food; vctx.beginPath();
+    vctx.moveTo(9,0); vctx.lineTo(-5,5.5); vctx.lineTo(-5,-5.5); vctx.closePath(); vctx.fill();
+    vctx.restore();
+  }
+
+  /* edges */
+  for(let k=0;k<s.m;k++){
+    const i=s.E[k][0], j=s.E[k][1];
+    const X1=toX(s.px[i]), Y1=toY(s.py[i]), X2=toX(s.px[j]), Y2=toY(s.py[j]);
+    if(P.strainColor){
+      const L=Math.hypot(s.px[j]-s.px[i], s.py[j]-s.py[i]);
+      const e=(L - s.ell[k])/s.ell[k];
+      const t=Math.max(-1,Math.min(1,e/STRAIN));
+      vctx.strokeStyle = t>=0
+        ? `hsl(8 ${(40+45*t).toFixed(0)}% ${(58-8*t).toFixed(0)}%)`
+        : `hsl(210 ${(40+45*-t).toFixed(0)}% ${(58+8*t).toFixed(0)}%)`;
+      vctx.lineWidth = 1.4 + 1.6*Math.abs(t);
+    } else {
+      vctx.strokeStyle = css("--edge");
+      vctx.lineWidth = 1.6;
+    }
+    vctx.beginPath(); vctx.moveTo(X1,Y1); vctx.lineTo(X2,Y2); vctx.stroke();
+  }
+
+  /* nodes: hue = learned phase offset, size+brightness = live grip */
+  for(let i=0;i<s.n;i++){
+    const X=toX(s.px[i]), Y=toY(s.py[i]);
+    const g=s.grip[i];
+    const rad = (0.16 + 0.15*g) * scale;
+    const lightBase = parseFloat(css("--phase-l"));
+    // hue = phase offset, or = which head owns this node
+    const hueSrc = P.basinColor ? (s.hSrc[i] * 2.399963) : s.thEff[i];
+    vctx.fillStyle = phaseColor(hueSrc, (lightBase - 16 + 26*g).toFixed(1) + "%");
+    vctx.beginPath(); vctx.arc(X,Y,rad,0,TAU); vctx.fill();
+    if(P.blind && s.anySense && s.blind[i]){        // hollow = relays only, senses nothing
+      vctx.fillStyle = css("--field");
+      vctx.beginPath(); vctx.arc(X,Y,rad*0.45,0,TAU); vctx.fill();
+    }
+    if(g > 0.72){   // gripping hard: an anchor ring
+      vctx.strokeStyle = css("--ink"); vctx.globalAlpha = 0.28 + 0.5*(g-0.72)/0.28;
+      vctx.lineWidth = 1.6;
+      vctx.beginPath(); vctx.arc(X,Y,rad+2.5,0,TAU); vctx.stroke();
+      vctx.globalAlpha = 1;
+    }
+  }
+
+  /* every head — a node that claims itself. The global argmin gets a
+     second ring, so you can see when a secondary head is holding its own. */
+  if(P.showHead){
+    for(let i=0;i<s.n;i++){
+      if(s.hSrc[i] !== i) continue;
+      const X=toX(s.px[i]), Y=toY(s.py[i]);
+      const rad=(0.16+0.15*s.grip[i])*scale + 5;
+      vctx.strokeStyle = food; vctx.lineWidth = 2;
+      vctx.beginPath(); vctx.arc(X,Y,rad,0,TAU); vctx.stroke();
+      if(i === s.headIdx){
+        vctx.lineWidth = 1;
+        vctx.beginPath(); vctx.arc(X,Y,rad+3.5,0,TAU); vctx.stroke();
+      }
+    }
+  }
+
+  /* the Jordan centre — a diamond. Watch which basin owns it. */
+  {
+    const X=toX(s.px[s.centroid]), Y=toY(s.py[s.centroid]);
+    const r = (0.16+0.15*s.grip[s.centroid])*scale + 7;
+    vctx.strokeStyle = css("--ink"); vctx.globalAlpha = 0.55; vctx.lineWidth = 1.4;
+    vctx.beginPath();
+    vctx.moveTo(X,Y-r); vctx.lineTo(X+r,Y); vctx.lineTo(X,Y+r); vctx.lineTo(X-r,Y);
+    vctx.closePath(); vctx.stroke(); vctx.globalAlpha = 1;
+  }
+
+  drawChart();
+}
+
+function drawChart(){
+  const s=S;
+  cctx.clearRect(0,0,CW,CH);
+  const pad = {l:2, r:2, t:6, b:6};
+  const w = CW-pad.l-pad.r, h = CH-pad.t-pad.b;
+  if(s.series.length < 2) return;
+
+  let mx = 1e-4;
+  for(const [,v] of s.series) mx = Math.max(mx, Math.abs(v));
+  mx *= 1.15;
+  const t0 = s.series[0][0], t1 = s.series[s.series.length-1][0];
+  const span = Math.max(1e-6, t1-t0);
+  const X = t => pad.l + (t-t0)/span * w;
+  const Y = v => pad.t + (1 - (v+mx)/(2*mx)) * h;
+
+  // zero line
+  cctx.strokeStyle = css("--line"); cctx.lineWidth=1;
+  cctx.beginPath(); cctx.moveTo(pad.l, Y(0)+0.5); cctx.lineTo(pad.l+w, Y(0)+0.5); cctx.stroke();
+
+  const acc = css("--accent");
+  // area fill under the curve, clipped to positive side reading as progress
+  cctx.beginPath();
+  cctx.moveTo(X(s.series[0][0]), Y(0));
+  for(const [t,v] of s.series) cctx.lineTo(X(t), Y(v));
+  cctx.lineTo(X(t1), Y(0)); cctx.closePath();
+  cctx.fillStyle = acc; cctx.globalAlpha = 0.14; cctx.fill(); cctx.globalAlpha = 1;
+
+  cctx.beginPath();
+  cctx.moveTo(X(s.series[0][0]), Y(s.series[0][1]));
+  for(const [t,v] of s.series) cctx.lineTo(X(t), Y(v));
+  cctx.strokeStyle = acc; cctx.lineWidth = 2; cctx.lineJoin="round"; cctx.stroke();
+
+  // emphasized endpoint
+  const last = s.series[s.series.length-1];
+  cctx.fillStyle = acc;
+  cctx.beginPath(); cctx.arc(X(last[0]), Y(last[1]), 3, 0, TAU); cctx.fill();
+  cctx.strokeStyle = css("--panel"); cctx.lineWidth=2;
+  cctx.beginPath(); cctx.arc(X(last[0]), Y(last[1]), 3, 0, TAU); cctx.stroke();
+
+  // scale label at the reached maximum
+  cctx.fillStyle = css("--ink-3");
+  cctx.font = '10px "IBM Plex Mono", monospace';
+  cctx.textAlign = "left"; cctx.textBaseline = "top";
+  cctx.fillText("+" + mx.toFixed(3), pad.l+2, pad.t);
+  cctx.textBaseline = "bottom";
+  cctx.fillText("−" + mx.toFixed(3), pad.l+2, pad.t+h);
+}
+
+/* ============================================================
+   Readouts
+   ============================================================ */
+function readouts(){
+  const s=S;
+  $("t-time").textContent = s.t.toFixed(0);
+  $("t-dist").textContent = s.dist.toFixed(1);
+  const sp = $("t-speed");
+  sp.textContent = (s.Rlp>=0?"+":"") + s.Rlp.toFixed(3);
+  sp.classList.toggle("pos", s.Rlp > 0.002);
+  $("t-lock").textContent = s.lock.toFixed(2);
+  $("t-grip").textContent = s.meanGrip.toFixed(2);
+  const nh = $("t-nheads");
+  nh.textContent = String(s.headCount);
+  nh.classList.toggle("pos", s.headCount > 1);
+  $("t-cent").textContent = "#" + s.centOwner + " · " + s.centFlip.toFixed(1);
+  $("t-head").textContent = "#" + s.headIdx + " · " + s.headRate.toFixed(1);
+  $("t-rho").textContent = s.rhoMax.toFixed(2);
+  $("t-cap").textContent = String(s.captures);
+  if(P.thetaMode === "profile")
+    $("v-coef").textContent = `${P.c1.toFixed(2)}u ${P.c2>=0?"+":"−"} ${Math.abs(P.c2).toFixed(2)}u² ${P.c3>=0?"+":"−"} ${Math.abs(P.c3).toFixed(2)}u³`;
+  $("c-now").textContent = (s.Rlp>=0?"+":"") + s.Rlp.toFixed(4);
+  if(P.learnGait){
+    $("v-rg").textContent = P.rg.toFixed(2);
+    $("v-xg").textContent = P.xg.toFixed(2);
+    $("v-a").textContent  = P.a.toFixed(3);
+    $("v-kappa").textContent = P.kappa.toFixed(2);
+  }
+}
+
+/* ============================================================
+   Loop
+   ============================================================ */
+function frame(){
+  _frameStamp++;
+  if(running && S){
+    const k = P.stepsPerFrame;
+    for(let i=0;i<k;i++) step(S);
+  }
+  if(S){ draw(); readouts(); }
+  requestAnimationFrame(frame);
+}
+
+/* ============================================================
+   Wiring
+   ============================================================ */
+function rebuild(){
+  S = build();
+  S._starAll = Array.from({length:S.n}, (_,i)=>i).filter(i=>i!==0);
+  S.series = []; S.trail = [];
+  if(typeof syncMode === "function") syncMode();
+}
+
+function bindRange(id, key, fmt, after){
+  const el = $("s-"+id), out = $("v-"+id);
+  const apply = () => {
+    P[key] = parseFloat(el.value);
+    out.textContent = fmt(P[key]);
+    if(after) after();
+  };
+  el.addEventListener("input", apply);
+  apply();
+}
+const f2 = v=>v.toFixed(2), f3 = v=>v.toFixed(3), f0 = v=>String(Math.round(v));
+
+bindRange("speed","stepsPerFrame",f0);
+bindRange("omega","omega",f2);
+bindRange("w","w",f2);
+bindRange("rg","rg",f2);
+bindRange("xg","xg",f2);
+bindRange("a","a",f3);
+bindRange("kappa","kappa",f2);
+bindRange("kappat","kappaT",v=>v.toFixed(1));
+bindRange("eta","eta",f3);
+bindRange("amp","amp",f2);
+bindRange("hold","holdPeriods",f0);
+bindRange("lg","lamG",f3);
+bindRange("ll","lamL",f3);
+bindRange("zoom","zoom",f2);
+bindRange("gamma","gamma",f2);
+bindRange("convexP","convexP",f2);
+bindRange("d0","d0",v=>v.toFixed(1));
+bindRange("mu","mu",f2);
+bindRange("kbend","kbend",f2);
+bindRange("cycles","cycles",f0, ()=>{ P.cycles=Math.round(P.cycles); if(P.topo==="limbed") rebuild(); });
+bindRange("n","n",f0, ()=>{ P.n = Math.round(P.n); rebuild(); });
+
+function syncMode(){
+  const prof = P.thetaMode === "profile";
+  $("n-coef").hidden = !prof;
+  $("lbl-learn").textContent = prof ? "c₁,c₂,c₃" : "θ";
+  $("lbl-np").textContent = String(prof ? 3 : S.n);
+  $("l-cycles").classList.toggle("locked", P.topo !== "limbed");
+  $("s-cycles").disabled = P.topo !== "limbed";
+  const n3 = S.n - S.nSense;
+  $("v-split").textContent = S.anySense ? `· ${S.nSense} sensory / ${n3} blind` : "· no sensors";
+}
+$("s-tmode").addEventListener("change", e=>{
+  P.thetaMode = e.target.value;
+  buildParamList(S);           // the dithered vector changes shape with the mode
+  syncMode();
+});
+$("c-head").addEventListener("change", e=>{ P.showHead = e.target.checked; });
+$("c-basin").addEventListener("change", e=>{ P.basinColor = e.target.checked; });
+$("c-blind").addEventListener("change", e=>{ P.blind = e.target.checked; syncMode(); });
+
+$("s-topo").addEventListener("change", e=>{ P.topo = e.target.value; rebuild(); });
+$("s-couple").addEventListener("change", e=>{ P.couple = e.target.value; });
+
+$("c-learn").addEventListener("change", e=>{ P.learn = e.target.checked; });
+$("c-trail").addEventListener("change", e=>{ P.trail = e.target.checked; if(!P.trail) S.trail=[]; });
+$("c-strain").addEventListener("change", e=>{ P.strainColor = e.target.checked; });
+$("c-learngait").addEventListener("change", e=>{
+  P.learnGait = e.target.checked;
+  for(const id of ["rg","xg","a","kappa"]) $("l-"+id).classList.toggle("locked", P.learnGait);
+  for(const id of ["rg","xg","a","kappa"]) $("s-"+id).disabled = P.learnGait;
+});
+
+$("b-run").addEventListener("click", e=>{ running = !running; e.target.textContent = running ? "Pause" : "Run"; });
+$("b-reset").addEventListener("click", ()=>rebuild());
+$("b-wave").addEventListener("click", ()=>{
+  if(P.thetaMode==="profile"){ P.c1=2.2; P.c2=0; P.c3=0; } else setWaveTheta(S);
+  S.G.fill(0);
+});
+$("b-rand").addEventListener("click", ()=>{
+  if(P.thetaMode==="profile"){ P.c1=(Math.random()-0.5)*6; P.c2=(Math.random()-0.5)*4; P.c3=(Math.random()-0.5)*2; }
+  else randomTheta(S);
+  S.G.fill(0);
+});
+$("b-zero").addEventListener("click", ()=>{
+  if(P.thetaMode==="profile"){ P.c1=0; P.c2=0; P.c3=0; } else zeroTheta(S);
+  S.G.fill(0);
+});
+
+rebuild();
+syncMode();
+resize();
+requestAnimationFrame(frame);
+</script>
+
+</body>
+</html>

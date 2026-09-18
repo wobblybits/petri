@@ -21,6 +21,15 @@ export const WF_FULL = 1;
 export const WF_SKIP = 2;
 export const WF_SHAPE = 4;
 export const WF_HOLD = 8;
+/**
+ * The one wire a rewrite is consuming. Solved on the bodies' centres rather
+ * than their stems — see `solveTether` in chain.ts for why, and `solve_tether`
+ * in solver.c for the twin.
+ *
+ * 16, because 4 and 8 are taken. It went in at 4 first and every rope-shaped
+ * wire in the pond was read as a tether.
+ */
+export const WF_TETHER = 16;
 
 export const WN = {
   a: 0,
@@ -183,6 +192,11 @@ export const STEER_PARAM = {
   unused12: 12,
   unused13: 13,
   senseSpan: 14,
+  /** What share of `deposit` a free auxiliary port leaks into each body voice.
+   *  Written by `scentWriteNative`, next to the `deposit` call that reads it,
+   *  rather than by the steer pass — one shared array, two passes, and an
+   *  ordering dependency between them is not a thing to rely on. */
+  portLeak: 15,
 } as const;
 
 /** Per-body steer flags, a bitfield. `solver.c`'s `SF_*`. */

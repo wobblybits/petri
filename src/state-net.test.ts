@@ -202,6 +202,10 @@ describe('the locomotion head', () => {
     // body takes whatever fits the instant it steps. With ground under it,
     // every tank set here would be back at its cap before the head is read.
     params.ambientEnergy = 0;
+    // And the head this is about drives `flockAlign`, which ships at 0 now.
+    // A test of the pathway has to switch the thing at the end of it on.
+    params.flockAlign = 5.5;
+    params.flockSep = 48;
     const half = sim.spawn('con', 5000, 5000, 0, params, true)!;
     const hungry = sim.spawn('con', 5000, 5400, 0, params, true)!;
     const fed = sim.spawn('con', 5000, 5800, 0, params, true)!;

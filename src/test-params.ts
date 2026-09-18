@@ -59,6 +59,13 @@ import type { Sim } from './sim.ts';
  * A test about foraging says so by asking for patches: `pond/ground.test.ts`
  * and the forage measures in `pond/measure.test.ts` do, and they own it.
  *
+ * `groundDropEvery` is pinned with it and for the same reason carried one step
+ * further: a drop lands somewhere *random*, so with it on, a dish is not only
+ * three-quarters bare, it is differently bare every few seconds. A test that
+ * asserts a total, a density, or anything downstream of either would be
+ * asserting against whichever cells the stream happened to pick. Off here; a
+ * test about the drops turns them on and owns them.
+ *
  * Everything else is the shipping default, deliberately: pinning five dials
  * to keep a measurement honest is different from running the suite against a
  * pond nobody ships.
@@ -69,6 +76,7 @@ export function fixedParams(): Params {
   params.metabolicRate = 0;
   params.uptakeVmax = 0;
   params.groundPatches = 0;
+  params.groundDropEvery = 0;
   return params;
 }
 

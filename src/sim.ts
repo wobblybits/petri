@@ -127,6 +127,7 @@ import {
   WF_HOLD,
   WF_SHAPE,
   WF_SKIP,
+  WF_TETHER,
   WIRE_NEAR_STRIDE,
   WN,
 } from './native/solver.ts';
@@ -300,13 +301,14 @@ function packTaste(
   tasteAll: Float64Array,
   slot: number,
   groundScale: number,
+  gain: number,
 ): void {
   const from = slot * 4;
-  out[at] = tasteAll[from];
-  out[at + 1] = tasteAll[from + 1];
-  out[at + 2] = tasteAll[from + 2];
-  out[at + 3] = tasteAll[from + 3];
-  out[at + CH.energy] = tasteAll[from + CH.energy] * groundScale;
+  out[at] = tasteAll[from] * gain;
+  out[at + 1] = tasteAll[from + 1] * gain;
+  out[at + 2] = tasteAll[from + 2] * gain;
+  out[at + 3] = tasteAll[from + 3] * gain;
+  out[at + CH.energy] = tasteAll[from + CH.energy] * groundScale * gain;
 }
 
 export class Sim {
@@ -896,7 +898,7 @@ export class Sim {
      */
     this.frames = (this.frames + 1) % FRAME_WRAP;
     const t = this.beginFrame(dt, params);
-    this.collectRewriteFrozen();
+    this.collectRewriteFrozen(params);
     Sim.phase('collectRewriteFrozen');
     this.assignPhysicsLod(view);
     Sim.phase('assignPhysicsLod');
@@ -1064,6 +1066,7 @@ export class Sim {
     // Rent-last is only safe *because* of the headroom: at cap == share it
     // leaves every body a hair in debt the moment it commutes.
     this.energy.configure(params.energyCell, params.ambientEnergy, params.groundPatches);
+    this.dropGround(params, t);
     /*
      * On the GPU path the grazing itself happened at the end of the last
      * frame, in the shader, against the field the shader owns. All that is
@@ -1186,6 +1189,9 @@ export class Sim {
      * feeding it.
      */
     this.tuneChannels(params);
+    // Cached here, beside the channel rates, for the same reason: a slider
+    // read once a frame rather than once a body per sensor per frame.
+    this.interiorTaste = params.interiorTaste;
     if (!this.fieldOnGpu) {
       if (!this.scentWriteNative(params)) this.deposit(params);
       Sim.phase('scentWrite');
@@ -1197,7 +1203,12 @@ export class Sim {
       Sim.phase('field:decay');
       // After the passes that move it, so a cell grows from what it kept
       // rather than from what it was about to lose.
-      this.fields.grow(CH.energy, params.energyRegrow * t, this.energy.cellCap);
+      this.fields.grow(
+        CH.energy,
+        params.energyRegrow * t,
+        this.energy.cellCap,
+        params.groundSmell * t,
+      );
       Sim.phase('field:grow');
     }
     this.autoSpawn(params, t);
@@ -1263,7 +1274,12 @@ export class Sim {
         bodies[o + FAR.vy] = a.vy;
         bodies[o + FAR.heading] = a.heading;
         bodies[o + FAR.omega] = a.omega;
-        const held = poseHeld(a);
+        // A *force* pass leaves a body mid-rewrite alone, whatever is closing
+        // it. Aiming a port at a neighbour half a pixel away is meaningless
+        // work and the torque it produces is not: on the spin bench it read
+        // peak omega 48 against a bound of 20. The span solve is the one pass
+        // that must still move the pair, and it packs its own meta.
+        const held = poseHeld(a) || a.locked;
         bodies[o + FAR.locked] = held ? 1 : 0;
         bodies[o + FAR.invMass] = held ? 0 : 1 / Math.max(0.08, a.mass);
         invI[i] = held ? 0 : 1 / Math.max(1e-4, momentOfInertia(a));
@@ -1316,7 +1332,8 @@ export class Sim {
     const splay = params.auxSpread * 0.35;
     if (this.portTorquesNative(gain, splay, dt)) return;
     const aim = (agent: Agent, slot: PortSlot, target: { x: number; y: number }): void => {
-      if (poseHeld(agent)) return;
+      // As the packs: a force pass leaves a body mid-rewrite alone.
+      if (poseHeld(agent) || agent.locked) return;
       const I = momentOfInertia(agent);
       // Critically damped: a bare proportional torque windmills, and a port
       // that latches half a turn out is exactly the case that sets it going.
@@ -1442,6 +1459,7 @@ export class Sim {
     const VY = st.vy;
     const HD = st.heading;
     const OM = st.omega;
+    const LK = st.locked;
     const MS = st.mass;
     const SC = st.scale;
     const KC = st.kindCode;
@@ -1457,7 +1475,8 @@ export class Sim {
       const mass = MS[sl];
       const scale = SC[sl];
       const kc = KC[sl];
-      const held = poseHeldAt(st, sl);
+      // As `packForces`: a force pass leaves a body mid-rewrite alone.
+      const held = poseHeldAt(st, sl) || LK[sl] !== 0;
       bodies[o + FAR.invMass] = held ? 0 : 1 / Math.max(0.08, mass);
       bodies[o + FAR.locked] = held ? 1 : 0;
       // Radius is deliberately absent: no force pass reads it. The broad
@@ -1691,6 +1710,44 @@ export class Sim {
     return parent;
   }
 
+  /** `params.interiorTaste`, cached per frame for `tasteGain`. */
+  private interiorTaste = 1;
+
+  /**
+   * How much of the field a body is allowed to smell: all of it at a leaf,
+   * `interiorTaste` anywhere else.
+   *
+   * **A body with more than one wire stops tasting the ground.** It still
+   * emits, still relays, still runs its reactor; it just has no reading of its
+   * own. The argument is the inchworm bench's, where it is not decoration but
+   * the thing that makes a relayed field mean anything: with every node
+   * sighted a chain of 24 shows 5.42 "heads", almost all of them body
+   * curvature rather than a real lobe, and blinding the interior makes every
+   * head a leaf *by construction* — across every run there, no blind node ever
+   * became one. It cost nothing to do: 14 of 24 blinded, 33 captures against
+   * 35 sighted, approach speeds within noise. The extremities carry the
+   * directional information and the interior readings are redundant.
+   *
+   * On wire count and not on kind, which is what the calculus allows to be
+   * said about a body. In today's grown nets the two coincide — every leaf in
+   * `nets/deep-87` and `nets/mixed-308` is an Era, because an Era has one port
+   * and a Con or a Dup in a grown net is saturated — so this stacks a fifth
+   * job on that one port, beside leaf, limb, feeder and anchor. The
+   * coincidence is the net's; the rule is the graph's.
+   *
+   * A loner has no wires at all, so it keeps everything it had: it senses, it
+   * steers, it forages. Only nets change.
+   *
+   * Applied as a gain on the *taste* row rather than as a branch, which is
+   * what makes it one number in `packTaste` and no new kernel, no new uniform
+   * and no new packed field on either device path: a zero taste row dots to
+   * zero against any field, and `scentSlowFactor` and `scentTurnBoost` fall to
+   * neutral on their own.
+   */
+  private tasteGain(slot: number): number {
+    return this.agentStore.wires[slot] > 1 ? this.interiorTaste : 1;
+  }
+
   private refreshBound(): void {
     if (this.boundVersion === this.graph.version && this.boundRoster === this.rosterVersion) {
       return;
@@ -1699,12 +1756,17 @@ export class Sim {
     this.boundRoster = this.rosterVersion;
     const g = this.graph;
     const BOUND_OF = this.agentStore.bound;
+    const WIRES_OF = this.agentStore.wires;
     for (const a of this.agents.values()) {
       const n = a.kind === 'era' ? 1 : 3;
       const sl = a.slot;
       let filled = 0;
       for (let k = 0; k < n; k++) if (!g.isFreeAtSlot(sl, k)) filled++;
       BOUND_OF[sl] = filled / n;
+      // The count as well as the fraction. `bound` is saturation — a wired Era
+      // and a saturated Con both read 1.0 — and saturation cannot tell a leaf
+      // from a hub. `interiorTaste` needs the degree.
+      WIRES_OF[sl] = filled;
     }
   }
 
@@ -1866,13 +1928,35 @@ export class Sim {
     return true;
   }
 
-  private collectRewriteFrozen(): void {
+  private collectRewriteFrozen(_params: Params): void {
     this.rewriteFrozen.clear();
+    this.rewriteWires.clear();
     for (const rw of this.rewrites) {
       this.rewriteFrozen.add(rw.a);
       this.rewriteFrozen.add(rw.b);
+      if (rw.wireId >= 0) this.rewriteWires.add(rw.wireId);
     }
   }
+
+  /**
+   * The principal wires the live rewrites are consuming.
+   *
+   * **The one wire a rewrite is allowed to pull on.** A body mid-rewrite is
+   * frozen out of every force pass and every wire touching it is skipped by
+   * the solver, which is right for its *leftovers* — a rewrite that hauled its
+   * neighbours in would make every commute a contraction pump, and the net's
+   * shape would be whatever the last one left behind. But the wire being
+   * consumed was skipped with them, so `Wire.collapse` spent the whole
+   * duration hauling on a rest length nothing read, and the pair was closed
+   * instead by `advanceRewrite` assigning positions to two bodies that physics
+   * was not touching.
+   *
+   * Now that one wire is solved. The pair closes because its own wire is
+   * shortening, shared by inverse mass, at whatever rate the tension allows —
+   * and it still cannot move anything else, because everything else attached
+   * to it is still skipped.
+   */
+  private readonly rewriteWires = new Set<number>();
 
   private agentDetailed(id: number): boolean {
     return !this.lodActive || this.detailedAgents.has(id);
@@ -2273,14 +2357,14 @@ export class Sim {
   dragStep(params: Params, dt: number, view?: PanView | null): void {
     if (!this.grabbed || dt <= 0) return;
     const h = dt / Sim.SUBSTEPS;
-    this.collectRewriteFrozen();
+    this.collectRewriteFrozen(params);
     this.assignPhysicsLod(view);
     this.graph.syncRest(this.time, params, this.agents, this.agentStore.gaitWave, this.wireDetailed);
     this.graph.applyRopePaths(this.agents, this.w, this.h, this.time, params);
     this.graph.syncRopeShape(this.agents, this.w, this.h, this.wireDetailed);
     this.buildClearPairs(params);
     for (let sub = 0; sub < Sim.SUBSTEPS; sub++) {
-      this.graph.solveWires(this.agents, params, h, this.time, this.rewriteFrozen, this.wireDetailed);
+      this.graph.solveWires(this.agents, params, h, this.time, this.rewriteFrozen, this.wireDetailed, this.rewriteWires);
       this.clearWires(params);
       this.solveGrab(h);
       this.solveContacts(h);
@@ -2436,7 +2520,9 @@ export class Sim {
     const PREV_X = store.prevX;
     const PREV_Y = store.prevY;
     const PREV_HEADING = store.prevHeading;
-    const LOCKED = store.locked;
+    // The *pose* hold, not `locked`: a body mid-rewrite still has mass and
+    // is still moved by its wires unless `rewritePull` says otherwise.
+    const LOCKED = store.poseLock;
     const PINNED = store.pinned;
     const ID = store.id;
 
@@ -2463,7 +2549,7 @@ export class Sim {
         }
       }
 
-      this.graph.solveWires(this.agents, params, h, this.time, frozen, this.wireDetailed);
+      this.graph.solveWires(this.agents, params, h, this.time, frozen, this.wireDetailed, this.rewriteWires);
       this.solveGrab(h);
       this.clearWires(params);
       this.solveContacts(h);
@@ -2903,11 +2989,19 @@ export class Sim {
    * quantity and the economy is supposed to conserve it, and it spreads at a
    * fraction of the signal rate so that local scarcity survives long enough
    * to forage against.
+   *
+   * Aux is the other end of that same trade. It carries the *smell* of the
+   * ground rather than the ground, so nothing is lost when it fades and
+   * nothing is destroyed when it drifts — which is exactly what lets it run
+   * fast where the substance has to run slow. It keeps the ordinary signal
+   * decay: a smell that did not fade would still be announcing a patch that
+   * was eaten a minute ago.
    */
   private tuneChannels(params: Params): void {
     const f = this.fields;
     f.decayRate[CH.energy] = 0;
     f.diffuseRate[CH.energy] = Math.max(0, params.energyDiffuse);
+    f.diffuseRate[CH.aux] = Math.max(0, params.groundSmellSpread);
   }
 
   /** True once a device exists and the field has moved there for good. */
@@ -3093,6 +3187,7 @@ export class Sim {
     const EMITS = this.agentStore.emitAll;
     const scale = this.fields.depositScale;
     const amt = params.deposit * scale;
+    const leak = amt * params.portLeak;
     let nDep = 0;
     /*
      * Two shared constants rather than `slotsFor(a.kind)`, which builds a
@@ -3110,7 +3205,7 @@ export class Sim {
       for (let pi = 0; pi < ports.length; pi++) {
         const slot = ports[pi];
         // See `deposit`: a voice carries whether or not the port is attached,
-        // an aux marker does not.
+        // a free-port marker does not.
         const free = this.graph.isFreeAt(a.id, slot);
         if (slot !== 'p' && !free) continue;
         const w = portWorldInto(a, slot, this.w, this.h, scratch);
@@ -3122,13 +3217,15 @@ export class Sim {
           const eo = a.slot * 4;
           dep[o + 4] = amt * EMITS[eo];
           dep[o + 5] = amt * EMITS[eo + 1];
+          // Neither the ground nor its smell is a body's to lay. See `effEmit`.
           dep[o + 6] = 0;
-          dep[o + 7] = amt * EMITS[eo + 3];
+          dep[o + 7] = 0;
         } else {
-          dep[o + 4] = 0;
-          dep[o + 5] = 0;
+          // Both voices, equally, so the marker stays kind-independent.
+          dep[o + 4] = leak;
+          dep[o + 5] = leak;
           dep[o + 6] = 0;
-          dep[o + 7] = amt * 0.7;
+          dep[o + 7] = 0;
         }
         nDep++;
       }
@@ -3218,7 +3315,7 @@ export class Sim {
       pro[o + 3] = y + rs * sd;
       pro[o + 4] = x;
       pro[o + 5] = y;
-      packTaste(pro, o + 8, TASTE_OF, sl, groundScale);
+      packTaste(pro, o + 8, TASTE_OF, sl, groundScale, this.tasteGain(sl));
     }
 
     Sim.phase('gpu:packProbe');
@@ -3269,6 +3366,7 @@ export class Sim {
         ch: CH.energy,
         r: params.energyRegrow * dt,
         cap: this.energy.cellCap,
+        smell: params.groundSmell * dt,
       },
       {
         ch: CH.energy,
@@ -3370,6 +3468,20 @@ export class Sim {
    * nothing is owed: drop the pending credit or the next frame pays out of a
    * buffer the GPU never wrote. The genome goes with it, since its sense
    * inputs were the probe's.
+   *
+   * **And the ground's queue comes back with it.** `openFieldGpu` puts
+   * `EnergyGrid` into deferring mode, where an `addAt` is queued for the
+   * shader's `scatter` instead of written, and nothing turned that off again:
+   * after a fallback every add — a corpse, a rewrite's leftovers, rent, a
+   * refund, a food drop — went into a queue that only `gpuFieldStep` empties,
+   * and `gpuFieldStep` no longer runs. The dish drained to zero and stayed
+   * there, silently, with no error anywhere. Seen on the page by resetting a
+   * ten-thousand-body pond down to two hundred: the field falls back, and the
+   * ground never comes back.
+   *
+   * The frame's queued records go with the flag, which is `deferAdds`'s own
+   * contract. They were addressed to a device that is gone, and the comment
+   * above already accepts losing one frame of credit for the same reason.
    */
   private dropFieldGpu(): void {
     this.harvestPending = false;
@@ -3377,6 +3489,7 @@ export class Sim {
     this.fieldOnGpu = false;
     this.genomeOnGpu = false;
     this.steerFromSamples = false;
+    this.energy.deferAdds(false);
     this.learnWanted.length = 0;
     this.learnAsked.length = 0;
     nativeSolver.useSamples(false);
@@ -3817,13 +3930,15 @@ export class Sim {
       const bi = wbi[k];
       const A = list[ai];
       const B = list[bi];
-      const frozenEnds = frozen.has(A.id) || frozen.has(B.id);
+      // A rewrite's own wire is the one it may pull on; its leftovers are not.
+      const frozenEnds = (frozen.has(A.id) || frozen.has(B.id)) && !this.rewriteWires.has(w.id);
       const skip = (poseHeld(A) && poseHeld(B)) || frozenEnds;
       const full = this.wireSimulatesRope(w) && w.nodes.length > 0;
       const stiff = this.graph.stiffnessOf(w, this.time, params);
       let flags = 0;
       if (full) flags |= WF_FULL;
       if (skip) flags |= WF_SKIP;
+      if (this.rewriteWires.has(w.id)) flags |= WF_TETHER;
       if (frozenEnds) flags |= WF_HOLD;
       if (full && w.ropePath === 'full' && w.shape.length === w.nodes.length) flags |= WF_SHAPE;
       wires[o + WN.a] = ai;
@@ -4449,6 +4564,44 @@ export class Sim {
     }
   }
 
+  private dropAcc = 0;
+
+  /**
+   * Lay a fresh patch of ground somewhere every `groundDropEvery` seconds.
+   *
+   * Beside `autoSpawn` because it is the same shape and the same argument from
+   * the other side: immigration keeps bodies arriving so the pond is never a
+   * closed population, and this keeps *ground* arriving so the dish is never a
+   * finished landscape. `groundPatches` decides the grain once and then
+   * grazing and diffusion wear it flat; regrowth cannot put it back, because
+   * `Fields.grow` skips a cell at zero and so heals only what is still alive.
+   *
+   * The accumulator is host-side and stepped by the frame's own clamped dt.
+   * A device-side clock would tick on the GPU's frames rather than the sim's
+   * and the two ponds would part company over a long run, which is the one
+   * class of divergence nothing on the page would show.
+   *
+   * `while`, not `if`, for the same reason `autoSpawn` uses one: a frame that
+   * swallowed several intervals — a tab returning from the background, a long
+   * synchronous pause — owes the dish every drop it missed, and a pond that
+   * quietly skips its income while hidden is a different pond.
+   */
+  private dropGround(params: Params, dt: number): void {
+    const every = params.groundDropEvery;
+    if (every <= 0 || params.groundDropMass <= 0) {
+      this.dropAcc = 0;
+      return;
+    }
+    this.dropAcc += dt;
+    // A clamp on the catch-up, so a pause cannot hand the dish a year of food
+    // in one frame. Eight drops is well past any frame the page produces.
+    if (this.dropAcc > every * 8) this.dropAcc = every * 8;
+    while (this.dropAcc >= every) {
+      this.dropAcc -= every;
+      this.energy.dropSomewhere(params.groundDropMass);
+    }
+  }
+
   /**
    * Laying scent, in the solver.
    *
@@ -4517,14 +4670,22 @@ export class Sim {
       bodies[o + FAR.locked] = LK[sl] !== 0 ? 1 : 0;
       kinds[i] = KC[sl];
       sc[i] = SC[sl];
-      // Materialised by `updateState`; `CH.energy` is masked here rather than
-      // in the vector, because the vector is the budget and the deposit path
-      // is the thing that must never see the ground. See `effEmit`.
+      // Materialised by `updateState`; `CH.energy` and `CH.aux` are masked
+      // here rather than in the vector, because the vector is the budget and
+      // the deposit path is the thing that must never see the ground or
+      // counterfeit its smell. See `effEmit` for both reasons.
       const eo = sl * 4;
-      for (let c = 0; c < 4; c++) emit[i * 4 + c] = c === CH.energy ? 0 : EMITS[eo + c];
+      for (let c = 0; c < 4; c++) {
+        emit[i * 4 + c] = c === CH.energy || c === CH.aux ? 0 : EMITS[eo + c];
+      }
       if (!freeFresh) free[i] = this.freePortMask(a);
     }
     Sim.phase('scent:bodyPack');
+    // Here rather than in the steer pass, though they share one array: this is
+    // the pass that reads it, and a value written by another pass is a value
+    // that depends on the order the two happen to run in.
+    const spDep = nativeSolver.steerParams;
+    if (spDep) spDep[STEER_PARAM.portLeak] = params.portLeak;
     nativeSolver.deposit(n, params.deposit);
     Sim.phase('scent:deposit');
 
@@ -4549,26 +4710,40 @@ export class Sim {
    * scales with how much of it there is — which is what makes "there is
    * something large over there" a thing a stranger can smell at all.
    *
-   * The aux marker keeps its gate, because it is not a voice. `CH.aux` means
-   * "there is somewhere to attach here", and that has to stay false when
-   * there is not, or the one kind-independent signal in the field stops being
-   * true. Emitting it from a filled port would advertise a socket that is not
-   * there and every latch-seeking body in range would come and find nothing.
+   * The free-port marker keeps its gate, because it is not a voice. It means
+   * "there is somewhere to attach here", and that has to stay false when there
+   * is not, or the one kind-independent signal in the field stops being true.
+   * Emitting it from a filled port would advertise a socket that is not there
+   * and every latch-seeking body in range would come and find nothing.
    *
-   * Its magnitude is still the hardcoded 0.7, and the plan was to make that a
-   * gene — `E[aux][BOUND]`, so a body advertises its sockets as loudly as its
-   * lineage has learned to. It is not done here because the clean version is
-   * not obvious: a body's ch3 voice is already emitted from its principal, so
-   * a second genetic ch3 term at the port positions is either double-counting
-   * or a separate gene, and "separate gene" is not the subsumption it was
-   * billed as. The position genuinely cannot be folded in — "the socket is
-   * *here*" is information a body-centred voice cannot carry — so what is left
-   * to move is one scalar, and it can wait for a reason to be a particular
-   * shape rather than being changed because it was on a list.
+   * **It is no longer on `CH.aux`, and that is a real loss paid for a real
+   * gain.** Aux is the ground's now — `Fields.grow` mints it in proportion to
+   * the food standing in a cell — and it is the right channel for that because
+   * it is the one with the longest reach, which is what a fixed thing worth
+   * walking toward from far away needs. What the marker gets instead is
+   * `portLeak` of *both* body voices at once, which keeps it kind-independent
+   * the way the old 0.7 was.
+   *
+   * The loss is that this partly re-merges the two things the paragraphs above
+   * split: to a linear taste vector, a free terminal is now not quite
+   * distinguishable from a Con and a Dup standing side by side. What keeps it
+   * useful is scale — `portLeak` is a fraction of a body's voice, so a socket
+   * is a near-field cue and a net is the far-field one — and position, which
+   * is the part a body-centred voice could never carry. "The socket is *here*"
+   * is still the information, and it is still only at sockets.
+   *
+   * The magnitude is `portLeak` rather than a hardcoded 0.7, which is the
+   * slider that constant never had. Making it a gene — `E[aux][BOUND]`, so a
+   * body advertises its sockets as loudly as its lineage has learned to — is
+   * still not done, and the reason still stands: a body's voice is already
+   * emitted from its principal, so a second genetic term at the port positions
+   * is either double-counting or a separate gene, and "separate gene" is not
+   * the subsumption it was billed as.
    */
   private deposit(params: Params): void {
     const EMITS = this.agentStore.emitAll;
     const p = this.portScratch;
+    const leak = params.deposit * params.portLeak;
     for (const agent of this.agents.values()) {
       if (agent.locked) continue;
       const slots = agent.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
@@ -4578,13 +4753,15 @@ export class Sim {
           portWorldInto(agent, slot, this.w, this.h, p);
           const eo = agent.slot * 4;
           for (let ch = 0; ch < 4; ch++) {
-            if (ch === CH.energy) continue;
+            // The ground and its smell are not a body's to lay. See `effEmit`.
+            if (ch === CH.energy || ch === CH.aux) continue;
             const w = EMITS[eo + ch];
             if (w !== 0) this.fields.deposit(ch, p.x, p.y, params.deposit * w);
           }
-        } else if (this.graph.isFreeAt(agent.id, slot)) {
+        } else if (leak > 0 && this.graph.isFreeAt(agent.id, slot)) {
           portWorldInto(agent, slot, this.w, this.h, p);
-          this.fields.deposit(CH.aux, p.x, p.y, params.deposit * 0.7);
+          this.fields.deposit(CH.conP, p.x, p.y, leak);
+          this.fields.deposit(CH.dupP, p.x, p.y, leak);
         }
       }
     }
@@ -4600,11 +4777,14 @@ export class Sim {
   private scentAt(agent: Agent, x: number, y: number, _params: Params): number {
     const t = this.agentStore.tasteAll;
     const o = agent.slot * 4;
+    const gain = this.tasteGain(agent.slot);
+    if (gain === 0) return 0;
     return (
-      t[o] * this.fields.sample(0, x, y) +
-      t[o + 1] * this.fields.sample(1, x, y) +
-      t[o + 2] * this.fields.sample(2, x, y) * this.groundScale +
-      t[o + 3] * this.fields.sample(3, x, y)
+      gain *
+      (t[o] * this.fields.sample(0, x, y) +
+        t[o + 1] * this.fields.sample(1, x, y) +
+        t[o + 2] * this.fields.sample(2, x, y) * this.groundScale +
+        t[o + 3] * this.fields.sample(3, x, y))
     );
   }
 
@@ -4711,7 +4891,7 @@ export class Sim {
           sc[i] = SCALE_OF[sl];
         }
         drive[i] = DRIVE_OF[sl];
-        packTaste(taste, i * 4, TASTE_OF, sl, groundScale);
+        packTaste(taste, i * 4, TASTE_OF, sl, groundScale, this.tasteGain(sl));
         if (cruiseArr && turnArr) {
           cruiseArr[i] = CRUISE_OF[sl];
           turnArr[i] = TURN_OF[sl];
@@ -4734,7 +4914,7 @@ export class Sim {
           sc[i] = SCALE_OF[sl];
         }
         drive[i] = DRIVE_OF[sl];
-        packTaste(taste, i * 4, TASTE_OF, sl, groundScale);
+        packTaste(taste, i * 4, TASTE_OF, sl, groundScale, this.tasteGain(sl));
         if (cruiseArr && turnArr) {
           cruiseArr[i] = CRUISE_OF[sl];
           turnArr[i] = TURN_OF[sl];
@@ -5973,10 +6153,11 @@ export class Sim {
           SENSE[so + 3] *= sScale;
           SENSE[so + CH.energy] *= gScale;
         }
-        x[IN_SENSE] = SENSE[so];
-        x[IN_SENSE + 1] = SENSE[so + 1];
-        x[IN_SENSE + 2] = SENSE[so + 2];
-        x[IN_SENSE + 3] = SENSE[so + 3];
+        const g = this.tasteGain(slot);
+        x[IN_SENSE] = SENSE[so] * g;
+        x[IN_SENSE + 1] = SENSE[so + 1] * g;
+        x[IN_SENSE + 2] = SENSE[so + 2] * g;
+        x[IN_SENSE + 3] = SENSE[so + 3] * g;
       } else {
         x[IN_SENSE] = 0;
         x[IN_SENSE + 1] = 0;
@@ -6532,6 +6713,7 @@ export class Sim {
         this.h,
         params.rewriteDuration,
         wire.id,
+        params.rewritePull > 0,
       );
       /*
        * With learning on the device, these two bodies' learned weights are
@@ -6844,12 +7026,22 @@ export class Sim {
   private tickRewrites(params: Params, dt: number): void {
     const done: Rewrite[] = [];
     for (const rw of this.rewrites) {
-      if (advanceRewrite(rw, this.agents, this.w, this.h, dt)) done.push(rw);
+      if (advanceRewrite(rw, this.agents, this.w, this.h, dt, params.rewritePull)) done.push(rw);
       // The wire is what pulls them together, so shorten it in step with the
       // pull. It retracts into the pair and is gone by the time they touch,
       // and because it stays taut on the way its pitch rises instead of
       // sagging the way a slackening rope's does.
-      const pull = clamp(rw.t / PULL_END, 0, 1);
+      //
+      // The same accelerating ease `advanceRewrite` used to close the pair on,
+      // and they have to be the same curve now that the wire is the thing
+      // doing it. They were not: the animation pulled on `easeIn` and the
+      // collapse was linear, so at a tenth of the way through a rewrite the
+      // wire was asking for seven times the closing the picture showed. That
+      // only stayed invisible while the wire was skipped by the solver, and it
+      // is a wire releasing its tension — it should arrive faster than it sets
+      // off, not set off at full speed.
+      const raw = clamp(rw.t / PULL_END, 0, 1);
+      const pull = raw * raw;
       if (rw.wireId >= 0) {
         const wire = this.graph.wires.get(rw.wireId);
         if (wire) {

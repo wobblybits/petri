@@ -20,6 +20,7 @@ import {
   reduceChain,
   sampleChain,
   solveWire,
+  solveTether,
   solveWireSpan,
   type ChainNode,
   type WireStiffness,
@@ -1245,10 +1246,22 @@ export class Graph {
       const raw = quiet * pull * this.strokeOf(wire.a, wire.b, agents, wave, params);
       wire.rest = Number.isFinite(raw) ? clamp(raw, 4, REST_CAP) : wire.restBase;
       wire.pitchFloor = wire.rest * 0.5;
-      // Applied under the floor on purpose: a collapsing wire has to be able
-      // to reach nothing, and 4 px is still a visible thread.
+      /*
+       * Applied under the floor on purpose: a collapsing wire has to be able
+       * to reach nothing, and 4 px is still a visible thread.
+       *
+       * The floor is `rewriteMeet` and not 0.5 because this is a constraint
+       * now. A rest of half a pixel asks the span solve to put two stems on
+       * top of each other, and a stem sits off the body's centre, so the
+       * correction arrives with a lever arm and comes out as spin: measured on
+       * the latch-spin bench, peak omega 57 against a bound of 20, from a pair
+       * that used to be animated into place with no forces at all. Stopping at
+       * the distance where the two glyphs touch asks for the same picture and
+       * asks it of something that can be solved.
+       */
       if (wire.collapse > 0) {
-        wire.rest = Math.max(0.5, wire.rest * (1 - wire.collapse));
+        const floor = Math.max(0.5, params.rewriteMeet);
+        wire.rest = Math.max(floor, wire.rest * (1 - wire.collapse));
       }
       if (wire.ropePath !== 'span' && (!detailed || detailed(wire))) {
         reduceChain(wire.nodes, wire.rest);
@@ -1396,9 +1409,25 @@ export class Graph {
    */
   private stiffness(wire: Wire, time: number, params: Params): WireStiffness {
     const age = Math.max(0, time - wire.born);
+    /*
+     * A collapsing wire is a winch, not a rod.
+     *
+     * `Wire.collapse` takes the rest length from a body's length to where the
+     * glyphs touch inside four tenths of a second, and a stiff span constraint
+     * asked to deliver that arrives at the stems — which sit off the bodies'
+     * centres, so the correction comes with a lever arm and leaves as spin.
+     * Measured on the latch bench, 45 rad/s against a bound of 20, from a pair
+     * that used to be animated into place with no forces at all.
+     *
+     * Compliance is the dial that says "pull, do not yank". The same term
+     * already carries a fresh latch through its first second for the same
+     * reason; this is the second thing in the pond that reels a wire in, and
+     * it wants the same treatment.
+     */
+    const give = wire.collapse > 0 ? 1 + params.rewriteGive * wire.collapse : 1;
     return {
       scale: 12 / Math.max(1, params.springK),
-      slack: 1 + 6 * Math.exp(-age / 0.8),
+      slack: (1 + 6 * Math.exp(-age / 0.8)) * give,
     };
   }
 
@@ -1413,16 +1442,36 @@ export class Graph {
     params: Params,
     h: number,
     time: number,
-    frozen?: Set<number>,
+    frozen?: ReadonlySet<number>,
     detailed?: (wire: Wire) => boolean,
+    /**
+     * Wires a rewrite is consuming, which are solved even though their ends
+     * are frozen. That one wire is how a rewrite closes its pair; every other
+     * wire touching the pair stays skipped, so a rewrite cannot haul its
+     * neighbours in. See `Sim.rewriteWires`.
+     */
+    consuming?: ReadonlySet<number>,
   ): void {
     for (const wire of this.wires.values()) {
       const A = agents.get(wire.a.id);
       const B = agents.get(wire.b.id);
       if (!A || !B) continue;
       if (poseHeld(A) && poseHeld(B)) continue;
-      if (frozen && (frozen.has(A.id) || frozen.has(B.id))) continue;
+      if (
+        frozen &&
+        (frozen.has(A.id) || frozen.has(B.id)) &&
+        !(consuming && consuming.has(wire.id))
+      ) {
+        continue;
+      }
       const stiff = this.stiffness(wire, time, params);
+      if (consuming && consuming.has(wire.id)) {
+        // Centres, not stems: see `solveTether`. The ports this wire is reeled
+        // by are about to stop existing, and the lever arm at them is the whole
+        // of the spin a physical close used to put on the pair.
+        solveTether(A, B, wire.rest, stiff, h);
+        continue;
+      }
       if (!ropeIsLive(wire, detailed)) {
         solveWireSpan(A, wire.a.slot, B, wire.b.slot, wire.rest, stiff, h);
         continue;
@@ -1447,7 +1496,7 @@ export class Graph {
     agents: Map<number, Agent>,
     w: number,
     h: number,
-    frozen?: Set<number>,
+    frozen?: ReadonlySet<number>,
     detailed?: (wire: Wire) => boolean,
   ): void {
     for (const wire of this.wires.values()) {

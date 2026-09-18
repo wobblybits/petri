@@ -124,6 +124,80 @@ describe('the ground as something to smell', () => {
     expect(drawn, 'it should have made real progress toward the food').toBeGreaterThan(20);
   });
 
+  /*
+   * Who is entitled to a reading at all.
+   *
+   * A leaf senses and an interior body relays. The argument is the inchworm
+   * bench's, where it is load-bearing rather than decorative: with every node
+   * sighted, a node is a head unless one of its edges points within 70 degrees
+   * of the food, so a bend manufactures one and a chain of 24 shows 5.42 of
+   * them. Blind the interior and every head is a leaf by construction.
+   */
+  it('blinds a body with more than one wire, and nothing else', () => {
+    const params = tasteParams();
+    params.ambientEnergy = 1;
+    params.interiorTaste = 0;
+    // A still dish: this compares two readings of the same cell, so nothing
+    // may move the ground between them.
+    params.energyRegrow = 0;
+    params.energyDiffuse = 0;
+    params.groundSmell = 0;
+    params.diffuse = 0;
+    params.decay = 0;
+    // And no grazing either: a body with room in its gut eats the cell this
+    // is reading, and the two reads below are of the same cell.
+    params.gutSize = 0;
+    const sim = new Sim(10000, 10000);
+    // A star: one hub with three wires, three leaves with one each, and a
+    // loner off to the side that never latched.
+    const hub = sim.spawn('con', AT.x, AT.y, 0, params, true)!;
+    const arms = [0, 1, 2].map((i) =>
+      sim.spawn('era', AT.x + 30 + i, AT.y + 30 * (i + 1), 0, params, true)!,
+    );
+    const loner = sim.spawn('con', AT.x + 400, AT.y, 0, params, true)!;
+    const cast = [hub, ...arms, loner];
+    for (const a of cast) {
+      a.pinned = true;
+      for (let k = 0; k < 4; k++) a.chem[TASTE + k] = 0;
+      a.chem[TASTE + CH.energy] = 1;
+    }
+    // Full tanks, topped up before every step: a body with room grazes the
+    // cell it is standing in, and this is comparing readings of that cell.
+    const step = (): void => {
+      for (const a of cast) a.extra = a.energyCap;
+      sim.step(1 / 60, params);
+    };
+    step();
+    const slots: ('p' | 'l' | 'r')[] = ['p', 'l', 'r'];
+    for (let i = 0; i < 3; i++) sim.wire(hub.id, slots[i], arms[i].id, 'p', params);
+    step();
+
+    const W = sim.agentStore.wires;
+    expect([W[hub.slot], W[arms[0].slot], W[loner.slot]]).toEqual([3, 1, 0]);
+
+    const read = (a: typeof hub): number =>
+      (sim as unknown as { scentAt(x: typeof a, u: number, v: number, p: Params): number })
+        .scentAt(a, a.x, a.y, params);
+
+    expect(read(hub), 'three wires, no reading of its own').toBe(0);
+    expect(read(arms[0]), 'a leaf senses').toBeGreaterThan(0);
+    expect(read(loner), 'and so does a body that never latched').toBeGreaterThan(0);
+
+    // And it is a gain, not a switch: 1 is the pond before this, and the
+    // reading scales linearly in between. Compared against the hub's own cell
+    // rather than a leaf's, since they are standing in different places.
+    params.interiorTaste = 1;
+    step();
+    const full = read(hub);
+    expect(full, 'at 1 the hub reads its own cell').toBeGreaterThan(0);
+    params.interiorTaste = 0.5;
+    step();
+    // As a ratio, and loosely: taste is `T.h + t0` and `h` moves every frame,
+    // so the row itself drifts a per cent or two between the two reads. Half
+    // against one and zero is what this is distinguishing, and that survives.
+    expect(read(hub) / full).toBeCloseTo(0.5, 1);
+  });
+
   it('lets avoidance work too, since taste is signed', () => {
     const params = tasteParams();
     const a = bareBody(seedChem('con', params));

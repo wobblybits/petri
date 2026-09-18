@@ -371,16 +371,54 @@ describe('field.wgsl on a device', () => {
     const ground = totalOf(cpu.fields, CH.energy);
     expect(ground, 'the dish was stripped, so there is nothing to compare').toBeGreaterThan(0);
     expect(Math.abs(totalOf(gpu.fields, CH.energy) - ground) / ground, 'the ground differs').toBeLessThan(0.02);
-    // The signalling channels are minted rather than traded, so they should
-    // stand at the same level either way — within the same one-frame lag,
-    // which is the deposit pass being a frame behind on the device.
-    // The rig is all Cons, so `conP` and `aux` are the channels they write.
-    for (const ch of [CH.conP, CH.aux]) {
+    /*
+     * The signalling channels are minted rather than traded, so they should
+     * stand at the same level either way — within the same one-frame lag,
+     * which is the deposit pass being a frame behind on the device.
+     *
+     * All three, and the rig is all Cons. That used to mean `conP` and `aux`,
+     * and it means something else now. `conP` is still what a Con's principal
+     * says. `aux` is the *ground's* voice — `Fields.grow` mints it in
+     * proportion to what is standing in a cell, so there is no body in this
+     * rig entitled to write it and it is there anyway. And `dupP` is on with
+     * no Dup in the dish at all, because a free auxiliary port leaks both body
+     * voices equally: that is what keeps "there is somewhere to attach here"
+     * kind-independent now that aux belongs to the ground.
+     */
+    for (const ch of [CH.conP, CH.dupP, CH.aux]) {
       const c = totalOf(cpu.fields, ch);
       expect(c, `nothing on channel ${ch}`).toBeGreaterThan(0);
       expect(Math.abs(totalOf(gpu.fields, ch) - c) / c, `channel ${ch} differs`).toBeLessThan(0.02);
     }
-    expect(totalOf(cpu.fields, CH.dupP), 'no Dup, no dupP').toBe(0);
+  });
+
+  it('puts dupP in a pond with no Dup only because terminals leak', () => {
+    // The other half of the sentence above, and the cheapest way to show that
+    // `dupP` there is the marker and not a stray voice: turn the leak off and
+    // a dish of Cons goes silent on that channel again. No device needed —
+    // this is about who writes what, not about the two paths agreeing.
+    const params = pondParams();
+    params.energyRegrow = 0;
+    params.decay = 0;
+    params.upkeep = 0;
+    const dish = (leak: number): Sim => {
+      params.portLeak = leak;
+      const sim = new Sim(1600, 1200, 128);
+      loadPreset(sim, 'soup', params);
+      for (let i = 0; i < 12; i++) {
+        const a = sim.spawn('con', sim.w * 0.5 + i * 12, sim.h * 0.5, 0, params, true)!;
+        a.pinned = true;
+      }
+      for (let i = 0; i < 90; i++) sim.step(1 / 60, params);
+      return sim;
+    };
+    const leaking = dish(0.7);
+    expect(totalOf(leaking.fields, CH.conP), 'the Cons speak').toBeGreaterThan(0);
+    expect(totalOf(leaking.fields, CH.dupP), 'and their sockets do').toBeGreaterThan(0);
+
+    const sealed = dish(0);
+    expect(totalOf(sealed.fields, CH.conP), 'the Cons still speak').toBeGreaterThan(0);
+    expect(totalOf(sealed.fields, CH.dupP), 'and nothing else does').toBe(0);
   });
 
   it('meters uptake on the device the way runHarvestPlan does', async ({ skip }) => {

@@ -32,20 +32,25 @@ import { Sim } from '../sim.ts';
 
 const FIXED_SCALE = 1e4;
 
-/** `grow`, line for line. Logistic on one channel. */
+/** `grow`, line for line. Logistic on one channel, and the ground's voice. */
 function mirrorGrow(
   src: Float32Array,
   n: number,
   ch: number,
   r: number,
   cap: number,
+  smell = 0,
 ): Float32Array {
   const out = Float32Array.from(src);
-  if (r <= 0 || cap <= 0) return out;
+  const grows = r > 0 && cap > 0;
+  const smells = smell > 0;
+  if (!grows && !smells) return out;
   for (let i = 0; i < n; i++) {
     const k = i * CHANNELS + ch;
     const e = out[k];
-    if (e <= 0 || e >= cap) continue;
+    if (e <= 0) continue;
+    if (smells) out[i * CHANNELS + CH.aux] += smell * e;
+    if (!grows || e >= cap) continue;
     const next = e + r * e * (1 - e / cap);
     out[k] = next > cap ? cap : next;
   }
@@ -410,6 +415,38 @@ describe('field shader arithmetic', () => {
       if (Math.abs(f.data[i] - before[i]) > 1e-9) moved++;
     }
     expect(moved).toBeGreaterThan(100);
+  });
+
+  it('mints the ground its voice past the cap, the way Fields does', () => {
+    /*
+     * The ordering is the whole of this one. A seeded patch sits at four times
+     * `cellCap` and a fresh drop higher, so a smell written inside the growth
+     * branch would leave the richest ground in the dish the only ground with
+     * no smell. Half the cells here are over capacity for exactly that reason.
+     */
+    const f = openBox(seeded());
+    const cap = 0.4;
+    let over = 0;
+    for (let i = CH.energy, c = 0; i < f.data.length; i += CHANNELS, c++) {
+      f.data[i] = c % 2 === 0 ? cap * 0.3 : cap * 4;
+      f.data[i - CH.energy + CH.aux] = 0;
+    }
+    const before = Float32Array.from(f.data);
+    const mine = mirrorGrow(before, f.cols * f.rows, CH.energy, 0.05, cap, 0.25);
+    f.grow(CH.energy, 0.05, cap, 0.25);
+    let worst = 0;
+    for (let i = 0; i < f.data.length; i++) worst = Math.max(worst, Math.abs(f.data[i] - mine[i]));
+    expect(worst, 'the smell diverged from its mirror').toBeLessThan(1e-6);
+    // The cells past capacity grew by nothing and still spoke.
+    for (let i = CH.energy, c = 0; i < f.data.length; i += CHANNELS, c++) {
+      if (c % 2 === 0) continue;
+      const aux = f.data[i - CH.energy + CH.aux];
+      if (before[i] <= 0) continue;
+      expect(f.data[i]).toBeCloseTo(before[i], 6);
+      expect(aux).toBeCloseTo(0.25 * before[i], 6);
+      over++;
+    }
+    expect(over, 'no cell was over capacity, so this proved nothing').toBeGreaterThan(100);
   });
 
   it('scatters where Fields deposits, within fixed-point', () => {

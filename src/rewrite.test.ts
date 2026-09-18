@@ -305,22 +305,41 @@ describe('annihilation staging', () => {
     expect(sawPull).toBe(true);
   });
 
-  it('closes the gap by the end of the pull, and only then collapses', () => {
+  it('closes the gap, and only then collapses', () => {
+    /*
+     * The gap used to be under 2 px by `PULL_END`, because the pair was being
+     * *assigned* positions along an ease curve and nothing could argue. It
+     * closes through the wire now — `Wire.collapse` takes the rest length down
+     * and the span solve hauls the pair after it — so how fast it shuts is a
+     * property of the pond rather than of the clock, and it stops at
+     * `rewriteMeet` rather than at nothing. What is still promised is that it
+     * shuts, monotonically, and that nothing shrinks or fades until it has.
+     */
     const { sim, params, a, b } = annihilating();
     let gapAtPull = Infinity;
+    let gapAtEnd = Infinity;
+    let worstGrowth = 0;
+    let prev = Infinity;
     let scaleAtEnd = 1;
     for (let f = 0; f < 200; f++) {
       const rw = sim.rewrites[0];
       if (!rw) break;
       const A = sim.agents.get(a);
       const B = sim.agents.get(b);
-      if (A && B && rw.t >= PULL_END && gapAtPull === Infinity) {
-        gapAtPull = Math.hypot(A.x - B.x, A.y - B.y);
+      if (A && B) {
+        const gap = Math.hypot(A.x - B.x, A.y - B.y);
+        if (rw.t >= PULL_END && gapAtPull === Infinity) gapAtPull = gap;
+        if (prev < Infinity) worstGrowth = Math.max(worstGrowth, gap - prev);
+        prev = gap;
+        gapAtEnd = gap;
       }
       if (A && rw.t > 0.95) scaleAtEnd = A.scale;
       sim.step(1 / 60, params);
     }
-    expect(gapAtPull).toBeLessThan(2);
+    // Most of the way by the end of the pull, all of the way by the end.
+    expect(gapAtPull, 'the pull did not do most of the closing').toBeLessThan(30);
+    expect(gapAtEnd, 'the pair never met').toBeLessThan(params.rewriteMeet + 8);
+    expect(worstGrowth, 'the gap opened again on the way in').toBeLessThan(1);
     expect(scaleAtEnd).toBeLessThan(0.2);
   });
 

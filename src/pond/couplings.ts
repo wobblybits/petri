@@ -75,6 +75,27 @@ export const COUPLINGS: readonly Coupling[] = [
     unless: { key: 'energyRegrow', is: 0 },
   },
   {
+    axis: 'groundDropEvery',
+    constant: 'energyRegrow',
+    why:
+      'at groundDropEvery 0 regrowth is the whole income and above it there are two, and they are ' +
+      'not the same income: regrowth heals living ground in place and can never re-green a cell at ' +
+      'zero, a drop puts new ground where there was none. Held across the axis, the fast end of it ' +
+      'is a richer pond as well as a lumpier one',
+    fix: 'choose energyRegrow per arm so the per-second income matches, and read structure not quantity',
+    unless: { key: 'energyRegrow', is: 0 },
+  },
+  {
+    axis: 'groundDropEvery',
+    constant: 'groundPatches',
+    why:
+      'a drop is one patch at the current grain — Energy.patchRadius and patchMass are both ' +
+      'divided by groundPatches — so the same drop interval lays a quarter-disk meadow at 1 patch ' +
+      'and a freckle at 128',
+    fix: 'hold groundPatches within an arm; crossing both axes is a grid, not a held constant',
+    unless: { key: 'groundDropEvery', is: 0 },
+  },
+  {
     axis: 'groundPatches',
     constant: 'learnDiscount',
     why:

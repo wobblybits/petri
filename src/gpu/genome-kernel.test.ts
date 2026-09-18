@@ -313,6 +313,10 @@ describe('the genome shader computes what updateState computes', () => {
     params.decay = 0;
     params.energyRegrow = 0;
     params.energyDiffuse = 0;
+    // The last thing that still moved this deliberately frozen field: the
+    // ground mints aux every frame in proportion to what is standing in a
+    // cell, and the snapshot below hardcodes what a body smells.
+    params.groundSmell = 0;
     params.swimCost = 0;
     params.ambientEnergy = 1;
     const sim = new Sim(20000, 20000);

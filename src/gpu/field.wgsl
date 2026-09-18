@@ -42,11 +42,13 @@ struct FieldParams {
   uptakeKs: f32,
   // Hill coefficient on uptake; 1 is plain Monod. See `UptakeKinetics.hillN`.
   hillN: f32,
-  // Reserved. It carried `catCoSubstrate` while the co-substrate was a factor
-  // in this pass; catabolism is the host's `runDigestion` on both field paths
-  // now, so nothing here reads it. The slot stays because the uniform is a
-  // whole number of sixteen-byte blocks and is packed by index.
-  pad5: f32,
+  // The ground's voice: aux minted per frame per unit of `growCh`. Took the
+  // slot that carried `catCoSubstrate` while the co-substrate was a factor in
+  // this pass; catabolism is the host's `runDigestion` on both field paths
+  // now, so nothing read it. The uniform is a whole number of sixteen-byte
+  // blocks and is packed by index, so a reserved slot is the free place for a
+  // scalar.
+  growSmell: f32,
   pad6: f32,
   pad7: f32,
 }
@@ -312,29 +314,41 @@ fn decay(@builtin(global_invocation_id) gid: vec3u) {
   src[i] *= P.keep;
 }
 
-// Logistic regrowth on one channel, optionally catalysed by another.
+// Logistic regrowth on one channel, and the ground's voice off the same read.
 //
 // Growth is proportional to what is already in the cell, so zero is a fixed
 // point: a cell grazed to the floor cannot recover on its own and has to be
-// recolonised by diffusion. The catalyst scales the *rate* and is clamped at
-// zero, so an inhibitor can stall regrowth but never run it backwards — ground
-// destroyed by being smelled at would be a hole in the conservation the whole
-// economy rests on. The result is clamped at capacity because one explicit
-// step can overshoot it once the catalyst multiplies the rate.
+// recolonised by diffusion. The result is clamped at capacity because one
+// explicit step can overshoot it.
+//
+// `growSmell` mints aux in proportion to what the cell holds — minted, never
+// moved, so the ground itself is untouched and the conservation the economy
+// rests on does not see it. Before the capacity test, not inside it: a seeded
+// patch sits at four times capacity and a fresh drop higher, and a smell that
+// stopped at the cap would leave the richest ground in the dish the only
+// ground with no smell. The two are separately switchable, so `energyRegrow`
+// at 0 — the clean control for a layout question — does not also go silent.
+//
+// Channel 3 is aux, matching `CH.aux`; the CPU twin is `Fields.grow`.
 @compute @workgroup_size(64)
 fn grow(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
   if (i >= P.cols * P.rows) { return; }
-  if (P.growR <= 0.0 || P.growCap <= 0.0) { return; }
+  let grows = P.growR > 0.0 && P.growCap > 0.0;
+  let smells = P.growSmell > 0.0;
+  if (!grows && !smells) { return; }
   let ci = i32(i % P.cols);
   let cj = i32(i / P.cols);
   if (cellOut(ci, cj)) { return; }
   let ch = u32(P.growCh);
   var v = src[i];
   let e = v[ch];
-  if (e <= 0.0 || e >= P.growCap) { return; }
-  let next = e + P.growR * e * (1.0 - e / P.growCap);
-  v[ch] = min(next, P.growCap);
+  if (e <= 0.0) { return; }
+  if (smells) { v[3] = v[3] + P.growSmell * e; }
+  if (grows && e < P.growCap) {
+    let next = e + P.growR * e * (1.0 - e / P.growCap);
+    v[ch] = min(next, P.growCap);
+  }
   src[i] = v;
 }
 

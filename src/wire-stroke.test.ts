@@ -76,6 +76,10 @@ function stubCtx(calls: Call[]): CanvasRenderingContext2D {
 function pond(): { sim: Sim; params: ReturnType<typeof defaultParams> } {
   const params = defaultParams();
   params.stepSpeed = 0;
+  // A shoal, which is what packs bodies close enough to meet. Both dials ship
+  // at 0 now and this rig needs the opening scramble, not the pond.
+  params.flockAlign = 5.5;
+  params.flockSep = 48;
   const sim = new Sim(400, 300);
   let seed = 4242;
   const rnd = (): number => {
@@ -83,7 +87,7 @@ function pond(): { sim: Sim; params: ReturnType<typeof defaultParams> } {
     return seed / 4294967296;
   };
   const kinds = ['era', 'dup', 'con'] as const;
-  for (let i = 0; i < 90; i++) {
+  for (let i = 0; i < 180; i++) {
     sim.spawn(kinds[i % 3], rnd() * 400, rnd() * 300, rnd() * 6.28, params, true);
   }
   // Zoomed out, so the LOD puts wires on the chord path rather than a live
@@ -91,6 +95,16 @@ function pond(): { sim: Sim; params: ReturnType<typeof defaultParams> } {
   // close-up pond never reaches.
   const far = { x: 200, y: 150, zoom: 0.12, viewW: 400, viewH: 300 };
   sim.setViewExtent((far.viewW / far.zoom) * 1.7, (far.viewH / far.zoom) * 1.7);
+  /*
+   * Dense enough that more than one rewrite is in flight when the render runs,
+   * which is what the handoff half of the comparison below needs. Ninety
+   * bodies was enough until the interior of a net stopped tasting the field
+   * (`interiorTaste`): a wired body no longer steers toward anything, so the
+   * opening scramble produces at most one overlap at a time and the handoff
+   * branch went untested. More bodies rather than more frames, because the
+   * count peaks in the first second and then settles — this rig wants the
+   * scramble, not a grown pond.
+   */
   for (let i = 0; i < 30; i++) sim.step(1 / 60, params, far);
   return { sim, params };
 }

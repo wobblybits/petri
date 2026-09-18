@@ -935,21 +935,51 @@ export class Fields {
    *
    * `r` is per frame, already multiplied by dt by the caller — this pass has
    * no idea what a second is.
+   *
+   * ---
+   *
+   * **`smell` is the second thing this pass does, and it is the ground's
+   * voice.** Every cell holding something mints `smell * e` into `CH.aux`.
+   *
+   * Here rather than in a pass of its own because this is already the one
+   * traversal that visits every cell and reads this channel, and a second
+   * would double the cost of the cheapest useful version of the idea. The two
+   * belong together in meaning as well: growth and evaporation are both what
+   * the ground does with what it is holding.
+   *
+   * It is **minted, not moved**. The energy stays exactly where it was — this
+   * is not a conversion and the conservation books do not see it, the same way
+   * a body's voice is minted rather than spent out of its tank. What changes
+   * is who is speaking: two channels the bodies own and two the ground does.
+   *
+   * Written *before* the capacity skip, and that ordering is the whole point.
+   * A seeded patch holds four times `cellCap` and a fresh drop more; if the
+   * smell went inside the growth branch, the richest ground in the dish would
+   * be the only ground with no smell at all. Growth stops at capacity because
+   * capacity is what it means; a smell does not.
+   *
+   * `ch` is `CH.energy` at every call site, and the aux write assumes it —
+   * passing `CH.aux` here would have a cell shout at itself.
    */
-  grow(ch: number, r: number, cap: number): void {
-    if (!(r > 0) || !(cap > 0)) return;
+  grow(ch: number, r: number, cap: number, smell = 0): void {
+    const grows = r > 0 && cap > 0;
+    const smells = smell > 0;
+    if (!grows && !smells) return;
     if (this.hiI < this.loI) return;
     const d = this.data;
     const { cols } = this;
     const { lo: sLo, hi: sHi } = this.spans();
-    const invCap = 1 / cap;
+    const invCap = grows ? 1 / cap : 0;
+    const auxOff = CH.aux - ch;
     for (let j = this.loJ; j <= this.hiJ; j++) {
       const rowBase = j * cols * CHANNELS;
       const a0 = sLo[j] > this.loI ? sLo[j] : this.loI;
       const b0 = sHi[j] < this.hiI ? sHi[j] : this.hiI;
       for (let i = a0, k = rowBase + a0 * CHANNELS + ch; i <= b0; i++, k += CHANNELS) {
         const e = d[k];
-        if (e <= 0 || e >= cap) continue;
+        if (e <= 0) continue;
+        if (smells) d[k + auxOff] += smell * e;
+        if (!grows || e >= cap) continue;
         const next = e + r * e * (1 - e * invCap);
         d[k] = next > cap ? cap : next;
       }

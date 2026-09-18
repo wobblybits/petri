@@ -7,6 +7,39 @@ import { SENSE_SCALE } from './chem-layout.ts';
 
 export interface Params {
   deposit: number;
+  /**
+   * What share of `deposit` a free *auxiliary* port lays, into both body
+   * voices equally. The one kind-independent "there is somewhere to attach
+   * here" signal in the field.
+   *
+   * It used to be a hardcoded 0.7 on `CH.aux`, and it moved because aux is the
+   * ground's now — `groundSmell` mints it in proportion to the food standing
+   * in a cell, and the channel with the longest reach belongs to the fixed
+   * thing worth walking toward from far away, not to a socket you have to be
+   * next to in order to use.
+   *
+   * Both voices at once, in equal amounts, so that what a terminal *says* is
+   * still "a socket" rather than "a Con". The cost of that is real and is
+   * written up on `Sim.deposit`: to a linear taste vector a free terminal is
+   * now barely distinguishable from a Con and a Dup side by side. What is left
+   * to tell them apart is position — "the socket is *here*" — which is the
+   * part a body-centred voice never could carry anyway.
+   *
+   * **Emitting it kind-independently does not make it heard that way**, and
+   * that is the second cost. Every kind tastes `CH.aux` at `attractMedium`, so
+   * the old flat 0.7 pulled on all three equally: 0.72 x 0.7 = 0.504 for a
+   * Con, a Dup and an Era alike. The two body voices are not tasted equally —
+   * a Con seeks ch1 and a Dup ch0 at `attractMedium`, while an Era seeks both
+   * at `attractStrong`. So at 0.7 a Con and a Dup feel exactly the pull they
+   * felt before, to the decimal, and an Era feels **4.03x** of it.
+   *
+   * 0.7 and not something smaller for that first reason: it is what the marker
+   * was, and reproducing the pond before it is the rule. It is not a free
+   * choice either — at 0.15, four and a half times quieter, a lambda term that
+   * had always reduced stopped reducing, because nothing found the terminals
+   * fast enough to latch. That is the number this dial actually controls.
+   */
+  portLeak: number;
   diffuse: number;
   decay: number;
   /**
@@ -29,6 +62,64 @@ export interface Params {
   faceRadius: number;
   faceAttract: number;
   rewriteDuration: number;
+  /**
+   * How much of a rewrite's closing is *imposed* on its pair, against being
+   * left to the wire that is already hauling them together.
+   *
+   * A rewrite used to do both jobs at once and one of them ignored the pond.
+   * `beginRewrite` locks the pair, which to every force pass means infinite
+   * mass — `chain.ts`'s `invMass` returns 0 for a held body — and then
+   * `advanceRewrite` drove their positions along an ease curve for
+   * `rewriteDuration`. Every wire attached to them was still solved, against
+   * two bodies physics was not touching, so a two-body rewrite rearranged a
+   * forty-body net exactly as hard as it rearranged a pair, twice a second,
+   * for seven tenths of a second at a time. A net had no shape of its own; it
+   * had whatever the last rewrite left behind. That is the thing standing
+   * between this pond and a gait, because a travelling wave along a body means
+   * nothing if the body is being re-posed underneath it.
+   *
+   * `Wire.collapse` was already doing the job properly the whole time — it
+   * hauls the rewriting wire's rest length to its floor over the same window,
+   * through the span constraint, shared by inverse mass. It simply could not
+   * move anything, because both its ends were anchors.
+   *
+   * So the lock no longer stops physics (`poseHeld` is `pinned` alone now) and
+   * this is what is left of the animation: a one-sided correction that shuts
+   * the live gap to the separation the beat asks for, split by inverse mass so
+   * the pair's centre of mass does not move. At 0 the wire does all of it and
+   * a rewrite is exactly as strong as its rest length — a pair embedded in a
+   * stiff net closes slowly, or does not close, and commits where it got to.
+   * At 1 the pair meets on schedule whatever the net wants, which is roughly
+   * the pond before this; roughly, because even at 1 the correction is shared
+   * by mass rather than imposed on locked bodies.
+   *
+   * Ships at 0. The whole point is to find out what a net's shape does when
+   * nothing is allowed to override it.
+   */
+  rewritePull: number;
+  /**
+   * How close a rewrite's collapsing wire asks its pair to come, in pixels of
+   * stem-to-stem rest length.
+   *
+   * It used to be half a pixel, which is what an *animation* can ask for: the
+   * pair was being assigned positions and shrunk to a tenth of its size at the
+   * same time, so two stems on top of each other looked like a collapse. As a
+   * constraint it is a different request. A stem sits off the body's centre,
+   * so a correction along the wire arrives with a lever arm, and asking for
+   * zero separation put 57 rad/s of spin on the latch bench against a bound of
+   * 20. The bodies are 9 to 16 px across; stopping where the glyphs touch asks
+   * for the same picture out of something a solver can actually deliver.
+   */
+  rewriteMeet: number;
+  /**
+   * How much more compliant a rewrite's collapsing wire is than a standing
+   * one, at full collapse. 0 is a rigid rod.
+   *
+   * See `Graph.stiffness`: the wire is reeling its pair in, and a span
+   * constraint stiff enough to hold a net together is far too stiff to be a
+   * winch. The lever arm at the stems turns the difference into spin.
+   */
+  rewriteGive: number;
   springK: number;
   springDamp: number;
   /** How far an aux port aims off its neighbour, toward its own side. 1 = 20 degrees. */
@@ -700,6 +791,82 @@ export interface Params {
    */
   energyRegrow: number;
   /**
+   * **The ground's voice.** Aux minted into a cell per second, per unit of
+   * ground standing in it. 0 is the pond before this, where `CH.aux` was a
+   * body's marker and the ground was silent.
+   *
+   * Food is a *contact* signal and nothing else here is. `energyDiffuse` holds
+   * the ground at 0.006 of the signal rate on purpose — local scarcity has to
+   * survive long enough to forage against, and a ground that spread like a
+   * scent would flatten into an everywhere-the-same dish within seconds. The
+   * consequence is that a body can only tell food is there by standing on it,
+   * which is not a gradient anything can climb and not something a net can
+   * aim at. So the ground gets a second substance that *is* free to travel:
+   * the smell of it, minted in proportion to what is there, on a channel that
+   * diffuses at the full signal rate and decays like every other signal.
+   *
+   * **Minted, not converted.** The energy is untouched — the conservation
+   * books do not see this, exactly as they do not see a body's voice. What
+   * changes is who speaks: two channels the bodies own (`conP`, `dupP`) and
+   * two the ground does (`energy`, `aux`).
+   *
+   * Written before the capacity test in `Fields.grow`, which is why it is a
+   * separate dial from `energyRegrow` rather than a term inside it: growth
+   * stops at capacity because capacity is what it means, and a seeded patch
+   * sits at four times `cellCap`. A smell that stopped there would leave the
+   * richest ground in the dish the only ground with no smell.
+   *
+   * Every kind already seeds a taste for channel 3 (`attractMedium`), so a
+   * seeded pond can smell food from its first frame with no genome change.
+   */
+  groundSmell: number;
+  /**
+   * How much faster the smell spreads than the other two voices, as a
+   * multiplier on the `diffuse` slider. 1 is "like any other signal".
+   *
+   * Above 1 because reach is the whole job: a body's voice says where a body
+   * is, and something within a body's own length wants to hear it. A patch is
+   * a fixed thing worth walking toward from further away than that, and the
+   * only way a scalar field carries further is to spread faster.
+   */
+  groundSmellSpread: number;
+  /**
+   * How much of the field a body with **more than one wire** is allowed to
+   * smell, as a gain on its taste row. **Ships at 0, and 0 is the new
+   * behaviour** — 1 is the pond before it, where everything sensed equally.
+   * That inverts the usual convention and is said out loud here because it
+   * does: the rule against shipping at zero is about not shipping a mechanic
+   * at its *neutral* value, and here zero is the active one.
+   *
+   * A leaf senses; an interior body relays. It still emits, still moves
+   * energy, still runs its reactor — it just has no reading of its own.
+   *
+   * Not decoration. On the inchworm bench, where the same rule is load
+   * bearing, a chain of 24 with every node sighted shows 5.42 "heads" at the
+   * shipped discount, and almost all of them are body curvature rather than a
+   * real lobe: a node is a head unless one of its edges points within 70
+   * degrees of the food, so a bend manufactures one. Blind the interior and
+   * every head is a leaf **by construction** — across every run there, no
+   * blind node ever became a head. That is what turns a relayed field from
+   * noise into a nose-to-tail coordinate, and it is the whole reason this is
+   * worth doing before anything relays.
+   *
+   * And it is free: 14 of 24 blinded cost 33 captures against 35 sighted, with
+   * approach speeds within noise. The extremities carry the directional
+   * information; the interior readings are redundant.
+   *
+   * On wire count, not on kind. In today's grown nets the two coincide —
+   * every leaf in `nets/deep-87` and `nets/mixed-308` is an Era — so this
+   * stacks a fifth job on the Era's one port, beside leaf, limb, feeder and
+   * anchor, two of which already pull against each other. The coincidence is
+   * the net's and not the rule's, and it will stop holding the moment a Con
+   * sits on the edge of one.
+   *
+   * A loner has no wires, so the soup is untouched: it senses, steers and
+   * forages exactly as it did. Only nets change.
+   */
+  interiorTaste: number;
+  /**
    * A standing rent on the tank, per second. **Back on at 0.01**, for the one
    * job of its four that nothing else took over.
    *
@@ -1310,11 +1477,65 @@ export interface Params {
    * what §6 wants from a reaction-diffusion ground, for free.
    */
   groundPatches: number;
+
+  /**
+   * Seconds between one fresh patch of ground being laid somewhere random in
+   * the disk. 0 is the pond before this: a dish seeded once and never added to.
+   *
+   * `groundPatches` decides how coarse the dish is *once*, and then diffusion
+   * and grazing wear that structure away — measured, `forage_ratio` peaks at
+   * 1.6-1.9x chance ground in the first minute and is back at parity by the
+   * close. Logistic regrowth cannot restore it, because `Fields.grow` skips a
+   * cell at zero: it heals what is still alive and can never re-green a
+   * region that was grazed out. So a dish with regrowth alone loses structure
+   * monotonically, and a pond whose food is everywhere-and-equal has nothing
+   * to forage *toward* — which is the plainest available reason nothing here
+   * forages yet.
+   *
+   * A drop is the other half of regeneration: new ground somewhere it was not.
+   * It is the same blob at the same grain the seed lays (`Energy.dropPatch`),
+   * never a point — twenty-four patches laid as points put five hundred times
+   * a cell's capacity into twenty-four cells and left 99.8% of the dish bare,
+   * which is a pathology and not a landscape.
+   *
+   * The timer is host-side and stepped by the frame's own dt, because a
+   * device-side clock would drift the GPU pond off the CPU one.
+   */
+  groundDropEvery: number;
+
+  /**
+   * How much lands in one drop, in units of one seeded patch's mass — so 1 is
+   * "a drop replaces one of the patches the dish was seeded with".
+   *
+   * Quoted against the patch rather than in absolute energy because the dish's
+   * total scales with `ambientEnergy` and the disk's area, and a number that
+   * meant one thing at one radius and another at the next would be exactly the
+   * held-constant-that-moved this project keeps paying for.
+   *
+   * With drops on, income arrives twice: here and through `energyRegrow`.
+   * They are not the same thing — regrowth heals living ground in place, a
+   * drop puts structure somewhere new — but they add, so the two have to be
+   * chosen together. `src/pond/couplings.ts` carries the row.
+   *
+   * **What the shipped pair does to the income, measured.** On an ungrazed
+   * patchy dish at the shipping `energyRegrow` of 0.02, regrowth starts near
+   * nothing — a fresh patch holds four times `cellCap`, and `Fields.grow`
+   * skips a cell at or above capacity — and climbs as diffusion walks the
+   * mass down into the productive band: 0.20 of a patch-mass per second at
+   * 4 s, 0.44 at 20 s, 0.60 at 40 s and still rising, which is one patch every
+   * 25 seconds or so. Drops at 0.25 of a patch every 6 s are 0.68 a second.
+   * **So the shipped setting roughly doubles the dish's income**, and that is
+   * a change in quantity on top of the change in structure it is for. Both
+   * ends are sliders; turn the mass down to hold the income and read structure
+   * alone, or `groundDropEvery` to 0 for the pond before this.
+   */
+  groundDropMass: number;
 }
 
 export function defaultParams(): Params {
   return {
     deposit: 5,
+    portLeak: 0.7,
     diffuse: 0.6,
     decay: 0.01,
     sense: 520,
@@ -1327,6 +1548,9 @@ export function defaultParams(): Params {
     faceRadius: 90,
     faceAttract: 32,
     rewriteDuration: 0.7,
+    rewritePull: 0,
+    rewriteMeet: 14,
+    rewriteGive: 24,
     springK: 12,
     springDamp: 45,
     auxSpread: 1.7,
@@ -1368,15 +1592,18 @@ export function defaultParams(): Params {
     intake: 0.06,
     gripSwing: 0.5,
     gaitSwell: 0.04,
-    flockAlign: 5.5,
-    flockSep: 48,
+    flockAlign: 0,
+    flockSep: 0,
     maxAgents: 100000,
     soupCount: 10000,
     spawnInterval: 0.5,
     energyCell: 40,
     ambientEnergy: 0.5,
     energyDiffuse: 0.006,
-    energyRegrow: 0.02,
+    energyRegrow: 0,
+    groundSmell: 1.5,
+    groundSmellSpread: 0,
+    interiorTaste: 0,
     upkeep: 0.01,
     swimCost: 0,
     rescueTo: 0.9,
@@ -1399,7 +1626,7 @@ export function defaultParams(): Params {
     hillN: 1,
     yDirect: 1,
     yEra: 1,
-    upkeepExcrete: 1,
+    upkeepExcrete: 0,
     bodyValue: REWRITE_SHARE,
     eraCapRatio: ERA_CAP_RATIO,
     eraUpkeepRatio: ERA_UPKEEP_RATIO,
@@ -1407,6 +1634,8 @@ export function defaultParams(): Params {
     digestRate: 12,
     gutSize: 1,
     groundPatches: 24,
+    groundDropEvery: 6,
+    groundDropMass: 0.25,
   };
 }
 
@@ -1420,6 +1649,7 @@ interface SliderSpec {
 
 export const SLIDERS: SliderSpec[] = [
   { key: 'deposit', label: 'Deposit', min: 0, max: 6, step: 0.05 },
+  { key: 'portLeak', label: 'Terminal leak', min: 0, max: 1, step: 0.01 },
   { key: 'diffuse', label: 'Diffuse', min: 0, max: 1, step: 0.01 },
   { key: 'decay', label: 'Decay', min: 0, max: 0.08, step: 0.001 },
   { key: 'sense', label: 'Sense', min: 0, max: 1200, step: 10 },
@@ -1461,6 +1691,9 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'wireTug', label: 'Wire tug (flux)', min: 0, max: 1, step: 0.02 },
   { key: 'wireMinRest', label: 'Wire min length', min: 8, max: 48, step: 1 },
   { key: 'springK', label: 'Spring stiffness', min: 0, max: 80, step: 0.5 },
+  { key: 'rewritePull', label: 'Rewrite pull', min: 0, max: 1, step: 0.05 },
+  { key: 'rewriteMeet', label: 'Rewrite meet', min: 0.5, max: 40, step: 0.5 },
+  { key: 'rewriteGive', label: 'Rewrite give', min: 0, max: 80, step: 1 },
   { key: 'springDamp', label: 'Rope damp', min: 0, max: 120, step: 1 },
   { key: 'portStiff', label: 'Port stiffness', min: 0.1, max: 4, step: 0.05 },
   { key: 'auxSpread', label: 'Aux spread', min: 0, max: 3, step: 0.05 },
@@ -1481,6 +1714,9 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'ambientEnergy', label: 'Ambient energy', min: 0, max: 2, step: 0.05 },
   { key: 'energyDiffuse', label: 'Ground spread', min: 0, max: 0.5, step: 0.005 },
   { key: 'energyRegrow', label: 'Ground regrow', min: 0, max: 0.4, step: 0.005 },
+  { key: 'groundSmell', label: 'Ground smell', min: 0, max: 8, step: 0.1 },
+  { key: 'groundSmellSpread', label: 'Smell spread', min: 0, max: 4, step: 0.1 },
+  { key: 'interiorTaste', label: 'Interior taste', min: 0, max: 1, step: 0.05 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
   { key: 'swimCost', label: 'Swim cost', min: 0, max: 0.002, step: 0.00005 },
   { key: 'rescueTo', label: 'Rescue fill', min: 0, max: 1, step: 0.05 },
@@ -1511,4 +1747,6 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'digestRate', label: 'Digest rate', min: 0, max: 40, step: 0.5 },
   { key: 'gutSize', label: 'Gut size', min: 0.1, max: 4, step: 0.1 },
   { key: 'groundPatches', label: 'Ground patches', min: 0, max: 128, step: 1 },
+  { key: 'groundDropEvery', label: 'Food drop every (s)', min: 0, max: 60, step: 0.5 },
+  { key: 'groundDropMass', label: 'Food drop mass (patches)', min: 0, max: 4, step: 0.05 },
 ];

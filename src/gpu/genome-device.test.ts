@@ -48,6 +48,9 @@ function learnParams(): Params {
   params.energyDiffuse = 0;
   params.decay = 0;
   params.diffuse = 0;
+  // With the others: the ground mints aux every frame in proportion to what is
+  // standing in a cell, and this rig wants a field that does not move.
+  params.groundSmell = 0;
   params.deposit = 0;
   /*
    * Rich enough that thirty frames of grazing cannot dent it. The bodies below

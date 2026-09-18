@@ -163,6 +163,7 @@ describe('the wasm wall agrees about every index that crosses it', () => {
       unused12: 'SP_UNUSED_12',
       unused13: 'SP_UNUSED_13',
       senseSpan: 'SP_SENSE_SPAN',
+      portLeak: 'SP_PORT_LEAK',
     };
     for (const [field, define] of Object.entries(C)) {
       expect(cDefine(define), `solver.c's ${define} against STEER_PARAM.${field}`).toBe(

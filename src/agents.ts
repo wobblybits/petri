@@ -604,7 +604,7 @@ export function cloneAgent(a: Agent): Agent {
   return clone;
 }
 
-/** True when physics must not integrate this body (rewrite lock or designer pin). */
+/** True when physics must not integrate this body (designer pin, or a rewrite driving its pair). */
 export function poseHeld(a: Agent): boolean {
   return poseHeldAt(a.store, a.slot);
 }
@@ -612,12 +612,31 @@ export function poseHeld(a: Agent): boolean {
 /**
  * `poseHeld` from a store and a slot, for packs that walk every body.
  *
- * The flyweight's `locked` and `pinned` getters each reach through `store`
- * and `slot` to arrive at the array this reads directly. One definition, two
- * ways in: the packs hold the store already, and everything else holds a body.
+ * The flyweight's `pinned` getter reaches through `store` and `slot` to arrive
+ * at the array this reads directly. One definition, two ways in: the packs
+ * hold the store already, and everything else holds a body.
+ *
+ * **`locked` used to be here too, and taking it out is the point.** A body is
+ * `locked` for the run of a rewrite, and to every force pass this made it an
+ * infinite-mass anchor — `chain.ts`'s `invMass` returns 0 for a held body, and
+ * the wasm and GPU packs ship `FAR.locked` straight through. Meanwhile
+ * `advanceRewrite` drove the pair's positions along an ease curve. So for
+ * 0.7 seconds two bodies were teleported with unlimited authority while every
+ * wire attached to them was solved against them, and a two-body rewrite
+ * rearranged a forty-body net exactly as hard as it rearranged a pair. A net
+ * had no shape of its own to hold; it had whatever the last rewrite left.
+ *
+ * A rewrite still closes its pair — `Wire.collapse` hauls the rest length to
+ * its floor, and `rewritePull` adds a schedule on top — but it does it through
+ * the same actuator everything else uses, mass-weighted, and the net gets a
+ * say. `locked` keeps every one of its other meanings: no latching, no
+ * transport, no deposit, no harvest while a body is mid-rewrite.
+ *
+ * The only other writer of `locked` is a render ghost, which is drawn and
+ * never simulated, so nothing there is waiting on this.
  */
 export function poseHeldAt(store: AgentStore, slot: number): boolean {
-  return store.locked[slot] !== 0 || store.pinned[slot] !== 0;
+  return store.poseLock[slot] !== 0 || store.pinned[slot] !== 0;
 }
 
 /** Slot as a small integer: principal 0, left 1, right 2. */
@@ -1067,9 +1086,23 @@ const SCRATCH4 = new Float64Array(4);
  * because a seed says what a kind is for; what is left of the question is
  * whether that simplex should be three wide, which is deferred for the same
  * reason.
+ *
+ * **`CH.aux` is zero for a different reason, and it is the ground's.** That
+ * channel carries the smell of food now — minted by `Fields.grow` in
+ * proportion to what is standing in a cell — and a body that could emit onto
+ * it would be advertising a meal that is not there. Not an oversight worth
+ * leaving open: mutation puts voice on every channel within a generation
+ * (`seedChem`'s renormalisation), so every lineage would find the lie, and the
+ * one signal a nose depends on would stop meaning anything before anything
+ * could be built on it. Deception is an interesting pond and it is a different
+ * one; it belongs on a channel bodies own.
+ *
+ * So the vocabulary is two and two: `conP` and `dupP` are what a body says,
+ * `energy` and `aux` are the ground and what the ground smells of. A body can
+ * still *taste* aux — `effTaste` masks nothing — which is the whole point.
  */
 export function effEmit(a: Agent, c: number): number {
-  if (c === CH.energy) return 0;
+  if (c === CH.energy || c === CH.aux) return 0;
   emitVector(effChem(a), 0, a.chem, 0, a.h, 0, NO_EXPLORE, 0, SCRATCH4, 0);
   return SCRATCH4[c];
 }
@@ -1413,6 +1446,7 @@ export function createAgent(
   agent.scale = 1;
   agent.locked = false;
   agent.pinned = false;
+  agent.store.poseLock[agent.slot] = 0;
   /*
    * A nudge off the metabolic steady state, so a fresh body's pathway starts
    * somewhere rather than sitting exactly on its own fixed point.

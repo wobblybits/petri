@@ -2,18 +2,24 @@ import { describe, expect, it } from 'vitest';
 import { CHEM_LEN, EMIT, E_OUT, HEAD_ROWS, STATE_DIMS, TASTE, T_OUT, bareBody, effEmit, effTaste, emitVector, seedChem, type Agent } from './agents.ts';
 
 /**
- * The emit head's ground slot. Nothing in the sim reads it any more — farming
- * is the ground's excretion row on the expression head — so the accessor
- * lives here, where the one thing still asked of the slot is asked: that it
- * is a quarter of the simplex and seeds the way it always did.
+ * One slot of the emit head, read off the vector rather than through
+ * `effEmit`.
+ *
+ * Two of the four are masked at the reader now: the ground, because the
+ * deposit path multiplies by `params.deposit` and a body must not mint food,
+ * and its smell, because `groundSmell` is the only thing entitled to say where
+ * food is. Both stay a quarter of the simplex — dropping them would
+ * renormalise every genome in the library — so the budget is a question about
+ * the vector, and this is how the vector is asked.
  */
-function emitEnergy(a: Agent): number {
+function emitRaw(a: Agent, ch: number): number {
   const out = new Float64Array(4);
   // The genome's own statement, with no learned delta and no exploration: this
   // asks what the seed *says*, which is a question about the simplex.
   emitVector(a.chem, 0, a.chem, 0, a.h, 0, NO_XI, 0, out, 0);
-  return out[CH.energy];
+  return out[ch];
 }
+const emitEnergy = (a: Agent): number => emitRaw(a, CH.energy);
 const NO_XI = new Float64Array(HEAD_ROWS);
 import { CHEM_SLOPE_MAX } from './rewrite.ts';
 import { CH } from './fields.ts';
@@ -150,7 +156,8 @@ describe('scent genome', () => {
     for (let k = E_OUT; k < E_OUT + 4 * STATE_DIMS; k++) c[k] = CHEM_SLOPE_MAX;
     for (const h of [[0, 0, 0, 0], [1, 1, 1, 1], [-1, -1, -1, -1], [0.9, -0.9, 0.5, -0.2]]) {
       const a = bareBody(c, { h });
-      const total = effEmit(a, CH.conP) + effEmit(a, CH.dupP) + effEmit(a, CH.aux) + emitEnergy(a);
+      const total =
+        emitRaw(a, CH.conP) + emitRaw(a, CH.dupP) + emitRaw(a, CH.aux) + emitRaw(a, CH.energy);
       // One unit, or nothing at all — a state that drives every channel below
       // zero leaves a body mute rather than being renormalised out of noise.
       expect(
@@ -158,6 +165,27 @@ describe('scent genome', () => {
         `h=[${h}] realised ${total}`,
       ).toBe(true);
     }
+  });
+
+  it('will not let a body say there is food here', () => {
+    /*
+     * `CH.aux` carries the smell of the ground, minted by `Fields.grow` in
+     * proportion to what is standing in a cell. A body that could emit onto it
+     * would be advertising a meal that is not there, and mutation puts voice on
+     * every channel within a generation — so every lineage would find the lie
+     * and the one signal a nose depends on would stop meaning anything.
+     *
+     * The slot stays a quarter of the simplex, because dropping it would
+     * renormalise every genome in the library. It is the reader that is shut.
+     */
+    const c = new Float32Array(CHEM_LEN);
+    for (let k = 0; k < 4; k++) c[EMIT + k] = 0.25;
+    const a = bareBody(c, { h: [0, 0, 0, 0] });
+    expect(emitRaw(a, CH.aux), 'still a quarter of the budget').toBeCloseTo(0.25, 6);
+    expect(effEmit(a, CH.aux), 'and nothing can spend it').toBe(0);
+    expect(effEmit(a, CH.energy), 'as the ground already was').toBe(0);
+    // Tasting it is the whole point, and is untouched.
+    expect(effTaste(a, CH.aux)).toBe(effTaste(a, CH.aux));
   });
 
   it('leaves a body that mutated its way to silence silent', () => {

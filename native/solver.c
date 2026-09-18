@@ -110,6 +110,18 @@ typedef v128_t v128;
 #define WF_SKIP 2
 #define WF_SHAPE 4
 #define WF_HOLD 8
+/* The one wire a rewrite is consuming: hauled on the bodies' centres rather
+ * than their stems, because the ports it is reeled by are about to stop
+ * existing and the lever arm at them comes out as spin. Mirrors
+ * `solveTether` in chain.ts.
+ *
+ * 16, and it went in at 4 first — on top of `WF_SHAPE`. Every rope-shaped
+ * wire in the pond was then read as a tether: solved on its bodies' centres
+ * and returned from before its rope was solved at all. It passed a typecheck,
+ * it passed most of the suite, and what it broke was a wired pair injecting
+ * energy and a transport recoil the receiver was supposed to absorb. Bits
+ * here are a hand-maintained set on both sides of the wall. */
+#define WF_TETHER 16
 
 #define ND_X 0
 #define ND_Y 1
@@ -756,6 +768,28 @@ static void solve_shape(float *node, float tx, float ty, float alpha) {
   node[ND_Y] += (w * lambda * dy) / C;
 }
 
+/* The span, on the centres. No attach offset, so no lever arm and no torque:
+ * the pair is being reeled together rather than articulated. */
+static void solve_tether(int i, int j, float rest, float alphaTilde) {
+  float *pi = bodies + i * STRIDE;
+  float *pj = bodies + j * STRIDE;
+  float dx = pj[FAR_X] - pi[FAR_X];
+  float dy = pj[FAR_Y] - pi[FAR_Y];
+  float dist = sqrtf(dx * dx + dy * dy);
+  if (dist < 1e-9f) return;
+  float wA = pi[FAR_LOCKED] >= 0.5f ? 0.f : pi[FAR_INVMASS];
+  float wB = pj[FAR_LOCKED] >= 0.5f ? 0.f : pj[FAR_INVMASS];
+  float denom = wA + wB + alphaTilde;
+  if (denom < 1e-12f) return;
+  float lambda = -(dist - rest) / denom;
+  float nx = dx / dist;
+  float ny = dy / dist;
+  pi[FAR_X] -= nx * lambda * wA;
+  pi[FAR_Y] -= ny * lambda * wA;
+  pj[FAR_X] += nx * lambda * wB;
+  pj[FAR_Y] += ny * lambda * wB;
+}
+
 static void solve_one_wire(int n, float *W, float h) {
   int flags = (int)W[WN_FLAGS];
   if (flags & WF_SKIP) return;
@@ -769,6 +803,10 @@ static void solve_one_wire(int n, float *W, float h) {
   int sj = (int)W[WN_BSLOT];
   float rest = W[WN_REST];
   int nn = (int)W[WN_NNODES];
+  if (flags & WF_TETHER) {
+    solve_tether(i, j, rest, aSpan);
+    return;
+  }
   if (!(flags & WF_FULL) || nn <= 0) {
     solve_span(i, si, j, sj, rest, aSpan);
     return;
@@ -1513,6 +1551,11 @@ static float port_exit_angle(int i, int slot, float tx, float ty) {
  * written down twice eventually disagrees, which is how the deposit
  * normalisation came to be 20 on one side and 10 on the other. */
 #define SP_SENSE_SPAN 14
+/* What share of `deposit` a free auxiliary port leaks, into both body voices.
+ * Passed in for the same reason as the span above: `params.portLeak` is a
+ * slider, and a slider written down on one side of this wall is a slider on
+ * one side of this wall. */
+#define SP_PORT_LEAK 15
 
 #define SF_P_FREE 1
 #define SF_STARVING 2
@@ -1661,24 +1704,33 @@ void solver_deposit(int n, float amount) {
     const float *em = body_emit + i * 4;
     int slots = kind[i] == 0 ? 1 : 3;
     for (int slot = 0; slot < slots; slot++) {
-      /* A voice carries whether or not the port is attached; an aux marker
-       * does not. See the twin in sim.ts's `deposit` for why: a net whose
-       * every port is filled used to emit nothing whatever, so the organism
-       * this world is about could not be heard, only its edges could. But
-       * channel 3 means "there is somewhere to attach here", and advertising
-       * a socket that is full would bring every latch-seeking body in range
-       * to find nothing. */
+      /* A voice carries whether or not the port is attached; a free-port
+       * marker does not. See the twin in sim.ts's `deposit` for why: a net
+       * whose every port is filled used to emit nothing whatever, so the
+       * organism this world is about could not be heard, only its edges
+       * could. But the marker means "there is somewhere to attach here", and
+       * advertising a socket that is full would bring every latch-seeking
+       * body in range to find nothing. */
       if (slot != 0 && !(free_mask & (1 << slot))) continue;
       float px, py;
       port_world(i, slot, &px, &py);
       if (slot == 0) {
-        /* A principal lays this body's emit vector across all four channels.
-         * Which channel it lands in is a gene now, not the kind. */
+        /* A principal lays this body's emit vector. The host has already
+         * zeroed channels 2 and 3 in `body_emit`: the ground is not a body's
+         * to lay through a path that multiplies by `deposit`, and channel 3
+         * is the ground's smell, which a body emitting would be a lie every
+         * lineage would find. */
         for (int ch = 0; ch < 4; ch++) {
           if (em[ch] != 0.f) scent_add(ch, px, py, amount * em[ch]);
         }
       } else {
-        scent_add(3, px, py, amount * 0.7f);
+        /* Both body voices equally, so the marker stays kind-independent the
+         * way the flat 0.7 on channel 3 used to be. */
+        float leak = amount * sparams[SP_PORT_LEAK];
+        if (leak > 0.f) {
+          scent_add(0, px, py, leak);
+          scent_add(1, px, py, leak);
+        }
       }
     }
   }
