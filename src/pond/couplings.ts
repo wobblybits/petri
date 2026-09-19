@@ -135,12 +135,14 @@ export const COUPLINGS: readonly Coupling[] = [
     axis: 'gaitProfile',
     constant: 'metabolicDiffuse',
     why:
-      'both set a chain phase gradient and the larger one decides: the broadcast lags about a ' +
-      'tenth of a cycle a wire in the *wiring order*, which over nine wires is most of a full ' +
-      'turn, against a profile that spans gaitProfile radians nose to tail. Measured on the ' +
-      'crawl bench, a profile of 6.3 aims the chain at a smell in 3 of 3 seeds both ways round ' +
-      'at a broadcast of 0.2, and in 0 of 3 at the shipped 1',
-    fix: 'read gaitProfile within a broadcast arm; crossing both is a grid, not a held constant',
+      'there is a window and the profile only works inside it. The broadcast makes the wave: ' +
+      'uncoupled, bodies free-run at scattered phases and a profile over depth sets offsets on ' +
+      'nothing. It also *aims* the wave, in the wiring order, at about a tenth of a cycle a wire ' +
+      '- most of a full turn over nine - so turned up it outvotes the profile. Measured on the ' +
+      'crawl bench at profile 6.3, three seeds, aiming at a smell both ways round: 3 of 3 at ' +
+      'broadcast 0.2, 0 of 3 at the shipped 1, 0 of 3 at 0. A profile re-aims a wave; it does ' +
+      'not create one',
+    fix: 'read gaitProfile within a broadcast arm, and never at 0 - that is no wave, not a null',
     unless: { key: 'gaitProfile', is: 0 },
   },
   {

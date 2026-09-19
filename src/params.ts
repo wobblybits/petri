@@ -758,16 +758,26 @@ export interface Params {
    *
    *     broadcast 0.2  profile 0.0   +32.5 / -32.5   0 of 3 seeds both ways
    *     broadcast 0.2  profile 6.3   +15.3 / +12.7   3 of 3 seeds both ways
+   *     broadcast 0.0  profile 6.3   -22.6 / +10.9   0 of 3 seeds both ways
+   *     broadcast 0.0  profile 0.0    +0.7 /  -0.7   0 of 3, and barely moves
    *
    * Every seed agrees in both arms, and the control is consistent the other
    * way. Note what it costs: the control travels twice as far, because a
    * profile that aims is a profile fighting the broadcast's own wave.
    *
-   * **At the shipped `metabolicDiffuse` of 1 it is still outvoted** — the
-   * whole-sweep table in that file is positive in one column and negative in
-   * the other at every profile. So this ships at the value that works and the
-   * dial that decides whether it *can* work is the broadcast, which is the
-   * reactor's and not the gait's. `src/pond/couplings.ts` carries the row.
+   * **The broadcast row is the one to read, because it says there is a window
+   * and this only works inside it.** Uncoupled, bodies free-run at scattered
+   * phases and a profile over depth is setting offsets on nothing — it does
+   * not aim, and the chain barely moves at all. Coupled hard, the broadcast's
+   * own lag runs in the wiring order and outvotes the profile. **A profile
+   * re-aims a wave; it does not create one**, and the wave is the reactor's.
+   *
+   * **So at the shipped `metabolicDiffuse` of 1 this is still outvoted**, and
+   * the dial that decides whether it can work belongs to the reactor rather
+   * than to the gait. Moving it is a metabolism decision made against a
+   * metabolism measurement, not one to take off a locomotion bench;
+   * `src/pond/couplings.ts` carries the row so a sweep cannot cross the two
+   * without being told.
    *
    * And read at a stroke the bench can see: `gaitSwell` is turned up to 0.3
    * there against the pond's 0.04, where this chain travels 0.18 px a second
@@ -1284,6 +1294,26 @@ export interface Params {
    */
   learnExplore: number;
   /**
+   * How many frames a head's perturbation is held before a fresh one is drawn.
+   * 1 is the pond before this: a new draw every frame.
+   *
+   * The timescales have to separate — **learning much slower than the hold,
+   * and the hold much slower than the gait** — and they did not. The gait's
+   * period is about a hundred frames and the draw changed every one of them,
+   * so what the eligibility trace integrated was the average of the noise
+   * rather than the consequence of a displacement. See `exploreKey`.
+   *
+   * 480, about eight seconds, which is roughly the eight gait periods the
+   * inchworm bench holds for and also covers the five to twelve seconds a trip
+   * to a patch takes — the same span `learnDiscount` and `learnTrace` have to
+   * reach across, and for the same reason.
+   *
+   * The other edge is real too and fails silently: let the hold approach the
+   * gait's own period and the demodulator picks up gait harmonics and walks
+   * the parameters off confidently in a wrong direction.
+   */
+  learnHold: number;
+  /**
    * What a body is taught by: the level of its tank, or the rate it is filling
    * at. 0 is all level, 1 is all rate.
    *
@@ -1735,6 +1765,7 @@ export function defaultParams(): Params {
     learnRate: 0.02,
     learnCritic: 0.2,
     learnExplore: 0.02,
+    learnHold: 480,
     learnReward: 0.5,
     learnTrace: 0.99,
     learnDiscount: 0.99,
@@ -1853,6 +1884,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'transportQuantum', label: 'Transport quantum', min: 0, max: 1, step: 0.05 },
   { key: 'learnRate', label: 'Learn rate', min: 0, max: 0.02, step: 0.0005 },
   { key: 'learnCritic', label: 'Learn critic', min: 0, max: 0.2, step: 0.005 },
+  { key: 'learnHold', label: 'Explore hold (frames)', min: 1, max: 2000, step: 10 },
   { key: 'learnExplore', label: 'Learn explore', min: 0, max: 0.4, step: 0.005 },
   { key: 'learnReward', label: 'Teacher: level -> rate', min: 0, max: 1, step: 0.05 },
   { key: 'learnTrace', label: 'Learn trace decay', min: 0.5, max: 0.995, step: 0.005 },

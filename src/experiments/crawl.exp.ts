@@ -253,17 +253,26 @@ describe('experiment: does a net crawl toward a smell', () => {
     const SECONDS = 60;
     const SEEDS = [1, 2, 3];
     const mean = (xs: number[]): number => xs.reduce((a, b) => a + b, 0) / xs.length;
-    console.log('\n  broadcast 0.2, three seeds, both ways round');
+    console.log('\n  three seeds, both ways round');
     console.log('  a mechanism that aims is positive in both columns, every seed\n');
-    console.log('  profile   head-end          tail-end          both');
-    console.log('             mean   seeds      mean   seeds      +ve?');
-    console.log('  ------- ------- -------    ------- -------    -----');
-    for (const profile of [0, 6.3]) {
-      const h = SEEDS.map((s) => run(profile, 0.2, true, s, SECONDS).toward);
-      const t = SEEDS.map((s) => run(profile, 0.2, false, s, SECONDS).toward);
+    console.log('  bcast profile   head-end          tail-end          both');
+    console.log('                   mean   seeds      mean   seeds      +ve?');
+    console.log('  ----- ------- ------- -------    ------- -------    -----');
+    /*
+     * And a broadcast of zero, which is the question the 0.2 row raises: with
+     * the coupling that weak, is the chain still a set of locked oscillators
+     * being *re-aimed*, or ten independent ones that depth is organising on its
+     * own? If zero aims as well as 0.2 then the coupling is not carrying the
+     * mechanism and `metabolicDiffuse` is free to be whatever the reactor
+     * wants it to be.
+     */
+    for (const [broadcast, profile] of [[0.2, 0], [0.2, 6.3], [0, 6.3], [0, 0]] as const) {
+      const h = SEEDS.map((s) => run(profile, broadcast, true, s, SECONDS).toward);
+      const t = SEEDS.map((s) => run(profile, broadcast, false, s, SECONDS).toward);
       const both = h.filter((v, i) => v > 0 && t[i] > 0).length;
       console.log(
-        `  ${profile.toFixed(2).padStart(7)}` +
+        `  ${broadcast.toFixed(2).padStart(5)}` +
+          ` ${profile.toFixed(2).padStart(7)}` +
           ` ${mean(h).toFixed(1).padStart(7)}` +
           ` ${h.map((v) => (v > 0 ? '+' : '-')).join('').padStart(7)}    ` +
           ` ${mean(t).toFixed(1).padStart(7)}` +

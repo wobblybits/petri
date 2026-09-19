@@ -467,6 +467,34 @@ export function exploreAt(slot: number, frame: number, row: number): number {
 export const FRAME_WRAP = 1 << 24;
 
 /**
+ * The key `exploreAt` is drawn against: which *hold* the pond is in, not which
+ * frame.
+ *
+ * A perturbation has to outlast the behaviour it is being credited with.
+ * `exploreAt` is a pure function of (body, frame, output) and was drawn fresh
+ * every frame, against a gait whose period is about a hundred of them — so a
+ * head was being shaken at 60 Hz and asked to take credit for something that
+ * oscillates once every 1.7 seconds. What the eligibility trace integrates
+ * over that is the *average* of the draw, which is zero. The displacement is
+ * real, the correlation is not, and node perturbation fails exactly this
+ * silently: it still moves weights, just in a direction uncorrelated with
+ * anything.
+ *
+ * The inchworm bench's own statement of it, which it lists among the traps:
+ * "Node perturbation instead of weight perturbation. For a temporally extended
+ * task NP's error floor scales with episode length T... Perturb once per
+ * dither hold, not every step." Its holds are eight gait periods.
+ *
+ * Wrapped after the division rather than before, so the hold index is exact in
+ * the `f32` the genome uniform carries it in for the same reason the frame
+ * count was.
+ */
+export function exploreKey(frame: number, holdFrames: number): number {
+  const h = holdFrames > 1 ? Math.floor(frame / holdFrames) : frame;
+  return h % FRAME_WRAP;
+}
+
+/**
  * The critic: a linear readout of `h` that predicts the cost this body is
  * heading into, plus its bias. Its error is what gates learning — the only
  * part of the rule that is a real gradient rather than a correlation.

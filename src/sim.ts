@@ -1,4 +1,4 @@
-import { GW_BASE, GX_BASE, SW_BASE, TX_A, TX_B, TX_BASE, TX_C, TX_D } from './chem-layout.ts';
+import { GW_BASE, GX_BASE, SW_BASE, TX_A, TX_B, TX_BASE, TX_C, TX_D, exploreKey } from './chem-layout.ts';
 import { REACT_B, REACT_C, REACT_D, REACT_SPECIES } from './agent-store.ts';
 import {
   boundRadius,
@@ -3603,7 +3603,7 @@ export class Sim {
         dtInv: this.frameDt > 0 ? 1 / this.frameDt : 0,
         maxWeight: CHEM_TASTE_MAX,
         explore: params.learnExplore,
-        frame: this.frames,
+        frame: exploreKey(this.frames, params.learnHold),
       })
     ) {
       this.genomeOnGpu = false;
@@ -6438,7 +6438,8 @@ export class Sim {
     const sigma = learn ? params.learnExplore : 0;
     const sigmaWasOn = this.exploreWasOn;
     this.exploreWasOn = sigma > 0;
-    const frame = this.frames;
+    // The hold, not the frame — the two paths share one key. See `exploreKey`.
+    const frame = exploreKey(this.frames, params.learnHold);
     const invDt = this.frameDt > 0 ? 1 / this.frameDt : 0;
     const MAXW = CHEM_TASTE_MAX;
     for (let i = 0; i < n; i++) {
