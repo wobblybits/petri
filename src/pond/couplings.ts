@@ -132,6 +132,28 @@ export const COUPLINGS: readonly Coupling[] = [
     fix: 'as declutter',
   },
   {
+    axis: 'gaitProfile',
+    constant: 'metabolicDiffuse',
+    why:
+      'both set a chain phase gradient and the larger one decides: the broadcast lags about a ' +
+      'tenth of a cycle a wire in the *wiring order*, which over nine wires is most of a full ' +
+      'turn, against a profile that spans gaitProfile radians nose to tail. Measured on the ' +
+      'crawl bench, a profile of 6.3 aims the chain at a smell in 3 of 3 seeds both ways round ' +
+      'at a broadcast of 0.2, and in 0 of 3 at the shipped 1',
+    fix: 'read gaitProfile within a broadcast arm; crossing both is a grid, not a held constant',
+    unless: { key: 'gaitProfile', is: 0 },
+  },
+  {
+    axis: 'gaitProfile',
+    constant: 'gaitSwell',
+    why:
+      'the profile decides *when* a segment strokes and gaitSwell how hard, so at a small enough ' +
+      'stroke no profile is resolvable: at the shipped 0.04 a ten-body chain travels 0.18 px/s ' +
+      'and a minute of it is inside the settle drift',
+    fix: 'hold gaitSwell where displacement is above the drift, or read a null as no instrument',
+    unless: { key: 'gaitProfile', is: 0 },
+  },
+  {
     axis: 'grip',
     constant: 'transportRecoil',
     why:

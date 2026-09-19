@@ -4201,6 +4201,12 @@ export class Sim {
   /** Per-frame `exp(-rate * dt)` by total rate, rebuilt only when it varies. */
   private readonly gripKeep = new Float64Array(Sim.GRIP_STEPS + 1);
 
+  /** The two actuator mixtures, turned by this body's depth. See `rotateMix`. */
+  private readonly swRot = new Float64Array(3);
+  private readonly gwRot = new Float64Array(3);
+  /** `[stroke, grip]` out of `actuatorPair`. */
+  private readonly actPair = new Float64Array(2);
+
   /**
    * One step of the body's reactor, and what this frame's stroke comes to.
    *
@@ -4268,6 +4274,11 @@ export class Sim {
     const waveK = params.metabolicWave > 0 ? params.metabolicWave : 1e-6;
     const workRate = params.metabolicWork * params.gaitSwell;
     const STARVE = store.starve;
+    const DEPTH = store.depth;
+    const profile = params.gaitProfile;
+    const SWROT = this.swRot;
+    const GWROT = this.gwRot;
+    const PAIR = this.actPair;
     const h = rate * dt;
     const steps = Math.max(1, Math.ceil(h / REACT_H));
     const hs = h / steps;
@@ -4325,10 +4336,21 @@ export class Sim {
       }
       speciesWaves(B, C, D, k2, k3, dec, waveK, WV);
       const g = s * CHEM_LEN;
-      const w = actuatorOf(CHEM, g + SW_BASE, WV);
-      WAVE[s] = w;
-      ANCHOR[s] = GA[s] * w;
-      GRIPW[s] = actuatorOf(CHEM, g + GW_BASE, WV);
+      /*
+       * When in its own cycle this body acts, from how far it sits behind its
+       * net's nose. The wavelength used to be global — `metabolicDiffuse` sets
+       * a lag per wire and nothing about a net's own shape or about where the
+       * food is reached it — so a net could undulate and could not aim. This
+       * is the whole of what the claim relay was built for.
+       *
+       * A *delay* with depth, so the stroke starts at the nose and runs back:
+       * a fixed phase difference per unit of depth is a travelling wave, and
+       * along a body that is peristalsis.
+       */
+      actuatorPair(CHEM, g, WV, profile * DEPTH[s], SWROT, GWROT, PAIR);
+      WAVE[s] = PAIR[0];
+      ANCHOR[s] = GA[s] * PAIR[0];
+      GRIPW[s] = PAIR[1];
     }
 
     /*
@@ -4427,11 +4449,13 @@ export class Sim {
         // The wave follows the catalyst, so a body that has just been driven
         // strokes as what it now is rather than what it was.
         speciesWaves(R[o + REACT_B], R[o + REACT_C], R[o + REACT_D], k2, k3, dec, waveK, WV);
-        const g = s * CHEM_LEN;
-        const w = actuatorOf(CHEM, g + SW_BASE, WV);
-        WAVE[s] = w;
-        ANCHOR[s] = GA[s] * w;
-        GRIPW[s] = actuatorOf(CHEM, g + GW_BASE, WV);
+        // Through the same `actuatorPair` the first read uses, depth profile
+        // and all. This is the later of the two and it wins, so anything the
+        // first one does and this one does not is not done at all.
+        actuatorPair(CHEM, s * CHEM_LEN, WV, profile * DEPTH[s], SWROT, GWROT, PAIR);
+        WAVE[s] = PAIR[0];
+        ANCHOR[s] = GA[s] * PAIR[0];
+        GRIPW[s] = PAIR[1];
       }
       // Something arrived in a gut, so the digestion pass has work again.
       this.gutLive = true;
@@ -7591,6 +7615,93 @@ function speciesWaves(
   out[2] = (2 * dc) / (waveK + dc) - 1;
 }
 
+/*
+ * Where each species sits on the cycle, relative to the catalyst.
+ *
+ * Three phase-shifted copies of one oscillation, so they span a plane and any
+ * two of them are a basis for it: a weighted sum of the three reaches any
+ * phase, and the same phase can be written more than one way. `docs/concepts.md`
+ * has where the numbers come from — B leads C by 84 degrees, near quadrature,
+ * and D trails it by `atan(w/d)`, which runs 51 degrees at the bottom of the
+ * fuel window to 65 at the top and measured 53.5 on a lone fed body. Nobody
+ * chose them; they fall out of `dD/dt = k3*C - d*D` being a first-order lag.
+ *
+ * Constants here rather than per-body because the spread across the fuel
+ * window is a seventh of the angle and a body's own operating point moves
+ * within it every cycle. `src/pond/spectrum.ts` derives them in closed form if
+ * a body-by-body version is ever wanted.
+ */
+const PHASE_B = (84 * Math.PI) / 180;
+const PHASE_C = 0;
+const PHASE_D = (-53.5 * Math.PI) / 180;
+
+/**
+ * The same actuator, delayed by `theta`, written in the C-D basis.
+ *
+ * **A rotation, and not a blend toward the other actuator.** The obvious way
+ * to give the stroke a phase that varies along a body is to slide its mixture
+ * from `Sw` toward `Gw`, and it is wrong: at the far end the two coincide, the
+ * stroke and the grip are then in phase, the loop in (shape, grip) has zero
+ * area, and that end of the net contributes no displacement at all. Purcell,
+ * which is the whole reason the 53 degrees between them exists. A blend
+ * travels along a chord between two points; what is wanted is a turn.
+ *
+ * So: read the mixture as a phasor against the angles above, turn it by
+ * `theta`, and write it back onto C and D — which span the plane, so the
+ * output waveform is exactly the original delayed, at the same amplitude, and
+ * whatever B component a lineage had is not lost but re-expressed. Both
+ * actuators are turned by the same angle, so the angle *between* them — the
+ * loop's area, the thing that makes a body move at all — is untouched, and
+ * what varies along the body is only when in the cycle each segment acts.
+ * That is peristalsis rather than a gradient of enthusiasm.
+ */
+function rotateMix(chem: Float32Array, base: number, theta: number, out: Float64Array): void {
+  const re =
+    chem[base] * Math.cos(PHASE_B) + chem[base + 1] * Math.cos(PHASE_C) + chem[base + 2] * Math.cos(PHASE_D);
+  const im =
+    chem[base] * Math.sin(PHASE_B) + chem[base + 1] * Math.sin(PHASE_C) + chem[base + 2] * Math.sin(PHASE_D);
+  const ct = Math.cos(theta);
+  const st = Math.sin(theta);
+  // Delay, so a deeper body acts later: multiply by exp(-i*theta).
+  const rr = re * ct + im * st;
+  const ri = im * ct - re * st;
+  /*
+   * Back onto C and D. With C at 0 and D at `PHASE_D`, the pair (c, d) that
+   * reproduces a phasor is the two-phase synthesis: `d` carries the whole of
+   * the component D alone can express and `c` makes up the rest.
+   */
+  const sd = Math.sin(PHASE_D);
+  let d = ri / sd;
+  let c = rr - d * Math.cos(PHASE_D);
+  /*
+   * And rescaled to the weight the lineage actually asked for.
+   *
+   * The synthesis above is exact only if the three waves are unit-amplitude
+   * sinusoids at those angles. They are neither: `speciesWaves` pushes scaled
+   * B, C and D through a saturating map, so their swings differ and B's and
+   * D's carry a rate-constant ratio in front of them. Left unscaled, a turn of
+   * 126 degrees on a seeded pure-C stroke came out as coefficients of −1.19
+   * and 1.01 and the actuator spent most of its cycle pinned at the clamp —
+   * measured on the crawl bench, half the chain reading exactly 1.000.
+   *
+   * So the *direction* is taken from the turn and the *magnitude* from the
+   * gene. A lineage that asked for a weak stroke keeps a weak one however deep
+   * the body sits, and the profile changes when a segment acts and not how
+   * hard, which is the whole distinction between a travelling wave and a
+   * gradient of enthusiasm.
+   */
+  const was = Math.abs(chem[base]) + Math.abs(chem[base + 1]) + Math.abs(chem[base + 2]);
+  const now = Math.abs(c) + Math.abs(d);
+  if (now > 1e-9) {
+    const k = was / now;
+    c *= k;
+    d *= k;
+  }
+  out[0] = 0;
+  out[1] = c;
+  out[2] = d;
+}
+
 /**
  * One actuator's reading: its own mixture of the three, bounded.
  *
@@ -7602,6 +7713,45 @@ function speciesWaves(
 function actuatorOf(chem: Float32Array, base: number, w: Float64Array): number {
   const v = chem[base] * w[0] + chem[base + 1] * w[1] + chem[base + 2] * w[2];
   return v <= -1 ? -1 : v >= 1 ? 1 : v;
+}
+
+/** `actuatorOf` against a mixture held somewhere other than the genome. */
+function actuatorOfVec(mix: Float64Array, w: Float64Array): number {
+  const v = mix[0] * w[0] + mix[1] * w[1] + mix[2] * w[2];
+  return v <= -1 ? -1 : v >= 1 ? 1 : v;
+}
+
+/**
+ * Both actuators for one body, turned by `theta`. `out` is [stroke, grip].
+ *
+ * One function because `advanceGait` reads them **twice** — once after
+ * integrating the reactor, and again after the coupling pass has moved species
+ * across the wires, so that "a body that has just been driven strokes as what
+ * it now is rather than what it was". The second read used to be written out
+ * longhand, and when the depth profile went into the first one only, the
+ * second quietly overwrote it for every body whose wire carried anything: the
+ * stroke came out bit-identical at `gaitProfile` 0 and 4.4 on a bench built to
+ * tell them apart, which reads as the mechanism doing nothing rather than as
+ * one of two call sites being stale.
+ */
+function actuatorPair(
+  chem: Float32Array,
+  g: number,
+  wv: Float64Array,
+  theta: number,
+  swRot: Float64Array,
+  gwRot: Float64Array,
+  out: Float64Array,
+): void {
+  if (theta === 0) {
+    out[0] = actuatorOf(chem, g + SW_BASE, wv);
+    out[1] = actuatorOf(chem, g + GW_BASE, wv);
+    return;
+  }
+  rotateMix(chem, g + SW_BASE, theta, swRot);
+  rotateMix(chem, g + GW_BASE, theta, gwRot);
+  out[0] = actuatorOfVec(swRot, wv);
+  out[1] = actuatorOfVec(gwRot, wv);
 }
 
 function crossing(

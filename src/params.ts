@@ -719,6 +719,61 @@ export interface Params {
    * two pixels, and never meant as a gait.
    */
   gaitSwell: number;
+  /**
+   * How much later a body acts for every unit of depth behind its net's nose,
+   * in radians of its own cycle. 0 is the pond before the relay: one phase for
+   * the whole net, whatever shape it is and wherever the food is.
+   *
+   * **The wavelength stops being global.** `metabolicDiffuse` sets a lag per
+   * wire, which makes a chain a travelling wave but one whose direction is the
+   * accident of who is upstream and whose wavelength is a world constant.
+   * `store.depth` is nose-to-tail in [0, 1], recomputed every frame from a
+   * relay that re-aims when the food moves, so a profile over it is a wave
+   * that runs from whichever end smells best — and one that means the same
+   * thing on a net of six and a net of three hundred, because the coordinate
+   * is normalised by the net's own reach.
+   *
+   * Applied as a **rotation of both actuator mixtures by the same angle**, so
+   * the angle between the stroke and the grip — the area of the loop, the only
+   * reason a body moves at all — is untouched and what varies with depth is
+   * only when in the cycle each segment acts. Sliding the stroke's mixture
+   * toward the grip's instead would put them in phase at the far end, where
+   * the loop closes on a line and that end of the net contributes nothing.
+   * See `rotateMix`.
+   *
+   * **6.3 — a full turn from nose to tail — because that is what the bench
+   * found, and because what it has to beat is bigger than it looks.** Two
+   * things set a chain's phase gradient. `metabolicDiffuse` is the broadcast,
+   * and a body speaks out of its principal only, so a chain wired mouth-to-ear
+   * gets a lag per wire that runs in the *wiring order* — a travelling wave
+   * whose direction is the accident of who is upstream, and about a tenth of a
+   * cycle a wire, so most of a full turn over nine of them. This is the other,
+   * and whichever is larger decides.
+   *
+   * `npm run experiment -- crawl`: one chain of ten, no steering and no
+   * thrust, so the gait is the only route from the field to its motion, and
+   * the smell painted past one end or the other. A mechanism that *aims* moves
+   * toward the smell both ways round; one that merely picks a direction is
+   * positive one way and negative the other. Sixty seconds, three seeds:
+   *
+   *     broadcast 0.2  profile 0.0   +32.5 / -32.5   0 of 3 seeds both ways
+   *     broadcast 0.2  profile 6.3   +15.3 / +12.7   3 of 3 seeds both ways
+   *
+   * Every seed agrees in both arms, and the control is consistent the other
+   * way. Note what it costs: the control travels twice as far, because a
+   * profile that aims is a profile fighting the broadcast's own wave.
+   *
+   * **At the shipped `metabolicDiffuse` of 1 it is still outvoted** — the
+   * whole-sweep table in that file is positive in one column and negative in
+   * the other at every profile. So this ships at the value that works and the
+   * dial that decides whether it *can* work is the broadcast, which is the
+   * reactor's and not the gait's. `src/pond/couplings.ts` carries the row.
+   *
+   * And read at a stroke the bench can see: `gaitSwell` is turned up to 0.3
+   * there against the pond's 0.04, where this chain travels 0.18 px a second
+   * and sixty seconds of it is inside the settle drift.
+   */
+  gaitProfile: number;
   /** Shoaling. See `declutter` for what this costs reproduction, and why the
    *  two only matter together. */
   flockAlign: number;
@@ -1651,6 +1706,7 @@ export function defaultParams(): Params {
     intake: 0.06,
     gripSwing: 0.5,
     gaitSwell: 0.04,
+    gaitProfile: 6.3,
     flockAlign: 0,
     flockSep: 0,
     maxAgents: 100000,
@@ -1747,6 +1803,7 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'metabolicGate', label: 'Speak above (seed)', min: 0, max: 6, step: 0.05 },
   { key: 'gripSwing', label: 'Grip swing (D)', min: 0, max: 1, step: 0.02 },
   { key: 'gaitSwell', label: 'Gait swell', min: 0, max: 0.8, step: 0.01 },
+  { key: 'gaitProfile', label: 'Gait profile (rad)', min: 0, max: 6.28, step: 0.05 },
   { key: 'flockAlign', label: 'Flock align (seed)', min: 0, max: 16, step: 0.1 },
   { key: 'flockSep', label: 'Flock separate (seed)', min: 0, max: 120, step: 1 },
   { key: 'snapRadius', label: 'Snap reach', min: 4, max: 48, step: 1 },
