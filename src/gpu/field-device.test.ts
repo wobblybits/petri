@@ -392,17 +392,24 @@ describe('field.wgsl on a device', () => {
     }
   });
 
-  it('puts dupP in a pond with no Dup only because terminals leak', () => {
-    // The other half of the sentence above, and the cheapest way to show that
-    // `dupP` there is the marker and not a stray voice: turn the leak off and
-    // a dish of Cons goes silent on that channel again. No device needed —
-    // this is about who writes what, not about the two paths agreeing.
+  it('marks a free principal on its own channel and a socket on both', () => {
+    /*
+     * Which marker is which, in a dish of nothing but Cons.
+     *
+     * A Con's free *principal* says so on `conP` — the one channel a Con is
+     * deaf to, so it cannot follow its own trail or huddle with its own kind —
+     * and its free *auxiliaries* say "somewhere to attach" on both. So `dupP`
+     * in a pond with no Dup in it is the socket marker and nothing else, and
+     * turning `auxLeak` off alone silences that channel while `conP` keeps
+     * both the voice and the principal's mark.
+     */
     const params = pondParams();
     params.energyRegrow = 0;
     params.decay = 0;
     params.upkeep = 0;
-    const dish = (leak: number): Sim => {
+    const dish = (leak: number, aux: number): Sim => {
       params.portLeak = leak;
+      params.auxLeak = aux;
       const sim = new Sim(1600, 1200, 128);
       loadPreset(sim, 'soup', params);
       for (let i = 0; i < 12; i++) {
@@ -412,13 +419,20 @@ describe('field.wgsl on a device', () => {
       for (let i = 0; i < 90; i++) sim.step(1 / 60, params);
       return sim;
     };
-    const leaking = dish(0.7);
-    expect(totalOf(leaking.fields, CH.conP), 'the Cons speak').toBeGreaterThan(0);
-    expect(totalOf(leaking.fields, CH.dupP), 'and their sockets do').toBeGreaterThan(0);
+    const both = dish(0.7, 0.2);
+    expect(totalOf(both.fields, CH.conP), 'the Cons speak').toBeGreaterThan(0);
+    expect(totalOf(both.fields, CH.dupP), 'and their sockets do').toBeGreaterThan(0);
 
-    const sealed = dish(0);
-    expect(totalOf(sealed.fields, CH.conP), 'the Cons still speak').toBeGreaterThan(0);
-    expect(totalOf(sealed.fields, CH.dupP), 'and nothing else does').toBe(0);
+    // Sockets silent, principals still marking: `dupP` has no other writer.
+    const noAux = dish(0.7, 0);
+    expect(totalOf(noAux.fields, CH.conP)).toBeGreaterThan(0);
+    expect(totalOf(noAux.fields, CH.dupP), 'a Con marked a Dup channel').toBe(0);
+
+    // And the principal's mark is on `conP`, so dropping it leaves the voice.
+    const noMark = dish(0, 0);
+    expect(totalOf(noMark.fields, CH.conP), 'the Cons still speak').toBeGreaterThan(0);
+    expect(totalOf(noMark.fields, CH.conP)).toBeLessThan(totalOf(noAux.fields, CH.conP));
+    expect(totalOf(noMark.fields, CH.dupP), 'and nothing else does').toBe(0);
   });
 
   it('meters uptake on the device the way runHarvestPlan does', async ({ skip }) => {

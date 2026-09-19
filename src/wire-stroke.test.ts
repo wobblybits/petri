@@ -114,6 +114,7 @@ const view: ViewOpts = {
   energyGrid: false,
   energyCircles: false,
   kindColors: true,
+  depth: false,
   gpuAgents: true,
 };
 

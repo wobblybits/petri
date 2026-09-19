@@ -149,7 +149,8 @@ sim.energy.inexhaustible = true;
 sim.breed = false;
 const camera = new Camera();
 const editor = new NetEditor(sim, camera, params);
-const view = { overlay: false, energyGrid: false, energyCircles: false, kindColors: true, gpuAgents: false };
+const view = { overlay: false, energyGrid: false, energyCircles: false, kindColors: true,
+  depth: false, gpuAgents: false };
 let farInstances = new Float32Array(0);
 type RunMode = 'stop' | 'settle' | 'play' | 'listen';
 let runMode: RunMode = 'stop';

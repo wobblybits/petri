@@ -26,6 +26,15 @@ export interface ViewOpts {
   /** Kind hues with energy as saturation, instead of a ring around each body. */
   kindColors: boolean;
   /**
+   * Tint every body by its depth behind its net's nose, and ring the heads.
+   *
+   * The instrument for the claim relay, and the only way to tell whether the
+   * coordinate means anything: on a net that has one, the colour runs
+   * nose-to-tail and turns round when the food moves; on a net that does not,
+   * it scatters. Nothing reads `depth` yet, so this is all there is to look at.
+   */
+  depth: boolean;
+  /**
    * When true, FAR-tier agents are skipped here entirely — the caller is
    * expected to have already drawn them as instanced dots on a WebGPU
    * canvas layered *on top* of this one (see buildFarInstances / AgentsGpu),
@@ -160,6 +169,7 @@ export function render(
   for (const agent of sim.agents.values()) {
     if (opts.gpuAgents && sim.isFarTier(agent.id)) continue;
     if (opts.energyCircles && !opts.kindColors) drawEnergySlot(ctx, agent);
+    if (opts.depth) drawDepth(ctx, sim, agent);
     drawAgent(ctx, agent, agent.alpha, sim.graph, opts.kindColors);
   }
   ctx.restore();
@@ -240,6 +250,43 @@ function drawEnergyGrid(ctx: CanvasRenderingContext2D, sim: Sim, camera: Camera)
       ctx.fillStyle = gold(e);
       ctx.fillRect(x, y, size, size);
     }
+  }
+  ctx.restore();
+}
+
+/**
+ * Depth as a hue, from the nose to the tail, and a ring on every head.
+ *
+ * Teal at the nose through to magenta at the tail, which reads as an ordering
+ * rather than as a temperature — what matters is whether the sequence runs
+ * along the body or scatters. A blind body (more than one wire, and so no
+ * reading of its own) is drawn hollow, because its depth is relayed rather
+ * than sensed and that is the distinction the whole mechanism turns on.
+ */
+function drawDepth(ctx: CanvasRenderingContext2D, sim: Sim, agent: Agent): void {
+  const store = sim.agentStore;
+  const slot = agent.slot;
+  const u = store.depth[slot];
+  const r = boundRadius(agent) + 5;
+  const hue = 170 + 150 * (u < 0 ? 0 : u > 1 ? 1 : u);
+  const lit = store.wires[slot] <= 1;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(agent.x, agent.y, r, 0, Math.PI * 2);
+  if (lit) {
+    ctx.fillStyle = `hsla(${hue}, 80%, 55%, 0.38)`;
+    ctx.fill();
+  }
+  ctx.strokeStyle = `hsla(${hue}, 80%, 62%, ${lit ? 0.95 : 0.4})`;
+  ctx.lineWidth = lit ? 2 : 1;
+  ctx.stroke();
+  // A head claims itself. Exact, not a threshold — so it gets its own mark.
+  if (store.depthHead[slot]) {
+    ctx.beginPath();
+    ctx.arc(agent.x, agent.y, r + 5, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(245, 245, 245, 0.9)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
   }
   ctx.restore();
 }

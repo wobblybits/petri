@@ -40,6 +40,20 @@ export interface Params {
    * fast enough to latch. That is the number this dial actually controls.
    */
   portLeak: number;
+  /**
+   * What share of `deposit` a free *auxiliary* port lays, into both body
+   * voices equally: "there is somewhere to attach here", to anybody.
+   *
+   * Small, and separate from `portLeak`, because the two markers say different
+   * things. A free principal is somewhere to *react* — a redex is two of them
+   * nose to nose — and it says so on its own kind's channel. An aux socket is
+   * somewhere to *attach*, it wants to be found by whoever is looking, and it
+   * is a near-field cue: you have to be at it to use it.
+   *
+   * Self-following, which is what keeps the principal's marker on one channel,
+   * is not a worry here. An aux port is not where a body senses from.
+   */
+  auxLeak: number;
   diffuse: number;
   decay: number;
   /**
@@ -867,6 +881,50 @@ export interface Params {
    */
   interiorTaste: number;
   /**
+   * The relay's discount, per unit of wire length, on a claim's way back from
+   * its source. 0 turns the claim relay off entirely.
+   *
+   * **A cosine threshold on edge alignment, not a decay rate.** On the
+   * inchworm bench, where the reading is a distance and so is 1-Lipschitz on
+   * the graph metric, a node is a head unless one of its edges points within
+   * `arccos(gamma)` of the food — 70 degrees at 0.35 — and at gamma >= 1 the
+   * relay is provably the identity because a node's own term always wins.
+   * That geometry is why the reading here is a *logarithm* of the scent rather
+   * than the scent: see `Sim.relayRead`.
+   *
+   * Curvature, not topology, is what produces most heads at low convexity. A
+   * chain of 24 with every node sighted showed 5.42 of them, almost all of
+   * them bends.
+   */
+  depthCost: number;
+  /**
+   * Convexity of the relay's cost curve. 1 is a plain discount; above it,
+   * short relays are cheaper and long ones dearer than linear.
+   *
+   * What separates a lobe from a wiggle. Measured on the bench: on an
+   * expander, 1 gave 3.40 heads, 1.5 gave 1.97 and 2.0 gave 1.31; on a
+   * U-shaped body it turned a bearing-dependent scatter of one to four heads
+   * into a stable two at nearly every bearing.
+   */
+  depthConvex: number;
+  /**
+   * The margin a body's current source keeps over a challenger, in reading
+   * units. Hysteresis, so a basin does not flicker between two sources that
+   * read within noise of each other.
+   */
+  depthHold: number;
+  /**
+   * How far a claim carries, in wires, before it is refused outright.
+   *
+   * Two jobs, and both are about a relay that has to be self-correcting. It is
+   * what makes a stale cycle die: a claim's cost grows with the distance it
+   * has travelled until the holder's own reading wins, and this is what stops
+   * `relayCost`'s own normaliser from growing with it and cancelling that.
+   * And it is the honest statement of the mechanism's range — a net longer
+   * than this has more than one nose, which for a very long net is right.
+   */
+  depthReach: number;
+  /**
    * A standing rent on the tank, per second. **Back on at 0.01**, for the one
    * job of its four that nothing else took over.
    *
@@ -1536,6 +1594,7 @@ export function defaultParams(): Params {
   return {
     deposit: 5,
     portLeak: 0.7,
+    auxLeak: 0.2,
     diffuse: 0.6,
     decay: 0.01,
     sense: 520,
@@ -1604,6 +1663,10 @@ export function defaultParams(): Params {
     groundSmell: 1.5,
     groundSmellSpread: 0,
     interiorTaste: 0,
+    depthCost: 0.35,
+    depthConvex: 2,
+    depthHold: 0.1,
+    depthReach: 64,
     upkeep: 0.01,
     swimCost: 0,
     rescueTo: 0.9,
@@ -1649,7 +1712,8 @@ interface SliderSpec {
 
 export const SLIDERS: SliderSpec[] = [
   { key: 'deposit', label: 'Deposit', min: 0, max: 6, step: 0.05 },
-  { key: 'portLeak', label: 'Terminal leak', min: 0, max: 1, step: 0.01 },
+  { key: 'portLeak', label: 'Principal mark', min: 0, max: 1, step: 0.01 },
+  { key: 'auxLeak', label: 'Socket mark', min: 0, max: 1, step: 0.01 },
   { key: 'diffuse', label: 'Diffuse', min: 0, max: 1, step: 0.01 },
   { key: 'decay', label: 'Decay', min: 0, max: 0.08, step: 0.001 },
   { key: 'sense', label: 'Sense', min: 0, max: 1200, step: 10 },
@@ -1717,6 +1781,10 @@ export const SLIDERS: SliderSpec[] = [
   { key: 'groundSmell', label: 'Ground smell', min: 0, max: 8, step: 0.1 },
   { key: 'groundSmellSpread', label: 'Smell spread', min: 0, max: 4, step: 0.1 },
   { key: 'interiorTaste', label: 'Interior taste', min: 0, max: 1, step: 0.05 },
+  { key: 'depthCost', label: 'Relay discount', min: 0, max: 2, step: 0.05 },
+  { key: 'depthConvex', label: 'Relay convexity', min: 1, max: 3, step: 0.1 },
+  { key: 'depthHold', label: 'Relay hold', min: 0, max: 1, step: 0.02 },
+  { key: 'depthReach', label: 'Relay reach (wires)', min: 1, max: 256, step: 1 },
   { key: 'upkeep', label: 'Upkeep', min: 0, max: 0.2, step: 0.005 },
   { key: 'swimCost', label: 'Swim cost', min: 0, max: 0.002, step: 0.00005 },
   { key: 'rescueTo', label: 'Rescue fill', min: 0, max: 1, step: 0.05 },

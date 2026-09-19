@@ -242,6 +242,14 @@ export class AgentStore {
    */
   poseLock!: Uint8Array;
   /**
+   * Depth behind this body's nose, 0 at the nose and 1 at the tail, from the
+   * claim relay in `Sim.relayDepth`. Computed from relayed scalars alone, so
+   * no body needs to know how big its net is.
+   */
+  depth!: Float64Array;
+  /** 1 when this body is a head: it claims itself. Exact, not a threshold. */
+  depthHead!: Uint8Array;
+  /**
    * The recurrent internal state, `STATE_W` floats a body.
    *
    * State, not genome: it is not inherited and not mutated, it is what the
@@ -567,6 +575,8 @@ export class AgentStore {
     this.bound[slot] = 0;
     this.wires[slot] = 0;
     this.poseLock[slot] = 0;
+    this.depth[slot] = 0;
+    this.depthHead[slot] = 0;
     this.hAll.fill(0, slot * STATE_W, slot * STATE_W + STATE_W);
     this.senseAll.fill(0, slot * SENSE_W, slot * SENSE_W + SENSE_W);
     this.steerAll.fill(0, slot * 3, slot * 3 + 3);
@@ -674,6 +684,8 @@ export class AgentStore {
     this.bound = growF64(this.bound);
     this.wires = growF64(this.wires);
     this.poseLock = growU8(this.poseLock);
+    this.depth = growF64(this.depth);
+    this.depthHead = growU8(this.depthHead);
     const newH = new Float64Array(newCapacity * STATE_W);
     if (this.hAll) newH.set(this.hAll.subarray(0, live * STATE_W));
     this.hAll = newH;

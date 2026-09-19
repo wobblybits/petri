@@ -295,6 +295,23 @@ function hillOf(params: Params): number {
  * this takes directly, and a comparison per channel against `CH.energy`,
  * which is a compile-time constant and so never had an answer that varied.
  */
+/**
+ * The channel a kind speaks on, and is itself deaf to. −1 for an Era.
+ *
+ * `seedChem`'s own arithmetic: a Con emits ch0 and tastes ch1 and ch3, a Dup
+ * emits ch1 and tastes ch0 and ch3. Neither has a taste for what it says. So a
+ * body advertising a free principal on this channel is inaudible to itself and
+ * to its own kind — no trail to follow, no huddle to form — and loud to the
+ * two kinds a redex with it would actually consume: the other node kind, and
+ * an Era, which tastes both at `attractStrong`.
+ *
+ * An Era has none. It says nothing at seed and it is the kind that goes
+ * looking rather than the kind that is looked for.
+ */
+function ownChannel(kind: AgentKind): number {
+  return kind === 'con' ? CH.conP : kind === 'dup' ? CH.dupP : -1;
+}
+
 function packTaste(
   out: Float32Array | Float64Array,
   at: number,
@@ -3188,6 +3205,7 @@ export class Sim {
     const scale = this.fields.depositScale;
     const amt = params.deposit * scale;
     const leak = amt * params.portLeak;
+    const auxLeak = amt * params.auxLeak;
     let nDep = 0;
     /*
      * Two shared constants rather than `slotsFor(a.kind)`, which builds a
@@ -3204,8 +3222,9 @@ export class Sim {
       const ports = a.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
       for (let pi = 0; pi < ports.length; pi++) {
         const slot = ports[pi];
-        // See `deposit`: a voice carries whether or not the port is attached,
-        // a free-port marker does not.
+        // See `deposit`: a voice carries whether or not the port is attached;
+        // a free *principal* adds its own kind's channel and a free auxiliary
+        // adds a little of both.
         const free = this.graph.isFreeAt(a.id, slot);
         if (slot !== 'p' && !free) continue;
         const w = portWorldInto(a, slot, this.w, this.h, scratch);
@@ -3213,19 +3232,18 @@ export class Sim {
         dep[o] = w.x;
         dep[o + 1] = w.y;
         dep[o + 2] = 0; // a density; `depositScale` is already in `amt`
+        // Neither the ground nor its smell is a body's to lay. See `effEmit`.
+        dep[o + 6] = 0;
+        dep[o + 7] = 0;
         if (slot === 'p') {
           const eo = a.slot * 4;
-          dep[o + 4] = amt * EMITS[eo];
-          dep[o + 5] = amt * EMITS[eo + 1];
-          // Neither the ground nor its smell is a body's to lay. See `effEmit`.
-          dep[o + 6] = 0;
-          dep[o + 7] = 0;
+          const own = ownChannel(a.kind);
+          const mark = free && own >= 0 ? leak : 0;
+          dep[o + 4] = amt * EMITS[eo] + (own === CH.conP ? mark : 0);
+          dep[o + 5] = amt * EMITS[eo + 1] + (own === CH.dupP ? mark : 0);
         } else {
-          // Both voices, equally, so the marker stays kind-independent.
-          dep[o + 4] = leak;
-          dep[o + 5] = leak;
-          dep[o + 6] = 0;
-          dep[o + 7] = 0;
+          dep[o + 4] = auxLeak;
+          dep[o + 5] = auxLeak;
         }
         nDep++;
       }
@@ -4685,7 +4703,10 @@ export class Sim {
     // the pass that reads it, and a value written by another pass is a value
     // that depends on the order the two happen to run in.
     const spDep = nativeSolver.steerParams;
-    if (spDep) spDep[STEER_PARAM.portLeak] = params.portLeak;
+    if (spDep) {
+      spDep[STEER_PARAM.portLeak] = params.portLeak;
+      spDep[STEER_PARAM.auxLeak] = params.auxLeak;
+    }
     nativeSolver.deposit(n, params.deposit);
     Sim.phase('scent:deposit');
 
@@ -4716,39 +4737,53 @@ export class Sim {
    * Emitting it from a filled port would advertise a socket that is not there
    * and every latch-seeking body in range would come and find nothing.
    *
-   * **It is no longer on `CH.aux`, and that is a real loss paid for a real
-   * gain.** Aux is the ground's now — `Fields.grow` mints it in proportion to
-   * the food standing in a cell — and it is the right channel for that because
-   * it is the one with the longest reach, which is what a fixed thing worth
-   * walking toward from far away needs. What the marker gets instead is
-   * `portLeak` of *both* body voices at once, which keeps it kind-independent
-   * the way the old 0.7 was.
+   * **It is no longer on `CH.aux`**, which is the ground's now — `Fields.grow`
+   * mints it in proportion to the food standing in a cell, and the channel
+   * with the longest reach belongs to the fixed thing worth walking toward
+   * from far away. What replaces it is not one marker but two, and which
+   * channel each uses is decided by the seed's own arithmetic rather than
+   * chosen here.
    *
-   * The loss is that this partly re-merges the two things the paragraphs above
-   * split: to a linear taste vector, a free terminal is now not quite
-   * distinguishable from a Con and a Dup standing side by side. What keeps it
-   * useful is scale — `portLeak` is a fraction of a body's voice, so a socket
-   * is a near-field cue and a net is the far-field one — and position, which
-   * is the part a body-centred voice could never carry. "The socket is *here*"
-   * is still the information, and it is still only at sockets.
+   * **A free principal leaks its own kind's channel: a Con `conP`, a Dup
+   * `dupP`, an Era nothing.** Look at what `seedChem` does and it is forced.
+   * A Con emits ch0 and tastes ch1 and ch3; a Dup emits ch1 and tastes ch0 and
+   * ch3; **neither tastes the channel it speaks on**. So a kind advertising on
+   * its own channel is invisible to itself and to its own kind — a Con cannot
+   * follow its own trail and cannot be drawn into a huddle of Cons — while
+   * being loud to exactly the two kinds that want it: a Dup at
+   * `attractMedium`, and an Era, which tastes both at `attractStrong`. And a
+   * free principal is precisely what the other body needs, because a redex is
+   * two principals nose to nose: Con-Dup commutes, Era-anything erases. The
+   * signal and the rule it serves line up without either being bent.
    *
-   * The magnitude is `portLeak` rather than a hardcoded 0.7, which is the
-   * slider that constant never had. Making it a gene — `E[aux][BOUND]`, so a
-   * body advertises its sockets as loudly as its lineage has learned to — is
-   * still not done, and the reason still stands: a body's voice is already
-   * emitted from its principal, so a second genetic term at the port positions
-   * is either double-counting or a separate gene, and "separate gene" is not
-   * the subsumption it was billed as.
+   * An Era leaks nothing because it has nothing to advertise. Its one port is
+   * how it eats and how it erases; it is the kind that goes looking, not the
+   * kind that is looked for.
+   *
+   * **A free auxiliary leaks `auxLeak` of both**, which is the old
+   * kind-independent "there is somewhere to attach here". Self-following is
+   * not a worry there the way it would be on a principal: an aux port is not
+   * where a body senses from, and a socket is a near-field cue that wants to
+   * be found by anybody rather than by one kind.
+   *
+   * Making either a gene — `E[aux][BOUND]`, so a body advertises as loudly as
+   * its lineage has learned to — is still not done, and the reason still
+   * stands: a body's voice is already emitted from its principal, so a second
+   * genetic term at the port positions is either double-counting or a separate
+   * gene, and "separate gene" is not the subsumption it was billed as.
    */
   private deposit(params: Params): void {
     const EMITS = this.agentStore.emitAll;
     const p = this.portScratch;
     const leak = params.deposit * params.portLeak;
+    const aux = params.deposit * params.auxLeak;
     for (const agent of this.agents.values()) {
       if (agent.locked) continue;
+      const own = ownChannel(agent.kind);
       const slots = agent.kind === 'era' ? ERA_SLOTS : NODE_SLOTS;
       for (let k = 0; k < slots.length; k++) {
         const slot = slots[k];
+        const free = this.graph.isFreeAt(agent.id, slot);
         if (slot === 'p') {
           portWorldInto(agent, slot, this.w, this.h, p);
           const eo = agent.slot * 4;
@@ -4758,10 +4793,13 @@ export class Sim {
             const w = EMITS[eo + ch];
             if (w !== 0) this.fields.deposit(ch, p.x, p.y, params.deposit * w);
           }
-        } else if (leak > 0 && this.graph.isFreeAt(agent.id, slot)) {
+          // "My principal is free", on the one channel this kind is deaf to.
+          if (free && leak > 0 && own >= 0) this.fields.deposit(own, p.x, p.y, leak);
+        } else if (free && aux > 0) {
           portWorldInto(agent, slot, this.w, this.h, p);
-          this.fields.deposit(CH.conP, p.x, p.y, leak);
-          this.fields.deposit(CH.dupP, p.x, p.y, leak);
+          // "There is somewhere to attach here", to anybody.
+          this.fields.deposit(CH.conP, p.x, p.y, aux);
+          this.fields.deposit(CH.dupP, p.x, p.y, aux);
         }
       }
     }
@@ -5968,8 +6006,283 @@ export class Sim {
       { grid: this.energy },
     );
     Sim.phase('pulse:flow');
+    // Before the state pass, and over the same adjacency it is about to walk.
+    this.relayDepth(list, adj, params);
+    Sim.phase('pulse:depth');
     this.updateState(list, adj, params);
     Sim.phase('state');
+  }
+
+  /* ---- the claim relay: where a net's nose is, and how deep each body sits
+     behind it ------------------------------------------------------------ */
+
+  /** A body with no reading of its own cannot enter the competition. */
+  private static readonly BLIND_BIG = 1e9;
+
+  /** Head claim, by slot: the source's reading, the distance to it, its id. */
+  private hVal = new Float64Array(0);
+  private hDst = new Float64Array(0);
+  private hSrc = new Int32Array(0);
+  private hVo = new Float64Array(0);
+  private hDo = new Float64Array(0);
+  private hSo = new Int32Array(0);
+  /** The same machinery on negated readings: the tail. */
+  private tVal = new Float64Array(0);
+  private tDst = new Float64Array(0);
+  private tSrc = new Int32Array(0);
+  private tVo = new Float64Array(0);
+  private tDo = new Float64Array(0);
+  private tSo = new Int32Array(0);
+
+  private growRelay(cap: number): void {
+    if (this.hVal.length >= cap) return;
+    const f = (old: Float64Array): Float64Array<ArrayBuffer> => {
+      const next = new Float64Array(cap);
+      next.set(old);
+      return next;
+    };
+    const i = (old: Int32Array): Int32Array<ArrayBuffer> => {
+      const next = new Int32Array(cap);
+      next.set(old);
+      return next;
+    };
+    this.hVal = f(this.hVal); this.hDst = f(this.hDst); this.hSrc = i(this.hSrc);
+    this.hVo = f(this.hVo); this.hDo = f(this.hDo); this.hSo = i(this.hSo);
+    this.tVal = f(this.tVal); this.tDst = f(this.tDst); this.tSrc = i(this.tSrc);
+    this.tVo = f(this.tVo); this.tDo = f(this.tDo); this.tSo = i(this.tSo);
+    this.relayRange = f(this.relayRange); this.relayExtent = f(this.relayExtent);
+  }
+
+  /**
+   * What the relay carries, and why it is a logarithm.
+   *
+   * The body's own taste score at its own position — `store.trail`, already
+   * computed once a body a frame by the steer pass and correct on both field
+   * paths. **Its own**, not a channel: a lineage that weights `aux` noses
+   * toward food and one that weights `conP` noses toward other bodies'
+   * terminals, so what the nose points at is a gene rather than a decision
+   * taken here. That is the whole of "port scent competes with the ground for
+   * navigation" — one nose, one field, and the taste vector arbitrates.
+   *
+   * Negated, so that *less* is *better* and the min-plus machinery below is
+   * the inchworm's unchanged.
+   *
+   * And a logarithm, which is the one place the bench's algebra does not
+   * transfer. Its sensor is `|p - food|`, which is 1-Lipschitz on the graph
+   * metric — `s_i <= s_j + l_ij` on every edge — and that is what makes the
+   * relay exact rather than tuned: at gamma >= 1 it is provably the identity,
+   * and since `s_i - s_j = l * cos(alpha)`, **gamma is a cosine threshold on
+   * edge alignment**. A diffused scent is not eikonal. Its gradient is steep
+   * beside a patch and flat away from one, so one global gamma would mean
+   * seventy degrees in one part of the dish and "everything is a head" in
+   * another. Diffusion against decay gives roughly `exp(-r/lambda)`, so the
+   * log of it has a near-constant slope `1/lambda` over a wide range, and
+   * gamma gets its geometry back.
+   */
+  private relayRead(slot: number): number {
+    if (this.agentStore.wires[slot] > 1) return Sim.BLIND_BIG;
+    const t = this.agentStore.trail[slot];
+    return -Math.log1p(t > 0 ? t : 0);
+  }
+
+  /**
+   * Transmission cost over the total distance back to a claim's source.
+   *
+   * `p = 1` is the plain discount. Above it, short relays get cheaper and long
+   * ones dearer than linear, which is what isolates a distant extremity into
+   * its own basin without flattening the local gradient. The bench measured
+   * that this is what separates a lobe from a wiggle: on its U-shaped body,
+   * `p = 1` gave a bearing-dependent scatter of one to four heads and
+   * `p = 2` a stable two at nearly every bearing.
+   */
+  private relayCost(d: number, slot: number, params: Params): number {
+    /*
+     * In units of the net's own reach, against the net's own reading range —
+     * and neither of those normalisations is optional.
+     *
+     * `depthCost` is a discount per unit length weighed against a reading, so
+     * it only means anything if the two are in comparable units. On the bench
+     * they are by construction: its length unit *is* one edge rest length and
+     * its reading is a distance in the same unit, so `s_i - s_j = l*cos(alpha)`
+     * and gamma is a cosine threshold. Here a wire is forty to sixty pixels
+     * and the reading is the log of a scent whose head-to-tail spread across a
+     * net might be a tenth. Left raw, a claim crossing eight bodies cost about
+     * 1500 against readings that differed by 0.18, so every body claimed
+     * itself, every body was its own head, and the coordinate came out
+     * uniformly zero — which reads as the relay being broken rather than as
+     * two unit errors.
+     *
+     * Both scales come out of the relay itself, one frame old: `range` is what
+     * this body's own head and tail claims differ by, and `extent` is how far
+     * apart they are. So the cost of crossing the *whole* net is `depthCost`
+     * times the range the net actually spans, whatever the pond's units are
+     * and whatever the gradient happens to be that second. At 0.35 a claim
+     * from the nose gives up about a third of the range by the time it reaches
+     * the tail, which still beats the tail's own reading — so the tail is not
+     * its own head — while a body sitting on a local bump bigger than the
+     * discount it has accumulated *is*. That is the bench's rule, restated in
+     * the only units this pond has.
+     *
+     * Both are zero on a body's first frame, which makes the cost zero, which
+     * lets the claims propagate freely and fills in the scales for the next
+     * one. It bootstraps rather than needing a seed.
+     *
+     * **`extent` is clamped by `depthReach`, and that clamp is what kills a
+     * stale cycle.** The bench's claims self-correct because distance
+     * accumulates around a loop until the cost of carrying one exceeds the
+     * holder's own reading — the cost has to *grow* without bound for that to
+     * work. Normalising by the relay's own reach feeds the output back into
+     * its own yardstick, so a runaway distance normalises itself away and the
+     * cost never catches it: measured on an eight-body chain, the tail claim
+     * ping-ponged between the last two bodies and carried 3500 px of
+     * accumulated distance across a net 479 px long, with every body reading a
+     * depth of nearly zero. Past the reach the yardstick stops growing, the
+     * cost resumes climbing, and the loop dies the way it is supposed to.
+     */
+    const extent = this.relayExtent[slot];
+    if (!(extent > 0)) return 0;
+    const u = d / extent;
+    const g = params.depthCost * this.relayRange[slot];
+    return params.depthConvex === 1 ? g * u : g * Math.pow(u, params.depthConvex);
+  }
+
+  /** What this body's head and tail claims differ by, and how far apart. */
+  private relayRange = new Float64Array(0);
+  private relayExtent = new Float64Array(0);
+
+  /**
+   * One hop of the claim relay, over the whole roster.
+   *
+   * Each body keeps the cheapest of its own reading (distance 0, itself the
+   * source) and each wired neighbour's claim carried one more hop. Run once
+   * on the readings and once on their negation, and what comes out is where
+   * the net's nose is and where its tail is.
+   *
+   * **A head is a body that claims itself** — exact, and not a threshold. And
+   * after `interiorTaste`, a body with more than one wire has no reading to
+   * enter, so every head is a leaf by construction rather than by tuning the
+   * cost curve. That is the whole reason the interior was blinded first.
+   *
+   * **It cannot latch.** The claim carries the *source's live reading* rather
+   * than an already-combined value, so every source re-asserts itself each
+   * frame and a claim is only ever as stale as its hop count. Stale cycles die
+   * on their own, because distance accumulates around a loop until the cost
+   * exceeds the holder's own reading. A plain scalar min-plus relay does latch
+   * — min propagation is monotone decreasing — and needs an explicit leak;
+   * this form does not, and that is why the source travels with the value.
+   *
+   * The source is an **id**, never an index. Slots are reused the moment a
+   * body dies and ids are not, and the only two things done with a source are
+   * equality tests: "is this me" and "is this the one I was already holding".
+   *
+   * Double-buffered, for the reason `updateState` is: reading a neighbour's
+   * value after it has been updated this frame builds a sequential algorithm
+   * whose answer depends on the roster's order.
+   */
+  private relayPass(
+    list: Agent[],
+    adj: WireAdjacency,
+    params: Params,
+    sgn: number,
+    val: Float64Array,
+    dst: Float64Array,
+    src: Int32Array,
+    vo: Float64Array,
+    dof: Float64Array,
+    so: Int32Array,
+  ): void {
+    const n = list.length;
+    const X = this.agentStore.x;
+    const Y = this.agentStore.y;
+    const mu = params.depthHold;
+    const reach = params.depthReach * Math.max(1, params.wireMinRest);
+    for (let i = 0; i < n; i++) {
+      const s = list[i].slot;
+      vo[s] = val[s];
+      dof[s] = dst[s];
+      so[s] = src[s];
+    }
+    for (let i = 0; i < n; i++) {
+      const a = list[i];
+      const s = a.slot;
+      const read = this.relayRead(s);
+      const own = read >= Sim.BLIND_BIG ? Sim.BLIND_BIG : sgn * read;
+      const holding = so[s];
+      let bV = own;
+      let bD = 0;
+      let bS = a.id;
+      // The incumbent keeps a margin, so a basin does not flicker between two
+      // sources that read within noise of each other.
+      let best = own - (holding === a.id ? mu : 0);
+      const lo = adj.off[i];
+      const hi = adj.off[i + 1];
+      for (let k = lo; k < hi; k++) {
+        const j = adj.nei[k];
+        const t = list[j].slot;
+        const gap = wrapDeltaVec(X[s], Y[s], X[t], Y[t], this.w, this.h);
+        const D = dof[t] + Math.hypot(gap.x, gap.y);
+        // A claim carries this far and no further, which is the other half of
+        // what stops a stale one going round a loop forever.
+        if (D > reach) continue;
+        let sc = vo[t] + this.relayCost(D, s, params);
+        if (so[t] === holding) sc -= mu;
+        if (sc < best) {
+          best = sc;
+          bV = vo[t];
+          bD = D;
+          bS = so[t];
+        }
+      }
+      // A claim only stands while it is cheaper than speaking for yourself.
+      if (bV + this.relayCost(bD, s, params) > own) {
+        bV = own;
+        bD = 0;
+        bS = a.id;
+      }
+      val[s] = bV;
+      dst[s] = bD;
+      src[s] = bS;
+    }
+  }
+
+  /**
+   * The nose-to-tail coordinate, once a frame.
+   *
+   * `rho` is the transmission cost back to this body's head and `rhoHat`
+   * normalises it against the cost onward to its tail, so it lands in [0, 1]
+   * out of relayed scalars alone — **no body needs to know the size of the net
+   * it is in**, which is what lets one profile over it mean the same thing on
+   * a net of six and a net of three hundred.
+   *
+   * The blind-mode formula, which is the one this pond is in: with the
+   * interior dark, depth is the distance back to a lit end rather than a
+   * difference of readings.
+   */
+  private relayDepth(list: Agent[], adj: WireAdjacency, params: Params): void {
+    if (!(params.depthCost > 0)) return;
+    this.growRelay(this.agentStore.capacity);
+    // Last frame's answer is this frame's yardstick. See `relayCost`.
+    const reach = params.depthReach * Math.max(1, params.wireMinRest);
+    for (let i = 0; i < list.length; i++) {
+      const s = list[i].slot;
+      const range = -this.tVal[s] - this.hVal[s];
+      this.relayRange[s] = range > 0 ? range : 0;
+      const extent = this.hDst[s] + this.tDst[s];
+      this.relayExtent[s] = extent > 0 ? (extent < reach ? extent : reach) : 0;
+    }
+    this.relayPass(list, adj, params, 1, this.hVal, this.hDst, this.hSrc, this.hVo, this.hDo, this.hSo);
+    this.relayPass(list, adj, params, -1, this.tVal, this.tDst, this.tSrc, this.tVo, this.tDo, this.tSo);
+    const DEPTH = this.agentStore.depth;
+    const HEAD = this.agentStore.depthHead;
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      const s = a.slot;
+      const rho = this.relayCost(this.hDst[s], s, params);
+      const tail = this.relayCost(this.tDst[s], s, params);
+      const span = rho + tail;
+      DEPTH[s] = span > 1e-9 ? rho / span : 0;
+      HEAD[s] = this.hSrc[s] === a.id && this.agentStore.wires[s] <= 1 ? 1 : 0;
+    }
   }
 
   /**

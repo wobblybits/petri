@@ -75,7 +75,8 @@ countInput.max = String(params.maxAgents);
 const sim = new Sim(800, 600);
 const camera = new Camera();
 const interaction = new Interaction(sim, camera);
-const view = { overlay: false, energyGrid: false, energyCircles: false, kindColors: true, gpuAgents: false };
+const view = { overlay: false, energyGrid: false, energyCircles: false, kindColors: true,
+  depth: false, gpuAgents: false };
 let farInstances = new Float32Array(0);
 let paused = false;
 let snapCamera = true;

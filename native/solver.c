@@ -1556,6 +1556,9 @@ static float port_exit_angle(int i, int slot, float tx, float ty) {
  * slider, and a slider written down on one side of this wall is a slider on
  * one side of this wall. */
 #define SP_PORT_LEAK 15
+/* What a free *auxiliary* port leaks, into both body voices. The principal's
+ * marker is `SP_PORT_LEAK` and goes on one channel; see solver_deposit. */
+#define SP_AUX_LEAK 16
 
 #define SF_P_FREE 1
 #define SF_STARVING 2
@@ -1711,7 +1714,8 @@ void solver_deposit(int n, float amount) {
        * could. But the marker means "there is somewhere to attach here", and
        * advertising a socket that is full would bring every latch-seeking
        * body in range to find nothing. */
-      if (slot != 0 && !(free_mask & (1 << slot))) continue;
+      int free = (free_mask & (1 << slot)) != 0;
+      if (slot != 0 && !free) continue;
       float px, py;
       port_world(i, slot, &px, &py);
       if (slot == 0) {
@@ -1723,13 +1727,27 @@ void solver_deposit(int n, float amount) {
         for (int ch = 0; ch < 4; ch++) {
           if (em[ch] != 0.f) scent_add(ch, px, py, amount * em[ch]);
         }
+        /* "My principal is free", on the one channel this kind is deaf to.
+         * A Con emits ch0 and tastes ch1 and ch3; a Dup emits ch1 and tastes
+         * ch0 and ch3; neither tastes what it says. So the marker is
+         * inaudible to its own kind — no trail to follow, no huddle — and loud
+         * to the two kinds a redex with it would consume. An Era has no
+         * channel and lays no marker: it is the kind that goes looking.
+         * Mirrors `ownChannel` in sim.ts. */
+        if (free) {
+          float leak = amount * sparams[SP_PORT_LEAK];
+          if (leak > 0.f) {
+            if (kind[i] == 2) scent_add(0, px, py, leak);
+            else if (kind[i] == 1) scent_add(1, px, py, leak);
+          }
+        }
       } else {
-        /* Both body voices equally, so the marker stays kind-independent the
-         * way the flat 0.7 on channel 3 used to be. */
-        float leak = amount * sparams[SP_PORT_LEAK];
-        if (leak > 0.f) {
-          scent_add(0, px, py, leak);
-          scent_add(1, px, py, leak);
+        /* "There is somewhere to attach here", to anybody. Both voices, so it
+         * stays kind-independent the way the flat 0.7 on channel 3 was. */
+        float aux = amount * sparams[SP_AUX_LEAK];
+        if (aux > 0.f) {
+          scent_add(0, px, py, aux);
+          scent_add(1, px, py, aux);
         }
       }
     }

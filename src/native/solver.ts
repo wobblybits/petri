@@ -197,6 +197,8 @@ export const STEER_PARAM = {
    *  rather than by the steer pass — one shared array, two passes, and an
    *  ordering dependency between them is not a thing to rely on. */
   portLeak: 15,
+  /** What a free *auxiliary* port leaks, into both voices. See `portLeak`. */
+  auxLeak: 16,
 } as const;
 
 /** Per-body steer flags, a bitfield. `solver.c`'s `SF_*`. */

@@ -37,6 +37,7 @@ app.innerHTML = `
     <label class="check"><input type="checkbox" id="energy-circles" /> Energy circles</label>
     <label class="check"><input type="checkbox" id="kind-colors" checked /> Kind colors</label>
     <label class="check"><input type="checkbox" id="energy-grid" /> Energy grid</label>
+    <label class="check"><input type="checkbox" id="depth-tint" /> Net depth</label>
     <label class="check"><input type="checkbox" id="sound" /> Sound</label>
     <label class="check" id="gpu-far-label">GPU FAR solve
       <select id="gpu-far">
@@ -100,7 +101,7 @@ const params: Params = defaultParams();
 const sim = new Sim(800, 600);
 const camera = new Camera();
 const interaction = new Interaction(sim, camera);
-const view = { overlay: false, energyGrid: false, energyCircles: false, kindColors: true, gpuAgents: false };
+const view = { overlay: false, energyGrid: false, energyCircles: false, kindColors: true, depth: false, gpuAgents: false };
 let paused = false;
 let spawnKind: AgentKind = 'era';
 let currentPreset: PresetName = 'soup';
@@ -242,6 +243,9 @@ document.querySelector('#energy-circles')!.addEventListener('change', (ev) => {
 });
 document.querySelector('#kind-colors')!.addEventListener('change', (ev) => {
   view.kindColors = (ev.target as HTMLInputElement).checked;
+});
+document.querySelector('#depth-tint')!.addEventListener('change', (ev) => {
+  view.depth = (ev.target as HTMLInputElement).checked;
 });
 document.querySelector('#energy-grid')!.addEventListener('change', (ev) => {
   view.energyGrid = (ev.target as HTMLInputElement).checked;
